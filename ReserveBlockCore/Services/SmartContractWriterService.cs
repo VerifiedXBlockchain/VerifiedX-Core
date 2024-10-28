@@ -257,19 +257,43 @@ namespace ReserveBlockCore.Services
 
                             if(x.FeatureName == FeatureName.Tokenization)
                             {
-                                var tokenization = JsonConvert.DeserializeObject<TokenizationFeature>(x.FeatureFeatures.ToString());
-                                //var tokenization = ((TokenizationFeature)x.FeatureFeatures);//((JObject)x.FeatureFeatures).ToObject<TokenizationFeature>();
-                                if (tokenization != null)
+                                try
                                 {
-                                    x.FeatureFeatures = tokenization;
-                                    Flist.Add(x);
-                                    var tokenizationSource = await TokenizationSourceGenerator.Build(tokenization, strBuild);
-                                    strBuild = tokenizationSource.Item1;
-                                    strTokenizationBld = tokenizationSource.Item2;
+                                    var tokenization = ((TokenizationFeature)x.FeatureFeatures);
+
+                                    if (tokenization != null)
+                                    {
+                                        x.FeatureFeatures = tokenization;
+                                        Flist.Add(x);
+                                        var tokenizationSource = await TokenizationSourceGenerator.Build(tokenization, strBuild);
+                                        strBuild = tokenizationSource.Item1;
+                                        strTokenizationBld = tokenizationSource.Item2;
+                                    }
+                                    if (strBuild.ToString() == "Failed")
+                                    {
+                                        return ("Failed to save smart contract asset for Multi-Asset. Please try again.", scMain, isToken);
+                                    }
                                 }
-                                if (strBuild.ToString() == "Failed")
+                                catch
                                 {
-                                    return ("Failed to save smart contract asset for Multi-Asset. Please try again.", scMain, isToken);
+                                    try
+                                    {
+                                        var tokenization = JsonConvert.DeserializeObject<TokenizationFeature>(x.FeatureFeatures.ToString());
+                                        //var tokenization = ((TokenizationFeature)x.FeatureFeatures);//((JObject)x.FeatureFeatures).ToObject<TokenizationFeature>();
+                                        if (tokenization != null)
+                                        {
+                                            x.FeatureFeatures = tokenization;
+                                            Flist.Add(x);
+                                            var tokenizationSource = await TokenizationSourceGenerator.Build(tokenization, strBuild);
+                                            strBuild = tokenizationSource.Item1;
+                                            strTokenizationBld = tokenizationSource.Item2;
+                                        }
+                                        if (strBuild.ToString() == "Failed")
+                                        {
+                                            return ("Failed to save smart contract asset for Multi-Asset. Please try again.", scMain, isToken);
+                                        }
+                                    }
+                                    catch { }
                                 }
                             }
 
