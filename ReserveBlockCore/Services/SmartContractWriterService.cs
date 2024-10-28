@@ -257,7 +257,8 @@ namespace ReserveBlockCore.Services
 
                             if(x.FeatureName == FeatureName.Tokenization)
                             {
-                                var tokenization = ((TokenizationFeature)x.FeatureFeatures);//((JObject)x.FeatureFeatures).ToObject<TokenizationFeature>();
+                                var tokenization = JsonConvert.DeserializeObject<TokenizationFeature>(x.FeatureFeatures.ToString());
+                                //var tokenization = ((TokenizationFeature)x.FeatureFeatures);//((JObject)x.FeatureFeatures).ToObject<TokenizationFeature>();
                                 if (tokenization != null)
                                 {
                                     x.FeatureFeatures = tokenization;
