@@ -88,14 +88,32 @@ namespace ReserveBlockCore.Models
             return banned;
         }
 
-        public static async Task UpdatePeerAsVal(string ip)
+        public static async Task UpdatePeerAsVal(string ip, string address, string walVersion)
         {
             var peers = GetAll();
+
+            if (peers == null)
+                return;
+
             var peer = peers?.Query().Where(x => x.PeerIP.Equals(ip)).FirstOrDefault();
             if(peer != null)
             {
                 peer.IsValidator = true;
                 peers?.Update(peer);
+            }
+            else
+            {
+                Peers nPeer = new Peers
+                {
+                    FailCount = 0,
+                    IsIncoming = true,
+                    IsOutgoing = true,
+                    PeerIP = ip,
+                    IsValidator = true,
+                    WalletVersion = walVersion
+                };
+
+                peers.InsertSafe(nPeer);
             }
         }
 

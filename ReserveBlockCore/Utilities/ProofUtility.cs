@@ -50,13 +50,7 @@ namespace ReserveBlockCore.Utilities
             var proof = "";
             // Random seed
             string seed = publicKey + blockHeight.ToString();
-            //if (Globals.BlockHashes.Count >= 35)
-            //{
-            //    var height = blockHeight - 7;
-            //    seed = seed + Globals.BlockHashes[height].ToString();
-            //}
-            //add previous block hash here!
-            
+
             // Convert the combined input to bytes (using UTF-8 encoding)
             byte[] combinedBytes = Encoding.UTF8.GetBytes(seed);
 

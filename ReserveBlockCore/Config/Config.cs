@@ -269,34 +269,6 @@ namespace ReserveBlockCore.Config
                 }
 			}
 
-			if(config.ElectrumServers != null)
-			{
-				var clientSettings = new List<Bitcoin.ElectrumX.ClientSettings>();
-				Globals.ClientSettings.Clear();
-
-                var serverList = config.ElectrumServers.Split(',');
-                foreach (var server in serverList)
-                {
-					bool isSsl = server.ToLower().Contains("https://") ? true : false;
-					string serverFormat = isSsl ? server.ToLower().Replace("https://", "") : server.ToLower().Replace("http://", "");
-					var hostport = serverFormat.Split(':');
-					var host = hostport[0];
-					var port = hostport[1];
-					var clientSetting = new Bitcoin.ElectrumX.ClientSettings
-					{
-						Host = host,
-						Port = Convert.ToInt32(port),
-						UseSsl = isSsl,
-                        Count = 0,
-                        FailCount = 0
-                    };
-
-					clientSettings.Add(clientSetting);
-                }
-
-				Globals.ClientSettings = clientSettings;
-            }
-
             if (config.STUNServers?.Count() > 0)
 			{
 				var serverList = config.STUNServers.Split(',');
@@ -360,11 +332,54 @@ namespace ReserveBlockCore.Config
 						UseSsl = true,
                         Count = 0,
 						FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "testnet4-electrumx.wakiyamap.dev",
+                        Port = 51002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "blackie.c3-soft.com",
+                        Port = 57010,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
                     }
-				};
+
+                };
             }
 
-			if(!string.IsNullOrEmpty(config.ArbiterPassword))
+            if (config.ElectrumServers != null)
+            {
+                var clientSettings = new List<Bitcoin.ElectrumX.ClientSettings>();
+                Globals.ClientSettings.Clear();
+
+                var serverList = config.ElectrumServers.Split(',');
+                foreach (var server in serverList)
+                {
+                    bool isSsl = server.ToLower().Contains("https://") ? true : false;
+                    string serverFormat = isSsl ? server.ToLower().Replace("https://", "") : server.ToLower().Replace("http://", "");
+                    var hostport = serverFormat.Split(':');
+                    var host = hostport[0];
+                    var port = hostport[1];
+                    var clientSetting = new Bitcoin.ElectrumX.ClientSettings
+                    {
+                        Host = host,
+                        Port = Convert.ToInt32(port),
+                        UseSsl = isSsl,
+                        Count = 0,
+                        FailCount = 0
+                    };
+
+                    clientSettings.Add(clientSetting);
+                }
+
+                Globals.ClientSettings = clientSettings;
+            }
+
+            if (!string.IsNullOrEmpty(config.ArbiterPassword))
 			{
                 Globals.ArbiterEncryptPassword = config.ArbiterPassword.ToSecureString();
             }

@@ -126,7 +126,7 @@ namespace ReserveBlockCore.P2P
                 netVal.Context = null;
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
 
-                _ = Peers.UpdatePeerAsVal(peerIP);
+                _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion);
                 _ = Clients.Caller.SendAsync("GetValMessage", "1", peerIP, new CancellationTokenSource(2000).Token);
                 _ = Clients.All.SendAsync("GetValMessage", "2", netValSerialize, new CancellationTokenSource(6000).Token);
 

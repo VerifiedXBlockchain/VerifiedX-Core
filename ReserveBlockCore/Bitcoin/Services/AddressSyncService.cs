@@ -53,6 +53,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     await GetBalance(client, address);
                     await GetTxHistory(client, address);
                     await Getinputs(client, address);
+
+                    client.Dispose();
                 }
             }
         }

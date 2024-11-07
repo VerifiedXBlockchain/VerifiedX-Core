@@ -11,6 +11,7 @@ using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using Spectre.Console;
 using System;
+using System.Diagnostics;
 using System.Net;
 
 namespace ReserveBlockCore.Bitcoin
@@ -112,44 +113,50 @@ namespace ReserveBlockCore.Bitcoin
 
         public static async Task ElectrumXRun()
         {
+            //Stopwatch sw = Stopwatch.StartNew();
+            
             while(true)
             {
                 bool electrumServerFound = false;
                 while (!electrumServerFound)
                 {
-                    var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 10).OrderBy(x => x.Count).FirstOrDefault();
+                    var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 5).OrderBy(x => x.Count).FirstOrDefault();
                     if (electrumServer != null)
                     {
                         try
                         {
-                            var client = new Client(electrumServer.Host, electrumServer.Port, true);
-                            var serverVersion = await client.GetServerVersion();
+                            using(var client = new Client(electrumServer.Host, electrumServer.Port, true))
+                            {
+                                //var client = new Client(electrumServer.Host, electrumServer.Port, true);
+                                var serverVersion = await client.GetServerVersion();
 
-                            if (serverVersion == null)
-                                throw new Exception("Bad server response or no connection.");
+                                if (serverVersion.ProtocolVersion == null)
+                                    throw new Exception("Bad server response or no connection.");
 
-                            Globals.ElectrumXConnected = true;
-                            Globals.ElectrumXLastCommunication = DateTime.Now;
-                            electrumServerFound = true;
+                                Globals.ElectrumXConnected = true;
+                                Globals.ElectrumXLastCommunication = DateTime.Now;
+                                electrumServerFound = true;
+
+                                client.Dispose();
+                            }
                         }
                         catch (Exception ex)
                         {
+                            //sw.Stop();
+                            var timetaken = sw.Elapsed.TotalMinutes;
                             electrumServer.FailCount++;
                             electrumServer.Count++;
+                            await Task.Delay(3000);
                         }
                     }
                     else
                     {
                         Globals.ElectrumXConnected = false;
-                    }
-                }
-
-                if(Globals.ElectrumXLastCommunication < DateTime.Now.AddMinutes(-10))
-                {
-                    //reset counts
-                    foreach(var elec in Globals.ClientSettings)
-                    {
-                        elec.FailCount = 0;
+                        foreach (var elec in Globals.ClientSettings)
+                        {
+                            elec.FailCount = 0;
+                        }
+                        break;
                     }
                 }
                 
@@ -171,13 +178,15 @@ namespace ReserveBlockCore.Bitcoin
                 Client client = null;
                 while(!electrumServerFound)
                 {
-                    var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 10).OrderBy(x => x.Count).FirstOrDefault();
+                    var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 5).OrderBy(x => x.Count).FirstOrDefault();
                     if (electrumServer != null)
                     {
                         try
                         {
-                            client = new Client(electrumServer.Host, electrumServer.Port, true);
-                            var serverVersion = await client.GetServerVersion();
+                            var clientConnection = new Client(electrumServer.Host, electrumServer.Port, true);
+                            var serverVersion = await clientConnection.GetServerVersion();
+
+                            client = clientConnection;
 
                             if (serverVersion == null)
                                 throw new Exception("Bad server response or no connection.");
@@ -193,14 +202,20 @@ namespace ReserveBlockCore.Bitcoin
                             //TODO: ADD LOGS
                             electrumServer.FailCount++;
                             electrumServer.Count++;
-                            await Task.Delay(1000);
+                            await Task.Delay(3000);
                         }
 
                     }
                     else
                     {
                         //no servers found
-                        await Task.Delay(60000);
+                        foreach (var elec in Globals.ClientSettings)
+                        {
+                            elec.FailCount = 0;
+                        }
+
+                        await Task.Delay(15000);
+                        break;
                     }
                     //TODO: ADD LOGS
                     await Task.Delay(1000);
@@ -210,8 +225,10 @@ namespace ReserveBlockCore.Bitcoin
                 try
                 {
                     Globals.BTCSyncing = true;
-                    if (client == null)
-                        throw new Exception("ElectrumX client was null");
+                    if (client == null || !electrumServerFound)
+                        throw new Exception("ElectrumX client was null or not found." +
+                            "" +
+                            "                    ");
 
                     var addressList = BitcoinAccount.GetBitcoin()?.FindAll().ToList();
 
@@ -494,7 +511,7 @@ namespace ReserveBlockCore.Bitcoin
                                 }
                             }
                             
-                            await Task.Delay(1500);
+                            await Task.Delay(5000);
                         }
                     }
 
