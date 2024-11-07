@@ -143,7 +143,7 @@ namespace ReserveBlockCore.Bitcoin
                         catch (Exception ex)
                         {
                             //sw.Stop();
-                            var timetaken = sw.Elapsed.TotalMinutes;
+                            //var timetaken = sw.Elapsed.TotalMinutes;
                             electrumServer.FailCount++;
                             electrumServer.Count++;
                             await Task.Delay(3000);
