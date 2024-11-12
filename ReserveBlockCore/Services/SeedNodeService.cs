@@ -186,7 +186,9 @@ namespace ReserveBlockCore.Services
                     IsOutgoing = true,
                     PeerIP = "144.126.156.102",
                     FailCount = 0,
-                    IsValidator = true
+                    IsValidator = true,
+                    ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
+                    ValidatorPublicKey = "0498ea84777552a3609143275b0e083086071a6b1453bd46b87a05461d24e0ee99e7de2870a018240026ad6ba892a087df39447f91c5a8f8e50a53b6643c9e713c"
                 };
 
                 Peers n3Peer = new Peers
@@ -195,7 +197,9 @@ namespace ReserveBlockCore.Services
                     IsOutgoing = true,
                     PeerIP = "144.126.156.101",
                     FailCount = 0,
-                    IsValidator = true
+                    IsValidator = true,
+                    ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+                    ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
                 };
 
                 peerList.Add(nPeer);

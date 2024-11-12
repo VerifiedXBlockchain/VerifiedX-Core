@@ -171,29 +171,7 @@ namespace ReserveBlockCore
 
             app.UseEndpoints(endpoints =>
             {
-                endpoints.MapControllerRoute(
-                    name: "adj_v1_controller",
-                    pattern: "adjapi/ADJV1Controller/{action=Index}/{id?}",
-                    defaults: new { controller = "ADJV1Controller" }
-                );
-
-                endpoints.MapControllerRoute(
-                    name: "bcapi_v1_controller",
-                    pattern: "bcapi/BCV1Controller/{action=Index}/{id?}",
-                    defaults: new { controller = "BCV1Controller" }
-                );
-
-                endpoints.MapControllerRoute(
-                    name: "dstapi_v1_controller",
-                    pattern: "dstapi/DSTV1Controller/{action=Index}/{id?}",
-                    defaults: new { controller = "DSTV1Controller" }
-                );
-
-                //endpoints.MapControllerRoute(
-                //    name: "v1_controller",
-                //    pattern: "api/V1Controller/{action=Index}/{id?}",
-                //    defaults: new { controller = "V1Controller" }
-                //);
+                endpoints.MapControllers();
             });
 
             

@@ -537,7 +537,8 @@ namespace ReserveBlockCore
 
             if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
-                _ = ValidatorService.StartValidatorServer();
+                _ = Task.Run(() => { ValidatorService.StartValidatorServer(); });
+                //_ = ValidatorService.StartValidatorServer();
                 _ = ValidatorService.StartupValidators();
                 _ = Task.Run(ValidatorService.BlockHeightCheckLoop);
             }
