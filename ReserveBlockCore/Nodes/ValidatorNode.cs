@@ -154,8 +154,8 @@ namespace ReserveBlockCore.Nodes
 
         public static async Task StartConsensus()
         {
-            var EpochTime = Globals.IsTestNet ? 1673397583280L : 1674172800000L;
-            var BeginBlock = Globals.IsTestNet ? 101013 : Globals.V3Height;
+            var EpochTime = Globals.IsTestNet ? 1731454926600L : 1674172800000L;
+            var BeginBlock = Globals.IsTestNet ? Globals.V4Height : Globals.V3Height;
             var PreviousHeight = -1L;
             var BlockDelay = Task.CompletedTask;
 
@@ -179,7 +179,7 @@ namespace ReserveBlockCore.Nodes
                     if (PreviousHeight != Height)
                     {
                         PreviousHeight = Height;
-                        await Task.WhenAll(BlockDelay, Task.Delay(3000));
+                        await Task.WhenAll(BlockDelay, Task.Delay(1500));
                         var CurrentTime = TimeUtil.GetMillisecondTime();
                         var DelayTimeCorrection = Globals.BlockTime * (Height - BeginBlock) - (CurrentTime - EpochTime);
                         var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);

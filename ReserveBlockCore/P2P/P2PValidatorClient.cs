@@ -683,34 +683,34 @@ namespace ReserveBlockCore.P2P
                     continue;
                 }
 
-                waitForVals = false;
-            }
+                var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
 
-            var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
-
-            foreach (var validator in valNodeList)
-            {
-                var source = new CancellationTokenSource(2000);
-                string activeValJson = await validator.Connection.InvokeAsync<string>("SendActiveVals");
-
-                if(activeValJson != null)
+                foreach (var validator in valNodeList)
                 {
-                    var activeVals = JsonConvert.DeserializeObject<List<string>>(activeValJson);
-                    if(activeVals != null)
-                    {
-                        var peerDB = Peers.GetAll();
+                    var source = new CancellationTokenSource(2000);
+                    string activeValJson = await validator.Connection.InvokeAsync<string>("SendActiveVals");
 
-                        foreach (var val in  activeVals)
+                    if (activeValJson != null)
+                    {
+                        var activeVals = JsonConvert.DeserializeObject<List<string>>(activeValJson);
+                        if (activeVals != null)
                         {
-                            var singleVal = peerDB.FindOne(x => x.PeerIP == val);
-                            if(singleVal != null)
+                            var peerDB = Peers.GetAll();
+
+                            foreach (var val in activeVals)
                             {
-                                singleVal.IsValidator = true;
-                                peerDB.UpdateSafe(singleVal);
+                                var singleVal = peerDB.FindOne(x => x.PeerIP == val);
+                                if (singleVal != null)
+                                {
+                                    singleVal.IsValidator = true;
+                                    peerDB.UpdateSafe(singleVal);
+                                }
                             }
                         }
                     }
                 }
+
+                waitForVals = false;
             }
         }
 

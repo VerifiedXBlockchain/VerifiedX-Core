@@ -113,9 +113,9 @@ namespace ReserveBlockCore
         public static long TXHeightRule1 = 820457; //March 31th, 2023 at 03:44 UTC
         public static long TXHeightRule2 = 847847; //around April 7, 2023 at 18:30 UTC
         public static long TXHeightRule3 = 1079488; //around June 13th, 2023 at 19:30 UTC
-        public static int BlockTime = 10000; //10 seconds
-        public static int BlockTimeMin = 8000; //8 seconds
-        public static int BlockTimeMax = 12000; //12 seconds
+        public static int BlockTime = 12000; //12 seconds
+        public static int BlockTimeMin = 10000; //10 seconds
+        public static int BlockTimeMax = 15000; //15 seconds
 
         //public static long Validating
         public static long LastAdjudicateTime = 0;
