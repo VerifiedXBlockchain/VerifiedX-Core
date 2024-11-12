@@ -12,6 +12,7 @@ namespace ReserveBlockCore.Models
         public string Signature { get; set; }
         public string SignatureMessage { get; set; }
         public long LastBlockProof { get; set; }
+        public int PortCheckFailCount { get; set; }
         public HubCallerContext? Context { get; set; }
     }
 }

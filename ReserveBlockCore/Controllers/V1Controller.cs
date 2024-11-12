@@ -228,7 +228,6 @@ namespace ReserveBlockCore.Controllers
         public async Task<string> GetIsWalletEncrypted()
         {
             var output = "false";
-
             if (Globals.IsWalletEncrypted)
                 output = "true";
 
@@ -727,7 +726,8 @@ namespace ReserveBlockCore.Controllers
                         {
                             account.IsValidating = true;
                             accounts.UpdateSafe(account);
-                            Globals.ValidatorAddress = account.Address;                            
+                            Globals.ValidatorAddress = account.Address;  
+                            Globals.ValidatorPublicKey = account.PublicKey;
                             output = "Success! The requested account has been turned on: " + account.Address;
                         }
                     }

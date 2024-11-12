@@ -113,6 +113,9 @@ namespace ReserveBlockCore
         public static long TXHeightRule1 = 820457; //March 31th, 2023 at 03:44 UTC
         public static long TXHeightRule2 = 847847; //around April 7, 2023 at 18:30 UTC
         public static long TXHeightRule3 = 1079488; //around June 13th, 2023 at 19:30 UTC
+        public static int BlockTime = 10000; //10 seconds
+        public static int BlockTimeMin = 8000; //8 seconds
+        public static int BlockTimeMax = 12000; //12 seconds
 
         //public static long Validating
         public static long LastAdjudicateTime = 0;
@@ -164,6 +167,7 @@ namespace ReserveBlockCore
 
         public static string Platform = "";
         public static string ValidatorAddress = "";
+        public static string ValidatorPublicKey = "";
         public static string? WalletPassword = null;
         public static string? APIPassword = null;
         public static string? APICallURL = null;
@@ -268,17 +272,18 @@ namespace ReserveBlockCore
         #region P2P Client Variables
 
         public const int MaxPeers = 10;
-        public const int MaxValPeers = 20;
+        public const int MaxValPeers = 30;
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;
         public static ConcurrentDictionary<string, int> SkipPeers = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, int> SkipValPeers = new ConcurrentDictionary<string, int>();
-        public static ConcurrentDictionary<string, NetworkValidator> NetworkValidators = new ConcurrentDictionary<string, NetworkValidator>(); //key = rbx address
+        public static ConcurrentDictionary<string, NetworkValidator> NetworkValidators = new ConcurrentDictionary<string, NetworkValidator>(); //key = vfx address
         public static ConcurrentDictionary<string, Peers> ValidatorPool = new ConcurrentDictionary<string, Peers>();
         public static ConcurrentDictionary<string, NodeInfo> ValidatorNodes = new ConcurrentDictionary<string, NodeInfo>(); //key = ipaddress
         public static ConcurrentDictionary<long, Proof> WinningProofs = new ConcurrentDictionary<long, Proof>();
         public static ConcurrentDictionary<long, string> FinalizedWinner = new ConcurrentDictionary<long, string>();
+        public static ConcurrentBag<Proof> Proofs = new ConcurrentBag<Proof>();
         public static ConcurrentDictionary<long, Block> NetworkBlockQueue = new ConcurrentDictionary<long, Block>();
         public static ConcurrentDictionary<long, List<Proof>> BackupProofs = new ConcurrentDictionary<long, List<Proof>>();
         public static ConcurrentDictionary<string, DateTime?> ProofsBroadcasted = new ConcurrentDictionary<string, DateTime?>();

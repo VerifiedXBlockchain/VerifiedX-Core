@@ -47,8 +47,6 @@ namespace ReserveBlockCore
 
             app.UseEndpoints(endpoints =>
             {
-                endpoints.MapControllers();
-
                 if (Globals.AdjudicateAccount != null)
                 {
                     endpoints.MapHub<ConsensusServer>("/consensus", options =>

@@ -6,6 +6,7 @@ using ReserveBlockCore.Models;
 using ReserveBlockCore.P2P;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
+using System.Collections.Concurrent;
 using System.Reflection.Metadata;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -14,7 +15,7 @@ using System.Xml.Linq;
 
 namespace ReserveBlockCore.Nodes
 {
-    public class ValidatorProcessor : IHostedService, IDisposable
+    public class ValidatorProcessor_BAk : IHostedService, IDisposable
     {
         public static IHubContext<P2PValidatorServer> HubContext;
         private readonly IHubContext<P2PValidatorServer> _hubContext;
@@ -37,7 +38,7 @@ namespace ReserveBlockCore.Nodes
         public static bool IsRunning { get; private set; }
 
 
-        public ValidatorProcessor(IHubContext<P2PValidatorServer> hubContext, IHostApplicationLifetime appLifetime)
+        public ValidatorProcessor_BAk(IHubContext<P2PValidatorServer> hubContext, IHostApplicationLifetime appLifetime)
         {
             _hubContext = hubContext;
             HubContext = hubContext;
@@ -46,20 +47,20 @@ namespace ReserveBlockCore.Nodes
         public Task StartAsync(CancellationToken stoppingToken)
         {
             //TODO: Create NetworkValidator Broadcast loop.
-            _ = CheckNetworkValidators();
-            _ = BroadcastNetworkValidators();
-            _ = BlockHeightCheckLoopForVals();
-            _ = GenerateProofs();
-            _ = RequestFinalizedWinners();
-            _ = SendCurrentWinners();
-            _ = RequestCurrentWinners();
-            _ = LockWinner();
-            _ = BlockStart();
-            _ = ProduceBlock();
-            _ = ConfirmBlock();
-            _ = NotifyExplorer();
-            _ = HealthCheck();
-            _ = ProofCleanup();
+            //_ = CheckNetworkValidators();
+            //_ = BroadcastNetworkValidators();
+            //_ = BlockHeightCheckLoopForVals();
+            //_ = GenerateProofs();
+            //_ = RequestFinalizedWinners();
+            //_ = SendCurrentWinners();
+            //_ = RequestCurrentWinners();
+            //_ = LockWinner();
+            //_ = BlockStart();
+            //_ = ProduceBlock();
+            //_ = ConfirmBlock();
+            //_ = NotifyExplorer();
+            //_ = HealthCheck();
+            //_ = ProofCleanup();
             
             return Task.CompletedTask;
         }
@@ -451,7 +452,7 @@ namespace ReserveBlockCore.Nodes
 
             var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
 
-            if(valNodeList == null || valNodeList.Count() == 0) return;
+            if (valNodeList == null || valNodeList.Count() == 0) return;
 
             foreach (var val in valNodeList)
             {
@@ -609,7 +610,7 @@ namespace ReserveBlockCore.Nodes
                             {
                                 if (winningProof != null)
                                 {
-                                    if (ProofUtility.VerifyProof(winningProof.PublicKey, winningProof.BlockHeight, winningProof.ProofHash))
+                                    if (ProofUtility.VerifyProof(winningProof.PublicKey, winningProof.BlockHeight, winningProof.PreviousBlockHash, winningProof.ProofHash))
                                     {
                                         Globals.FinalizedWinner.TryAdd(i, winningProof.Address);
 
@@ -968,7 +969,7 @@ namespace ReserveBlockCore.Nodes
                         var firstProof = Globals.LastBlock.Height == (Globals.V4Height - 1) ? false : true;
                         firstProof = Globals.IsTestNet ? false : true;
 
-                        var proofs = await ProofUtility.GenerateProofs(Globals.ValidatorAddress, account.PublicKey, Globals.LastBlock.Height, firstProof);
+                        var proofs = await ProofUtility.GenerateProofs();
                         await ProofUtility.SortProofs(proofs);
                         //send proofs
                         var proofsJson = JsonConvert.SerializeObject(proofs);
@@ -993,7 +994,7 @@ namespace ReserveBlockCore.Nodes
                                 await delay;
                                 continue;
                             }
-                            var proofs = await ProofUtility.GenerateProofs(Globals.ValidatorAddress, account.PublicKey, Globals.LastProofBlockheight, firstProof);
+                            var proofs = await ProofUtility.GenerateProofs();
                             await ProofUtility.SortProofs(proofs);
                             //send proofs
                             var proofsJson = JsonConvert.SerializeObject(proofs);
@@ -1047,7 +1048,18 @@ namespace ReserveBlockCore.Nodes
                         if(!portOpen)
                         {
                             //if port is not open remove them from pool
-                            Globals.NetworkValidators.Remove(validator.Key, out _);
+                            bool found = Globals.NetworkValidators.TryGetValue(validator.Key, out var _networkVal);
+                            if(found)
+                            {
+                                if(_networkVal != null)
+                                {
+                                    _networkVal.PortCheckFailCount += 1;
+                                    if(_networkVal.PortCheckFailCount > 5)
+                                    {
+                                        Globals.NetworkValidators.Remove(validator.Key, out _);
+                                    }
+                                }
+                            }
                         }
                     }
                 }

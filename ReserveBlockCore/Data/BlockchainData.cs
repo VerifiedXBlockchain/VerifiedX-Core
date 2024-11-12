@@ -414,7 +414,7 @@ namespace ReserveBlockCore.Data
                     block.BCraftTime = buildTime.Milliseconds;
 
 
-                    blockCrafted = await BlockValidatorService.ValidateBlock(block, true, false, true);
+                    blockCrafted = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
                     if (blockCrafted == true)
                     {
                         break;
@@ -580,12 +580,6 @@ namespace ReserveBlockCore.Data
                     _ = BlockDiffService.UpdateQueue(Globals.BlockTimeDiff);
                     _ = ValidatorService.UpdateActiveValidators(block);
 
-                    if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
-                    {
-                        _ = ValidatorService.UpdateBlockMemory(block.Height);
-                        _ = ValidatorService.UpdateProofBlockHashDictionary(block.Height, block.Hash);
-                    }
-                    
 
                     //insert block to db
                     blocks.InsertSafe(block);

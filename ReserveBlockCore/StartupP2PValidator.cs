@@ -1,4 +1,5 @@
-﻿using ReserveBlockCore.Nodes;
+﻿using ReserveBlockCore.Controllers;
+using ReserveBlockCore.Nodes;
 using ReserveBlockCore.P2P;
 using ReserveBlockCore.Services;
 
@@ -18,7 +19,13 @@ namespace ReserveBlockCore
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddControllers();
+            services.AddControllers().ConfigureApplicationPartManager(apm =>
+            {
+                // Remove all controllers except the one you want (ValidatorController)
+                var controllerFeatureProvider = new ExcludeControllersFeatureProvider<ValidatorController>();
+                apm.FeatureProviders.Add(controllerFeatureProvider);
+            });
+
             services.AddSignalR(options => {
                 options.KeepAliveInterval = TimeSpan.FromSeconds(15); //check connections everyone 15 seconds
                 options.ClientTimeoutInterval = TimeSpan.FromSeconds(60); //close connection after 60 seconds
@@ -29,7 +36,7 @@ namespace ReserveBlockCore
             });
 
             //Create hosted service for just consensus measures
-            services.AddHostedService<ValidatorProcessor>();
+            services.AddHostedService<ValidatorNode>();
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -48,16 +55,15 @@ namespace ReserveBlockCore
 
             app.UseEndpoints(endpoints =>
             {
-                endpoints.MapControllers();
-
                 if (Globals.ValidatorAddress != null)
                 {
+                    endpoints.MapControllerRoute(
+                        name: "validator_controller",
+                        pattern: "api/validatorcontroller/{action=Index}/{id?}",
+                        defaults: new { controller = "ValidatorController" }
+                    );
+
                     endpoints.MapHub<P2PValidatorServer>("/validator", options =>
-                    {
-                        options.ApplicationMaxBufferSize = 8388608; // values might need tweaking if mem consumption gets too large
-                        options.TransportMaxBufferSize = 8388608; // values might need tweaking if mem consumption gets too large
-                    });
-                    endpoints.MapHub<P2PMPCServer>("/mpc", options =>
                     {
                         options.ApplicationMaxBufferSize = 8388608; // values might need tweaking if mem consumption gets too large
                         options.TransportMaxBufferSize = 8388608; // values might need tweaking if mem consumption gets too large

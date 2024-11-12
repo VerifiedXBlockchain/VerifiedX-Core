@@ -264,6 +264,7 @@ namespace ReserveBlockCore.Services
                         var saveResult = accountTable.UpdateSafe(account);
 
                         Globals.ValidatorAddress = validator.Address;
+                        Globals.ValidatorPublicKey = account.PublicKey;
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 
@@ -327,6 +328,7 @@ namespace ReserveBlockCore.Services
                     valAccount.IsValidating = false;
                     accounts.UpdateSafe(valAccount);
                     Globals.ValidatorAddress = "";
+                    Globals.ValidatorPublicKey = "";
                     return valAccount.Address;
                 }
             }
@@ -509,6 +511,7 @@ namespace ReserveBlockCore.Services
                     validators.DeleteAllSafe();
 
                     Globals.ValidatorAddress = "";
+                    Globals.ValidatorPublicKey = "";
 
                     await P2PClient.DisconnectAdjudicators();
                 }
@@ -877,6 +880,7 @@ namespace ReserveBlockCore.Services
                         var saveResult = accountTable.UpdateSafe(account);
 
                         Globals.ValidatorAddress = validator.Address;
+                        Globals.ValidatorPublicKey = account.PublicKey;
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 

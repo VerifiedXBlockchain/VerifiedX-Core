@@ -1,7 +1,9 @@
 ﻿using ReserveBlockCore.Data;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Services;
 using System.Collections.Concurrent;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -11,45 +13,98 @@ namespace ReserveBlockCore.Utilities
     {
         private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
 
-        public static async Task<List<Proof>> GenerateProofs(string address, string publicKey, long blockHeight, bool firstProof)
+        public static async Task<List<Proof>> GenerateProofs()
         {
             List<Proof> proofs = new List<Proof>();
-            var blockHeightStart = blockHeight + 1;
-            var finalHeight = blockHeightStart + 1;
 
-            if (firstProof)
+            var blockHeight = Globals.LastBlock.Height + 1;
+            var prevHash = Globals.LastBlock.Hash;
+
+            var peerDB = Peers.GetAll();
+            //Force unban quicker
+            await BanService.RunUnban();
+
+            var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                finalHeight = blockHeightStart + 3;//if first proof of the day then push it out.
+                SkipIPs.Add("144.126.156.101");
             }
-            for (long h = blockHeightStart; h <= finalHeight; h++)
-            {
-                var proof = await CreateProof(address, publicKey, h);
-                if(proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
-                {
-                    Proof _proof = new Proof {
-                        Address = address,
-                        BlockHeight = h,
-                        ProofHash = proof.Item2,
-                        PublicKey = publicKey,
-                        VRFNumber = proof.Item1,
-                    };
 
-                    proofs.Add(_proof);
+            var newPeers = peerDB.Find(x => x.IsValidator).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray();
+
+            if (!newPeers.Any())
+            {
+                //clear out skipped peers to try again
+                Globals.SkipValPeers.Clear();
+
+                SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+                newPeers = peerDB.Find(x => x.IsValidator).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray();
+            }
+
+            List<Peers> peersMissingDataList = new List<Peers>();
+
+            foreach(var val in newPeers)
+            {
+                if(val.ValidatorAddress != null && val.ValidatorPublicKey != null)
+                {
+                    var stateAddress = StateData.GetSpecificAccountStateTrei(val.ValidatorAddress);
+                    if (stateAddress == null)
+                    {
+                        continue;
+                    }
+
+                    if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
+                    {
+                        continue;
+                    }
+
+                    var proof = await CreateProof(val.ValidatorAddress, val.ValidatorPublicKey, blockHeight, prevHash);
+                    if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
+                    {
+                        Proof _proof = new Proof
+                        {
+                            Address = val.ValidatorAddress,
+                            BlockHeight = blockHeight,
+                            PreviousBlockHash = prevHash,
+                            ProofHash = proof.Item2,
+                            PublicKey = val.ValidatorPublicKey,
+                            VRFNumber = proof.Item1,
+                            IPAddress = val.PeerIP
+                        };
+
+                        proofs.Add(_proof);
+                    }
+                }
+                else
+                {
+                    peersMissingDataList.Add(val);
                 }
             }
 
-            Globals.LastProofBlockheight = finalHeight;
+            Globals.LastProofBlockheight = blockHeight;
 
             return proofs;
         }
 
-        public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight)
+        public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight, string prevBlockHash)
         {
             
             uint vrfNum = 0;
             var proof = "";
             // Random seed
-            string seed = publicKey + blockHeight.ToString();
+            string seed = publicKey + blockHeight.ToString() + prevBlockHash;
 
             // Convert the combined input to bytes (using UTF-8 encoding)
             byte[] combinedBytes = Encoding.UTF8.GetBytes(seed);
@@ -70,14 +125,14 @@ namespace ReserveBlockCore.Utilities
             return (vrfNum, proof);
         }
 
-        public static async Task<bool> VerifyProofAsync(string publicKey, long blockHeight, string proofHash)
+        public static async Task<bool> VerifyProofAsync(string publicKey, long blockHeight, string prevBlockHash, string proofHash)
         {
             try
             {
                 uint vrfNum = 0;
                 var proof = "";
                 // Random seed
-                string seed = publicKey + blockHeight.ToString();
+                string seed = publicKey + blockHeight.ToString() + prevBlockHash;
                 //if (Globals.BlockHashes.Count >= 35)
                 //{
                 //    var height = blockHeight - 7;
@@ -109,14 +164,14 @@ namespace ReserveBlockCore.Utilities
             
         }
 
-        public static bool VerifyProof(string publicKey, long blockHeight, string proofHash)
+        public static bool VerifyProof(string publicKey, long blockHeight, string prevBlockHash, string proofHash)
         {
             try
             {
                 uint vrfNum = 0;
                 var proof = "";
                 // Random seed
-                string seed = publicKey + blockHeight.ToString();
+                string seed = publicKey + blockHeight.ToString() + prevBlockHash;
                 //if (Globals.BlockHashes.Count >= 35)
                 //{
                 //    var height = blockHeight - 7;
@@ -147,109 +202,62 @@ namespace ReserveBlockCore.Utilities
 
         }
 
-        public static async Task SortProofs(List<Proof> proofs, bool isWinnerList = false)
+        public static async Task<Proof?> SortProofs(List<Proof> proofs, bool isWinnerList = false)
         {
             try
             {
-                var checkListForOneVal = proofs.GroupBy(p => p.Address).Count();
-
-                //More than one val found in proof list. This should not happen unless cheating occurs. 
-                if (checkListForOneVal > 1 && !isWinnerList)
-                    return;
-
-                var badProofFound = proofs.Where(x => !x.VerifyProof()).Count() > 0 ? true : false;
-
-                var address = proofs.FirstOrDefault()?.Address;
-                if (address == null)
-                    return;
-
-                if(Globals.ABL.Exists(x => x == address)) 
-                    return;
-
-                //If any proofs are bad the entire list is ignored.
-                if (badProofFound)
-                    return;
-
-                var processHeight = Globals.LastBlock.Height - 5;
+                var processHeight = Globals.LastBlock.Height + 1;
                 var finalProof = new Proof();
+                var currentWinningProof = proofs.FirstOrDefault();
                 foreach (var proof in proofs)
                 {
-                    var currentWinningProof = Globals.WinningProofs.Where(x => x.Key == proof.BlockHeight).FirstOrDefault();
-                    if (currentWinningProof.Value != null)
+                    if(Globals.ABL.Exists(x => x == proof.Address))
+                    {
+                        continue;
+                    }
+
+                    if (currentWinningProof != null)
                     {
                         if (proof.VerifyProof())
                         {
-                            //Skip proof since winner was already found.
-                            if (Globals.FinalizedWinner.ContainsKey(proof.BlockHeight))
-                                continue;
-
-                            if (processHeight > proof.BlockHeight)
+                            if (processHeight != proof.BlockHeight)
                                 continue;
 
                             //Closer to zero wins.
-                            if (currentWinningProof.Value.VRFNumber > proof.VRFNumber)
+                            if (currentWinningProof.VRFNumber > proof.VRFNumber)
                             {
-                                Globals.BackupProofs.TryGetValue(proof.BlockHeight, out var backupProofs);
-                                if (backupProofs != null)
+                                using (var client = Globals.HttpClientFactory.CreateClient())
                                 {
-                                    var hasProof = backupProofs.Exists(x => x.Address == currentWinningProof.Value.Address && x.BlockHeight == currentWinningProof.Value.BlockHeight);
-                                    if(!hasProof)
+                                    try
                                     {
-                                        backupProofs.Add(currentWinningProof.Value);
-                                        Globals.BackupProofs[proof.BlockHeight] = backupProofs.OrderBy(x => x.VRFNumber).ToList();
+                                        var uri = $"http://{proof.IPAddress}:{Globals.ValPort}/api/validator/heartbeat";
+                                        var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
+
+                                        if (response != null)
+                                        {
+                                            if (response.IsSuccessStatusCode)
+                                                finalProof = proof;
+                                        }
                                     }
-                                }
-                                else
-                                {
-                                    await AddBackupProof(currentWinningProof.Value.BlockHeight, new List<Proof> { currentWinningProof.Value });
-                                }
-                                //Update winning proof with new proof if the value is greater.
-                                Globals.WinningProofs[proof.BlockHeight] = proof;
-                            }
-                            else
-                            {
-                                Globals.BackupProofs.TryGetValue(proof.BlockHeight, out var backupProofs);
-                                if (backupProofs != null)
-                                {
-                                    var hasProof = backupProofs.Exists(x => x.Address == proof.Address && x.BlockHeight == proof.BlockHeight);
-                                    if (!hasProof)
+                                    catch (Exception ex)
                                     {
-                                        backupProofs.Add(currentWinningProof.Value);
-                                        Globals.BackupProofs[proof.BlockHeight] = backupProofs.OrderBy(x => x.VRFNumber).ToList();
                                     }
+                                    
                                 }
-                                else
-                                {
-                                    await AddBackupProof(proof.BlockHeight, new List<Proof> { proof });
-                                }
+                                
                             }
                         }
                         else
                         {
                             //stop checking due to proof failure. This should never happen unless a rigged proof is entered. 
-                            return;
+                            continue;
                         }
                     }
-                    else
-                    {
-                        //No proof found, so add first one found.
-                        if (proof.VerifyProof())
-                            await AddProof(proof.BlockHeight, proof);
-                    }
-
-                    finalProof = proof;
                 }
 
-
-                //Updates the network val with latest list to ensure spamming doesn't happen.
-                var networkVal = Globals.NetworkValidators.TryGet(finalProof.Address);
-                if (networkVal != null)
-                {
-                    networkVal.LastBlockProof = finalProof.BlockHeight;
-                    Globals.NetworkValidators[finalProof.Address] = networkVal;
-                }
+                return finalProof;
             }
-            catch { return; }
+            catch { return null; }
         }
 
         public static async Task AddProof(long blockHeight, Proof proof)

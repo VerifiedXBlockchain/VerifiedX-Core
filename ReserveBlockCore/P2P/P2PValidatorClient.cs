@@ -173,7 +173,7 @@ namespace ReserveBlockCore.P2P
                 var IPAddress = GetPathUtility.IPFromURL(url);
                 hubConnection.On<string, string>("GetValMessage", async (message, data) =>
                 {
-                    _ = ValidatorProcessor.ProcessData(message, data, IPAddress);
+                    _ = ValidatorNode.ProcessData(message, data, IPAddress);
                 });
 
                 await hubConnection.StartAsync(new CancellationTokenSource(8000).Token);
@@ -244,6 +244,124 @@ namespace ReserveBlockCore.P2P
             {
                 ConnectLock.TryRemove(url, out _);
             }
+        }
+
+        #endregion
+
+        #region Connect for Alive
+
+        private static async Task ConnectAlive(Peers peer)
+        {
+            var url = "http://" + peer.PeerIP + ":" + Globals.ValPort + "/valproc";
+            try
+            {
+                var account = AccountData.GetLocalValidator();
+                var validators = Validators.Validator.GetAll();
+                var validator = validators.FindOne(x => x.Address == account.Address);
+                if (validator == null)
+                    return;
+
+                var time = TimeUtil.GetTime().ToString();
+                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+
+                var hubConnection = new HubConnectionBuilder()
+                       .WithUrl(url, options =>
+                       {
+                           options.Headers.Add("address", validator.Address);
+                           options.Headers.Add("time", time);
+                           options.Headers.Add("uName", validator.UniqueName);
+                           options.Headers.Add("signature", signature);
+                           options.Headers.Add("walver", Globals.CLIVersion);
+                           options.Headers.Add("publicKey", account.PublicKey);
+                       })
+                       .Build();
+
+                var IPAddress = GetPathUtility.IPFromURL(url);
+
+                await hubConnection.StartAsync(new CancellationTokenSource(8000).Token);
+
+                if (hubConnection.ConnectionId == null)
+                {
+                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    peer.FailCount += 1;
+                    if (peer.FailCount > 60)
+                        peer.IsOutgoing = false;
+                    Peers.GetAll()?.UpdateSafe(peer);
+                    return;
+                }
+                else
+                {
+                    //connection success
+                    await hubConnection.StopAsync();
+                }
+
+                
+            }
+            catch
+            {
+                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                peer.FailCount += 1;
+                if (peer.FailCount > 60)
+                    peer.IsOutgoing = false;
+                Peers.GetAll()?.UpdateSafe(peer);
+            }
+            finally
+            {
+                ConnectLock.TryRemove(url, out _);
+            }
+        }
+
+        #endregion
+
+        #region Connect to Validators For Alive Check
+        public static async Task<bool> ValidatorAnnounce()
+        {
+            var peerDB = Peers.GetAll();
+
+            //Force unban quicker
+            await BanService.RunUnban();
+
+            var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
+            {
+                SkipIPs.Add("144.126.156.101");
+            }
+
+            Random rnd = new Random();
+            var newPeers = peerDB.Find(x => x.IsValidator).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .ToArray();
+
+            if (!newPeers.Any())
+            {
+                //clear out skipped peers to try again
+                Globals.SkipValPeers.Clear();
+
+                SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+                newPeers = peerDB.Find(x => x.IsValidator).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .ToArray();
+            }
+
+            var Diff = Globals.MaxValPeers - Globals.ValidatorNodes.Count;
+            newPeers.Take(Diff).ToArray().ParallelLoop(peer =>
+            {
+                _ = ConnectAlive(peer);
+            });
+
+            return Globals.MaxValPeers != 0;
         }
 
         #endregion
@@ -329,6 +447,7 @@ namespace ReserveBlockCore.P2P
             try
             {
                 Globals.ValidatorAddress = "";
+                Globals.ValidatorPublicKey = "";
                 foreach (var node in Globals.ValidatorNodes.Values)
                     if (node.Connection != null)
                         await node.Connection.DisposeAsync();
@@ -503,7 +622,7 @@ namespace ReserveBlockCore.P2P
                 try
                 {
                     var txJson = JsonConvert.SerializeObject(txSend);
-                    _ = ValidatorProcessor.Broadcast("7777", txJson, "SendTxToMempoolVals");
+                    _ = ValidatorProcessor_BAk.Broadcast("7777", txJson, "SendTxToMempoolVals");
                 }
                 catch (Exception ex)
                 {
@@ -546,6 +665,55 @@ namespace ReserveBlockCore.P2P
                 }
             }
         }
+        #endregion
+
+        #region Request Active Validators
+
+        public static async Task RequestActiveValidators()
+        {
+            bool waitForVals = true;
+            while (waitForVals)
+            {
+                var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                var valNodeListCheck = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+                if (valNodeListCheck.Count() == 0)
+                {
+                    await delay;
+                    continue;
+                }
+
+                waitForVals = false;
+            }
+
+            var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+            foreach (var validator in valNodeList)
+            {
+                var source = new CancellationTokenSource(2000);
+                string activeValJson = await validator.Connection.InvokeAsync<string>("SendActiveVals");
+
+                if(activeValJson != null)
+                {
+                    var activeVals = JsonConvert.DeserializeObject<List<string>>(activeValJson);
+                    if(activeVals != null)
+                    {
+                        var peerDB = Peers.GetAll();
+
+                        foreach (var val in  activeVals)
+                        {
+                            var singleVal = peerDB.FindOne(x => x.PeerIP == val);
+                            if(singleVal != null)
+                            {
+                                singleVal.IsValidator = true;
+                                peerDB.UpdateSafe(singleVal);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         #endregion
 
         #region Request a Queued Block

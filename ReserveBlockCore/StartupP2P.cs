@@ -24,7 +24,7 @@ namespace ReserveBlockCore
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddControllers();
+            //services.AddControllers();
             services.AddSignalR(options => {
                 options.KeepAliveInterval = TimeSpan.FromSeconds(15); //check connections everyone 15 seconds
                 options.ClientTimeoutInterval = TimeSpan.FromSeconds(60); //close connection after 60 seconds
@@ -52,7 +52,7 @@ namespace ReserveBlockCore
             
             app.UseEndpoints(endpoints =>
             {
-                endpoints.MapControllers();
+                //endpoints.MapControllers();
 
                 //change to mother local DB rec
                 if(Mother.GetMother() != null)

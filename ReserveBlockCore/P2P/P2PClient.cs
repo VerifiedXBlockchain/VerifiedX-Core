@@ -314,17 +314,17 @@ namespace ReserveBlockCore.P2P
                         switch(message)
                         {
                             case "task":
-                                await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
                                 break;
                             case "taskResult":
-                                await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
                                 break;
                             case "sendWinningBlock":
-                                await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
                                 break;
                             case "fortisPool":
                                 if(Globals.AdjudicateAccount == null)
-                                    await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                    await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
                                 break;
                             case "status":
                                 //ConsoleWriterService.Output(data);
@@ -339,7 +339,7 @@ namespace ReserveBlockCore.P2P
                                 }
                                 break;
                             case "tx":
-                                await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
                                 break;
                             case "badBlock":
                                 //do something
@@ -383,7 +383,7 @@ namespace ReserveBlockCore.P2P
                 };
                 }
 
-                ValidatorProcessor.RandomNumberTaskV3(Globals.LastBlock.Height + 1);
+                ValidatorProcessor_BAk.RandomNumberTaskV3(Globals.LastBlock.Height + 1);
 
                 return true;
             }

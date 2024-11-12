@@ -579,6 +579,7 @@ namespace ReserveBlockCore
                     myAccount.IsValidating = true;
                     accounts.UpdateSafe(myAccount);
                     Globals.ValidatorAddress = myAccount.Address;
+                    Globals.ValidatorPublicKey = myAccount.PublicKey;
                     Globals.GUIPasswordNeeded = false;
                     LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
                 }

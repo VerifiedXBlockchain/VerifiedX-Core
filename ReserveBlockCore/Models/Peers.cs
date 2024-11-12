@@ -21,6 +21,8 @@ namespace ReserveBlockCore.Models
         public bool IsBanned { get; set; }
         public bool IsPermaBanned { get; set; }
         public bool IsValidator { get; set; }
+        public string? ValidatorAddress { get; set; }
+        public string? ValidatorPublicKey { get; set; }
         public int BanCount { get; set; }
         public DateTime? InitialBanDate { get; set; }
         public DateTime? LastBanDate { get; set; }
@@ -88,7 +90,7 @@ namespace ReserveBlockCore.Models
             return banned;
         }
 
-        public static async Task UpdatePeerAsVal(string ip, string address, string walVersion)
+        public static async Task UpdatePeerAsVal(string ip, string address, string walVersion, string validatorAddress, string valPublicKey)
         {
             var peers = GetAll();
 
@@ -99,6 +101,8 @@ namespace ReserveBlockCore.Models
             if(peer != null)
             {
                 peer.IsValidator = true;
+                peer.ValidatorAddress = validatorAddress;
+                peer.ValidatorPublicKey = valPublicKey;
                 peers?.Update(peer);
             }
             else
@@ -110,7 +114,42 @@ namespace ReserveBlockCore.Models
                     IsOutgoing = true,
                     PeerIP = ip,
                     IsValidator = true,
+                    ValidatorAddress = validatorAddress,
+                    ValidatorPublicKey = valPublicKey,
                     WalletVersion = walVersion
+                };
+
+                peers.InsertSafe(nPeer);
+            }
+        }
+
+        public static async Task UpdatePeerAsVal(string ip, string validatorAddress, string valPublicKey)
+        {
+            var peers = GetAll();
+
+            if (peers == null)
+                return;
+
+            var peer = peers?.Query().Where(x => x.PeerIP.Equals(ip)).FirstOrDefault();
+            if (peer != null)
+            {
+                peer.IsValidator = true;
+                peer.ValidatorAddress = validatorAddress;
+                peer.ValidatorPublicKey = valPublicKey;
+                peers?.Update(peer);
+            }
+            else
+            {
+                Peers nPeer = new Peers
+                {
+                    FailCount = 0,
+                    IsIncoming = true,
+                    IsOutgoing = true,
+                    PeerIP = ip,
+                    IsValidator = true,
+                    ValidatorAddress = validatorAddress,
+                    ValidatorPublicKey = valPublicKey,
+                    WalletVersion = Globals.CLIVersion
                 };
 
                 peers.InsertSafe(nPeer);

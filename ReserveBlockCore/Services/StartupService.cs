@@ -662,12 +662,14 @@ namespace ReserveBlockCore.Services
                 if (myAccountTest != null)
                 {
                     Globals.ValidatorAddress = myAccountTest.Address;
+                    Globals.ValidatorPublicKey = myAccountTest.PublicKey;
                 }
             }
             var myAccount = accounts.FindOne(x => x.IsValidating == true && x.Address != Globals.GenesisAddress);
             if (myAccount != null)
             {
                 Globals.ValidatorAddress = myAccount.Address;
+                Globals.ValidatorPublicKey = myAccount.PublicKey;
             }
         }
 
@@ -681,6 +683,7 @@ namespace ReserveBlockCore.Services
             {
                 var valResult = await ValidatorService.StartValidating(myAccount, uname, true);
                 Globals.ValidatorAddress = myAccount.Address;
+                Globals.ValidatorPublicKey = myAccount.PublicKey;
             }
         }
 
@@ -1442,6 +1445,7 @@ namespace ReserveBlockCore.Services
             if (myAccount != null)
             {
                 Globals.ValidatorAddress = myAccount.Address;
+                Globals.ValidatorPublicKey = myAccount.PublicKey;
                 LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
             }
         }

@@ -109,7 +109,7 @@ namespace ReserveBlockCore.Utilities
 
                 var _PublicKey = "04" + ByteToHex(publicKey.toString());
 
-                var isProofValid = await ProofUtility.VerifyProofAsync(_PublicKey, blockHeight, validatorProof);
+                var isProofValid = await ProofUtility.VerifyProofAsync(_PublicKey, blockHeight, Globals.LastBlock.Hash, validatorProof);
                 var result = isProofValid ? "" : "Proof Invalid.";
 
                 return (isProofValid, result);

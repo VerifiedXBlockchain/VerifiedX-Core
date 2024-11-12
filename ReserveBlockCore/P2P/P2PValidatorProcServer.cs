@@ -1,0 +1,149 @@
+﻿using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.SignalR;
+using Newtonsoft.Json;
+using ReserveBlockCore.Data;
+using ReserveBlockCore.Models;
+using ReserveBlockCore.Services;
+using ReserveBlockCore.Utilities;
+
+namespace ReserveBlockCore.P2P
+{
+    public class P2PValidatorProcServer : P2PServer
+    {
+        #region On Connect/Disconnect
+        public override async Task OnConnectedAsync()
+        {
+            string peerIP = null;
+            try
+            {
+                peerIP = GetIP(Context);
+
+                if (Globals.BannedIPs.ContainsKey(peerIP))
+                {
+                    return;
+                }
+                var httpContext = Context.GetHttpContext();
+
+                if (httpContext == null)
+                {
+                    return;
+                }
+
+                var portCheck = PortUtility.IsPortOpen(peerIP, Globals.ValPort);
+                if(!portCheck) 
+                {
+                    return;
+                }
+
+                var address = httpContext.Request.Headers["address"].ToString();
+                var time = httpContext.Request.Headers["time"].ToString();
+                var uName = httpContext.Request.Headers["uName"].ToString();
+                var publicKey = httpContext.Request.Headers["publicKey"].ToString();
+                var signature = httpContext.Request.Headers["signature"].ToString();
+                var walletVersion = httpContext.Request.Headers["walver"].ToString();
+
+                var ablList = Globals.ABL.ToList();
+
+                if (ablList.Exists(x => x == address))
+                {
+                    BanService.BanPeer(peerIP, "Request malformed", "OnConnectedAsync");
+                    return;
+                }
+
+                var SignedMessage = address;
+                var Now = TimeUtil.GetTime();
+                SignedMessage = address + ":" + time + ":" + publicKey;
+                if (TimeUtil.GetTime() - long.Parse(time) > 300)
+                {
+                    return;
+                }
+
+                var walletVersionVerify = WalletVersionUtility.Verify(walletVersion);
+
+                if (string.IsNullOrWhiteSpace(address) ||
+                    string.IsNullOrWhiteSpace(publicKey) ||
+                    string.IsNullOrWhiteSpace(signature))
+                {
+                    return;
+                }
+                var stateAddress = StateData.GetSpecificAccountStateTrei(address);
+                if (stateAddress == null)
+                {
+                    return;
+                }
+
+                if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
+                {
+                    return;
+                }
+
+                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
+                if (!verifySig)
+                {
+                    return;
+                }
+
+                _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
+            }
+            catch (Exception ex)
+            {
+                Context?.Abort();
+                ErrorLogUtility.LogError($"Unhandled exception has happend. Error : {ex.ToString()}", "P2PValidatorServer.OnConnectedAsync()");
+            }
+        }
+        public override async Task OnDisconnectedAsync(Exception? ex)
+        {
+            //var peerIP = GetIP(Context);
+            //var netVal = Globals.NetworkValidators.Where(x => x.Value.IPAddress == peerIP).FirstOrDefault();
+
+            //Globals.P2PValDict.TryRemove(peerIP, out _);
+            Context?.Abort();
+
+            await base.OnDisconnectedAsync(ex);
+        }
+
+        #endregion
+
+        #region End on Connect
+
+        private async Task EndOnConnect(string ipAddress, string adjMessage, string logMessage)
+        {
+            if (Globals.OptionalLogging == true)
+            {
+                LogUtility.Log(logMessage, "Validator Connection");
+                LogUtility.Log($"IP: {ipAddress} ", "Validator Connection");
+            }
+
+            Context?.Abort();
+        }
+
+        #endregion
+
+        #region Get IP
+        private static string GetIP(HubCallerContext context)
+        {
+            try
+            {
+                var peerIP = "NA";
+                var feature = context.Features.Get<IHttpConnectionFeature>();
+                if (feature != null)
+                {
+                    if (feature.RemoteIpAddress != null)
+                    {
+                        peerIP = feature.RemoteIpAddress.MapToIPv4().ToString();
+                    }
+                }
+
+                return peerIP;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "ConsensusServer.GetIP()");
+            }
+
+            return "0.0.0.0";
+        }
+
+        #endregion
+    }
+}

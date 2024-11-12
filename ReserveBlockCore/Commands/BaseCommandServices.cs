@@ -495,6 +495,7 @@ namespace ReserveBlockCore.Commands
         public static async void ResetValidator()
         {
             Globals.ValidatorAddress = "";
+            Globals.ValidatorPublicKey = "";
             var result = await ValidatorService.ValidatorErrorReset();
             if (result)
             {

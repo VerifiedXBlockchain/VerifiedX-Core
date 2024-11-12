@@ -126,7 +126,7 @@ namespace ReserveBlockCore.P2P
                 netVal.Context = null;
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
 
-                _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion);
+                _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
                 _ = Clients.Caller.SendAsync("GetValMessage", "1", peerIP, new CancellationTokenSource(2000).Token);
                 _ = Clients.All.SendAsync("GetValMessage", "2", netValSerialize, new CancellationTokenSource(6000).Token);
 
@@ -385,7 +385,7 @@ namespace ReserveBlockCore.P2P
                                 if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
                                     mempool.InsertSafe(txReceived);
-                                    _ = ValidatorProcessor.Broadcast("7777", data, "SendTxToMempoolVals");
+                                    _ = ValidatorProcessor_BAk.Broadcast("7777", data, "SendTxToMempoolVals");
 
                                     return "ATMP";//added to mempool
                                 }
@@ -465,7 +465,7 @@ namespace ReserveBlockCore.P2P
                                 mempool.InsertSafe(txReceived);
                                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                 {
-                                    _ = ValidatorProcessor.Broadcast("7777", data, "SendTxToMempoolVals");
+                                    _ = ValidatorProcessor_BAk.Broadcast("7777", data, "SendTxToMempoolVals");
                                 } //sends tx to connected peers
                                 return "ATMP";//added to mempool
                             }
@@ -590,6 +590,25 @@ namespace ReserveBlockCore.P2P
             catch { }
 
             return "0";
+        }
+
+        #endregion
+
+        #region Receive Winning Proof Vote
+        public async Task SendWinningProofVote(string winningProofJson)
+        {
+            try
+            {
+                var proof = JsonConvert.DeserializeObject<Proof>(winningProofJson);
+                if (proof != null)
+                {
+                    if(proof.VerifyProof())
+                        Globals.Proofs.Add(proof);
+                }
+            }
+            catch (Exception ex)
+            {
+            }
         }
 
         #endregion
