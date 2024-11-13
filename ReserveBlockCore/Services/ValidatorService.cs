@@ -36,7 +36,7 @@ namespace ReserveBlockCore.Services
                         webBuilder.UseKestrel()
                         .UseStartup<StartupP2PValidator>()
                         .UseUrls(url)
-                        .ConfigureLogging(loggingBuilder => loggingBuilder.ClearProviders());
+                        .ConfigureLogging(loggingBuilder => loggingBuilder.SetMinimumLevel(LogLevel.Debug));
                         webBuilder.ConfigureKestrel(options =>
                         {
 

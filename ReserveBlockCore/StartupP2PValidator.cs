@@ -26,7 +26,8 @@ namespace ReserveBlockCore
                 apm.FeatureProviders.Add(controllerFeatureProvider);
             });
 
-            services.AddSignalR(options => {
+            services.AddSignalR(options =>
+            {
                 options.KeepAliveInterval = TimeSpan.FromSeconds(15); //check connections everyone 15 seconds
                 options.ClientTimeoutInterval = TimeSpan.FromSeconds(60); //close connection after 60 seconds
                 options.MaximumReceiveMessageSize = 1179648;
@@ -59,7 +60,7 @@ namespace ReserveBlockCore
                 {
                     endpoints.MapControllerRoute(
                         name: "validator_controller",
-                        pattern: "api/validatorcontroller/{action=Index}/{id?}",
+                        pattern: "valapi/validatorcontroller/{action=Index}/{id?}",
                         defaults: new { controller = "ValidatorController" }
                     );
 

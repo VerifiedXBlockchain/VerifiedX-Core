@@ -167,6 +167,7 @@ namespace ReserveBlockCore.P2P
                            options.Headers.Add("signature", signature);
                            options.Headers.Add("walver", Globals.CLIVersion);
                            options.Headers.Add("publicKey", account.PublicKey);
+                           options.Transports = Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets;
                        })                       
                        .Build();
 
@@ -248,123 +249,6 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
-        #region Connect for Alive
-
-        private static async Task ConnectAlive(Peers peer)
-        {
-            var url = "http://" + peer.PeerIP.Replace("::ffff:", "") + ":" + Globals.ValPort + "/valproc";
-            try
-            {
-                var account = AccountData.GetLocalValidator();
-                var validators = Validators.Validator.GetAll();
-                var validator = validators.FindOne(x => x.Address == account.Address);
-                if (validator == null)
-                    return;
-
-                var time = TimeUtil.GetTime().ToString();
-                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
-
-                var hubConnection = new HubConnectionBuilder()
-                       .WithUrl(url, options =>
-                       {
-                           options.Headers.Add("address", validator.Address);
-                           options.Headers.Add("time", time);
-                           options.Headers.Add("uName", validator.UniqueName);
-                           options.Headers.Add("signature", signature);
-                           options.Headers.Add("walver", Globals.CLIVersion);
-                           options.Headers.Add("publicKey", account.PublicKey);
-                       })
-                       .Build();
-
-                var IPAddress = GetPathUtility.IPFromURL(url);
-
-                await hubConnection.StartAsync(new CancellationTokenSource(8000).Token);
-
-                if (hubConnection.ConnectionId == null)
-                {
-                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
-                    peer.FailCount += 1;
-                    if (peer.FailCount > 60)
-                        peer.IsOutgoing = false;
-                    Peers.GetAll()?.UpdateSafe(peer);
-                    return;
-                }
-                else
-                {
-                    //connection success
-                    await hubConnection.StopAsync();
-                }
-
-                
-            }
-            catch
-            {
-                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
-                peer.FailCount += 1;
-                if (peer.FailCount > 60)
-                    peer.IsOutgoing = false;
-                Peers.GetAll()?.UpdateSafe(peer);
-            }
-            finally
-            {
-                ConnectLock.TryRemove(url, out _);
-            }
-        }
-
-        #endregion
-
-        #region Connect to Validators For Alive Check
-        public static async Task<bool> ValidatorAnnounce()
-        {
-            var peerDB = Peers.GetAll();
-
-            //Force unban quicker
-            await BanService.RunUnban();
-
-            var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-                .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
-
-            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
-            {
-                SkipIPs.Add("66.94.124.2");
-            }
-
-            Random rnd = new Random();
-            var newPeers = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
-                .ToArray()
-                .OrderBy(x => rnd.Next())
-                .ToArray();
-
-            if (!newPeers.Any())
-            {
-                //clear out skipped peers to try again
-                Globals.SkipValPeers.Clear();
-
-                SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-                .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
-
-                newPeers = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
-                .ToArray()
-                .OrderBy(x => rnd.Next())
-                .ToArray();
-            }
-
-            var Diff = Globals.MaxValPeers - Globals.ValidatorNodes.Count;
-            newPeers.Take(Diff).ToArray().ParallelLoop(peer =>
-            {
-                _ = ConnectAlive(peer);
-            });
-
-            return Globals.MaxValPeers != 0;
-        }
-
-        #endregion
 
         #region Connect to Validators
         public static async Task<bool> ConnectToValidators()

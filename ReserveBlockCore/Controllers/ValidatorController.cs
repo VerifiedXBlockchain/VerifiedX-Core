@@ -8,7 +8,7 @@ using System.Net;
 
 namespace ReserveBlockCore.Controllers
 {
-    [Route("api/[controller]")]
+    [Route("valapi/[controller]")]
     [ApiController]
     public class ValidatorController : ControllerBase
     {

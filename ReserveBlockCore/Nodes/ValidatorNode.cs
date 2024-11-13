@@ -23,6 +23,7 @@ namespace ReserveBlockCore.Nodes
         private static SemaphoreSlim ConsensusLock = new SemaphoreSlim(1, 1);
         private static bool ActiveValidatorRequestDone = false;
         private static bool AlertValidatorsOfStatusDone = false;
+        static SemaphoreSlim NotifyExplorerLock = new SemaphoreSlim(1, 1);
 
 
 
@@ -45,6 +46,9 @@ namespace ReserveBlockCore.Nodes
 
             //Start consensus
             _ = StartConsensus();
+
+            //Notify Explorer for visibility.
+            _ = NotifyExplorer();
 
             //return Task.CompletedTask;
         }
@@ -90,7 +94,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             try
                             {
-                                var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/api/validator/status/{Globals.ValidatorAddress}/{Globals.ValidatorPublicKey}";
+                                var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status/{Globals.ValidatorAddress}/{Globals.ValidatorPublicKey}";
                                 await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
                             }
                             catch (Exception ex) { }
@@ -137,7 +141,7 @@ namespace ReserveBlockCore.Nodes
                     {
                         using (var client = Globals.HttpClientFactory.CreateClient())
                         {
-                            var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/api/validator/heartbeat";
+                            var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
                             var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                             if (response != null)
@@ -267,7 +271,7 @@ namespace ReserveBlockCore.Nodes
                                         {
                                             using (var client = Globals.HttpClientFactory.CreateClient())
                                             {
-                                                var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/api/validator/getblock/{finalizedWinner.BlockHeight}";
+                                                var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
                                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                                                 if (response != null)
@@ -502,6 +506,91 @@ namespace ReserveBlockCore.Nodes
         {
 
         }
+        #endregion
+
+        #region Notify Explorer Status
+        public static async Task NotifyExplorer()
+        {
+            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                var delay = Task.Delay(new TimeSpan(0, 1, 0));
+                try
+                {
+                    if (Globals.StopAllTimers && !Globals.IsChainSynced)
+                    {
+                        await delay;
+                        continue;
+                    }
+                    await NotifyExplorerLock.WaitAsync();
+
+
+                    var account = AccountData.GetLocalValidator();
+                    if (account == null)
+                        return;
+
+                    var validator = Validators.Validator.GetAll().FindOne(x => x.Address == account.Address);
+                    if (validator == null)
+                        return;
+
+                    var fortis = new FortisPool
+                    {
+                        Address = Globals.ValidatorAddress,
+                        ConnectDate = Globals.ValidatorStartDate,
+                        IpAddress = P2PClient.MostLikelyIP(),
+                        LastAnswerSendDate = DateTime.UtcNow,
+                        UniqueName = validator.UniqueName,
+                        WalletVersion = validator.WalletVersion
+                    };
+
+                    List<FortisPool> fortisPool = new List<FortisPool> { fortis };
+
+                    var listFortisPool = fortisPool.Select(x => new
+                    {
+                        ConnectionId = "NA",
+                        x.ConnectDate,
+                        x.LastAnswerSendDate,
+                        x.IpAddress,
+                        x.Address,
+                        x.UniqueName,
+                        x.WalletVersion
+                    }).ToList();
+
+                    var fortisPoolStr = JsonConvert.SerializeObject(listFortisPool);
+
+                    using (var client = Globals.HttpClientFactory.CreateClient())
+                    {
+                        string endpoint = Globals.IsTestNet ? "https://testnet-data.rbx.network/api/masternodes/send/" : "https://data.rbx.network/api/masternodes/send/";
+                        var httpContent = new StringContent(fortisPoolStr, Encoding.UTF8, "application/json");
+                        using (var Response = await client.PostAsync(endpoint, httpContent))
+                        {
+                            if (Response.StatusCode == System.Net.HttpStatusCode.OK)
+                            {
+                                //success
+                                Globals.ExplorerValDataLastSend = DateTime.Now;
+                                Globals.ExplorerValDataLastSendSuccess = true;
+                            }
+                            else
+                            {
+                                //ErrorLogUtility.LogError($"Error sending payload to explorer. Response Code: {Response.StatusCode}. Reason: {Response.ReasonPhrase}", "ClientCallService.DoFortisPoolWork()");
+                                Globals.ExplorerValDataLastSendSuccess = false;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to send validator list to explorer API. Error: {ex.ToString()}", "ValidatorService.NotifyExplorer()");
+                    Globals.ExplorerValDataLastSendSuccess = false;
+                }
+                finally
+                {
+                    NotifyExplorerLock.Release();
+                }
+                await delay;
+            }
+
+        }
+
         #endregion
 
         #region Broadcast
