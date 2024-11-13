@@ -33,15 +33,21 @@ namespace ReserveBlockCore.Services
                     var builder = Host.CreateDefaultBuilder()
                     .ConfigureWebHostDefaults(webBuilder =>
                     {
-                        webBuilder.UseKestrel()
+                        webBuilder.UseKestrel(options =>
+                        {
+                            options.Limits.MaxConcurrentConnections = 100;
+                            options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10MB
+                            options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
+                            options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+                        })
                         .UseStartup<StartupP2PValidator>()
                         .UseUrls(url)
-                        .ConfigureLogging(loggingBuilder => loggingBuilder.SetMinimumLevel(LogLevel.Debug));
-                        webBuilder.ConfigureKestrel(options =>
+                        .ConfigureLogging(loggingBuilder =>
                         {
-
-
+                            loggingBuilder.SetMinimumLevel(LogLevel.Debug);
+                            loggingBuilder.AddConsole();
                         });
+                        
                     });
 
                     _ = builder.RunConsoleAsync();

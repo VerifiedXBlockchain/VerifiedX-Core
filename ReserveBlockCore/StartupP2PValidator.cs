@@ -26,6 +26,16 @@ namespace ReserveBlockCore
                 apm.FeatureProviders.Add(controllerFeatureProvider);
             });
 
+            services.AddCors(options =>
+            {
+                options.AddPolicy("AllowAll", builder =>
+                {
+                    builder.AllowAnyOrigin()
+                           .AllowAnyMethod()
+                           .AllowAnyHeader();
+                });
+            });
+
             services.AddSignalR(options =>
             {
                 options.KeepAliveInterval = TimeSpan.FromSeconds(15); //check connections everyone 15 seconds
@@ -52,6 +62,8 @@ namespace ReserveBlockCore
 
             app.UseRouting();
 
+            app.UseCors("AllowAll");
+
             app.UseAuthorization();
 
             app.UseEndpoints(endpoints =>
@@ -61,7 +73,7 @@ namespace ReserveBlockCore
                     endpoints.MapControllerRoute(
                         name: "validator_controller",
                         pattern: "valapi/validatorcontroller/{action=Index}/{id?}",
-                        defaults: new { controller = "ValidatorController" }
+                        defaults: new { controller = "Validator" }
                     );
 
                     endpoints.MapHub<P2PValidatorServer>("/consensus", options =>
