@@ -175,7 +175,7 @@ namespace ReserveBlockCore.Nodes
 
         public static async Task StartConsensus()
         {
-            var EpochTime = Globals.IsTestNet ? 1731454926600L : 1674172800000L;
+            var EpochTime = Globals.IsTestNet ? 1731540172010L : 1674172800000L;
             var BeginBlock = Globals.IsTestNet ? Globals.V4Height : Globals.V3Height;
             var PreviousHeight = -1L;
             var BlockDelay = Task.CompletedTask;
@@ -355,8 +355,7 @@ namespace ReserveBlockCore.Nodes
                     _ = IpMessage(data);
                     break;
                 case "2":
-                    //send vote
-                    //TODO: ADD METHOD HERE
+                    _ = ReceiveVote(data);
                     break;
                 case "7":
                     _ = ReceiveConfirmedBlock(data);
@@ -383,6 +382,7 @@ namespace ReserveBlockCore.Nodes
                 Globals.ReportedIPs[IP] = 1;
         }
 
+        //2
         private static async Task ReceiveVote(string data)
         {
             if (string.IsNullOrEmpty(data)) return;
