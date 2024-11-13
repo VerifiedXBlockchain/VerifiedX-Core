@@ -218,7 +218,7 @@ namespace ReserveBlockCore.Services
                     else
                     {
                         peerExist.FailCount = 0;
-                        peerExist.IsValidator = true;
+                        //peerExist.IsValidator = true;
                         dbPeers.UpdateSafe(peerExist);
                     }
                 }
