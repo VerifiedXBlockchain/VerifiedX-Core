@@ -540,7 +540,7 @@ namespace ReserveBlockCore.Nodes
             
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                SkipIPs.Add("144.126.156.101");
+                SkipIPs.Add("66.94.124.2");
             }
 
             var peerList = peerDB.Find(x => x.IsValidator).ToArray()

@@ -195,7 +195,7 @@ namespace ReserveBlockCore.Services
                 {
                     IsIncoming = false,
                     IsOutgoing = true,
-                    PeerIP = "144.126.156.101",
+                    PeerIP = "66.94.124.2",
                     FailCount = 0,
                     IsValidator = true,
                     ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",

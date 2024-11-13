@@ -31,7 +31,7 @@ namespace ReserveBlockCore.Utilities
 
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                SkipIPs.Add("144.126.156.101");
+                SkipIPs.Add("66.94.124.2");
             }
 
             var newPeers = peerDB.Find(x => x.IsValidator).ToArray()
