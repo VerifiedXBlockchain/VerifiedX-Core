@@ -1044,7 +1044,7 @@ namespace ReserveBlockCore.Nodes
 
                     foreach(var validator in Globals.NetworkValidators)
                     {
-                        var portOpen = PortUtility.IsPortOpen(validator.Value.IPAddress, Globals.ValPort);
+                        var portOpen = PortUtility.IsPortOpen(validator.Value.IPAddress.Replace("::ffff:", ""), Globals.ValPort);
                         if(!portOpen)
                         {
                             //if port is not open remove them from pool
@@ -1354,7 +1354,7 @@ namespace ReserveBlockCore.Nodes
                     if(Globals.ReportedIPs.Count() != 0)
                     {
                         var ip = Globals.ReportedIPs.OrderByDescending(y => y.Value).Select(y => y.Key).First();
-                        var portCheck = PortUtility.IsPortOpen(ip, Globals.ValPort);
+                        var portCheck = PortUtility.IsPortOpen(ip.Replace("::ffff:", ""), Globals.ValPort);
                         if(!portCheck)
                         {
                             portCheckCount += 1;

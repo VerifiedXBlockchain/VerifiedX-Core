@@ -29,7 +29,7 @@ namespace ReserveBlockCore.P2P
                     return;
                 }
 
-                var portCheck = PortUtility.IsPortOpen(peerIP, Globals.ValPort);
+                var portCheck = PortUtility.IsPortOpen(peerIP.Replace("::ffff:", ""), Globals.ValPort);
                 if(!portCheck) 
                 {
                     return;

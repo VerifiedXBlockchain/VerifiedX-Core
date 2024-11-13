@@ -230,7 +230,7 @@ namespace ReserveBlockCore.Utilities
                                 {
                                     try
                                     {
-                                        var uri = $"http://{proof.IPAddress}:{Globals.ValPort}/api/validator/heartbeat";
+                                        var uri = $"http://{proof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/api/validator/heartbeat";
                                         var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
 
                                         if (response != null)

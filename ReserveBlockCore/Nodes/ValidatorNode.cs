@@ -90,7 +90,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             try
                             {
-                                var uri = $"http://{peer.PeerIP}:{Globals.ValPort}/api/validator/status/{Globals.ValidatorAddress}/{Globals.ValidatorPublicKey}";
+                                var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/api/validator/status/{Globals.ValidatorAddress}/{Globals.ValidatorPublicKey}";
                                 await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
                             }
                             catch (Exception ex) { }
@@ -137,7 +137,7 @@ namespace ReserveBlockCore.Nodes
                     {
                         using (var client = Globals.HttpClientFactory.CreateClient())
                         {
-                            var uri = $"http://{peer.PeerIP}:{Globals.ValPort}/api/validator/heartbeat";
+                            var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/api/validator/heartbeat";
                             var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                             if (response != null)
@@ -267,7 +267,7 @@ namespace ReserveBlockCore.Nodes
                                         {
                                             using (var client = Globals.HttpClientFactory.CreateClient())
                                             {
-                                                var uri = $"http://{finalizedWinner.IPAddress}:{Globals.ValPort}/api/validator/getblock/{finalizedWinner.BlockHeight}";
+                                                var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/api/validator/getblock/{finalizedWinner.BlockHeight}";
                                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                                                 if (response != null)
