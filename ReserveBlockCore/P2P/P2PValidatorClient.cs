@@ -687,26 +687,61 @@ namespace ReserveBlockCore.P2P
 
                 foreach (var validator in valNodeList)
                 {
-                    var source = new CancellationTokenSource(2000);
-                    string activeValJson = await validator.Connection.InvokeAsync<string>("SendActiveVals");
-
-                    if (activeValJson != null)
+                    try
                     {
-                        var activeVals = JsonConvert.DeserializeObject<List<string>>(activeValJson);
-                        if (activeVals != null)
-                        {
-                            var peerDB = Peers.GetAll();
+                        var source = new CancellationTokenSource(2000);
+                        string activeValJson = await validator.Connection.InvokeAsync<string>("SendActiveVals", source);
 
-                            foreach (var val in activeVals)
+                        if (activeValJson != null && activeValJson != "0")
+                        {
+                            var activeVals = JsonConvert.DeserializeObject<List<string>>(activeValJson.ToDecompress().ToStringFromBase64());
+                            if (activeVals != null)
                             {
-                                var singleVal = peerDB.FindOne(x => x.PeerIP == val);
-                                if (singleVal != null)
+                                var peerDB = Peers.GetAll();
+
+                                foreach (var valArray in activeVals)
                                 {
-                                    singleVal.IsValidator = true;
-                                    peerDB.UpdateSafe(singleVal);
+                                    //PeerIp
+                                    //Validator address
+                                    //validator pub key
+                                    //wal version
+                                    var val = valArray.Split(",");
+                                    var singleVal = peerDB.FindOne(x => x.PeerIP == val[0]);
+                                    if (singleVal != null)
+                                    {
+                                        singleVal.IsValidator = true;
+
+                                        if(singleVal.ValidatorAddress == null)
+                                            singleVal.ValidatorAddress = val[1];
+
+                                        if(singleVal.ValidatorPublicKey == null)
+                                            singleVal.ValidatorPublicKey = val[2];
+
+                                        peerDB.UpdateSafe(singleVal);
+                                    }
+                                    else
+                                    {
+                                        Peers nPeer = new Peers
+                                        {
+                                            IsIncoming = false,
+                                            IsOutgoing = true,
+                                            PeerIP = val[0],
+                                            FailCount = 0,
+                                            IsValidator = true,
+                                            ValidatorAddress = val[1],
+                                            ValidatorPublicKey = val[2],
+                                            WalletVersion = val[3]
+                                        };
+
+                                        peerDB.InsertSafe(nPeer);
+                                    }
                                 }
                             }
                         }
+                    }
+                    catch (Exception ex)
+                    {
+
                     }
                 }
 

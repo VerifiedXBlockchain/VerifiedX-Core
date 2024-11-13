@@ -334,6 +334,28 @@ namespace ReserveBlockCore.P2P
         }
 
         #endregion
+        public static async Task<string> SendActiveVals()
+        {
+            var peerDB = Peers.GetAll();
+
+            if (peerDB == null)
+                return "0";
+
+            List<string> valList = new List<string>();
+
+            var vals = peerDB.Query().Where(x => x.IsValidator).ToList();
+
+            if (!vals.Any())
+                return "0";
+
+            foreach(var val in vals)
+            {
+                var valStr = $"{val.PeerIP},{val.ValidatorAddress},{val.ValidatorPublicKey},{val.WalletVersion}";
+                valList.Add(valStr);
+            }
+
+            return JsonConvert.SerializeObject(valList).ToBase64().ToCompress();
+        }
 
         #region Send TX to Mempool Vals
         public async Task<string> SendTxToMempoolVals(Transaction txReceived)
