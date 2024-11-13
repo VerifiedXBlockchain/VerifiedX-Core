@@ -191,6 +191,7 @@ namespace ReserveBlockCore.Utilities
 
                     if (currentWinningProof != null)
                     {
+                        finalProof = currentWinningProof;
                         if (proof.VerifyProof())
                         {
                             if (processHeight != proof.BlockHeight)

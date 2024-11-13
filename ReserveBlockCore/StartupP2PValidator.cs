@@ -74,9 +74,9 @@ namespace ReserveBlockCore
                 var path = context.Request.Path.Value?.ToLower();
 
                 // Log incoming requests for debugging
-                Console.WriteLine($"Request path: {path}");
-                Console.WriteLine($"Request protocol: {context.Request.Protocol}");
-                Console.WriteLine($"Is WebSocket? {context.WebSockets.IsWebSocketRequest}");
+                //Console.WriteLine($"Request path: {path}");
+                //Console.WriteLine($"Request protocol: {context.Request.Protocol}");
+                //Console.WriteLine($"Is WebSocket? {context.WebSockets.IsWebSocketRequest}");
 
                 // Allow SignalR negotiation and WebSocket upgrade requests
                 if (path?.StartsWith("/consensus") == true)
