@@ -212,12 +212,16 @@ namespace ReserveBlockCore.Nodes
                         continue;
 
                     //Generate Proofs for ALL vals
+                    ConsoleWriterService.Output("\r\nGenerating Proofs");
                     var proofs = await ProofUtility.GenerateProofs();
+                    ConsoleWriterService.Output($"\r\n{proofs.Count()} Proofs Generated");
                     var winningProof = await ProofUtility.SortProofs(proofs);
+                    ConsoleWriterService.Output($"\r\nSorting Proofs");
 
                     //cast vote to master and subs
                     if (winningProof != null)
                     {
+                        ConsoleWriterService.Output($"\r\nWinner Found! Address: {winningProof.Address}");
                         Globals.Proofs.Add(winningProof);
                         await Broadcast("2", JsonConvert.SerializeObject(winningProof), "SendWinningProofVote");
                     }
@@ -234,6 +238,7 @@ namespace ReserveBlockCore.Nodes
                             if (finalizedWinner.Address == Globals.ValidatorAddress)
                             {
                                 //Craft Block
+                                ConsoleWriterService.Output($"\r\nYou Won! Crafting Block");
                                 var nextblock = Globals.LastBlock.Height + 1;
                                 var block = await BlockchainData.CraftBlock_V5(
                                                 Globals.ValidatorAddress,
@@ -242,6 +247,7 @@ namespace ReserveBlockCore.Nodes
 
                                 if(block != null)
                                 {
+                                    ConsoleWriterService.Output($"\r\nBlock crafted. Sending block.");
                                     //Send block to others
                                     _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                     _ = P2PValidatorClient.BroadcastBlock(block);
@@ -251,6 +257,7 @@ namespace ReserveBlockCore.Nodes
                             {
                                 //Give winner time to craft. Might need to increase.
                                 await Task.Delay(2000);
+                                ConsoleWriterService.Output($"\r\nYou did not win. Looking for block.");
                                 //Request block if it is not here
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight)
                                 {
@@ -317,6 +324,7 @@ namespace ReserveBlockCore.Nodes
                     }
 
                     //start over.
+                    ConsoleWriterService.Output($"\r\nStarting over.");
                     Globals.Proofs.Clear();
                     Globals.Proofs = new ConcurrentBag<Proof>();
 
