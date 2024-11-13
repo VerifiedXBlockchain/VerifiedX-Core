@@ -143,7 +143,7 @@ namespace ReserveBlockCore.P2P
         private static ConcurrentDictionary<string, bool> ConnectLock = new ConcurrentDictionary<string, bool>();
         private static async Task Connect(Peers peer)
         {
-            var url = "http://" + peer.PeerIP.Replace("::ffff:", "") + ":" + Globals.ValPort + "/validator";
+            var url = "http://" + peer.PeerIP.Replace("::ffff:", "") + ":" + Globals.ValPort + "/consensus";
             try
             {
                 if (!ConnectLock.TryAdd(url, true))

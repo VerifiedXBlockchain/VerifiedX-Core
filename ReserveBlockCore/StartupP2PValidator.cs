@@ -63,7 +63,7 @@ namespace ReserveBlockCore
                         defaults: new { controller = "ValidatorController" }
                     );
 
-                    endpoints.MapHub<P2PValidatorServer>("/validator", options =>
+                    endpoints.MapHub<P2PValidatorServer>("/consensus", options =>
                     {
                         options.ApplicationMaxBufferSize = 8388608; // values might need tweaking if mem consumption gets too large
                         options.TransportMaxBufferSize = 8388608; // values might need tweaking if mem consumption gets too large
