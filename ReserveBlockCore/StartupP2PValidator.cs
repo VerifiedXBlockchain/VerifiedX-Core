@@ -20,9 +20,13 @@ namespace ReserveBlockCore
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddControllers().ConfigureApplicationPartManager(apm =>
+            // Add memory cache
+            services.AddMemoryCache();
+
+            services.AddControllers(options => {
+                options.EnableEndpointRouting = true;
+            }).ConfigureApplicationPartManager(apm =>
             {
-                // Remove all controllers except the one you want (ValidatorController)
                 var controllerFeatureProvider = new ExcludeControllersFeatureProvider<ValidatorController>();
                 apm.FeatureProviders.Add(controllerFeatureProvider);
             });
@@ -34,8 +38,8 @@ namespace ReserveBlockCore
                 options.MaximumReceiveMessageSize = 1179648;
                 options.StreamBufferCapacity = 1024;
                 options.EnableDetailedErrors = true;
-                options.HandshakeTimeout = TimeSpan.FromSeconds(30);
                 options.MaximumParallelInvocationsPerClient = int.MaxValue;
+                options.HandshakeTimeout = TimeSpan.FromSeconds(30);
             }).AddHubOptions<P2PValidatorServer>(options =>
             {
                 options.EnableDetailedErrors = true;
@@ -44,9 +48,6 @@ namespace ReserveBlockCore
 
             //Create hosted service for just consensus measures
             services.AddHostedService<ValidatorNode>();
-
-            // Add memory cache
-            services.AddMemoryCache();
 
             // Add routing with strict constraints
             services.AddRouting(options =>
@@ -71,45 +72,48 @@ namespace ReserveBlockCore
             app.Use(async (context, next) =>
             {
                 var path = context.Request.Path.Value?.ToLower();
-                if (path?.StartsWith("/consensus") == true &&
-                    context.WebSockets.IsWebSocketRequest)
+
+                // Log incoming requests for debugging
+                Console.WriteLine($"Request path: {path}");
+                Console.WriteLine($"Request protocol: {context.Request.Protocol}");
+                Console.WriteLine($"Is WebSocket? {context.WebSockets.IsWebSocketRequest}");
+
+                if (path?.StartsWith("/consensus") == true && context.WebSockets.IsWebSocketRequest)
                 {
-                    // Handle SignalR WebSocket connections
+                    // WebSocket request for SignalR
                     await next();
                 }
                 else if (path?.StartsWith("/valapi") == true)
                 {
-                    // Handle API requests
+                    // HTTP request for Web API
                     await next();
                 }
                 else
                 {
+                    // Unknown request type
                     context.Response.StatusCode = 404;
                     return;
                 }
             });
 
-            app.UseAuthorization();
+            //app.UseAuthorization();
 
             app.UseEndpoints(endpoints =>
             {
                 if (Globals.ValidatorAddress != null)
                 {
-                    // Map validator controller with explicit route prefix
+                    // Map the Web API endpoint
                     endpoints.MapControllerRoute(
-                        name: "validator_controller",
-                        pattern: "valapi/validatorcontroller/{action=Index}/{id?}",
-                        defaults: new { controller = "Validator" }
+                        name: "validator_api",
+                        pattern: "valapi/{controller=Validator}/{action=Index}/{id?}"
                     ).WithDisplayName("ValidatorAPI");
 
-                    // Map SignalR hub with specific options
+                    // Map the SignalR hub with transport configuration
                     endpoints.MapHub<P2PValidatorServer>("/consensus", options =>
                     {
                         options.ApplicationMaxBufferSize = 8388608;
                         options.TransportMaxBufferSize = 8388608;
-                        options.Transports =
-                            HttpTransportType.WebSockets |
-                            HttpTransportType.ServerSentEvents;
+                        options.Transports = HttpTransportType.WebSockets;
                         options.WebSockets.CloseTimeout = TimeSpan.FromSeconds(30);
                     }).WithDisplayName("ConsensusHub");
                 }
