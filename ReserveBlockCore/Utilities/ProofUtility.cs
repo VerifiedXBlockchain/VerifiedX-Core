@@ -24,34 +24,7 @@ namespace ReserveBlockCore.Utilities
             //Force unban quicker
             await BanService.RunUnban();
 
-            var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-                .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
-
-            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
-            {
-                SkipIPs.Add("66.94.124.2");
-            }
-
-            var newPeers = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
-                .ToArray();
-
-            if (!newPeers.Any())
-            {
-                //clear out skipped peers to try again
-                Globals.SkipValPeers.Clear();
-
-                SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-                .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
-
-                newPeers = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
-                .ToArray();
-            }
+            var newPeers = peerDB.Find(x => x.IsValidator).ToArray();
 
             List<Peers> peersMissingDataList = new List<Peers>();
 
@@ -81,7 +54,7 @@ namespace ReserveBlockCore.Utilities
                             ProofHash = proof.Item2,
                             PublicKey = val.ValidatorPublicKey,
                             VRFNumber = proof.Item1,
-                            IPAddress = val.PeerIP
+                            IPAddress = val.PeerIP.Replace("::ffff:", "")
                         };
 
                         proofs.Add(_proof);
