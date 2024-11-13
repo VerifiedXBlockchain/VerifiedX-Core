@@ -73,7 +73,7 @@ namespace ReserveBlockCore.Nodes
 
         public static async Task AlertValidatorsOfStatus(bool comingOnline = true)
         {
-            if(comingOnline) 
+            if (comingOnline)
             {
                 while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
                 {
@@ -96,14 +96,16 @@ namespace ReserveBlockCore.Nodes
                             {
                                 var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status/{Globals.ValidatorAddress}/{Globals.ValidatorPublicKey}";
                                 await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
+                                await Task.Delay(200);
                             }
                             catch (Exception ex) { }
-                            
+
                         }
                     });
 
                     comingOnline = false;
                     AlertValidatorsOfStatusDone = true;
+                    await Task.Delay(new TimeSpan(0, 30, 0));
                 }
             }
             else
@@ -114,7 +116,7 @@ namespace ReserveBlockCore.Nodes
 
         public static async Task ValidatorHeartbeat()
         {
-            while(true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
                 if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
@@ -123,7 +125,7 @@ namespace ReserveBlockCore.Nodes
                     continue;
                 }
 
-                if(!AlertValidatorsOfStatusDone || !ActiveValidatorRequestDone)
+                if (!AlertValidatorsOfStatusDone || !ActiveValidatorRequestDone)
                 {
                     await delay;
                     continue;
@@ -146,7 +148,7 @@ namespace ReserveBlockCore.Nodes
 
                             if (response != null)
                             {
-                                if(!response.IsSuccessStatusCode)
+                                if (!response.IsSuccessStatusCode)
                                     BadValidatorList.Add(peer.PeerIP);
                             }
                         }
@@ -156,18 +158,18 @@ namespace ReserveBlockCore.Nodes
                         BadValidatorList.Add(peer.PeerIP);
                     }
                 });
-                
-                foreach(var val in BadValidatorList)
+
+                foreach (var val in BadValidatorList)
                 {
                     var validator = peerDB.FindOne(x => x.PeerIP == val);
-                    if(validator != null)
+                    if (validator != null)
                     {
                         validator.IsValidator = false;
                         peerDB.UpdateSafe(validator);
                     }
                 }
 
-                await Task.Delay(new TimeSpan(0,15,0));
+                await Task.Delay(new TimeSpan(0, 15, 0));
             }
         }
 
@@ -249,7 +251,7 @@ namespace ReserveBlockCore.Nodes
                                                 Globals.NetworkValidators.Count(),
                                                 finalizedWinner.ProofHash, nextblock);
 
-                                if(block != null)
+                                if (block != null)
                                 {
                                     ConsoleWriterService.Output($"\r\nBlock crafted. Sending block.");
                                     //Send block to others
@@ -265,7 +267,7 @@ namespace ReserveBlockCore.Nodes
                                 //Request block if it is not here
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight)
                                 {
-                                    for(var i = 0; i < 3; i++)
+                                    for (var i = 0; i < 3; i++)
                                     {
                                         try
                                         {
@@ -279,16 +281,16 @@ namespace ReserveBlockCore.Nodes
                                                     if (response.IsSuccessStatusCode)
                                                     {
                                                         var responseBody = await response.Content.ReadAsStringAsync();
-                                                        if( responseBody != null )
+                                                        if (responseBody != null)
                                                         {
-                                                            if(responseBody == "0")
+                                                            if (responseBody == "0")
                                                             {
                                                                 await Task.Delay(1000);
                                                                 continue;
                                                             }
 
                                                             var block = JsonConvert.DeserializeObject<Block>(responseBody);
-                                                            if(block != null)
+                                                            if (block != null)
                                                             {
                                                                 var IP = finalizedWinner.IPAddress;
                                                                 var nextHeight = Globals.LastBlock.Height + 1;
@@ -313,13 +315,13 @@ namespace ReserveBlockCore.Nodes
                                                             }
                                                         }
                                                     }
-                                                        
+
                                                 }
                                             }
                                         }
                                         catch (Exception ex)
                                         {
-                                            
+
                                         }
                                     }
                                 }
@@ -625,7 +627,7 @@ namespace ReserveBlockCore.Nodes
             .Union(Globals.SkipValPeers.Keys)
             .Union(Globals.ReportedIPs.Keys));
 
-            if(!skipConnectedNodes)
+            if (!skipConnectedNodes)
             {
                 var connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
 
@@ -634,7 +636,7 @@ namespace ReserveBlockCore.Nodes
                     SkipIPs.Add(validator.NodeIP);
                 }
             }
-            
+
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
                 SkipIPs.Add("66.94.124.2");

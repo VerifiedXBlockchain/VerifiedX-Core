@@ -168,6 +168,10 @@ namespace ReserveBlockCore.P2P
                            options.Headers.Add("walver", Globals.CLIVersion);
                            options.Headers.Add("publicKey", account.PublicKey);
                            options.Transports = Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets;
+                           options.SkipNegotiation = false; // Important: Allow negotiation
+                           options.WebSocketConfiguration = conf => {
+                               conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
+                           };
                        })                       
                        .Build();
 

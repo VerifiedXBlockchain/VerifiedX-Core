@@ -78,19 +78,17 @@ namespace ReserveBlockCore
                 Console.WriteLine($"Request protocol: {context.Request.Protocol}");
                 Console.WriteLine($"Is WebSocket? {context.WebSockets.IsWebSocketRequest}");
 
-                if (path?.StartsWith("/consensus") == true && context.WebSockets.IsWebSocketRequest)
+                // Allow SignalR negotiation and WebSocket upgrade requests
+                if (path?.StartsWith("/consensus") == true)
                 {
-                    // WebSocket request for SignalR
                     await next();
                 }
                 else if (path?.StartsWith("/valapi") == true)
                 {
-                    // HTTP request for Web API
                     await next();
                 }
                 else
                 {
-                    // Unknown request type
                     context.Response.StatusCode = 404;
                     return;
                 }
@@ -113,7 +111,9 @@ namespace ReserveBlockCore
                     {
                         options.ApplicationMaxBufferSize = 8388608;
                         options.TransportMaxBufferSize = 8388608;
-                        options.Transports = HttpTransportType.WebSockets;
+                        options.Transports = 
+                            HttpTransportType.WebSockets | 
+                            HttpTransportType.LongPolling;
                         options.WebSockets.CloseTimeout = TimeSpan.FromSeconds(30);
                     }).WithDisplayName("ConsensusHub");
                 }
