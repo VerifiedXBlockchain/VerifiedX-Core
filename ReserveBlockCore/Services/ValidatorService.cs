@@ -35,17 +35,32 @@ namespace ReserveBlockCore.Services
                     {
                         webBuilder.UseKestrel(options =>
                         {
+                            // Configure Kestrel with specific limits
                             options.Limits.MaxConcurrentConnections = 100;
+                            options.Limits.MaxConcurrentUpgradedConnections = 100;
                             options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10MB
+                            options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+
+                            // Configure connection timeouts
                             options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
                             options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+
+                            // Configure backpressure
+                            options.Limits.MinRequestBodyDataRate = null;
+                            options.Limits.MinResponseDataRate = null;
+
+                            // Listen settings
+                            options.ListenAnyIP(Globals.ValPort, listenOptions =>
+                            {
+                                listenOptions.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1AndHttp2;
+                                listenOptions.UseConnectionLogging();
+                            });
                         })
                         .UseStartup<StartupP2PValidator>()
                         .UseUrls(url)
                         .ConfigureLogging(loggingBuilder =>
                         {
-                            loggingBuilder.SetMinimumLevel(LogLevel.Debug);
-                            loggingBuilder.AddConsole();
+                            loggingBuilder.ClearProviders();
                         });
                         
                     });
