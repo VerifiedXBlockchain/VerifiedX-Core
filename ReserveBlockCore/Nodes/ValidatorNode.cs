@@ -175,7 +175,7 @@ namespace ReserveBlockCore.Nodes
 
         public static async Task StartConsensus()
         {
-            var EpochTime = Globals.IsTestNet ? 1731540172010L : 1674172800000L;
+            var EpochTime = Globals.IsTestNet ? 1731454926600L : 1674172800000L;
             var BeginBlock = Globals.IsTestNet ? Globals.V4Height : Globals.V3Height;
             var PreviousHeight = -1L;
             var BlockDelay = Task.CompletedTask;
