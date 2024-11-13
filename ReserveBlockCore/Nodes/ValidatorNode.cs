@@ -21,6 +21,10 @@ namespace ReserveBlockCore.Nodes
         private readonly IHubContext<P2PValidatorServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
         private static SemaphoreSlim ConsensusLock = new SemaphoreSlim(1, 1);
+        private static bool ActiveValidatorRequestDone = false;
+        private static bool AlertValidatorsOfStatusDone = false;
+
+
 
         public ValidatorNode(IHubContext<P2PValidatorServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -31,10 +35,10 @@ namespace ReserveBlockCore.Nodes
         public async Task StartAsync(CancellationToken stoppingToken)
         {
             //Request latest val list - RequestValidatorList()
-            await ActiveValidatorRequest();
+            _ = ActiveValidatorRequest();
 
             //Alert vals you are online - OnlineMethod()
-            await AlertValidatorsOfStatus();
+            _ = AlertValidatorsOfStatus();
 
             //Checks for active vals every 15 mins
             _ = ValidatorHeartbeat();
@@ -59,6 +63,8 @@ namespace ReserveBlockCore.Nodes
             }
 
             await P2PValidatorClient.RequestActiveValidators();
+
+            ActiveValidatorRequestDone = true;
         }
 
         public static async Task AlertValidatorsOfStatus(bool comingOnline = true)
@@ -91,6 +97,9 @@ namespace ReserveBlockCore.Nodes
                             
                         }
                     });
+
+                    comingOnline = false;
+                    AlertValidatorsOfStatusDone = true;
                 }
             }
             else
@@ -105,6 +114,12 @@ namespace ReserveBlockCore.Nodes
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
                 if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+                {
+                    await delay;
+                    continue;
+                }
+
+                if(!AlertValidatorsOfStatusDone || !ActiveValidatorRequestDone)
                 {
                     await delay;
                     continue;
@@ -164,6 +179,12 @@ namespace ReserveBlockCore.Nodes
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
                 if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+                {
+                    await delay;
+                    continue;
+                }
+
+                if (!AlertValidatorsOfStatusDone || !ActiveValidatorRequestDone)
                 {
                     await delay;
                     continue;
