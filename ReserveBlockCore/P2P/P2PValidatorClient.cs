@@ -510,7 +510,7 @@ namespace ReserveBlockCore.P2P
                 try
                 {
                     var txJson = JsonConvert.SerializeObject(txSend);
-                    _ = ValidatorProcessor_BAk.Broadcast("7777", txJson, "SendTxToMempoolVals");
+                    _ = ValidatorNode.Broadcast("7777", txJson, "SendTxToMempoolVals");
                 }
                 catch (Exception ex)
                 {

@@ -398,7 +398,7 @@ namespace ReserveBlockCore.P2P
                                     mempool.InsertSafe(txReceived);
                                     if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                     {
-                                        _ = ValidatorProcessor_BAk.Broadcast("7777", data, "SendTxToMempoolVals");
+                                        _ = ValidatorNode.Broadcast("7777", data, "SendTxToMempoolVals");
                                     }
                                     
                                     return "ATMP";//added to mempool
@@ -479,7 +479,7 @@ namespace ReserveBlockCore.P2P
                                 mempool.InsertSafe(txReceived);
                                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                 {
-                                    _ = ValidatorProcessor_BAk.Broadcast("7777", data, "SendTxToMempoolVals");
+                                    _ = ValidatorNode.Broadcast("7777", data, "SendTxToMempoolVals");
                                 } //sends tx to connected peers
                                 return "ATMP";//added to mempool
                             }
