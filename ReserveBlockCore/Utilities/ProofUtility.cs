@@ -24,14 +24,22 @@ namespace ReserveBlockCore.Utilities
             //Force unban quicker
             await BanService.RunUnban();
 
-            var newPeers = peerDB.Find(x => x.IsValidator).ToArray();
+            var newPeers = peerDB.Find(x => x.IsValidator && !x.PeerIP.Contains("::ffff:")).ToArray();
 
             List<Peers> peersMissingDataList = new List<Peers>();
+            List<string> CompletedIPs = new List<string>();
+            List<string> CompletedAddresses = new List<string>();
 
-            foreach(var val in newPeers)
+            foreach (var val in newPeers)
             {
                 if(val.ValidatorAddress != null && val.ValidatorPublicKey != null)
                 {
+                    if (CompletedIPs.Contains(val.PeerIP) || CompletedAddresses.Contains(val.ValidatorAddress))
+                        continue;
+
+                    CompletedIPs.Add(val.PeerIP);
+                    CompletedAddresses.Add(val.ValidatorAddress);
+
                     var stateAddress = StateData.GetSpecificAccountStateTrei(val.ValidatorAddress);
                     if (stateAddress == null)
                     {
@@ -65,6 +73,12 @@ namespace ReserveBlockCore.Utilities
                     peersMissingDataList.Add(val);
                 }
             }
+
+            CompletedIPs.Clear();
+            CompletedAddresses.Clear();
+
+            CompletedIPs = new List<string>();
+            CompletedAddresses = new List<string>();
 
             Globals.LastProofBlockheight = blockHeight;
 

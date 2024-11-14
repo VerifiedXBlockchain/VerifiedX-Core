@@ -635,6 +635,7 @@ namespace ReserveBlockCore.Data
             Console.WriteLine(" * State Hash......: {0}",  block.StateRoot);
             Console.WriteLine(" * Timestamp       : {0}", TimeUtil.ToDateTime(block.Timestamp));
             Console.WriteLine(" * Chain Validator : {0}", block.Validator);
+            Console.WriteLine(" * Validator Ans.  : {0}", block.ValidatorAnswer);
 
             Console.WriteLine(" * Number Of Tx(s) : {0}", block.NumOfTx);
             Console.WriteLine(" * Amount...........: {0}", block.TotalAmount);

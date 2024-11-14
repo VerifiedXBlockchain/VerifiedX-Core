@@ -235,7 +235,12 @@ namespace ReserveBlockCore.Nodes
                     //await 
                     await Task.Delay(2500); //Give 3 seconds for other proofs. Might be able to reduce this.
 
-                    var finalizedWinnerGroup = Globals.Proofs.GroupBy(x => x.Address).OrderByDescending(x => x.Count()).FirstOrDefault();
+                    var finalizedWinnerGroup = Globals.Proofs
+                        .GroupBy(x => x.Address)  // Group by address
+                        .OrderByDescending(x => x.Count())  // Primary sort by count
+                        .ThenBy(x => x.Min(y => Math.Abs(y.VRFNumber)))  // Secondary sort by the VRFNumber closest to zero
+                        .FirstOrDefault();  // Get the first group (the "winner")
+
                     if (finalizedWinnerGroup != null)
                     {
                         var finalizedWinner = finalizedWinnerGroup.FirstOrDefault();
