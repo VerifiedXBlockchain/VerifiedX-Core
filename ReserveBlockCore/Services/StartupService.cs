@@ -752,11 +752,11 @@ namespace ReserveBlockCore.Services
                 if (Globals.AdjBench.TryGetValue(signer.Key, out var bench))
                 {                    
                     var url = "http://" + bench.IPAddress + ":" + Globals.Port + "/adjudicator";
-                    if (await P2PClient.ConnectAdjudicator(url, validator.Address, time, validator.UniqueName, signature))
-                    {
-                        _ = UpdateBenchIpAndSigners();
-                        break;
-                    }                    
+                    //if (await P2PClient.ConnectAdjudicator(url, validator.Address, time, validator.UniqueName, signature))
+                    //{
+                    //    _ = UpdateBenchIpAndSigners();
+                    //    break;
+                    //}                    
                 }
 
             }                       
@@ -970,7 +970,7 @@ namespace ReserveBlockCore.Services
                                 continue;
 
                             var url = "http://" + NewAdjudicator.IpAddress + ":" + Globals.Port + "/adjudicator";
-                            await P2PClient.ConnectAdjudicator(url, validator.Address, time, validator.UniqueName, signature);
+                            //await P2PClient.ConnectAdjudicator(url, validator.Address, time, validator.UniqueName, signature);
                         }
 
                         if (!Globals.AdjNodes.Any())

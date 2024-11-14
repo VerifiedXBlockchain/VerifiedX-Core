@@ -64,7 +64,7 @@ namespace ReserveBlockCore.Nodes
             
             return Task.CompletedTask;
         }
-        public static async Task ProcessData(string message, string data, string ipAddress)
+        public static async Task ProcessDatas(string message, string data, string ipAddress)
         {
             if (string.IsNullOrEmpty(message))
                 return;

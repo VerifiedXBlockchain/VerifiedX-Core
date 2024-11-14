@@ -314,17 +314,17 @@ namespace ReserveBlockCore.P2P
                         switch(message)
                         {
                             case "task":
-                                await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "taskResult":
-                                await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "sendWinningBlock":
-                                await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "fortisPool":
                                 if(Globals.AdjudicateAccount == null)
-                                    await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
+                                    await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "status":
                                 //ConsoleWriterService.Output(data);
@@ -339,7 +339,7 @@ namespace ReserveBlockCore.P2P
                                 }
                                 break;
                             case "tx":
-                                await ValidatorProcessor_BAk.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "badBlock":
                                 //do something
