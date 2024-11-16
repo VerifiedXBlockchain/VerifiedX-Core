@@ -331,6 +331,8 @@ namespace ReserveBlockCore.Nodes
 
                                     if(approvalCount >= 0.51M)
                                         approved = true;
+
+                                    await Task.Delay(200);
                                 }
 
                                 var nextblock = Globals.LastBlock.Height + 1;
