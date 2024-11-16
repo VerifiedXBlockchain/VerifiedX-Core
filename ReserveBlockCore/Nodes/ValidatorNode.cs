@@ -348,6 +348,9 @@ namespace ReserveBlockCore.Nodes
                                     _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                     _ = P2PValidatorClient.BroadcastBlock(block);
                                 }
+
+                                //Give network time to respond.
+                                await Task.Delay(1000);
                             }
                             else
                             {
@@ -375,7 +378,7 @@ namespace ReserveBlockCore.Nodes
                                         }
                                     }
                                 }
-                                await Task.Delay(2000);
+
                                 ConsoleWriterService.Output($"\r\nYou did not win. Looking for block.");
                                 //Request block if it is not here
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight)
@@ -411,7 +414,8 @@ namespace ReserveBlockCore.Nodes
 
                                                                 if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (block, IP)))
                                                                 {
-                                                                    await Task.Delay(2000);
+                                                                    //Testing removal.
+                                                                    //await Task.Delay(2000);
 
                                                                     if (Globals.LastBlock.Height < block.Height)
                                                                         await BlockValidatorService.ValidateBlocks();
@@ -424,6 +428,8 @@ namespace ReserveBlockCore.Nodes
 
                                                                     if (nextHeight < currentHeight)
                                                                         await BlockDownloadService.GetAllBlocks();
+
+                                                                    break;
                                                                 }
                                                             }
                                                         }
@@ -436,6 +442,8 @@ namespace ReserveBlockCore.Nodes
                                         {
 
                                         }
+
+                                        await Task.Delay(1000);
                                     }
                                 }
                             }
