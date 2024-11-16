@@ -329,7 +329,7 @@ namespace ReserveBlockCore.Nodes
 
                                     decimal approvalRate = (decimal)approvalCount / valCount;
 
-                                    if(approvalCount >= 0.51M)
+                                    if(approvalRate >= 0.51M)
                                         approved = true;
 
                                     await Task.Delay(200);
