@@ -318,6 +318,20 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// Get Validator Pool
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet]
+        [Route("ValidatorPool")]
+        public async Task<string> ValidatorPool()
+        {
+            if (Globals.NetworkValidators.Any())
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"Validators Found", NetworkValidators = Globals.NetworkValidators }, Formatting.Indented);
+
+            return JsonConvert.SerializeObject(new { Success = true, Message = $"No Validators found" });
+        }
+
+        /// <summary>
         /// Get Validator Backup Proofs
         /// </summary>
         /// <returns></returns>

@@ -19,6 +19,7 @@ using System.Collections.Concurrent;
 using Microsoft.AspNetCore.SignalR;
 using System.Xml.Linq;
 using System.Net;
+using System.Reflection.Metadata.Ecma335;
 
 namespace ReserveBlockCore.P2P
 {
@@ -342,11 +343,11 @@ namespace ReserveBlockCore.P2P
 
                 if(Globals.NetworkValidators.Count() > 0)
                 {
-                    foreach (var val in Globals.NetworkValidators.Values)
-                    {
-                        if (val.Context != null)
-                            val.Context.Abort();
-                    }
+                    //foreach (var val in Globals.NetworkValidators.Values)
+                    //{
+                    //    if (val.Context != null)
+                    //        val.Context.Abort();
+                    //}
                 }
             }
             catch (Exception ex)
@@ -582,28 +583,28 @@ namespace ReserveBlockCore.P2P
 
                         if (activeValJson != null && activeValJson != "0")
                         {
-                            var activeVals = JsonConvert.DeserializeObject<List<string>>(activeValJson.ToDecompress().ToStringFromBase64());
+                            var activeVals = JsonConvert.DeserializeObject<List<NetworkValidator>>(activeValJson.ToDecompress().ToStringFromBase64());
                             if (activeVals != null)
                             {
                                 var peerDB = Peers.GetAll();
 
-                                foreach (var valArray in activeVals)
+                                foreach (var val in activeVals)
                                 {
-                                    //PeerIp
-                                    //Validator address
-                                    //validator pub key
-                                    //wal version
-                                    var val = valArray.Split(",");
-                                    var singleVal = peerDB.FindOne(x => x.PeerIP == val[0]);
+                                    var addResult = await NetworkValidator.AddValidatorToPool(val);
+
+                                    if (!addResult)
+                                        continue;
+
+                                    var singleVal = peerDB.FindOne(x => x.PeerIP == val.IPAddress);
                                     if (singleVal != null)
                                     {
                                         singleVal.IsValidator = true;
 
                                         if(singleVal.ValidatorAddress == null)
-                                            singleVal.ValidatorAddress = val[1];
+                                            singleVal.ValidatorAddress = val.Address;
 
                                         if(singleVal.ValidatorPublicKey == null)
-                                            singleVal.ValidatorPublicKey = val[2];
+                                            singleVal.ValidatorPublicKey = val.PublicKey;
 
                                         peerDB.UpdateSafe(singleVal);
                                     }
@@ -613,12 +614,12 @@ namespace ReserveBlockCore.P2P
                                         {
                                             IsIncoming = false,
                                             IsOutgoing = true,
-                                            PeerIP = val[0],
+                                            PeerIP = val.IPAddress,
                                             FailCount = 0,
                                             IsValidator = true,
-                                            ValidatorAddress = val[1],
-                                            ValidatorPublicKey = val[2],
-                                            WalletVersion = val[3]
+                                            ValidatorAddress = val.Address,
+                                            ValidatorPublicKey = val.PublicKey,
+                                            WalletVersion = Globals.CLIVersion,
                                         };
 
                                         peerDB.InsertSafe(nPeer);

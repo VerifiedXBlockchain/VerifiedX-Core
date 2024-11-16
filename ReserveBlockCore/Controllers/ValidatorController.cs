@@ -18,14 +18,22 @@ namespace ReserveBlockCore.Controllers
             return "Hello from ValidatorController!";
         }
 
-        [HttpGet]
-        [Route("Status/{validatorAddress}/{validatorPublicKey}")]
-        public ActionResult<string> Status(string validatorAddress, string validatorPublicKey)
+        [HttpPost]
+        [Route("Status")]
+        public ActionResult<string> Status([FromBody] string networkValJson)
         {
             var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
 
             // Convert it to a string if it's not null
             string peerIP = remoteIpAddress?.ToString();
+
+            if(networkValJson == null)
+                return BadRequest("Bad Json");
+
+            var networkVal = JsonConvert.DeserializeObject<NetworkValidator>(networkValJson);
+
+            if (networkVal == null)
+                return BadRequest("Could not deserialize network val request");
 
             if (Globals.BannedIPs.ContainsKey(peerIP))
             {
@@ -39,13 +47,17 @@ namespace ReserveBlockCore.Controllers
             }
             var ablList = Globals.ABL.ToList();
 
-            if (ablList.Exists(x => x == validatorAddress))
+            if (ablList.Exists(x => x == networkVal.Address))
             {
                 BanService.BanPeer(peerIP, "Request malformed", "OnConnectedAsync");
                 return Unauthorized();
             }
 
-            _ = Peers.UpdatePeerAsVal(peerIP, validatorAddress, validatorPublicKey);
+            _ = Peers.UpdatePeerAsVal(peerIP, networkVal.Address, networkVal.PublicKey);
+
+            networkVal.IPAddress = peerIP;
+
+            _ = NetworkValidator.AddValidatorToPool(networkVal);
 
             return Ok();
         }

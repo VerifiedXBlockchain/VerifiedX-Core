@@ -1053,8 +1053,8 @@ namespace ReserveBlockCore.Nodes
                             {
                                 if(_networkVal != null)
                                 {
-                                    _networkVal.PortCheckFailCount += 1;
-                                    if(_networkVal.PortCheckFailCount > 5)
+                                    _networkVal.CheckFailCount += 1;
+                                    if(_networkVal.CheckFailCount > 5)
                                     {
                                         Globals.NetworkValidators.Remove(validator.Key, out _);
                                     }

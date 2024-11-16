@@ -111,24 +111,21 @@ namespace ReserveBlockCore.P2P
 
                 var netVal = new NetworkValidator { 
                     Address = address,
-                    IPAddress = peerIP,
-                    LastBlockProof = 0,
+                    IPAddress = peerIP.Replace("::ffff:", ""),
                     PublicKey = publicKey,
                     Signature = signature,
                     SignatureMessage = SignedMessage,
                     UniqueName = uName,
-                    Context = Context
+
                 };
 
                 Globals.NetworkValidators.TryAdd(address, netVal);
 
-                //Have to null context out as json cannot serialize.
-                netVal.Context = null;
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
 
                 _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
                 _ = Clients.Caller.SendAsync("GetValMessage", "1", peerIP, new CancellationTokenSource(2000).Token);
-                _ = Clients.All.SendAsync("GetValMessage", "2", netValSerialize, new CancellationTokenSource(6000).Token);
+                _ = Clients.All.SendAsync("GetValMessage", "3", netValSerialize, new CancellationTokenSource(6000).Token);
 
             }
             catch (Exception ex)
@@ -336,26 +333,13 @@ namespace ReserveBlockCore.P2P
         #endregion
         public static async Task<string> SendActiveVals()
         {
-            var peerDB = Peers.GetAll();
-
-            if (peerDB == null)
-                return "0";
-
-            List<string> valList = new List<string>();
-
-            var vals = peerDB.Query().Where(x => x.IsValidator).ToList();
+            var vals = Globals.NetworkValidators.Values.ToList();
 
             if (!vals.Any())
                 return "0";
 
-            foreach(var val in vals)
-            {
-                var valStr = $"{val.PeerIP},{val.ValidatorAddress},{val.ValidatorPublicKey},{val.WalletVersion}";
-                valList.Add(valStr);
-            }
-
-            return JsonConvert.SerializeObject(valList).ToBase64().ToCompress();
-        }
+            return JsonConvert.SerializeObject(vals).ToBase64().ToCompress();
+        } 
 
         #region Send TX to Mempool Vals
         public async Task<string> SendTxToMempoolVals(Transaction txReceived)
