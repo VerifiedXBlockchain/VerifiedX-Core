@@ -25,6 +25,7 @@ namespace ReserveBlockCore.Nodes
         private static bool ActiveValidatorRequestDone = false;
         private static bool AlertValidatorsOfStatusDone = false;
         static SemaphoreSlim NotifyExplorerLock = new SemaphoreSlim(1, 1);
+        private static ConcurrentBag<(string, long)> ValidatorApprovalBag = new ConcurrentBag<(string, long)>();
 
         public ValidatorNode(IHubContext<P2PValidatorServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -292,7 +293,7 @@ namespace ReserveBlockCore.Nodes
                     //cast vote to master and subs
                     if (winningProof != null)
                     {
-                        ConsoleWriterService.Output($"\r\nWinner Found! Address: {winningProof.Address}");
+                        ConsoleWriterService.Output($"\r\nPotential Winner Found! Address: {winningProof.Address}");
                         Globals.Proofs.Add(winningProof);
                         await Broadcast("2", JsonConvert.SerializeObject(winningProof), "SendWinningProofVote");
                     }
@@ -314,7 +315,24 @@ namespace ReserveBlockCore.Nodes
                             if (finalizedWinner.Address == Globals.ValidatorAddress)
                             {
                                 //Craft Block
-                                ConsoleWriterService.Output($"\r\nYou Won! Crafting Block");
+                                ConsoleWriterService.Output($"\r\nYou Won! Awaiting Approval To Craft Block");
+                                ValidatorApprovalBag = new ConcurrentBag<(string, long)>();
+
+                                bool approved = false;
+
+                                ValidatorApprovalBag.Add(("local", finalizedWinner.BlockHeight));
+
+                                while (!approved)
+                                {
+                                    var valCount = Globals.NetworkValidators.Count();
+                                    var approvalCount = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).Count();
+
+                                    decimal approvalRate = (decimal)approvalCount / valCount;
+
+                                    if(approvalCount >= 0.51M)
+                                        approved = true;
+                                }
+
                                 var nextblock = Globals.LastBlock.Height + 1;
                                 var block = await BlockchainData.CraftBlock_V5(
                                                 Globals.ValidatorAddress,
@@ -332,6 +350,29 @@ namespace ReserveBlockCore.Nodes
                             else
                             {
                                 //Give winner time to craft. Might need to increase.
+                                var approvalSent = false;
+                                var count = 0;
+
+                                while (!approvalSent) 
+                                {
+                                    if(count > 3)
+                                        approvalSent=true;
+
+                                    using (var client = Globals.HttpClientFactory.CreateClient())
+                                    {
+                                        var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}";
+                                        var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
+                                        if (response.IsSuccessStatusCode)
+                                        {
+                                            approvalSent = true;
+                                        }
+                                        else
+                                        {
+                                            await Task.Delay(200);
+                                            count++;
+                                        }
+                                    }
+                                }
                                 await Task.Delay(2000);
                                 ConsoleWriterService.Output($"\r\nYou did not win. Looking for block.");
                                 //Request block if it is not here
@@ -753,6 +794,22 @@ namespace ReserveBlockCore.Nodes
 
             return peerList;
         }
+        #endregion
+
+        #region Get Approval
+
+        public static async Task GetApproval(string? ip, long blockHeight)
+        {
+            if (ip == null)
+                return;
+
+            var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip).ToList();
+            if (alreadyApproved.Any())
+                return;
+
+            ValidatorApprovalBag.Add((ip,blockHeight));
+        }
+
         #endregion
 
         #region Stop/Dispose

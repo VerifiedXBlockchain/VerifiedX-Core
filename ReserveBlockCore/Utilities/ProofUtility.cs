@@ -24,23 +24,23 @@ namespace ReserveBlockCore.Utilities
             //Force unban quicker
             await BanService.RunUnban();
 
-            var newPeers = peerDB.Find(x => x.IsValidator && !x.PeerIP.Contains("::ffff:")).ToArray();
+            var newPeers = Globals.NetworkValidators.Values.ToList();
 
-            List<Peers> peersMissingDataList = new List<Peers>();
+            List<NetworkValidator> peersMissingDataList = new List<NetworkValidator>();
             List<string> CompletedIPs = new List<string>();
             List<string> CompletedAddresses = new List<string>();
 
             foreach (var val in newPeers)
             {
-                if(val.ValidatorAddress != null && val.ValidatorPublicKey != null)
+                if(val.Address != null && val.PublicKey != null)
                 {
-                    if (CompletedIPs.Contains(val.PeerIP) || CompletedAddresses.Contains(val.ValidatorAddress))
+                    if (CompletedIPs.Contains(val.IPAddress) || CompletedAddresses.Contains(val.Address))
                         continue;
 
-                    CompletedIPs.Add(val.PeerIP);
-                    CompletedAddresses.Add(val.ValidatorAddress);
+                    CompletedIPs.Add(val.IPAddress);
+                    CompletedAddresses.Add(val.Address);
 
-                    var stateAddress = StateData.GetSpecificAccountStateTrei(val.ValidatorAddress);
+                    var stateAddress = StateData.GetSpecificAccountStateTrei(val.Address);
                     if (stateAddress == null)
                     {
                         continue;
@@ -51,18 +51,18 @@ namespace ReserveBlockCore.Utilities
                         continue;
                     }
 
-                    var proof = await CreateProof(val.ValidatorAddress, val.ValidatorPublicKey, blockHeight, prevHash);
+                    var proof = await CreateProof(val.Address, val.PublicKey, blockHeight, prevHash);
                     if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
                     {
                         Proof _proof = new Proof
                         {
-                            Address = val.ValidatorAddress,
+                            Address = val.Address,
                             BlockHeight = blockHeight,
                             PreviousBlockHash = prevHash,
                             ProofHash = proof.Item2,
-                            PublicKey = val.ValidatorPublicKey,
+                            PublicKey = val.PublicKey,
                             VRFNumber = proof.Item1,
-                            IPAddress = val.PeerIP.Replace("::ffff:", "")
+                            IPAddress = val.IPAddress.Replace("::ffff:", "")
                         };
 
                         proofs.Add(_proof);
@@ -70,6 +70,7 @@ namespace ReserveBlockCore.Utilities
                 }
                 else
                 {
+                    //TODO: Try to get info or remove them.
                     peersMissingDataList.Add(val);
                 }
             }

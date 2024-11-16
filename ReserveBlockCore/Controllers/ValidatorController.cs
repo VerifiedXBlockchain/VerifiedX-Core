@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Net;
@@ -68,6 +69,22 @@ namespace ReserveBlockCore.Controllers
         {
             if(Globals.LastBlock.Height == blockHeight)
                 return Ok(JsonConvert.SerializeObject(Globals.LastBlock));
+
+            return Ok("0");
+        }
+
+        [HttpGet]
+        [Route("SendApproval/{blockHeight}")]
+        public ActionResult<string?> SendApproval(long blockHeight)
+        {
+            var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
+            // Convert it to a string if it's not null
+            string? peerIP = remoteIpAddress?.ToString();
+
+            if (Globals.LastBlock.Height + 1 == blockHeight)
+            {
+                _ = ValidatorNode.GetApproval(peerIP, blockHeight);
+            }
 
             return Ok("0");
         }
