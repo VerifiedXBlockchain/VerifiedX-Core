@@ -268,78 +268,38 @@ namespace ReserveBlockCore.Nodes
 
                 try
                 {
-
-                    // Calculate the next slot start time
-                    var CurrentTime = TimeUtil.GetMillisecondTime();
-                    var BlocksSinceEpoch = (CurrentTime - EpochTime) / Globals.BlockTime;
-                    var NextSlotTime = EpochTime + ((BlocksSinceEpoch + 1) * Globals.BlockTime);
-
-                    // Check if we have enough time in this slot
-                    var minimumTimeRequired = 12000; // 12 seconds minimum needed
-                    var timeToNextSlot = NextSlotTime - CurrentTime;
-                    if (timeToNextSlot < minimumTimeRequired)
-                    {
-                        // Skip to next slot if we don't have enough time
-                        NextSlotTime += Globals.BlockTime;
-                        timeToNextSlot = NextSlotTime - CurrentTime;
-                    }
-
-                    // Wait until the next time slot begins
-                    if (timeToNextSlot > 0)
-                    {
-                        await Task.Delay((int)timeToNextSlot);
-                    }
-
                     var Height = Globals.LastBlock.Height + 1;
+
                     if (Height != Globals.LastBlock.Height + 1)
                         continue;
 
-                    //if (PreviousHeight != Height)
-                    //{
-                    //    PreviousHeight = Height;
-                    //    await Task.WhenAll(BlockDelay, Task.Delay(1500));
-                    //    var CurrentTime = TimeUtil.GetMillisecondTime();
-                    //    var DelayTimeCorrection = Globals.BlockTime * (Height - BeginBlock) - (CurrentTime - EpochTime);
-                    //    var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
-                    //    BlockDelay = Task.Delay((int)DelayTime);
-                    //    ConsoleWriterService.Output("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
-                    //}
+                    // Time correction only when height changes
+                    if (PreviousHeight != Height)
+                    {
+                        PreviousHeight = Height;
+                        await Task.WhenAll(BlockDelay, Task.Delay(1500));
+                        var CurrentTime = TimeUtil.GetMillisecondTime();
+                        var DelayTimeCorrection = Globals.BlockTime * (Height - BeginBlock) - (CurrentTime - EpochTime);
+                        var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
+                        BlockDelay = Task.Delay((int)DelayTime);
+                        ConsoleWriterService.Output("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
+                    }
 
-                    PreviousHeight = Height;
-
-                    // Now all nodes should be roughly synchronized
-                    ConsoleWriterService.Output($"\r\nStarting consensus for height {Height} at slot time {NextSlotTime}");
-
-                    // Generate Proofs for ALL vals
+                    //Generate Proofs for ALL vals
                     ConsoleWriterService.Output("\r\nGenerating Proofs");
                     var proofs = await ProofUtility.GenerateProofs();
                     ConsoleWriterService.Output($"\r\n{proofs.Count()} Proofs Generated");
                     var winningProof = await ProofUtility.SortProofs(proofs);
                     ConsoleWriterService.Output($"\r\nSorting Proofs");
 
-                    // Use remaining slot time to determine timeouts
-                    var remainingTime = NextSlotTime + Globals.BlockTime - TimeUtil.GetMillisecondTime();
-                    if (remainingTime <= 0)
-                    {
-                        ConsoleWriterService.Output("\r\nSlot time expired, starting over");
-                        continue;
-                    }
-
-                    // Allocate the remaining time across phases
-                    var proofPhaseTime = Math.Min(PROOF_COLLECTION_TIME, remainingTime * 0.4);
-                    var approvalPhaseTime = Math.Min(APPROVAL_WINDOW, remainingTime * 0.3);
-                    var blockPhaseTime = Math.Min(BLOCK_REQUEST_WINDOW, remainingTime * 0.3);
-
-                    //cast vote to master and subs
                     if (winningProof != null)
                     {
                         var verificationResult = false;
                         while (!verificationResult)
                         {
-                            if(winningProof != null)
+                            if (winningProof != null)
                             {
                                 verificationResult = await ProofUtility.VerifyWinnerAvailability(winningProof);
-                                // Fall back to next best proof
                                 if (!verificationResult)
                                 {
                                     winningProof = await ProofUtility.SortProofs(
@@ -364,15 +324,12 @@ namespace ReserveBlockCore.Nodes
                         await Broadcast("2", JsonConvert.SerializeObject(winningProof), "SendWinningProofVote");
                     }
 
-                    // Wait for proof collection phase
-                    await Task.Delay((int)proofPhaseTime);
+                    await Task.Delay(PROOF_COLLECTION_TIME);
 
-                    // Take a snapshot of proofs at a specific time
                     var proofSnapshot = Globals.Proofs.ToList();
 
-                    // Sort first by VRFNumber to ensure deterministic ordering within groups
                     var finalizedWinnerGroup = proofSnapshot
-                        .OrderBy(x => Math.Abs(x.VRFNumber)) // Make ordering deterministic first
+                        .OrderBy(x => Math.Abs(x.VRFNumber))
                         .GroupBy(x => x.Address)
                         .OrderByDescending(x => x.Count())
                         .ThenBy(x => x.Min(y => Math.Abs(y.VRFNumber)))
@@ -385,15 +342,10 @@ namespace ReserveBlockCore.Nodes
                         {
                             if (finalizedWinner.Address == Globals.ValidatorAddress)
                             {
-                                //Craft Block
                                 ConsoleWriterService.Output($"\r\nYou Won! Awaiting Approval To Craft Block");
                                 ValidatorApprovalBag = new ConcurrentBag<(string, long)>();
-
                                 bool approved = false;
-
                                 ValidatorApprovalBag.Add(("local", finalizedWinner.BlockHeight));
-
-                                var retryCount = 0;
 
                                 var sw = Stopwatch.StartNew();
                                 while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
@@ -407,21 +359,7 @@ namespace ReserveBlockCore.Nodes
                                     await Task.Delay(100);
                                 }
 
-                                //while (!approved && retryCount < 11)
-                                //{
-                                //    var valCount = Globals.NetworkValidators.Count();
-                                //    var approvalCount = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).Count();
-
-                                //    decimal approvalRate = (decimal)approvalCount / valCount;
-
-                                //    if(approvalRate >= 0.51M)
-                                //        approved = true;
-
-                                //    retryCount++;
-                                //    await Task.Delay(200);
-                                //}
-
-                                if(approved)
+                                if (approved)
                                 {
                                     var nextblock = Globals.LastBlock.Height + 1;
                                     var block = await BlockchainData.CraftBlock_V5(
@@ -432,26 +370,21 @@ namespace ReserveBlockCore.Nodes
                                     if (block != null)
                                     {
                                         ConsoleWriterService.Output($"\r\nBlock crafted. Sending block.");
-                                        //Send block to others
                                         _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                         _ = P2PValidatorClient.BroadcastBlock(block);
                                     }
-
-                                    //Give network time to respond.
-                                    await Task.Delay(1000);
                                 }
                             }
                             else
                             {
-                                //Give winner time to craft. Might need to increase.
                                 var approvalSent = false;
                                 var count = 0;
 
                                 var sw = Stopwatch.StartNew();
                                 while (!approvalSent && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
-                                    if(count > 5)
-                                        approvalSent=true;
+                                    if (count > 5)
+                                        approvalSent = true;
 
                                     using (var client = Globals.HttpClientFactory.CreateClient())
                                     {
@@ -466,7 +399,7 @@ namespace ReserveBlockCore.Nodes
                                             }
                                             else
                                             {
-                                                await Task.Delay(200);
+                                                await Task.Delay(100);
                                                 count++;
                                             }
                                         }
@@ -475,7 +408,6 @@ namespace ReserveBlockCore.Nodes
                                 }
 
                                 ConsoleWriterService.Output($"\r\nYou did not win. Looking for block.");
-                                //Request block if it is not here
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight)
                                 {
                                     bool blockFound = false;
@@ -530,13 +462,11 @@ namespace ReserveBlockCore.Nodes
                                                             }
                                                         }
                                                     }
-
                                                 }
                                             }
                                         }
                                         catch (Exception ex)
                                         {
-
                                         }
 
                                         await Task.Delay(200);
@@ -546,18 +476,15 @@ namespace ReserveBlockCore.Nodes
                         }
                     }
 
-                    //start over.
                     ConsoleWriterService.Output($"\r\nStarting over.");
                     Globals.Proofs.Clear();
                     Globals.Proofs = new ConcurrentBag<Proof>();
-
                 }
                 catch (Exception ex)
                 {
-
+                    ErrorLogUtility.LogError($"Error in consensus loop: {ex.Message}", "ValidatorNode.StartConsensus()");
                 }
             }
-
         }
 
         #region Process Data
