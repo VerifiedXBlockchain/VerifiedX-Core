@@ -383,9 +383,6 @@ namespace ReserveBlockCore.Nodes
                                 var sw = Stopwatch.StartNew();
                                 while (!approvalSent && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
-                                    if (count > 5)
-                                        approvalSent = true;
-
                                     using (var client = Globals.HttpClientFactory.CreateClient())
                                     {
                                         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
