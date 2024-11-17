@@ -268,31 +268,67 @@ namespace ReserveBlockCore.Nodes
 
                 try
                 {
-                    var Height = Globals.LastBlock.Height + 1;
 
-                    if (Height != Globals.LastBlock.Height + 1)
-                        continue;
+                    // Calculate the next slot start time
+                    var CurrentTime = TimeUtil.GetMillisecondTime();
+                    var BlocksSinceEpoch = (CurrentTime - EpochTime) / Globals.BlockTime;
+                    var NextSlotTime = EpochTime + ((BlocksSinceEpoch + 1) * Globals.BlockTime);
 
-                    if (PreviousHeight != Height)
+                    // Check if we have enough time in this slot
+                    var minimumTimeRequired = 12000; // 12 seconds minimum needed
+                    var timeToNextSlot = NextSlotTime - CurrentTime;
+                    if (timeToNextSlot < minimumTimeRequired)
                     {
-                        PreviousHeight = Height;
-                        await Task.WhenAll(BlockDelay, Task.Delay(1500));
-                        var CurrentTime = TimeUtil.GetMillisecondTime();
-                        var DelayTimeCorrection = Globals.BlockTime * (Height - BeginBlock) - (CurrentTime - EpochTime);
-                        var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
-                        BlockDelay = Task.Delay((int)DelayTime);
-                        ConsoleWriterService.Output("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
+                        // Skip to next slot if we don't have enough time
+                        NextSlotTime += Globals.BlockTime;
+                        timeToNextSlot = NextSlotTime - CurrentTime;
                     }
 
+                    // Wait until the next time slot begins
+                    if (timeToNextSlot > 0)
+                    {
+                        await Task.Delay((int)timeToNextSlot);
+                    }
+
+                    var Height = Globals.LastBlock.Height + 1;
                     if (Height != Globals.LastBlock.Height + 1)
                         continue;
 
-                    //Generate Proofs for ALL vals
+                    //if (PreviousHeight != Height)
+                    //{
+                    //    PreviousHeight = Height;
+                    //    await Task.WhenAll(BlockDelay, Task.Delay(1500));
+                    //    var CurrentTime = TimeUtil.GetMillisecondTime();
+                    //    var DelayTimeCorrection = Globals.BlockTime * (Height - BeginBlock) - (CurrentTime - EpochTime);
+                    //    var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
+                    //    BlockDelay = Task.Delay((int)DelayTime);
+                    //    ConsoleWriterService.Output("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
+                    //}
+
+                    PreviousHeight = Height;
+
+                    // Now all nodes should be roughly synchronized
+                    ConsoleWriterService.Output($"\r\nStarting consensus for height {Height} at slot time {NextSlotTime}");
+
+                    // Generate Proofs for ALL vals
                     ConsoleWriterService.Output("\r\nGenerating Proofs");
                     var proofs = await ProofUtility.GenerateProofs();
                     ConsoleWriterService.Output($"\r\n{proofs.Count()} Proofs Generated");
                     var winningProof = await ProofUtility.SortProofs(proofs);
                     ConsoleWriterService.Output($"\r\nSorting Proofs");
+
+                    // Use remaining slot time to determine timeouts
+                    var remainingTime = NextSlotTime + Globals.BlockTime - TimeUtil.GetMillisecondTime();
+                    if (remainingTime <= 0)
+                    {
+                        ConsoleWriterService.Output("\r\nSlot time expired, starting over");
+                        continue;
+                    }
+
+                    // Allocate the remaining time across phases
+                    var proofPhaseTime = Math.Min(PROOF_COLLECTION_TIME, remainingTime * 0.4);
+                    var approvalPhaseTime = Math.Min(APPROVAL_WINDOW, remainingTime * 0.3);
+                    var blockPhaseTime = Math.Min(BLOCK_REQUEST_WINDOW, remainingTime * 0.3);
 
                     //cast vote to master and subs
                     if (winningProof != null)
@@ -328,8 +364,8 @@ namespace ReserveBlockCore.Nodes
                         await Broadcast("2", JsonConvert.SerializeObject(winningProof), "SendWinningProofVote");
                     }
 
-                    //await 
-                    await Task.Delay(PROOF_COLLECTION_TIME); //Give 5 seconds for other proofs. Might be able to reduce this.
+                    // Wait for proof collection phase
+                    await Task.Delay((int)proofPhaseTime);
 
                     // Take a snapshot of proofs at a specific time
                     var proofSnapshot = Globals.Proofs.ToList();
@@ -503,7 +539,7 @@ namespace ReserveBlockCore.Nodes
 
                                         }
 
-                                        await Task.Delay(1000);
+                                        await Task.Delay(200);
                                     }
                                 }
                             }
