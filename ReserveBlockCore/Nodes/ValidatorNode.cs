@@ -9,6 +9,7 @@ using ReserveBlockCore.P2P;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection.Metadata;
 using System.Text;
 using System.Threading.Tasks.Dataflow;
@@ -26,6 +27,9 @@ namespace ReserveBlockCore.Nodes
         private static bool AlertValidatorsOfStatusDone = false;
         static SemaphoreSlim NotifyExplorerLock = new SemaphoreSlim(1, 1);
         private static ConcurrentBag<(string, long)> ValidatorApprovalBag = new ConcurrentBag<(string, long)>();
+        const int PROOF_COLLECTION_TIME = 5000; // 5 seconds
+        const int APPROVAL_WINDOW = 3500;      // 3.5 seconds
+        const int BLOCK_REQUEST_WINDOW = 3500;  // 3.5 seconds
 
         public ValidatorNode(IHubContext<P2PValidatorServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -325,7 +329,7 @@ namespace ReserveBlockCore.Nodes
                     }
 
                     //await 
-                    await Task.Delay(5000); //Give 5 seconds for other proofs. Might be able to reduce this.
+                    await Task.Delay(PROOF_COLLECTION_TIME); //Give 5 seconds for other proofs. Might be able to reduce this.
 
                     // Take a snapshot of proofs at a specific time
                     var proofSnapshot = Globals.Proofs.ToList();
@@ -355,19 +359,31 @@ namespace ReserveBlockCore.Nodes
 
                                 var retryCount = 0;
 
-                                while (!approved && retryCount < 11)
+                                var sw = Stopwatch.StartNew();
+                                while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
-                                    var valCount = Globals.NetworkValidators.Count();
-                                    var approvalCount = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).Count();
+                                    var approvalRate = (decimal)ValidatorApprovalBag
+                                        .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.NetworkValidators.Count();
 
-                                    decimal approvalRate = (decimal)approvalCount / valCount;
-
-                                    if(approvalRate >= 0.51M)
+                                    if (approvalRate >= 0.51M)
                                         approved = true;
 
-                                    retryCount++;
-                                    await Task.Delay(200);
+                                    await Task.Delay(100);
                                 }
+
+                                //while (!approved && retryCount < 11)
+                                //{
+                                //    var valCount = Globals.NetworkValidators.Count();
+                                //    var approvalCount = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).Count();
+
+                                //    decimal approvalRate = (decimal)approvalCount / valCount;
+
+                                //    if(approvalRate >= 0.51M)
+                                //        approved = true;
+
+                                //    retryCount++;
+                                //    await Task.Delay(200);
+                                //}
 
                                 if(approved)
                                 {
@@ -395,24 +411,30 @@ namespace ReserveBlockCore.Nodes
                                 var approvalSent = false;
                                 var count = 0;
 
-                                while (!approvalSent) 
+                                var sw = Stopwatch.StartNew();
+                                while (!approvalSent && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
                                     if(count > 5)
                                         approvalSent=true;
 
                                     using (var client = Globals.HttpClientFactory.CreateClient())
                                     {
-                                        var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}";
-                                        var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
-                                        if (response.IsSuccessStatusCode)
+                                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                                        try
                                         {
-                                            approvalSent = true;
+                                            var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}";
+                                            var response = await client.GetAsync(uri, cts.Token);
+                                            if (response.IsSuccessStatusCode)
+                                            {
+                                                approvalSent = true;
+                                            }
+                                            else
+                                            {
+                                                await Task.Delay(200);
+                                                count++;
+                                            }
                                         }
-                                        else
-                                        {
-                                            await Task.Delay(200);
-                                            count++;
-                                        }
+                                        catch (Exception e) { }
                                     }
                                 }
 
@@ -420,7 +442,9 @@ namespace ReserveBlockCore.Nodes
                                 //Request block if it is not here
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight)
                                 {
-                                    for (var i = 0; i < 3; i++)
+                                    bool blockFound = false;
+                                    var swb = Stopwatch.StartNew();
+                                    while (!blockFound && swb.ElapsedMilliseconds < BLOCK_REQUEST_WINDOW)
                                     {
                                         try
                                         {
@@ -438,7 +462,7 @@ namespace ReserveBlockCore.Nodes
                                                         {
                                                             if (responseBody == "0")
                                                             {
-                                                                await Task.Delay(1000);
+                                                                await Task.Delay(200);
                                                                 continue;
                                                             }
 
@@ -451,8 +475,7 @@ namespace ReserveBlockCore.Nodes
 
                                                                 if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (block, IP)))
                                                                 {
-                                                                    //Testing removal.
-                                                                    //await Task.Delay(2000);
+                                                                    blockFound = true;
 
                                                                     if (Globals.LastBlock.Height < block.Height)
                                                                         await BlockValidatorService.ValidateBlocks();
