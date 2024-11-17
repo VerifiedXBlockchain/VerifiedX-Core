@@ -273,6 +273,11 @@ namespace ReserveBlockCore.Nodes
                     if (Height != Globals.LastBlock.Height + 1)
                         continue;
 
+                    if (PreviousHeight == -1L) // First time running
+                    {
+                        await WaitForNextConsensusRound();
+                    }
+
                     // Time correction only when height changes
                     if (PreviousHeight != Height)
                     {
@@ -838,6 +843,23 @@ namespace ReserveBlockCore.Nodes
                 return;
 
             ValidatorApprovalBag.Add((ip.Replace("::ffff:", ""), blockHeight));
+        }
+
+        #endregion
+
+        #region Wait For Next Consensus Round
+        private static async Task WaitForNextConsensusRound()
+        {
+            var CurrentTime = TimeUtil.GetMillisecondTime();
+            var LastBlockTime = Globals.LastBlock.Timestamp;
+            var TimeSinceLastBlock = CurrentTime - LastBlockTime;
+
+            // If we're in the middle of a consensus round, wait for the next one
+            if (TimeSinceLastBlock < Globals.BlockTime)
+            {
+                var waitTime = Globals.BlockTime - TimeSinceLastBlock + 1000; // Add 1 second buffer
+                await Task.Delay((int)waitTime);
+            }
         }
 
         #endregion
