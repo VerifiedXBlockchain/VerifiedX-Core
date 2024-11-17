@@ -293,19 +293,50 @@ namespace ReserveBlockCore.Nodes
                     //cast vote to master and subs
                     if (winningProof != null)
                     {
+                        var verificationResult = false;
+                        while (!verificationResult)
+                        {
+                            if(winningProof != null)
+                            {
+                                verificationResult = await ProofUtility.VerifyWinnerAvailability(winningProof);
+                                // Fall back to next best proof
+                                if (!verificationResult)
+                                {
+                                    winningProof = await ProofUtility.SortProofs(
+                                        proofs.Where(x => x.Address != winningProof.Address).ToList()
+                                    );
+                                }
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        }
+
+                        if (winningProof == null)
+                        {
+                            ConsoleWriterService.Output($"\r\nCould not connect to any nodes for winning proof. Starting over.");
+                            continue;
+                        }
+
                         ConsoleWriterService.Output($"\r\nPotential Winner Found! Address: {winningProof.Address}");
                         Globals.Proofs.Add(winningProof);
                         await Broadcast("2", JsonConvert.SerializeObject(winningProof), "SendWinningProofVote");
                     }
 
                     //await 
-                    await Task.Delay(2500); //Give 3 seconds for other proofs. Might be able to reduce this.
+                    await Task.Delay(5000); //Give 5 seconds for other proofs. Might be able to reduce this.
 
-                    var finalizedWinnerGroup = Globals.Proofs
-                        .GroupBy(x => x.Address)  // Group by address
-                        .OrderByDescending(x => x.Count())  // Primary sort by count
-                        .ThenBy(x => x.Min(y => Math.Abs(y.VRFNumber)))  // Secondary sort by the VRFNumber closest to zero
-                        .FirstOrDefault();  // Get the first group (the "winner")
+                    // Take a snapshot of proofs at a specific time
+                    var proofSnapshot = Globals.Proofs.ToList();
+
+                    // Sort first by VRFNumber to ensure deterministic ordering within groups
+                    var finalizedWinnerGroup = proofSnapshot
+                        .OrderBy(x => Math.Abs(x.VRFNumber)) // Make ordering deterministic first
+                        .GroupBy(x => x.Address)
+                        .OrderByDescending(x => x.Count())
+                        .ThenBy(x => x.Min(y => Math.Abs(y.VRFNumber)))
+                        .FirstOrDefault();
 
                     if (finalizedWinnerGroup != null)
                     {
@@ -322,7 +353,9 @@ namespace ReserveBlockCore.Nodes
 
                                 ValidatorApprovalBag.Add(("local", finalizedWinner.BlockHeight));
 
-                                while (!approved)
+                                var retryCount = 0;
+
+                                while (!approved && retryCount < 11)
                                 {
                                     var valCount = Globals.NetworkValidators.Count();
                                     var approvalCount = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).Count();
@@ -332,25 +365,29 @@ namespace ReserveBlockCore.Nodes
                                     if(approvalRate >= 0.51M)
                                         approved = true;
 
+                                    retryCount++;
                                     await Task.Delay(200);
                                 }
 
-                                var nextblock = Globals.LastBlock.Height + 1;
-                                var block = await BlockchainData.CraftBlock_V5(
-                                                Globals.ValidatorAddress,
-                                                Globals.NetworkValidators.Count(),
-                                                finalizedWinner.ProofHash, nextblock);
-
-                                if (block != null)
+                                if(approved)
                                 {
-                                    ConsoleWriterService.Output($"\r\nBlock crafted. Sending block.");
-                                    //Send block to others
-                                    _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
-                                    _ = P2PValidatorClient.BroadcastBlock(block);
-                                }
+                                    var nextblock = Globals.LastBlock.Height + 1;
+                                    var block = await BlockchainData.CraftBlock_V5(
+                                                    Globals.ValidatorAddress,
+                                                    Globals.NetworkValidators.Count(),
+                                                    finalizedWinner.ProofHash, nextblock);
 
-                                //Give network time to respond.
-                                await Task.Delay(1000);
+                                    if (block != null)
+                                    {
+                                        ConsoleWriterService.Output($"\r\nBlock crafted. Sending block.");
+                                        //Send block to others
+                                        _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                        _ = P2PValidatorClient.BroadcastBlock(block);
+                                    }
+
+                                    //Give network time to respond.
+                                    await Task.Delay(1000);
+                                }
                             }
                             else
                             {
@@ -360,7 +397,7 @@ namespace ReserveBlockCore.Nodes
 
                                 while (!approvalSent) 
                                 {
-                                    if(count > 3)
+                                    if(count > 5)
                                         approvalSent=true;
 
                                     using (var client = Globals.HttpClientFactory.CreateClient())
@@ -817,7 +854,7 @@ namespace ReserveBlockCore.Nodes
             if (alreadyApproved.Any())
                 return;
 
-            ValidatorApprovalBag.Add((ip,blockHeight));
+            ValidatorApprovalBag.Add((ip.Replace("::ffff:", ""), blockHeight));
         }
 
         #endregion

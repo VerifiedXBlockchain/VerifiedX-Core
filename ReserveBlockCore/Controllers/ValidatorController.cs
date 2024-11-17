@@ -81,7 +81,7 @@ namespace ReserveBlockCore.Controllers
             // Convert it to a string if it's not null
             string? peerIP = remoteIpAddress?.ToString();
 
-            if (Globals.LastBlock.Height + 1 == blockHeight)
+            if (blockHeight >= Globals.LastBlock.Height)
             {
                 _ = ValidatorNode.GetApproval(peerIP, blockHeight);
             }

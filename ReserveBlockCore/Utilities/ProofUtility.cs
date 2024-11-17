@@ -190,11 +190,53 @@ namespace ReserveBlockCore.Utilities
 
         }
 
+        public static async Task<bool> VerifyWinnerAvailability(Proof winningProof)
+        {
+            using (var client = Globals.HttpClientFactory.CreateClient())
+            {
+                try
+                {
+                    //skip call because current winner is our node.
+                    if (winningProof.Address == Globals.ValidatorAddress)
+                    {
+                        return true;
+                    }
+                    var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
+                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
+
+                    if (response != null)
+                    {
+                        if (response.IsSuccessStatusCode)
+                            return true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                }
+            }
+
+            return false;
+        }
+
         public static async Task<Proof?> SortProofs(List<Proof> proofs, bool isWinnerList = false)
         {
             try
             {
                 var processHeight = Globals.LastBlock.Height + 1;
+
+                var validProofs = proofs.Where(p =>
+                    p.BlockHeight == processHeight &&
+                    p.VerifyProof() &&
+                    !Globals.ABL.Exists(x => x == p.Address)
+                ).ToList();
+
+                // Sort deterministically by VRF number
+                return validProofs
+                    .OrderBy(x => x.VRFNumber)  // Closest to zero wins
+                    .FirstOrDefault();
+
+                
+
                 var finalProof = new Proof();
                 var currentWinningProof = proofs.FirstOrDefault();
                 foreach (var proof in proofs)
@@ -219,6 +261,12 @@ namespace ReserveBlockCore.Utilities
                                 {
                                     try
                                     {
+                                        //skip call because current winner is our node.
+                                        if(proof.Address == Globals.ValidatorAddress)
+                                        {
+                                            finalProof = proof;
+                                            continue;
+                                        }
                                         var uri = $"http://{proof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
                                         var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
 
