@@ -62,10 +62,16 @@ namespace ReserveBlockCore.Controllers
 
             return Ok();
         }
+        [HttpPost]
+        [Route("TestPost")]
+        public async Task<string> TestPost([FromBody] string winningProof)
+        {
+            return "Ok";
+        }
 
         [HttpPost]
         [Route("ReceiveWinningProof")]
-        public ActionResult<string> ReceiveWinningProof([FromBody] string winningProof)
+        public async Task<ActionResult<string>> ReceiveWinningProof([FromBody] string winningProof)
         {
             try
             {

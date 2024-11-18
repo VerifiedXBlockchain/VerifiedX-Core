@@ -801,75 +801,6 @@ namespace ReserveBlockCore.Nodes
         #region Send Winning Proof Backup Method
         public static async Task SendWinningProof(Proof proof)
         {
-            var validators = Globals.NetworkValidators.Values.ToList();
-
-            try
-            {
-                var rnd = new Random();
-                var randomizedValidators = validators
-                    .OrderBy(x => rnd.Next())
-                    .ToList();
-
-                var postData = JsonConvert.SerializeObject(proof);
-                var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
-
-                // Create a CancellationTokenSource with a 5-second timeout
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                var cancellationToken = cts.Token;
-
-                // Create a list to hold all tasks
-                var tasks = new List<Task>();
-
-                foreach (var validator in randomizedValidators)
-                {
-                    // Add each task to the task list
-                    tasks.Add(Task.Run(async () =>
-                    {
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            return; // Stop task if cancellation is requested
-                        }
-
-                        using (var client = Globals.HttpClientFactory.CreateClient())
-                        {
-                            try
-                            {
-                                // Post data with a timeout of 2 seconds for each request
-                                var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
-                                _ = client.PostAsync(uri, httpContent, cancellationToken);
-                                await Task.Delay(75, cancellationToken); // Slight delay to prevent overwhelming the server
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                // Handle task cancellation here if needed
-                            }
-                            catch (Exception ex)
-                            {
-                                // Log or handle other exceptions if needed
-                            }
-                        }
-                    }, cancellationToken));
-                }
-
-                // Await all tasks, respecting the 5-second overall timeout
-                try
-                {
-                    await Task.WhenAll(tasks);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Handle cancellation if needed
-                    Console.WriteLine("Operation timed out after 5 seconds.");
-                }
-            }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Error in proof distribution: {ex.Message}", "ValidatorNode.SendWinningProof()");
-            }
-        }
-
-        public static async Task SendWinningProofbak(Proof proof)
-        {
             // Create a CancellationTokenSource with a timeout of 5 seconds
             var validators = Globals.NetworkValidators.Values.ToList();
 
@@ -884,13 +815,13 @@ namespace ReserveBlockCore.Nodes
                 var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
 
                 var sw = Stopwatch.StartNew();
-                randomizedValidators.ParallelLoop(async validator =>
+                foreach(var validator in randomizedValidators)
                 {
                     if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
                     {
                         // Stop processing if cancellation is requested
                         sw.Stop();
-                        return;
+                        break;
                     }
 
                     using (var client = Globals.HttpClientFactory.CreateClient())
@@ -907,7 +838,7 @@ namespace ReserveBlockCore.Nodes
                             // Log or handle the exception if needed
                         }
                     }
-                }); 
+                }; 
             }
             catch (Exception ex)
             {
