@@ -81,7 +81,7 @@ namespace ReserveBlockCore.Utilities
             var dupAddrText = $"Duplicate Addresses found Validating? {dupAddr}";
             var explorerDataText = $"Explorer Last Send Success? {explorerData}";
             var explorerLastSendText = $"Explorer Last Send Date: {explorerDataLastSent}";
-            var explorerLastSendResponseText = $"Explorer Last Send Date: {explorerDataResponse}");
+            var explorerLastSendResponseText = $"Explorer Last Send Date: {explorerDataResponse}";
 
             var blockLastSentText = $"Block last sent at: {blockLastSent}";
             var lastDiffText = $"Block last delay: {lastDiff}";
