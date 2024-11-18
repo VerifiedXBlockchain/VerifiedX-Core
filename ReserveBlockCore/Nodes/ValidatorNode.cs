@@ -704,8 +704,6 @@ namespace ReserveBlockCore.Nodes
                         await delay;
                         continue;
                     }
-                    await NotifyExplorerLock.WaitAsync();
-
 
                     var account = AccountData.GetLocalValidator();
                     if (account == null)
@@ -738,6 +736,8 @@ namespace ReserveBlockCore.Nodes
                         x.WalletVersion
                     }).ToList();
 
+                    await NotifyExplorerLock.WaitAsync();
+
                     var fortisPoolStr = JsonConvert.SerializeObject(listFortisPool);
 
                     using (var client = Globals.HttpClientFactory.CreateClient())
@@ -751,11 +751,13 @@ namespace ReserveBlockCore.Nodes
                                 //success
                                 Globals.ExplorerValDataLastSend = DateTime.Now;
                                 Globals.ExplorerValDataLastSendSuccess = true;
+                                Globals.ExplorerValDataLastSendResponseCode = "200-OK";
                             }
                             else
                             {
                                 //ErrorLogUtility.LogError($"Error sending payload to explorer. Response Code: {Response.StatusCode}. Reason: {Response.ReasonPhrase}", "ClientCallService.DoFortisPoolWork()");
                                 Globals.ExplorerValDataLastSendSuccess = false;
+                                Globals.ExplorerValDataLastSendResponseCode = Response.StatusCode.ToString();
                             }
                         }
                     }

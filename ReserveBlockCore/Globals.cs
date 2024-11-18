@@ -94,6 +94,7 @@ namespace ReserveBlockCore
         public static DateTime? APIUnlockTime = null;
         public static DateTime? ExplorerValDataLastSend = null;
 
+
         public const int ValidatorRequiredRBX = 50_000;
         public const decimal ADNRRequiredRBX = 5.0M;
         public const decimal ADNRTransferRequiredRBX = 1.0M;
@@ -181,6 +182,7 @@ namespace ReserveBlockCore
         public static string GenesisValidator = "";
         public static string ArbiterURI = "";
         public static List<Models.Arbiter> Arbiters = new List<Models.Arbiter>();
+        public static string? ExplorerValDataLastSendResponseCode = null;
 
         public static bool Lock = true;
         public static bool AlwaysRequireWalletPassword = false;
