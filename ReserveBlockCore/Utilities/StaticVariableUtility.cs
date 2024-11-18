@@ -46,6 +46,7 @@ namespace ReserveBlockCore.Utilities
             var dupIPs = Globals.DuplicateAdjIP.ToString();
             var dupAddr = Globals.DuplicateAdjAddr.ToString();
             var explorerData = Globals.ExplorerValDataLastSendSuccess.ToString();
+            var explorerDataResponse = Globals.ExplorerValDataLastSendResponseCode;
             var explorerDataLastSent = Globals.ExplorerValDataLastSend.ToString();
             var blockLastSent = Globals.LastBlockAddedTimestamp.ToLocalDateTimeFromUnix().ToString();
             var lastDiff = Globals.BlockTimeDiff.ToString();
@@ -80,6 +81,7 @@ namespace ReserveBlockCore.Utilities
             var dupAddrText = $"Duplicate Addresses found Validating? {dupAddr}";
             var explorerDataText = $"Explorer Last Send Success? {explorerData}";
             var explorerLastSendText = $"Explorer Last Send Date: {explorerDataLastSent}";
+            var explorerLastSendResponseText = $"Explorer Last Send Date: {explorerDataResponse}");
 
             var blockLastSentText = $"Block last sent at: {blockLastSent}";
             var lastDiffText = $"Block last delay: {lastDiff}";
@@ -173,6 +175,8 @@ namespace ReserveBlockCore.Utilities
             strBld.AppendLine(explorerDataText);
             strBld.AppendLine("---------------------------------------------------------------------");
             strBld.AppendLine(explorerLastSendText);
+            strBld.AppendLine("---------------------------------------------------------------------");
+            strBld.AppendLine(explorerLastSendResponseText);
             strBld.AppendLine("---------------------------------------------------------------------");
             strBld.AppendLine(adjConnection);
             strBld.AppendLine("---------------------------------------------------------------------");
