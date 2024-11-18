@@ -290,6 +290,7 @@ namespace ReserveBlockCore.Nodes
                         ConsoleWriterService.Output("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
                     }
 
+                    ValidatorApprovalBag = new ConcurrentBag<(string, long)>();
                     //Generate Proofs for ALL vals
                     ConsoleWriterService.Output("\r\nGenerating Proofs");
                     var proofs = await ProofUtility.GenerateProofs();
@@ -348,7 +349,6 @@ namespace ReserveBlockCore.Nodes
                             if (finalizedWinner.Address == Globals.ValidatorAddress)
                             {
                                 ConsoleWriterService.Output($"\r\nYou Won! Awaiting Approval To Craft Block");
-                                ValidatorApprovalBag = new ConcurrentBag<(string, long)>();
                                 bool approved = false;
                                 ValidatorApprovalBag.Add(("local", finalizedWinner.BlockHeight));
 
@@ -383,7 +383,6 @@ namespace ReserveBlockCore.Nodes
                             else
                             {
                                 var approvalSent = false;
-                                var count = 0;
 
                                 var sw = Stopwatch.StartNew();
                                 while (!approvalSent && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
@@ -402,7 +401,6 @@ namespace ReserveBlockCore.Nodes
                                             else
                                             {
                                                 await Task.Delay(100);
-                                                count++;
                                             }
                                         }
                                         catch (Exception e) { }
@@ -479,6 +477,13 @@ namespace ReserveBlockCore.Nodes
                                         }
 
                                         await Task.Delay(200);
+                                    }
+
+                                    if(!blockFound)
+                                    {
+                                        ConsoleWriterService.Output($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
+                                        if(finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
+                                            ProofUtility.AddFailedProducer(finalizedWinner.Address);
                                     }
                                 }
                             }

@@ -846,7 +846,7 @@ namespace ReserveBlockCore.Nodes
                         await SendWinningVoteLock.WaitAsync();
                         await RequestCurrentWinnersLock.WaitAsync();
 
-                        await ProofUtility.AbandonProof(supposedHeight, supposeValidatorAddress);
+                        //await ProofUtility.AbandonProof(supposedHeight, supposeValidatorAddress);
 
                         //Possible loop here. Getting same bad value? 
                         //await P2PValidatorClient.RequestCurrentWinners();
@@ -1234,39 +1234,6 @@ namespace ReserveBlockCore.Nodes
                 await delay;
             }
             
-        }
-
-        #endregion
-
-        #region Proof Cleanup
-        public static async Task ProofCleanup()
-        {
-            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
-            {
-                var delay = Task.Delay(new TimeSpan(0, 1, 0));
-                try
-                {
-                    if (Globals.StopAllTimers && !Globals.IsChainSynced)
-                    {
-                        await delay;
-                        continue;
-                    }
-
-                    await ProofCleanupLock.WaitAsync();
-
-                    await ProofUtility.ProofCleanup();
-                }
-                catch (Exception ex)
-                {
-
-                }
-                finally
-                {
-                    ProofCleanupLock.Release();
-                }
-
-                await delay;
-            }
         }
 
         #endregion

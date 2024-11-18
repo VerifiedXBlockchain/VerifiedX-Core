@@ -34,7 +34,9 @@ namespace ReserveBlockCore.Utilities
             {
                 if(val.Address != null && val.PublicKey != null)
                 {
-                    if (CompletedIPs.Contains(val.IPAddress) || CompletedAddresses.Contains(val.Address))
+                    if (CompletedIPs.Contains(val.IPAddress) || 
+                        CompletedAddresses.Contains(val.Address) ||
+                        IsProducerExcluded(val.Address))
                         continue;
 
                     CompletedIPs.Add(val.IPAddress);
@@ -297,250 +299,35 @@ namespace ReserveBlockCore.Utilities
             catch { return null; }
         }
 
-        public static async Task AddProof(long blockHeight, Proof proof)
+        public static void AddFailedProducer(string address)
         {
-            var currentBlockHeight = Globals.LastBlock.Height - 5;
-
-            if(currentBlockHeight <= blockHeight)
-                Globals.WinningProofs.TryAdd(proof.BlockHeight, proof);
+            var currentTime = TimeUtil.GetMillisecondTime();
+            Globals.FailedBlockProducers.AddOrUpdate(
+                address,
+                (addr) => (1, currentTime),
+                (addr, existing) => (existing.failCount + 1, currentTime)
+            );
         }
 
-        public static async Task AddBackupProof(long blockHeight, List<Proof> proof)
+        // Add method to check and clean failed producers
+        private static bool IsProducerExcluded(string address)
         {
-            var currentBlockHeight = Globals.LastBlock.Height - 5;
-
-            if (currentBlockHeight <= blockHeight)
-                Globals.BackupProofs.TryAdd(blockHeight, proof);
-        }
-
-        public static async Task AbandonProof(long height, string supposeValidatorAddress)
-        {
-            await _semaphore.WaitAsync();
-            try
+            if (Globals.FailedBlockProducers.TryGetValue(address, out var failureInfo))
             {
-                int maxRetries = 10;
-                int counter = 0;
-                while (!Globals.FinalizedWinner.TryRemove(height, out _) && counter < maxRetries)
+                var currentTime = TimeUtil.GetMillisecondTime();
+                var timeSinceFailure = currentTime - failureInfo.lastFailTime;
+
+                // Remove from exclusion list if enough time has passed
+                if (timeSinceFailure > Globals.BlockTime * 3) // Exclude for 3 block times
                 {
-                    counter++;
-                    await Task.Delay(20);
+                    Globals.FailedBlockProducers.TryRemove(address, out _);
+                    return false;
                 }
 
-                counter = 0;
-                var blockDiff = (TimeUtil.GetTime() - Globals.LastBlockAddedTimestamp);
-                if (blockDiff >= 120)
-                {
-                    Globals.FailedValidators.Clear();
-                    Globals.FailedValidators = new ConcurrentDictionary<string, long>();
-                }
-                    
-                Globals.FailedValidators.TryAdd(supposeValidatorAddress, height + 1);
-
-                var proofList = Globals.WinningProofs;
-                foreach (var proof in proofList)
-                {
-                    if (proof.Value.Address == supposeValidatorAddress)
-                    {
-                        while (!Globals.WinningProofs.TryRemove(proof.Key, out _) && counter < maxRetries)
-                        {
-                            counter++;
-                            await Task.Delay(100);
-                        }
-                        counter = 0;
-                        Globals.BackupProofs.TryGetValue(proof.Key, out var backupProofList);
-                        if (backupProofList != null)
-                        {
-                            var newProof = backupProofList.Where(x => x.Address != supposeValidatorAddress).OrderBy(x => x.VRFNumber).FirstOrDefault();
-                            if (newProof != null)
-                            {
-                                while (!Globals.WinningProofs.TryAdd(proof.Key, newProof) && counter < maxRetries)
-                                {
-                                    counter++;
-                                    await Task.Delay(20);
-                                }
-                                counter = 0;
-                            }
-                        }
-                    }
-                }
+                // Exclude if they've failed multiple times recently
+                return failureInfo.failCount >= 2;
             }
-            catch (Exception ex)
-            {
-
-            }
-            finally
-            {
-                _semaphore.Release();
-            }
-            ValidatorLogUtility.Log($"Validator {supposeValidatorAddress} failed to produce block for height: {height} ", "ProofUtility.AbandonProof()");
-        }
-
-        public static async Task ProofCleanup()
-        {
-            var blockHeight = Globals.LastBlock.Height;
-
-            var keysToRemove = Globals.WinningProofs.Where(x => x.Key < blockHeight).ToList();
-
-            var backupKeysToRemove = Globals.BackupProofs.Where(x => x.Key < blockHeight).ToList();
-
-            var networkBlockQueueToRemove = Globals.NetworkBlockQueue.Where(x => x.Key < blockHeight).ToList();
-
-            foreach (var key in keysToRemove)
-            {
-                try
-                {
-                    var proofCountRemove = 0;
-                    bool removed = false;
-
-                    while (!removed && proofCountRemove < 10)
-                    {
-                        if (Globals.WinningProofs.ContainsKey(key.Key))
-                        {
-                            removed = Globals.WinningProofs.TryRemove(key.Key, out _);
-                        }
-
-                        if (!removed)
-                        {
-                            proofCountRemove++;
-                            await Task.Delay(20);
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            foreach (var key in backupKeysToRemove)
-            {
-                try
-                {
-                    var backupProofCountRemove = 0;
-                    bool removed = false;
-
-                    while (!removed && backupProofCountRemove < 10)
-                    {
-                        if (Globals.BackupProofs.ContainsKey(key.Key))
-                        {
-                            removed = Globals.BackupProofs.TryRemove(key.Key, out _);
-                        }
-
-                        if (!removed)
-                        {
-                            backupProofCountRemove++;
-                            await Task.Delay(20);
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            foreach (var key in networkBlockQueueToRemove)
-            {
-                try
-                {
-                    var networkBlockQueueCountRemove = 0;
-                    bool removed = false;
-
-                    while (!removed && networkBlockQueueCountRemove < 10)
-                    {
-                        if (Globals.NetworkBlockQueue.ContainsKey(key.Key))
-                        {
-                            removed = Globals.NetworkBlockQueue.TryRemove(key.Key, out _);
-                        }
-
-                        if (!removed)
-                        {
-                            networkBlockQueueCountRemove++;
-                            await Task.Delay(20);
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            if (Globals.FailedValidators.Count() > 0)
-            {
-                try
-                {
-                    var failedValsToRemove = Globals.FailedValidators.Where(x => x.Value < blockHeight).ToList();
-                    if (failedValsToRemove?.Count() > 0)
-                    {
-                        foreach (var key in failedValsToRemove)
-                        {
-                            var FailedValidatorsCountRemove = 0;
-                            bool removed = false;
-
-                            while (!removed && FailedValidatorsCountRemove < 10)
-                            {
-                                if (Globals.FailedValidators.ContainsKey(key.Key))
-                                {
-                                    removed = Globals.FailedValidators.TryRemove(key.Key, out _);
-                                }
-
-                                if (!removed)
-                                {
-                                    FailedValidatorsCountRemove++;
-                                    await Task.Delay(20);
-                                }
-                            }
-                        }
-                    }
-                }
-                catch { }
-            }
-        }
-
-        public static async Task CleanupProofs()
-        {
-            var blockHeight = Globals.LastBlock.Height;
-
-            var keysToRemove = Globals.WinningProofs.Where(x => x.Key < blockHeight).ToList();
-
-            var backupKeysToRemove = Globals.BackupProofs.Where(x => x.Key < blockHeight).ToList();
-
-            var networkBlockQueueToRemove = Globals.NetworkBlockQueue.Where(x => x.Key < blockHeight).ToList();
-
-            foreach (var key in keysToRemove)
-            {
-                try
-                {
-                    Globals.WinningProofs.TryRemove(key.Key, out _);
-                }
-                catch { }
-            }
-
-            foreach (var key in backupKeysToRemove)
-            {
-                try
-                {
-                    Globals.BackupProofs.TryRemove(key.Key, out _);
-                }
-                catch { }
-            }
-
-            foreach(var key in networkBlockQueueToRemove)
-            {
-                try
-                {
-                    Globals.NetworkBlockQueue.TryRemove(key.Key, out _);
-                }
-                catch { }
-            }
-
-            if(Globals.FailedValidators.Count() > 0)
-            {
-                try
-                {
-                    var failedValsToRemove = Globals.FailedValidators.Where(x => x.Value < blockHeight).ToList();
-                    if (failedValsToRemove?.Count() > 0)
-                    {
-                        foreach (var val in failedValsToRemove)
-                        {
-                            Globals.FailedValidators.TryRemove(val.Key, out _);
-                        }
-                    }
-                }
-                catch { }
-            }
+            return false;
         }
 
         public static string CalculateSHA256Hash(string input)

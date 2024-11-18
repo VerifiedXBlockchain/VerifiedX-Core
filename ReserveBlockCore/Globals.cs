@@ -250,6 +250,8 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, long> ActiveValidatorDict = new ConcurrentDictionary<string, long>();
         public static ConcurrentBag<StunServer> STUNServers = new ConcurrentBag<StunServer>();
         public static ConcurrentDictionary<string, BitcoinValShares> ArbiterValidatorShares = new ConcurrentDictionary<string, BitcoinValShares>();
+        public static ConcurrentDictionary<string, (int failCount, long lastFailTime)> FailedBlockProducers = new ConcurrentDictionary<string, (int failCount, long lastFailTime)>();
+
 
 
         public static SecureString EncryptPassword = new SecureString();
