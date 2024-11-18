@@ -829,9 +829,8 @@ namespace ReserveBlockCore.Nodes
                         try
                         {
                             // Create a request-specific CancellationTokenSource with a 1-second timeout
-                            using var requestCts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
                             var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
-                            await client.PostAsync(uri, httpContent, requestCts.Token);
+                            await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 2)); ;
                             await Task.Delay(75);
                         }
                         catch (Exception ex)
