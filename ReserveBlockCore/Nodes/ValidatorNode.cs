@@ -805,55 +805,70 @@ namespace ReserveBlockCore.Nodes
             var validators = Globals.NetworkValidators.Values.ToList();
             try
             {
-                // Randomly shuffle the validators list
                 var rnd = new Random();
                 var randomizedValidators = validators
                     .OrderBy(x => rnd.Next())
                     .ToList();
-                var postData = JsonConvert.SerializeObject(proof);
-                var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
 
-                var tasks = randomizedValidators.Select(async validator =>
+                var postData = JsonConvert.SerializeObject(proof);
+                var tasks = new List<Task>();
+
+                foreach (var validator in randomizedValidators)
                 {
                     if (cts.Token.IsCancellationRequested)
-                        return;
+                        break;
 
-                    try
+                    var task = Task.Run(async () =>
                     {
-                        using var client = Globals.HttpClientFactory.CreateClient();
-                        var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
-
-                        using var requestCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(requestCts.Token, cts.Token);
-
-                        var response = await client.PostAsync(uri, httpContent, linkedCts.Token);
-                        if (response.IsSuccessStatusCode)
+                        try
                         {
-                            ConsoleWriterService.Output($"\r\nVote sent successfully to {validator.IPAddress}");
-                        }
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // Request timed out or method is shutting down
-                    }
-                    catch (Exception ex)
-                    {
-                        // Log other errors but continue with other validators
-                    }
-                });
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
+                            var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
 
-                await Task.WhenAll(tasks);
-            }
-            catch (OperationCanceledException)
-            {
-                ConsoleWriterService.Output("\r\nVote distribution time window expired");
+                            // Create a timeout specific for this request
+                            using var requestCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(requestCts.Token, cts.Token);
+
+                            // Use WhenAny with a timeout task
+                            var timeoutTask = Task.Delay(2000, linkedCts.Token);
+                            var requestTask = client.PostAsync(uri, httpContent, linkedCts.Token);
+
+                            var completedTask = await Task.WhenAny(requestTask, timeoutTask);
+                            if (completedTask == requestTask && !timeoutTask.IsCompleted)
+                            {
+                                var response = await requestTask;
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    ConsoleWriterService.Output($"\r\nProof sent successfully to {validator.IPAddress}");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // Log but don't throw
+                        }
+                    }, cts.Token);
+
+                    tasks.Add(task);
+                }
+
+                // Use WhenAny with a timeout for the entire operation
+                var overallTimeout = Task.Delay(5000);
+                var allTasks = Task.WhenAll(tasks);
+
+                var completed = await Task.WhenAny(allTasks, overallTimeout);
+                if (completed == overallTimeout)
+                {
+                    ConsoleWriterService.Output("\r\nProof distribution timed out after 5 seconds");
+                    cts.Cancel(); // Cancel any remaining tasks
+                }
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Error in vote distribution: {ex.Message}", "ValidatorNode.SendVotesViaRestApi()");
+                ErrorLogUtility.LogError($"Error in proof distribution: {ex.Message}", "ValidatorNode.SendWinningProof()");
             }
         }
-
         #endregion
 
         #region Get Val List
