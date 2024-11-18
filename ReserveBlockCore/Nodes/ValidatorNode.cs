@@ -330,6 +330,9 @@ namespace ReserveBlockCore.Nodes
                         await Broadcast("2", JsonConvert.SerializeObject(winningProof), "SendWinningProofVote");
                     }
 
+                    //send proofs over rest call as backup to random nodes
+                     _ = SendWinningProof(winningProof);
+
                     await Task.Delay(PROOF_COLLECTION_TIME);
 
                     var proofSnapshot = Globals.Proofs.ToList();
@@ -790,6 +793,64 @@ namespace ReserveBlockCore.Nodes
             {
                 var source = new CancellationTokenSource(2000);
                 await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
+            }
+        }
+
+        #endregion
+
+        #region Send Winning Proof Backup Method
+        public static async Task SendWinningProof(Proof proof)
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var validators = Globals.NetworkValidators.Values.ToList();
+            try
+            {
+                // Randomly shuffle the validators list
+                var rnd = new Random();
+                var randomizedValidators = validators
+                    .OrderBy(x => rnd.Next())
+                    .ToList();
+                var postData = JsonConvert.SerializeObject(proof);
+                var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
+
+                var tasks = randomizedValidators.Select(async validator =>
+                {
+                    if (cts.Token.IsCancellationRequested)
+                        return;
+
+                    try
+                    {
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
+
+                        using var requestCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(requestCts.Token, cts.Token);
+
+                        var response = await client.PostAsync(uri, httpContent, linkedCts.Token);
+                        if (response.IsSuccessStatusCode)
+                        {
+                            ConsoleWriterService.Output($"\r\nVote sent successfully to {validator.IPAddress}");
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Request timed out or method is shutting down
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log other errors but continue with other validators
+                    }
+                });
+
+                await Task.WhenAll(tasks);
+            }
+            catch (OperationCanceledException)
+            {
+                ConsoleWriterService.Output("\r\nVote distribution time window expired");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error in vote distribution: {ex.Message}", "ValidatorNode.SendVotesViaRestApi()");
             }
         }
 

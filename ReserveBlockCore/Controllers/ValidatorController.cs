@@ -63,6 +63,34 @@ namespace ReserveBlockCore.Controllers
             return Ok();
         }
 
+        [HttpPost]
+        [Route("ReceiveWinningProof")]
+        public ActionResult<string> ReceiveWinningProof([FromBody] string winningProof)
+        {
+            var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
+
+            // Convert it to a string if it's not null
+            string peerIP = remoteIpAddress?.ToString();
+
+            if (winningProof == null)
+                return BadRequest("Bad Json");
+
+            var proof = JsonConvert.DeserializeObject<Proof>(winningProof);
+
+            if (proof == null)
+                return BadRequest("Could not deserialize network val request");
+
+            if (Globals.BannedIPs.ContainsKey(peerIP))
+            {
+                return Unauthorized();
+            }
+
+            if (proof.VerifyProof())
+                Globals.Proofs.Add(proof);
+
+            return Ok();
+        }
+
         [HttpGet]
         [Route("GetBlock/{blockHeight}")]
         public ActionResult<string?> GetBlock(long blockHeight)
