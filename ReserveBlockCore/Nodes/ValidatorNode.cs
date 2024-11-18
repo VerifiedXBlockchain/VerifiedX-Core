@@ -28,8 +28,8 @@ namespace ReserveBlockCore.Nodes
         static SemaphoreSlim NotifyExplorerLock = new SemaphoreSlim(1, 1);
         private static ConcurrentBag<(string, long)> ValidatorApprovalBag = new ConcurrentBag<(string, long)>();
         const int PROOF_COLLECTION_TIME = 5000; // 5 seconds
-        const int APPROVAL_WINDOW = 3500;      // 3.5 seconds
-        const int BLOCK_REQUEST_WINDOW = 3500;  // 3.5 seconds
+        const int APPROVAL_WINDOW = 12000;      // 12 seconds
+        const int BLOCK_REQUEST_WINDOW = 12000;  // 3.5 seconds
 
         public ValidatorNode(IHubContext<P2PValidatorServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -416,6 +416,13 @@ namespace ReserveBlockCore.Nodes
                                     var swb = Stopwatch.StartNew();
                                     while (!blockFound && swb.ElapsedMilliseconds < BLOCK_REQUEST_WINDOW)
                                     {
+                                        if(Globals.LastBlock.Height == finalizedWinner.BlockHeight)
+                                        {
+                                            _ = Broadcast("7", JsonConvert.SerializeObject(Globals.LastBlock), "");
+                                            _ = P2PValidatorClient.BroadcastBlock(Globals.LastBlock);
+                                            blockFound = true;
+                                            break;
+                                        }
                                         try
                                         {
                                             using (var client = Globals.HttpClientFactory.CreateClient())
