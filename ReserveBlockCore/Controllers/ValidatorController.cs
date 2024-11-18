@@ -21,57 +21,7 @@ namespace ReserveBlockCore.Controllers
 
         [HttpPost]
         [Route("Status")]
-        public ActionResult<string> Status([FromBody] string networkValJson)
-        {
-            var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
-
-            // Convert it to a string if it's not null
-            string peerIP = remoteIpAddress?.ToString();
-
-            if(networkValJson == null)
-                return BadRequest("Bad Json");
-
-            var networkVal = JsonConvert.DeserializeObject<NetworkValidator>(networkValJson);
-
-            if (networkVal == null)
-                return BadRequest("Could not deserialize network val request");
-
-            if (Globals.BannedIPs.ContainsKey(peerIP))
-            {
-                return Unauthorized();
-            }
-
-            var portCheck = PortUtility.IsPortOpen(peerIP.Replace("::ffff:", ""), Globals.ValPort);
-            if (!portCheck)
-            {
-                return Unauthorized();
-            }
-            var ablList = Globals.ABL.ToList();
-
-            if (ablList.Exists(x => x == networkVal.Address))
-            {
-                BanService.BanPeer(peerIP, "Request malformed", "OnConnectedAsync");
-                return Unauthorized();
-            }
-
-            _ = Peers.UpdatePeerAsVal(peerIP, networkVal.Address, networkVal.PublicKey);
-
-            networkVal.IPAddress = peerIP;
-
-            _ = NetworkValidator.AddValidatorToPool(networkVal);
-
-            return Ok();
-        }
-        [HttpPost]
-        [Route("TestPost")]
-        public async Task<string> TestPost([FromBody] string winningProof)
-        {
-            return "Ok";
-        }
-
-        [HttpPost]
-        [Route("ReceiveWinningProof")]
-        public async Task<ActionResult<string>> ReceiveWinningProof([FromBody] string winningProof)
+        public ActionResult<string> Status([FromBody] NetworkValidator networkVal)
         {
             try
             {
@@ -80,10 +30,51 @@ namespace ReserveBlockCore.Controllers
                 // Convert it to a string if it's not null
                 string peerIP = remoteIpAddress?.ToString();
 
-                if (winningProof == null)
-                    return BadRequest("Bad Json");
+                if (networkVal == null)
+                    return BadRequest("Could not deserialize network val request");
 
-                var proof = JsonConvert.DeserializeObject<Proof>(winningProof);
+                if (Globals.BannedIPs.ContainsKey(peerIP))
+                {
+                    return Unauthorized();
+                }
+
+                var portCheck = PortUtility.IsPortOpen(peerIP.Replace("::ffff:", ""), Globals.ValPort);
+                if (!portCheck)
+                {
+                    return Unauthorized();
+                }
+                var ablList = Globals.ABL.ToList();
+
+                if (ablList.Exists(x => x == networkVal.Address))
+                {
+                    BanService.BanPeer(peerIP, "Request malformed", "OnConnectedAsync");
+                    return Unauthorized();
+                }
+
+                _ = Peers.UpdatePeerAsVal(peerIP, networkVal.Address, networkVal.PublicKey);
+
+                networkVal.IPAddress = peerIP;
+
+                _ = NetworkValidator.AddValidatorToPool(networkVal);
+            }
+            catch (Exception ex)
+            {
+
+            }
+
+            return Ok();
+        }
+
+        [HttpPost]
+        [Route("ReceiveWinningProof")]
+        public async Task<ActionResult<string>> ReceiveWinningProof([FromBody] Proof proof)
+        {
+            try
+            {
+                var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
+
+                // Convert it to a string if it's not null
+                string peerIP = remoteIpAddress?.ToString();
 
                 if (proof == null)
                     return BadRequest("Could not deserialize network val request");
@@ -93,6 +84,7 @@ namespace ReserveBlockCore.Controllers
                     return Unauthorized();
                 }
 
+                // Verify the proof and add it if valid
                 if (proof.VerifyProof())
                     Globals.Proofs.Add(proof);
 

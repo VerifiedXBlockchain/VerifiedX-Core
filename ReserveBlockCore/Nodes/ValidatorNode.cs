@@ -814,14 +814,17 @@ namespace ReserveBlockCore.Nodes
                 var postData = JsonConvert.SerializeObject(proof);
                 var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
 
+                if (!randomizedValidators.Any())
+                    return;
+
                 var sw = Stopwatch.StartNew();
-                foreach(var validator in randomizedValidators)
+                randomizedValidators.ParallelLoop(async validator =>
                 {
                     if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
                     {
                         // Stop processing if cancellation is requested
                         sw.Stop();
-                        break;
+                        return;
                     }
 
                     using (var client = Globals.HttpClientFactory.CreateClient())
@@ -838,7 +841,7 @@ namespace ReserveBlockCore.Nodes
                             // Log or handle the exception if needed
                         }
                     }
-                }; 
+                });
             }
             catch (Exception ex)
             {
