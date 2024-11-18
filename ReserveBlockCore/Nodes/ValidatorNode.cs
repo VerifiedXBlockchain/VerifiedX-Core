@@ -811,58 +811,29 @@ namespace ReserveBlockCore.Nodes
                     .ToList();
 
                 var postData = JsonConvert.SerializeObject(proof);
-                var tasks = new List<Task>();
+                var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
 
-                foreach (var validator in randomizedValidators)
+                randomizedValidators.ParallelLoop(async validator =>
                 {
                     if (cts.Token.IsCancellationRequested)
-                        break;
+                    {
+                        // Stop processing if cancellation is requested
+                        return;
+                    }
 
-                    var task = Task.Run(async () =>
+                    using (var client = Globals.HttpClientFactory.CreateClient())
                     {
                         try
                         {
-                            using var client = Globals.HttpClientFactory.CreateClient();
-                            using var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
+                            var requestCts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
                             var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
-
-                            // Create a timeout specific for this request
-                            using var requestCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(requestCts.Token, cts.Token);
-
-                            // Use WhenAny with a timeout task
-                            var timeoutTask = Task.Delay(2000, linkedCts.Token);
-                            var requestTask = client.PostAsync(uri, httpContent, linkedCts.Token);
-
-                            var completedTask = await Task.WhenAny(requestTask, timeoutTask);
-                            if (completedTask == requestTask && !timeoutTask.IsCompleted)
-                            {
-                                var response = await requestTask;
-                                if (response.IsSuccessStatusCode)
-                                {
-                                    ConsoleWriterService.Output($"\r\nProof sent successfully to {validator.IPAddress}");
-                                }
-                            }
+                            await client.PostAsync(uri, httpContent, requestCts.Token);
+                            await Task.Delay(75);
                         }
-                        catch (Exception ex)
-                        {
-                            // Log but don't throw
-                        }
-                    }, cts.Token);
+                        catch (Exception ex) { }
 
-                    tasks.Add(task);
-                }
-
-                // Use WhenAny with a timeout for the entire operation
-                var overallTimeout = Task.Delay(5000);
-                var allTasks = Task.WhenAll(tasks);
-
-                var completed = await Task.WhenAny(allTasks, overallTimeout);
-                if (completed == overallTimeout)
-                {
-                    ConsoleWriterService.Output("\r\nProof distribution timed out after 5 seconds");
-                    cts.Cancel(); // Cancel any remaining tasks
-                }
+                    }
+                });
             }
             catch (Exception ex)
             {
