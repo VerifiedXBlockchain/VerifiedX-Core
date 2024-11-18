@@ -801,8 +801,9 @@ namespace ReserveBlockCore.Nodes
         #region Send Winning Proof Backup Method
         public static async Task SendWinningProof(Proof proof)
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            // Create a CancellationTokenSource with a timeout of 5 seconds
             var validators = Globals.NetworkValidators.Values.ToList();
+
             try
             {
                 var rnd = new Random();
@@ -813,11 +814,13 @@ namespace ReserveBlockCore.Nodes
                 var postData = JsonConvert.SerializeObject(proof);
                 var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
 
+                var sw = Stopwatch.StartNew();
                 randomizedValidators.ParallelLoop(async validator =>
                 {
-                    if (cts.Token.IsCancellationRequested)
+                    if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
                     {
                         // Stop processing if cancellation is requested
+                        sw.Stop();
                         return;
                     }
 
@@ -825,15 +828,18 @@ namespace ReserveBlockCore.Nodes
                     {
                         try
                         {
-                            var requestCts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                            // Create a request-specific CancellationTokenSource with a 1-second timeout
+                            using var requestCts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
                             var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
                             await client.PostAsync(uri, httpContent, requestCts.Token);
                             await Task.Delay(75);
                         }
-                        catch (Exception ex) { }
-
+                        catch (Exception ex)
+                        {
+                            // Log or handle the exception if needed
+                        }
                     }
-                });
+                }); 
             }
             catch (Exception ex)
             {
