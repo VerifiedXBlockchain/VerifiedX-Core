@@ -28,7 +28,7 @@ namespace ReserveBlockCore.Controllers
                 var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
 
                 // Convert it to a string if it's not null
-                string peerIP = remoteIpAddress?.ToString();
+                string peerIP = remoteIpAddress?.ToString().Replace("::ffff:", "");
 
                 if (networkVal == null)
                     return BadRequest("Could not deserialize network val request");
@@ -51,9 +51,9 @@ namespace ReserveBlockCore.Controllers
                     return Unauthorized();
                 }
 
-                _ = Peers.UpdatePeerAsVal(peerIP, networkVal.Address, networkVal.PublicKey);
+                _ = Peers.UpdatePeerAsVal(peerIP.Replace("::ffff:", ""), networkVal.Address, networkVal.PublicKey);
 
-                networkVal.IPAddress = peerIP;
+                networkVal.IPAddress = peerIP.Replace("::ffff:", "");
 
                 _ = NetworkValidator.AddValidatorToPool(networkVal);
             }

@@ -51,6 +51,10 @@ namespace ReserveBlockCore.Commands
                     Globals.StopConsoleOutput = !Globals.StopConsoleOutput;
                     Console.WriteLine($"Stop Console Output set to: {Globals.StopConsoleOutput}");
                     break;
+                case "/stopvalco":
+                    Globals.StopValConsoleOutput = !Globals.StopValConsoleOutput;
+                    Console.WriteLine($"Stop Val Console Output set to: {Globals.StopValConsoleOutput}");
+                    break;
                 case "/exit":
                     commandResult = "_EXIT";
                     break;

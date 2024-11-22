@@ -187,7 +187,8 @@ namespace ReserveBlockCore
         public static bool Lock = true;
         public static bool AlwaysRequireWalletPassword = false;
         public static bool AlwaysRequireAPIPassword = false;
-        public static bool StopConsoleOutput = false;        
+        public static bool StopConsoleOutput = false;
+        public static bool StopValConsoleOutput = false;
         public static int AdjudicateLock = 0;        
         public static Account AdjudicateAccount;
         public static PrivateKey AdjudicatePrivateKey;

@@ -24,7 +24,7 @@ namespace ReserveBlockCore.Utilities
             //Force unban quicker
             await BanService.RunUnban();
 
-            var newPeers = Globals.NetworkValidators.Values.ToList();
+            var newPeers = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount <= 3).ToList();
 
             List<NetworkValidator> peersMissingDataList = new List<NetworkValidator>();
             List<string> CompletedIPs = new List<string>();

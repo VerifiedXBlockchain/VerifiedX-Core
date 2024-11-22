@@ -31,6 +31,7 @@ namespace ReserveBlockCore.Models
                 {
                     if (networkVal != null)
                     {
+                        validator.CheckFailCount = networkVal.CheckFailCount;
                         Globals.NetworkValidators[networkVal.Address] = validator;
                     }
                 }

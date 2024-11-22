@@ -250,7 +250,7 @@ namespace ReserveBlockCore.Nodes
             var PreviousHeight = -1L;
             var BlockDelay = Task.CompletedTask;
 
-            ConsoleWriterService.Output("Booting up consensus loop");
+            ConsoleWriterService.OutputVal("Booting up consensus loop");
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
@@ -287,16 +287,16 @@ namespace ReserveBlockCore.Nodes
                         var DelayTimeCorrection = Globals.BlockTime * (Height - BeginBlock) - (CurrentTime - EpochTime);
                         var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
                         BlockDelay = Task.Delay((int)DelayTime);
-                        ConsoleWriterService.Output("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
+                        ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
                     }
 
                     ValidatorApprovalBag = new ConcurrentBag<(string, long)>();
                     //Generate Proofs for ALL vals
-                    ConsoleWriterService.Output("\r\nGenerating Proofs");
+                    ConsoleWriterService.OutputVal("\r\nGenerating Proofs");
                     var proofs = await ProofUtility.GenerateProofs();
-                    ConsoleWriterService.Output($"\r\n{proofs.Count()} Proofs Generated");
+                    ConsoleWriterService.OutputVal($"\r\n{proofs.Count()} Proofs Generated");
                     var winningProof = await ProofUtility.SortProofs(proofs);
-                    ConsoleWriterService.Output($"\r\nSorting Proofs");
+                    ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
 
                     if (winningProof != null)
                     {
@@ -321,11 +321,11 @@ namespace ReserveBlockCore.Nodes
 
                         if (winningProof == null)
                         {
-                            ConsoleWriterService.Output($"\r\nCould not connect to any nodes for winning proof. Starting over.");
+                            ConsoleWriterService.OutputVal($"\r\nCould not connect to any nodes for winning proof. Starting over.");
                             continue;
                         }
 
-                        ConsoleWriterService.Output($"\r\nPotential Winner Found! Address: {winningProof.Address}");
+                        ConsoleWriterService.OutputVal($"\r\nPotential Winner Found! Address: {winningProof.Address}");
                         Globals.Proofs.Add(winningProof);
                         await Broadcast("2", JsonConvert.SerializeObject(winningProof), "SendWinningProofVote");
                     }
@@ -351,7 +351,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             if (finalizedWinner.Address == Globals.ValidatorAddress)
                             {
-                                ConsoleWriterService.Output($"\r\nYou Won! Awaiting Approval To Craft Block");
+                                ConsoleWriterService.OutputVal($"\r\nYou Won! Awaiting Approval To Craft Block");
                                 bool approved = false;
                                 ValidatorApprovalBag.Add(("local", finalizedWinner.BlockHeight));
 
@@ -377,7 +377,7 @@ namespace ReserveBlockCore.Nodes
 
                                     if (block != null)
                                     {
-                                        ConsoleWriterService.Output($"\r\nBlock crafted. Sending block.");
+                                        ConsoleWriterService.OutputVal($"\r\nBlock crafted. Sending block.");
                                         _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                         _ = P2PValidatorClient.BroadcastBlock(block);
                                     }
@@ -410,7 +410,7 @@ namespace ReserveBlockCore.Nodes
                                     }
                                 }
 
-                                ConsoleWriterService.Output($"\r\nYou did not win. Looking for block.");
+                                ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight)
                                 {
                                     bool blockFound = false;
@@ -484,7 +484,7 @@ namespace ReserveBlockCore.Nodes
 
                                     if(!blockFound)
                                     {
-                                        ConsoleWriterService.Output($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
+                                        ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
                                         if(finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
                                             ProofUtility.AddFailedProducer(finalizedWinner.Address);
                                     }
@@ -493,7 +493,7 @@ namespace ReserveBlockCore.Nodes
                         }
                     }
 
-                    ConsoleWriterService.Output($"\r\nStarting over.");
+                    ConsoleWriterService.OutputVal($"\r\nStarting over.");
                     Globals.Proofs.Clear();
                     Globals.Proofs = new ConcurrentBag<Proof>();
                 }
@@ -736,7 +736,7 @@ namespace ReserveBlockCore.Nodes
                         x.WalletVersion
                     }).ToList();
 
-                    await NotifyExplorerLock.WaitAsync();
+                    //await NotifyExplorerLock.WaitAsync();
 
                     var fortisPoolStr = JsonConvert.SerializeObject(listFortisPool);
 
@@ -769,7 +769,7 @@ namespace ReserveBlockCore.Nodes
                 }
                 finally
                 {
-                    NotifyExplorerLock.Release();
+                    //NotifyExplorerLock.Release();
                 }
                 await delay;
             }
