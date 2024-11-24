@@ -10,6 +10,7 @@ using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
 using System.Reflection.Metadata;
 using System.Text;
 using System.Threading.Tasks.Dataflow;
@@ -181,7 +182,8 @@ namespace ReserveBlockCore.Nodes
                         BadValidatorList.Add(val.IPAddress);
                 }
 
-                peerList.ParallelLoop(async peer =>
+                // Collect tasks for parallel execution
+                var tasks = peerList.Select(async peer =>
                 {
                     try
                     {
@@ -197,7 +199,7 @@ namespace ReserveBlockCore.Nodes
                                     if (!response.IsSuccessStatusCode)
                                         BadValidatorList.Add(peer.IPAddress);
 
-                                    if(response.IsSuccessStatusCode)
+                                    if (response.IsSuccessStatusCode)
                                     {
                                         Globals.NetworkValidators.TryGetValue(peer.Address, out var networkValidator);
                                         if (networkValidator != null)
@@ -206,16 +208,26 @@ namespace ReserveBlockCore.Nodes
                                             Globals.NetworkValidators[networkValidator.Address] = networkValidator;
                                         }
                                     }
+                                    else
+                                    {
+                                        BadValidatorList.Add(peer.IPAddress);
+                                    }
+                                }
+                                else
+                                {
+                                    BadValidatorList.Add(peer.IPAddress);
                                 }
                             }
                         }
-                        
                     }
                     catch (Exception ex)
                     {
                         BadValidatorList.Add(peer.IPAddress);
                     }
-                });
+                }).ToList();
+
+                // Wait for all tasks to complete
+                await Task.WhenAll(tasks);
 
                 foreach (var val in BadValidatorList)
                 {
@@ -235,6 +247,8 @@ namespace ReserveBlockCore.Nodes
                             }
 
                             Globals.NetworkValidators.TryRemove(networkVal.Address, out var _);
+                            ValidatorLogUtility.Log($"Validator removed from pool: {networkVal.Address}", "ValidatorNode.ValidatorHeartbeat()");
+                            ConsoleWriterService.OutputVal($"Validator removed from pool: {networkVal.Address}");
                         }
                     }
                 }
@@ -451,7 +465,16 @@ namespace ReserveBlockCore.Nodes
                                                                 var nextHeight = Globals.LastBlock.Height + 1;
                                                                 var currentHeight = block.Height;
 
-                                                                if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (block, IP)))
+                                                                if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                                                {
+                                                                    BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                                    if (nextHeight == currentHeight)
+                                                                        await BlockValidatorService.ValidateBlocks();
+                                                                    if (nextHeight < currentHeight)
+                                                                        await BlockDownloadService.GetAllBlocks();
+                                                                }
+
+                                                                if (currentHeight == nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (block, IP)))
                                                                 {
                                                                     blockFound = true;
 
@@ -468,6 +491,17 @@ namespace ReserveBlockCore.Nodes
                                                                         await BlockDownloadService.GetAllBlocks();
 
                                                                     break;
+                                                                }
+                                                                else
+                                                                {
+                                                                    if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                                                    {
+                                                                        BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                                        if (nextHeight == currentHeight)
+                                                                            await BlockValidatorService.ValidateBlocks();
+                                                                        if (nextHeight < currentHeight)
+                                                                            await BlockDownloadService.GetAllBlocks();
+                                                                    }
                                                                 }
                                                             }
                                                         }
