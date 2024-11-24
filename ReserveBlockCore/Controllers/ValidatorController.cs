@@ -126,6 +126,9 @@ namespace ReserveBlockCore.Controllers
         [Route("HeartBeat")]
         public ActionResult<string> HeartBeat()
         {
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                return BadRequest();
+
             return Ok();
         }
 
