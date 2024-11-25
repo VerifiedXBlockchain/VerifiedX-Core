@@ -739,6 +739,12 @@ namespace ReserveBlockCore.Nodes
                         continue;
                     }
 
+                    if(!Globals.ValidatorNodes.Any())
+                    {
+                        await delay;
+                        continue;
+                    }
+
                     var account = AccountData.GetLocalValidator();
                     if (account == null)
                         return;

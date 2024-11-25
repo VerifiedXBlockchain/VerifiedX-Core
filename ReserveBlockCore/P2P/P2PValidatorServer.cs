@@ -116,7 +116,6 @@ namespace ReserveBlockCore.P2P
                     Signature = signature,
                     SignatureMessage = SignedMessage,
                     UniqueName = uName,
-
                 };
 
                 Globals.NetworkValidators.TryAdd(address, netVal);
