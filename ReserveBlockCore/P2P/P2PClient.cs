@@ -62,8 +62,28 @@ namespace ReserveBlockCore.P2P
         }
         public static string MostLikelyIP()
         {
+            // Function to check if an IP is within private ranges
+            bool IsPrivateIP(string ip)
+            {
+                var ipParts = ip.Split('.').Select(int.Parse).ToArray();
+                if (ipParts[0] == 10)
+                    return true; // 10.0.0.0/8
+                if (ipParts[0] == 172 && ipParts[1] >= 16 && ipParts[1] <= 31)
+                    return true; // 172.16.0.0/12
+                if (ipParts[0] == 192 && ipParts[1] == 168)
+                    return true; // 192.168.0.0/16
+                if (ip == "127.0.0.1")
+                    return true; // localhost loopback
+
+                return false;
+            }
+
             return Globals.ReportedIPs.Count != 0 ?
-                Globals.ReportedIPs.OrderByDescending(y => y.Value).Select(y => y.Key).First() : "NA";
+                Globals.ReportedIPs
+                    .Where(y => !IsPrivateIP(y.Key)) // Filter out private IPs
+                    .OrderByDescending(y => y.Value)
+                    .Select(y => y.Key)
+                    .FirstOrDefault() ?? "NA" : "NA";
         }
 
         public static async Task DropLowBandwidthPeers()

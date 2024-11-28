@@ -34,6 +34,10 @@ namespace ReserveBlockCore.Models
                         validator.CheckFailCount = networkVal.CheckFailCount;
                         Globals.NetworkValidators[networkVal.Address] = validator;
                     }
+                    else
+                    {
+                        Globals.NetworkValidators.TryAdd(validator.Address, validator);
+                    }
                 }
                 else
                 {

@@ -123,11 +123,16 @@ namespace ReserveBlockCore.Controllers
         }
 
         [HttpGet]
-        [Route("HeartBeat")]
-        public ActionResult<string> HeartBeat()
+        [Route("HeartBeat/{address}")]
+        public ActionResult<string> HeartBeat(string address)
         {
             if (string.IsNullOrEmpty(Globals.ValidatorAddress))
                 return BadRequest();
+
+            if (!Globals.NetworkValidators.ContainsKey(address))
+            {
+                return Accepted();
+            }
 
             return Ok();
         }

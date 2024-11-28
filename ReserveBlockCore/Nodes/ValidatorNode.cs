@@ -137,7 +137,7 @@ namespace ReserveBlockCore.Nodes
 
                     comingOnline = false;
                     AlertValidatorsOfStatusDone = true;
-                    await Task.Delay(new TimeSpan(0, 30, 0));
+                    await Task.Delay(new TimeSpan(0, 1, 0));
                 }
             }
             else
@@ -191,11 +191,16 @@ namespace ReserveBlockCore.Nodes
                         {
                             using (var client = Globals.HttpClientFactory.CreateClient())
                             {
-                                var uri = $"http://{peer.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
+                                var uri = $"http://{peer.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                                 if (response != null)
                                 {
+                                    if(response.StatusCode == HttpStatusCode.Accepted)
+                                    {
+
+                                    }
+                                    
                                     if (!response.IsSuccessStatusCode)
                                         BadValidatorList.Add(peer.IPAddress);
 
@@ -212,6 +217,7 @@ namespace ReserveBlockCore.Nodes
                                     {
                                         BadValidatorList.Add(peer.IPAddress);
                                     }
+                                    
                                 }
                                 else
                                 {
