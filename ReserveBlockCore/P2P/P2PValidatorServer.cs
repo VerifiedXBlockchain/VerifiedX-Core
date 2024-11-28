@@ -202,37 +202,37 @@ namespace ReserveBlockCore.P2P
         {
             try
             {
-                return await SignalRQueue(Context, (int)nextBlock.Size, async () =>
+                //return await SignalRQueue(Context, (int)nextBlock.Size, async () =>
+                //{
+                if (nextBlock.ChainRefId == BlockchainData.ChainRef)
                 {
-                    if (nextBlock.ChainRefId == BlockchainData.ChainRef)
+                    var IP = GetIP(Context);
+                    var nextHeight = Globals.LastBlock.Height + 1;
+                    var currentHeight = nextBlock.Height;
+
+                    if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
                     {
-                        var IP = GetIP(Context);
-                        var nextHeight = Globals.LastBlock.Height + 1;
-                        var currentHeight = nextBlock.Height;
+                        await Task.Delay(2000);
 
-                        if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                        if(Globals.LastBlock.Height < nextBlock.Height)
+                            await BlockValidatorService.ValidateBlocks();
+
+                        if (nextHeight == currentHeight)
                         {
-                            await Task.Delay(2000);
-
-                            if(Globals.LastBlock.Height < nextBlock.Height)
-                                await BlockValidatorService.ValidateBlocks();
-
-                            if (nextHeight == currentHeight)
-                            {
-                                string data = "";
-                                data = JsonConvert.SerializeObject(nextBlock);
-                                await Clients.All.SendAsync("GetMessage", "blk", data);
-                            }
-
-                            if (nextHeight < currentHeight)
-                                await BlockDownloadService.GetAllBlocks();
-
-                            return true;
+                            string data = "";
+                            data = JsonConvert.SerializeObject(nextBlock);
+                            await Clients.All.SendAsync("GetMessage", "blk", data);
                         }
-                    }
 
-                    return false;
-                });
+                        if (nextHeight < currentHeight)
+                            await BlockDownloadService.GetAllBlocks();
+
+                        return true;
+                    }
+                }
+
+                return false;
+                //});
             }
             catch { }
 
@@ -330,7 +330,9 @@ namespace ReserveBlockCore.P2P
         }
 
         #endregion
-        public static async Task<string> SendActiveVals()
+
+        #region Send active val list
+        public async Task<string> SendActiveVals()
         {
             var vals = Globals.NetworkValidators.Values.ToList();
 
@@ -338,7 +340,9 @@ namespace ReserveBlockCore.P2P
                 return "0";
 
             return JsonConvert.SerializeObject(vals).ToBase64().ToCompress();
-        } 
+        }
+
+        #endregion
 
         #region Send TX to Mempool Vals
         public async Task<string> SendTxToMempoolVals(Transaction txReceived)

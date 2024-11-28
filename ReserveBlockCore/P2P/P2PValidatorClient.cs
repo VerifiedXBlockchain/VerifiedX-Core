@@ -187,7 +187,7 @@ namespace ReserveBlockCore.P2P
                 {
                     Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
                     peer.FailCount += 1;
-                    if (peer.FailCount > 60)
+                    if (peer.FailCount > 600)
                         peer.IsOutgoing = false;
                     Peers.GetAll()?.UpdateSafe(peer);
                     return;
@@ -242,7 +242,7 @@ namespace ReserveBlockCore.P2P
             {
                 Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
                 peer.FailCount += 1;
-                if (peer.FailCount > 60)
+                if (peer.FailCount > 600)
                     peer.IsOutgoing = false;
                 Peers.GetAll()?.UpdateSafe(peer);
             }
@@ -288,6 +288,7 @@ namespace ReserveBlockCore.P2P
                 .Where(x => !SkipIPs.Contains(x.PeerIP))
                 .ToArray()
                 .OrderBy(x => rnd.Next())
+                .ThenBy(x => x.FailCount)
                 .ToArray();
 
             if(!newPeers.Any())
@@ -311,6 +312,7 @@ namespace ReserveBlockCore.P2P
                 .Where(x => !SkipIPs.Contains(x.PeerIP))
                 .ToArray()
                 .OrderBy(x => rnd.Next())
+                .ThenBy(x => x.FailCount)
                 .ToArray();
             }
 
@@ -537,14 +539,7 @@ namespace ReserveBlockCore.P2P
                     try
                     {
                         var source = new CancellationTokenSource(5000);
-                        if (isQueueBlock)
-                        {
-                            _ = node.Connection.InvokeCoreAsync<bool>("ReceiveQueueBlockVal", new object?[] { block }, source.Token);
-                        }
-                        else
-                        {
-                            _ = node.Connection.InvokeCoreAsync<bool>("ReceiveBlockVal", new object?[] { block }, source.Token);
-                        }
+                        _ = node.Connection.InvokeCoreAsync<bool>("ReceiveBlockVal", new object?[] { block }, source.Token);                      
                     }
                     catch (Exception ex)
                     {
@@ -579,7 +574,7 @@ namespace ReserveBlockCore.P2P
                     try
                     {
                         var source = new CancellationTokenSource(2000);
-                        string activeValJson = await validator.Connection.InvokeAsync<string>("SendActiveVals", source);
+                        string activeValJson = await validator.Connection.InvokeAsync<string>("SendActiveVals", source.Token);
 
                         if (activeValJson != null && activeValJson != "0")
                         {

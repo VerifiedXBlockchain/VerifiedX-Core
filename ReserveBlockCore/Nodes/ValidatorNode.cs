@@ -10,6 +10,7 @@ using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Reflection.Metadata;
 using System.Text;
@@ -321,6 +322,7 @@ namespace ReserveBlockCore.Nodes
                     if (winningProof != null)
                     {
                         var verificationResult = false;
+                        List<string> ExcludeValList = new List<string>();
                         while (!verificationResult)
                         {
                             if (winningProof != null)
@@ -328,8 +330,9 @@ namespace ReserveBlockCore.Nodes
                                 verificationResult = await ProofUtility.VerifyWinnerAvailability(winningProof);
                                 if (!verificationResult)
                                 {
+                                    ExcludeValList.Add(winningProof.Address);
                                     winningProof = await ProofUtility.SortProofs(
-                                        proofs.Where(x => x.Address != winningProof.Address).ToList()
+                                        proofs.Where(x => !ExcludeValList.Contains(x.Address)).ToList()
                                     );
                                 }
                             }
