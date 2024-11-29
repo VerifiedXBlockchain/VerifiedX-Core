@@ -339,6 +339,13 @@ namespace ReserveBlockCore.Data
                         return null;
                     }
 
+                    if(height == Globals.SpecialBlockHeight)
+                    {
+                        var specialBlock = await CraftSpecialBlock(validator, totalVals, valAnswer, height, skipTXs);
+                        if(specialBlock != null)
+                            return specialBlock;
+                    }
+
                     //Get tx's from Mempool                
                     var processedTxPool = await TransactionData.ProcessTxPool();
                     var txPool = TransactionData.GetPool();
@@ -439,6 +446,119 @@ namespace ReserveBlockCore.Data
             return null;
         }
 
+        private static async Task<Block?> CraftSpecialBlock(string validator, int totalVals, string valAnswer, long height, bool skipTXs = false)
+        {
+            Block block;
+            int craftCount = 1;
+            bool blockCrafted = false;
+            try
+            {
+                do
+                {
+                    await BlockValidatorService.ValidationDelay();
+
+                    var startCraftTimer = DateTime.UtcNow;
+                    var validatorAccount = AccountData.GetSingleAccount(validator);
+
+                    if (validatorAccount == null)
+                    {
+                        return null;
+                    }
+
+                    //Need to get master node validator.
+                    var timestamp = TimeUtil.GetTime();
+
+                    if (timestamp <= Globals.LastBlock.Timestamp)
+                        timestamp = Globals.LastBlock.Timestamp + 1;
+
+                    var postMineBalance = 200_000_000M - AccountStateTrei.GetNetworkTotal();
+
+                    var transactionList = new List<Transaction>();
+
+                    var coinbase_tx2 = new Transaction
+                    {
+                        Amount = 0.00M,
+                        ToAddress = validator,
+                        Fee = 0.00M,
+                        Timestamp = timestamp,
+                        FromAddress = "Coinbase_BlkRwd",
+                        TransactionType = TransactionType.TX
+                    };
+
+                    var coinbase_special = new Transaction
+                    {
+                        Amount = postMineBalance,
+                        ToAddress = Globals.GenesisValidator,
+                        Fee = 0.00M,
+                        Timestamp = timestamp,
+                        FromAddress = "Coinbase_BlkRwd",
+                        TransactionType = TransactionType.TX
+                    };
+
+
+                    coinbase_tx2.Build();
+                    coinbase_special.Build();
+
+                    transactionList.Add(coinbase_tx2);
+                    transactionList.Add(coinbase_special);
+
+                    block = new Block
+                    {
+                        Height = height,
+                        Timestamp = timestamp,
+                        Transactions = GiveOtherInfos(transactionList, height),
+                        Validator = validator,
+                        ChainRefId = ChainRef,
+                        TotalValidators = totalVals,
+                        ValidatorAnswer = valAnswer
+                    };
+                    block.Build();
+
+                    if (block.PrevHash == "0")
+                    {
+                        if (Globals.OptionalLogging)
+                            ErrorLogUtility.LogError("Block Previous Hash not available.", "BlockchainData.CraftBlock_V5()");
+
+                        return null;
+                    }
+
+                    //Add validator signature
+                    block.ValidatorSignature = SignatureService.ValidatorSignature(block.Hash);
+
+                    //block size
+                    var str = JsonConvert.SerializeObject(block);
+                    block.Size = str.Length;
+
+                    // get craft time    
+                    var endTimer = DateTime.UtcNow;
+                    var buildTime = endTimer - startCraftTimer;
+                    block.BCraftTime = buildTime.Milliseconds;
+
+
+                    blockCrafted = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
+                    if (blockCrafted == true)
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        craftCount += 1; //add count to attempts and retry.
+                    }
+
+                } while (craftCount != 5);
+
+                if (blockCrafted == true)
+                {
+                    return block;
+                }
+            }
+            catch (Exception ex)
+            {
+            }
+
+            return null;
+        }
+
         #endregion
 
         public static decimal GetBlockReward()
@@ -504,8 +624,43 @@ namespace ReserveBlockCore.Data
             return -1;
             
         }
+        public static bool ValidateSpecialBlock(Block block)
+        {
+            var txList = block.Transactions.ToList();
+
+            var blkRwdCnt = txList.Where(x => x.FromAddress == "Coinbase_BlkRwd").Count();
+            var feeRemovalCheck = txList.Exists(x => x.FromAddress == "Coinbase_TrxFees");
+
+            if (feeRemovalCheck)
+                return false;
+            
+
+            if (blkRwdCnt > 2)
+                return false;
+            
+
+            var valRewardCheck = txList.Where(x => x.FromAddress == "Coinbase_BlkRwd" && x.ToAddress == block.Validator).FirstOrDefault();
+            if(valRewardCheck?.Amount > 0.00M)
+                return false;
+            
+
+            var specialRewardCheck = txList.Where(x => x.FromAddress == "Coinbase_BlkRwd" && x.ToAddress == Globals.GenesisValidator).FirstOrDefault();
+            if(specialRewardCheck == null) 
+                return false;
+
+            var networkBalance = AccountStateTrei.GetNetworkTotal();
+
+            //Leaving room for marginal error. Only 1k tho.
+            if (networkBalance + specialRewardCheck.Amount > 200_001_000)
+                return false;
+
+            return true;
+        }
         public static bool ValidateBlock(Block block)
         {
+            if (block.Height == Globals.SpecialBlockHeight)
+                return true;
+
             bool result = false;
 
             var txList = block.Transactions.ToList();

@@ -138,6 +138,13 @@ namespace ReserveBlockCore.Controllers
         }
 
         [HttpGet]
+        [Route("HeartBeat")]
+        public ActionResult<string> HeartBeat()
+        {
+            return Ok();
+        }
+
+        [HttpGet]
         [Route("ValidatorInfo")]
         public ActionResult<string> ValidatorInfo()
         {

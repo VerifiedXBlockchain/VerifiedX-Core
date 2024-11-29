@@ -283,6 +283,13 @@ namespace ReserveBlockCore.Services
 
                 if (block.Height != 0)
                 {
+                    if(block.Height == Globals.SpecialBlockHeight)
+                    {
+                        var specialBlockValidation = BlockchainData.ValidateSpecialBlock(block);
+                        if (!specialBlockValidation)
+                            return result;
+                    }
+
                     var blockCoinBaseResult = BlockchainData.ValidateBlock(block); //this checks the coinbase tx
 
                     //Need to check here the prev hash if it is correct!

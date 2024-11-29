@@ -334,10 +334,24 @@ namespace ReserveBlockCore.Nodes
                                     winningProof = await ProofUtility.SortProofs(
                                         proofs.Where(x => !ExcludeValList.Contains(x.Address)).ToList()
                                     );
+
+                                    if(winningProof == null)
+                                    {
+                                        ExcludeValList.Clear();
+                                        ExcludeValList = new List<string>();
+                                    }
                                 }
+                                else
+                                {
+                                    ExcludeValList.Clear(); 
+                                    ExcludeValList = new List<string>();
+                                }
+
                             }
                             else
                             {
+                                ExcludeValList.Clear();
+                                ExcludeValList = new List<string>();
                                 break;
                             }
                         }
@@ -384,7 +398,7 @@ namespace ReserveBlockCore.Nodes
                                     var approvalRate = (decimal)ValidatorApprovalBag
                                         .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.NetworkValidators.Count();
 
-                                    if (approvalRate >= 0.51M)
+                                    if (approvalRate >= 0.60M)
                                         approved = true;
 
                                     await Task.Delay(100);
