@@ -84,7 +84,7 @@ namespace ReserveBlockCore.Nodes
             {
                 while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
                 {
-                    var delay = Task.Delay(new TimeSpan(0, 0, 30));
+                    var delay = Task.Delay(new TimeSpan(0, 0, 5));
                     if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
                     {
                         await delay;
@@ -121,24 +121,46 @@ namespace ReserveBlockCore.Nodes
                     var postData = JsonConvert.SerializeObject(networkVal);
                     var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
 
-                    valList.ParallelLoop(async peer =>
-                    {
-                        using (var client = Globals.HttpClientFactory.CreateClient())
-                        {
-                            try
-                            {
-                                var uri = $"http://{peer.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status";
-                                await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 1));
-                                await Task.Delay(75);
-                            }
-                            catch (Exception ex) { }
+                    var coreCount = Environment.ProcessorCount;
 
+                    if(coreCount >= 4 || Globals.RunUnsafeCode)
+                    {
+                        valList.ParallelLoop(async peer =>
+                        {
+                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            {
+                                try
+                                {
+                                    var uri = $"http://{peer.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status";
+                                    await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 4));
+                                    await Task.Delay(100);
+                                }
+                                catch (Exception ex) { }
+
+                            }
+                        });
+                    }
+                    else
+                    {
+                        foreach(var peer in valList)
+                        {
+                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            {
+                                try
+                                {
+                                    var uri = $"http://{peer.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status";
+                                    await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 4));
+                                    await Task.Delay(100);
+                                }
+                                catch (Exception ex) { }
+                            }
                         }
-                    });
+                    }
+                    
 
                     comingOnline = false;
                     AlertValidatorsOfStatusDone = true;
-                    await Task.Delay(new TimeSpan(0, 1, 0));
+                    await Task.Delay(new TimeSpan(0, 1, 30));
                 }
             }
             else
@@ -183,58 +205,134 @@ namespace ReserveBlockCore.Nodes
                         BadValidatorList.Add(val.IPAddress);
                 }
 
-                // Collect tasks for parallel execution
-                var tasks = peerList.Select(async peer =>
+                var coreCount = Environment.ProcessorCount;
+                if (coreCount >= 4 || Globals.RunUnsafeCode) 
                 {
-                    try
+                    var tasks = peerList.Select(async peer =>
                     {
-                        if (!BadValidatorList.Contains(peer.IPAddress))
+                        try
                         {
-                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            if (!BadValidatorList.Contains(peer.IPAddress))
                             {
-                                var uri = $"http://{peer.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
-                                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
-
-                                if (response != null)
+                                using (var client = Globals.HttpClientFactory.CreateClient())
                                 {
-                                    if(response.StatusCode == HttpStatusCode.Accepted)
-                                    {
+                                    var uri = $"http://{peer.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
 
+                                    var sw = Stopwatch.StartNew();
+                                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 4));
+                                    sw.Stop();
+                                    Globals.NetworkValidators.TryGetValue(peer.Address, out var networkValidator);
+                                    await Task.Delay(75);
+
+                                    if (networkValidator != null)
+                                    {
+                                        networkValidator.Latency = sw.ElapsedMilliseconds;
+                                        Globals.NetworkValidators[networkValidator.Address] = networkValidator;
                                     }
-                                    
-                                    if (!response.IsSuccessStatusCode)
-                                        BadValidatorList.Add(peer.IPAddress);
 
-                                    if (response.IsSuccessStatusCode)
+                                    if (response != null)
                                     {
-                                        Globals.NetworkValidators.TryGetValue(peer.Address, out var networkValidator);
-                                        if (networkValidator != null)
+                                        if (response.StatusCode == HttpStatusCode.Accepted)
                                         {
-                                            networkValidator.CheckFailCount = 0;
-                                            Globals.NetworkValidators[networkValidator.Address] = networkValidator;
+
                                         }
+
+                                        if (!response.IsSuccessStatusCode)
+                                            BadValidatorList.Add(peer.IPAddress);
+
+                                        if (response.IsSuccessStatusCode)
+                                        {
+
+                                            if (networkValidator != null)
+                                            {
+                                                networkValidator.CheckFailCount = 0;
+                                                Globals.NetworkValidators[networkValidator.Address] = networkValidator;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            BadValidatorList.Add(peer.IPAddress);
+                                        }
+
                                     }
                                     else
                                     {
                                         BadValidatorList.Add(peer.IPAddress);
                                     }
-                                    
-                                }
-                                else
-                                {
-                                    BadValidatorList.Add(peer.IPAddress);
                                 }
                             }
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        BadValidatorList.Add(peer.IPAddress);
-                    }
-                }).ToList();
+                        catch (Exception ex)
+                        {
+                            BadValidatorList.Add(peer.IPAddress);
+                        }
+                    }).ToList();
 
-                // Wait for all tasks to complete
-                await Task.WhenAll(tasks);
+                    // Wait for all tasks to complete
+                    await Task.WhenAll(tasks);
+                }
+                else
+                {
+                    foreach (var peer in peerList) 
+                    {
+                        try
+                        {
+                            if (!BadValidatorList.Contains(peer.IPAddress))
+                            {
+                                using (var client = Globals.HttpClientFactory.CreateClient())
+                                {
+                                    var uri = $"http://{peer.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
+
+                                    var sw = Stopwatch.StartNew();
+                                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 4));
+                                    sw.Stop();
+                                    Globals.NetworkValidators.TryGetValue(peer.Address, out var networkValidator);
+                                    await Task.Delay(75);
+
+                                    if (networkValidator != null)
+                                    {
+                                        networkValidator.Latency = sw.ElapsedMilliseconds;
+                                        Globals.NetworkValidators[networkValidator.Address] = networkValidator;
+                                    }
+
+                                    if (response != null)
+                                    {
+                                        if (response.StatusCode == HttpStatusCode.Accepted)
+                                        {
+
+                                        }
+
+                                        if (!response.IsSuccessStatusCode)
+                                            BadValidatorList.Add(peer.IPAddress);
+
+                                        if (response.IsSuccessStatusCode)
+                                        {
+
+                                            if (networkValidator != null)
+                                            {
+                                                networkValidator.CheckFailCount = 0;
+                                                Globals.NetworkValidators[networkValidator.Address] = networkValidator;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            BadValidatorList.Add(peer.IPAddress);
+                                        }
+
+                                    }
+                                    else
+                                    {
+                                        BadValidatorList.Add(peer.IPAddress);
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            BadValidatorList.Add(peer.IPAddress);
+                        }
+                    }
+                }
 
                 foreach (var val in BadValidatorList)
                 {
@@ -244,7 +342,7 @@ namespace ReserveBlockCore.Nodes
                         networkVal.CheckFailCount++;
                         Globals.NetworkValidators[networkVal.Address] = networkVal;
 
-                        if (networkVal.CheckFailCount > 3)
+                        if (networkVal.CheckFailCount > 2)
                         {
                             var validator = peerDB.FindOne(x => x.PeerIP == val);
                             if (validator != null)
@@ -260,7 +358,7 @@ namespace ReserveBlockCore.Nodes
                     }
                 }
 
-                await Task.Delay(new TimeSpan(0, 0, 30));
+                await Task.Delay(new TimeSpan(0, 1, 0));
             }
         }
 
@@ -429,7 +527,7 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     using (var client = Globals.HttpClientFactory.CreateClient())
                                     {
-                                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                                        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(APPROVAL_WINDOW));
                                         try
                                         {
                                             var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}";
@@ -466,7 +564,7 @@ namespace ReserveBlockCore.Nodes
                                             using (var client = Globals.HttpClientFactory.CreateClient())
                                             {
                                                 var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
-                                                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
+                                                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0,0,0,0,BLOCK_REQUEST_WINDOW));
 
                                                 if (response != null)
                                                 {

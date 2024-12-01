@@ -14,6 +14,7 @@ namespace ReserveBlockCore.Models
         public string Signature { get; set; }
         public string SignatureMessage { get; set; }
         public int CheckFailCount { get; set; }
+        public long Latency { get; set; }
 
         public static async Task<bool> AddValidatorToPool(NetworkValidator validator)
         {
