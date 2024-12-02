@@ -79,10 +79,25 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        public static async Task StartupValidatorProcess()
+        {
+            if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                while (!Globals.IsChainSynced)
+                {
+                    await Task.Delay(1000);
+                }
+                _ = Task.Run(() => { StartValidatorServer(); });
+                //_ = ValidatorService.StartValidatorServer();
+                _ = StartupValidators();
+                _ = Task.Run(BlockHeightCheckLoop);
+            }
+        }
+
         internal static async Task StartupValidators()
         {
             //wait 25 seconds
-            await Task.Delay(new TimeSpan(0,0,25));
+            await Task.Delay(new TimeSpan(0,0,5));
             while (true)
             {
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))

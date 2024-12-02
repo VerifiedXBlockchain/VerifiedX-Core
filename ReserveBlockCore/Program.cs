@@ -539,10 +539,15 @@ namespace ReserveBlockCore
 
             if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
-                _ = Task.Run(() => { ValidatorService.StartValidatorServer(); });
-                //_ = ValidatorService.StartValidatorServer();
-                _ = ValidatorService.StartupValidators();
-                _ = Task.Run(ValidatorService.BlockHeightCheckLoop);
+                _ = ValidatorService.StartupValidatorProcess();
+                //while (!Globals.IsChainSynced)
+                //{
+                //    await Task.Delay(1000);
+                //}
+                //_ = Task.Run(() => { ValidatorService.StartValidatorServer(); });
+                ////_ = ValidatorService.StartValidatorServer();
+                //_ = ValidatorService.StartupValidators();
+                //_ = Task.Run(ValidatorService.BlockHeightCheckLoop);
             }
             
             Globals.StopAllTimers = true;
