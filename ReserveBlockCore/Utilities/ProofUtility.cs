@@ -318,7 +318,7 @@ namespace ReserveBlockCore.Utilities
                 var timeSinceFailure = currentTime - failureInfo.lastFailTime;
 
                 // Remove from exclusion list if enough time has passed
-                if (timeSinceFailure > Globals.BlockTime * 3) // Exclude for 3 block times
+                if (timeSinceFailure > Globals.BlockTime * 10) // Exclude for 3 block times
                 {
                     Globals.FailedBlockProducers.TryRemove(address, out _);
                     return false;

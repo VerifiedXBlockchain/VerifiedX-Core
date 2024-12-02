@@ -490,13 +490,15 @@ namespace ReserveBlockCore.Nodes
                                 bool approved = false;
                                 ValidatorApprovalBag.Add(("local", finalizedWinner.BlockHeight));
 
+                                var valCount = Globals.NetworkValidators.Count() - Globals.FailedBlockProducers.Count();
+
                                 var sw = Stopwatch.StartNew();
                                 while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
                                     var approvalRate = (decimal)ValidatorApprovalBag
-                                        .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.NetworkValidators.Count();
+                                        .Count(x => x.Item2 == finalizedWinner.BlockHeight) / valCount;
 
-                                    if (approvalRate >= 0.60M)
+                                    if (approvalRate >= 0.51M)
                                         approved = true;
 
                                     await Task.Delay(100);
