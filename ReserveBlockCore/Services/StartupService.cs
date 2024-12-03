@@ -1063,10 +1063,15 @@ namespace ReserveBlockCore.Services
 
                     }
 
+                    var highestReportedBlock = Globals.Nodes.Values.OrderByDescending(x => x.NodeHeight).FirstOrDefault();
+
                     var lastBlock = Globals.LastBlock;
                     var currentTimestamp = TimeUtil.GetTime(-90);
 
-                    if(lastBlock.Timestamp >= currentTimestamp || Globals.IsTestNet)
+                    if ((lastBlock.Height - 5) > highestReportedBlock?.NodeHeight)
+                        continue;
+
+                    if((lastBlock.Timestamp >= currentTimestamp || Globals.IsTestNet) && (lastBlock.Height + 2 >= highestReportedBlock?.NodeHeight))
                     {
                         DateTime endTime = DateTime.UtcNow;
                         ConsoleWriterService.Output($"Block downloads finished on: {endTime.ToLocalTime()}");

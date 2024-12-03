@@ -237,64 +237,6 @@ namespace ReserveBlockCore.Utilities
                     .OrderBy(x => x.VRFNumber)  // Closest to zero wins
                     .FirstOrDefault();
 
-                
-
-                var finalProof = new Proof();
-                var currentWinningProof = proofs.FirstOrDefault();
-                foreach (var proof in proofs)
-                {
-                    if(Globals.ABL.Exists(x => x == proof.Address))
-                    {
-                        continue;
-                    }
-
-                    if (currentWinningProof != null)
-                    {
-                        finalProof = currentWinningProof;
-                        if (proof.VerifyProof())
-                        {
-                            if (processHeight != proof.BlockHeight)
-                                continue;
-
-                            //Closer to zero wins.
-                            if (currentWinningProof.VRFNumber > proof.VRFNumber)
-                            {
-                                using (var client = Globals.HttpClientFactory.CreateClient())
-                                {
-                                    try
-                                    {
-                                        //skip call because current winner is our node.
-                                        if(proof.Address == Globals.ValidatorAddress)
-                                        {
-                                            finalProof = proof;
-                                            continue;
-                                        }
-                                        var uri = $"http://{proof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
-                                        var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
-
-                                        if (response != null)
-                                        {
-                                            if (response.IsSuccessStatusCode)
-                                                finalProof = proof;
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                    }
-                                    
-                                }
-                                
-                            }
-                        }
-                        else
-                        {
-                            //stop checking due to proof failure. This should never happen unless a rigged proof is entered. 
-                            continue;
-                        }
-                    }
-                }
-
-                return finalProof;
             }
             catch { return null; }
         }
@@ -318,7 +260,7 @@ namespace ReserveBlockCore.Utilities
                 var timeSinceFailure = currentTime - failureInfo.lastFailTime;
 
                 // Remove from exclusion list if enough time has passed
-                if (timeSinceFailure > Globals.BlockTime * 10) // Exclude for 3 block times
+                if (timeSinceFailure > Globals.BlockTime * 10) // Exclude for 10 block times
                 {
                     Globals.FailedBlockProducers.TryRemove(address, out _);
                     return false;
