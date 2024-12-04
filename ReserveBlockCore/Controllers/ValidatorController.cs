@@ -107,8 +107,8 @@ namespace ReserveBlockCore.Controllers
         }
 
         [HttpGet]
-        [Route("SendApproval/{blockHeight}")]
-        public ActionResult<string?> SendApproval(long blockHeight)
+        [Route("SendApproval/{blockHeight}/{validatorAddress}")]
+        public ActionResult<string?> SendApproval(long blockHeight, string validatorAddress)
         {
             var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
             // Convert it to a string if it's not null
@@ -116,7 +116,7 @@ namespace ReserveBlockCore.Controllers
 
             if (blockHeight >= Globals.LastBlock.Height)
             {
-                _ = ValidatorNode.GetApproval(peerIP, blockHeight);
+                _ = ValidatorNode.GetApproval(peerIP, blockHeight, validatorAddress);
             }
 
             return Ok("0");

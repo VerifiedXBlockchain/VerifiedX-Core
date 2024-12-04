@@ -251,6 +251,21 @@ namespace ReserveBlockCore.Utilities
             );
         }
 
+        public static void PruneFailedProducers()
+        {
+            var currentTime = TimeUtil.GetMillisecondTime();
+            foreach(var val in  Globals.FailedBlockProducers)
+            {
+                var timeSinceFailure = currentTime - val.Value.lastFailTime;
+
+                // Remove from exclusion list if enough time has passed
+                if (timeSinceFailure > Globals.BlockTime * 10) // Exclude for 10 block times
+                {
+                    Globals.FailedBlockProducers.TryRemove(val.Key, out _);
+                }
+            }
+        }
+
         // Add method to check and clean failed producers
         private static bool IsProducerExcluded(string address)
         {

@@ -328,7 +328,63 @@ namespace ReserveBlockCore.Controllers
             if (Globals.NetworkValidators.Any())
                 return JsonConvert.SerializeObject(new { Success = true, Message = $"Validators Found", NetworkValidators = Globals.NetworkValidators }, Formatting.Indented);
 
-            return JsonConvert.SerializeObject(new { Success = true, Message = $"No Validators found" });
+            return JsonConvert.SerializeObject(new { Success = false, Message = $"No Validators found" });
+        }
+
+        /// <summary>
+        /// Get Validator Pool
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet]
+        [Route("ConsensusQueue")]
+        public async Task<string> ConsensusQueue()
+        {
+            if (Globals.NetworkValidators.Any())
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"Consensus Queue Found", ConsensusQueue = Globals.ConsensusHeaderQueue }, Formatting.Indented);
+
+            return JsonConvert.SerializeObject(new { Success = false, Message = $"No Consensus Queue found" });
+        }
+
+        /// <summary>
+        /// Get Validator Pool
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet]
+        [Route("Producers")]
+        public async Task<string> Producers()
+        {
+            if (Globals.NetworkValidators.Any())
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"Producers Found", ConsensusQueue = Globals.ProducerDict }, Formatting.Indented);
+
+            return JsonConvert.SerializeObject(new { Success = false, Message = $"No Producers found" });
+        }
+
+        /// <summary>
+        /// Get Validator Pool
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet]
+        [Route("FailedProducers")]
+        public async Task<string> FailedProducers()
+        {
+            if (Globals.NetworkValidators.Any())
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"Failed Producers Found", ConsensusQueue = Globals.FailedProducerDict }, Formatting.Indented);
+
+            return JsonConvert.SerializeObject(new { Success = false, Message = $"No Failed Producers found" });
+        }
+
+        /// <summary>
+        /// Get Validator Pool
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet]
+        [Route("BannedFailedProducers")]
+        public async Task<string> BannedFailedProducers()
+        {
+            if (Globals.NetworkValidators.Any())
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"Failed Producers Found", ConsensusQueue = Globals.FailedProducers }, Formatting.Indented);
+
+            return JsonConvert.SerializeObject(new { Success = false, Message = $"No Failed Producers found" });
         }
 
         /// <summary>

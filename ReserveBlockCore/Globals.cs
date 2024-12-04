@@ -294,6 +294,10 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<long, List<Proof>> BackupProofs = new ConcurrentDictionary<long, List<Proof>>();
         public static ConcurrentDictionary<string, DateTime?> ProofsBroadcasted = new ConcurrentDictionary<string, DateTime?>();
         public static ConcurrentDictionary<long, DateTime?> BlockQueueBroadcasted = new ConcurrentDictionary<long, DateTime?>();
+        public static ConcurrentDictionary<string, (long, int)> FailedProducerDict = new ConcurrentDictionary<string, (long, int)>();
+        public static ConcurrentDictionary<string, int> ProducerDict = new ConcurrentDictionary<string, int>();
+        public static ConcurrentQueue<ConsensusHeader> ConsensusHeaderQueue = new ConcurrentQueue<ConsensusHeader>();
+        public static ConcurrentBag<string> FailedProducers = new ConcurrentBag<string>();
 
         #endregion
 
