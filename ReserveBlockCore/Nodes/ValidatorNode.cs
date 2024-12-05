@@ -558,7 +558,8 @@ namespace ReserveBlockCore.Nodes
                                         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(APPROVAL_WINDOW));
                                         try
                                         {
-                                            var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}";
+                                            var valAddr = Globals.ValidatorAddress;
+                                            var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}/{valAddr}";
                                             var response = await client.GetAsync(uri, cts.Token);
                                             if (response.IsSuccessStatusCode)
                                             {
@@ -670,7 +671,7 @@ namespace ReserveBlockCore.Nodes
                                         Globals.FailedProducerDict.TryGetValue(finalizedWinner.Address, out var failRec);
                                         if(failRec.Item1 != 0)
                                         {
-                                            var currentTime = TimeUtil.GetTime(0, 0, 1);
+                                            var currentTime = TimeUtil.GetTime(0, 0, -1);
                                             failRec.Item2 += 1;
                                             Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
                                             if(failRec.Item2 >= 30)
