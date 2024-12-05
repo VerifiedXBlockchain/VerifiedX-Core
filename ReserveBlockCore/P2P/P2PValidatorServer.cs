@@ -241,6 +241,49 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
+        #region Receive Block - Receives Block and then Broadcast out.
+        public async Task<bool> FailedToReachConsensus(List<string> failedProducersList)
+        {
+            try
+            {
+                foreach (var val in failedProducersList)
+                {
+                    Globals.FailedProducerDict.TryGetValue(val, out var failRec);
+                    if (failRec.Item1 != 0)
+                    {
+                        var currentTime = TimeUtil.GetTime(0, 0, -1);
+                        failRec.Item2 += 1;
+                        Globals.FailedProducerDict[val] = failRec;
+                        if (failRec.Item2 >= 10)
+                        {
+                            if (currentTime > failRec.Item1)
+                            {
+                                var exist = Globals.FailedProducers.Where(x => x == val).FirstOrDefault();
+                                if (exist == null)
+                                    Globals.FailedProducers.Add(val);
+                            }
+                        }
+
+                        //Reset timer
+                        if (failRec.Item2 < 10)
+                        {
+                            if (failRec.Item1 < currentTime)
+                            {
+                                failRec.Item1 = TimeUtil.GetTime();
+                                failRec.Item2 = 1;
+                                Globals.FailedProducerDict[val] = failRec;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        #endregion
+
         #region Receives a Queued block from client
 
         public async Task<bool> ReceiveQueueBlockVal(Block nextBlock)

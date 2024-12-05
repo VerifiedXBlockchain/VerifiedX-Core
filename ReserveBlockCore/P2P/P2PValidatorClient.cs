@@ -551,6 +551,33 @@ namespace ReserveBlockCore.P2P
         }
         #endregion
 
+        #region Broadcast Blocks to Peers
+        public static async Task FailedToReachConsensus(List<string> failedProducers)
+        {
+            var peersConnected = await AreValidatorsConnected();
+
+            if (!peersConnected)
+                return;
+
+            else
+            {
+                foreach (var node in Globals.ValidatorNodes.Values)
+                {
+                    try
+                    {
+                        var source = new CancellationTokenSource(5000);
+                        _ = node.Connection.InvokeCoreAsync<bool>("FailedToReachConsensus", new object?[] { failedProducers }, source.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        //possible dead connection, or node is offline
+                        Console.WriteLine("Error Sending FailedToReachConsensus. Please try again!");
+                    }
+                }
+            }
+        }
+        #endregion
+
         #region Request Active Validators
 
         public static async Task RequestActiveValidators()

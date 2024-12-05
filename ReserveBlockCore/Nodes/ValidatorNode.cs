@@ -342,7 +342,7 @@ namespace ReserveBlockCore.Nodes
                         networkVal.CheckFailCount++;
                         Globals.NetworkValidators[networkVal.Address] = networkVal;
 
-                        if (networkVal.CheckFailCount > 2)
+                        if (networkVal.CheckFailCount >= 2)
                         {
                             var validator = peerDB.FindOne(x => x.PeerIP == val);
                             if (validator != null)
@@ -358,7 +358,7 @@ namespace ReserveBlockCore.Nodes
                     }
                 }
 
-                await Task.Delay(new TimeSpan(0, 1, 0));
+                await Task.Delay(new TimeSpan(0, 0, 30));
             }
         }
 
@@ -523,7 +523,7 @@ namespace ReserveBlockCore.Nodes
                                     _ = AddConsensusHeaderQueue(consensusHeader);
 
                                     var winnerFound = Globals.ProducerDict.TryGetValue(finalizedWinner.Address, out var winningCount);
-                                    if(winnerFound)
+                                    if (winnerFound)
                                     {
                                         Globals.ProducerDict[finalizedWinner.Address] = winningCount + 1;
                                     }
@@ -543,6 +543,43 @@ namespace ReserveBlockCore.Nodes
                                         _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                         _ = P2PValidatorClient.BroadcastBlock(block);
                                     }
+                                }
+                                else
+                                {
+                                    foreach (var val in failedProducersList)
+                                    {
+                                        Globals.FailedProducerDict.TryGetValue(val, out var failRec);
+                                        if (failRec.Item1 != 0)
+                                        {
+                                            var currentTime = TimeUtil.GetTime(0, 0, -1);
+                                            failRec.Item2 += 1;
+                                            Globals.FailedProducerDict[val] = failRec;
+                                            if (failRec.Item2 >= 10)
+                                            {
+                                                if (currentTime > failRec.Item1)
+                                                {
+                                                    var exist = Globals.FailedProducers.Where(x => x == val).FirstOrDefault();
+                                                    if (exist == null)
+                                                        Globals.FailedProducers.Add(val);
+                                                }
+                                            }
+
+                                            //Reset timer
+                                            if (failRec.Item2 < 10)
+                                            {
+                                                if (failRec.Item1 < currentTime)
+                                                {
+                                                    failRec.Item1 = TimeUtil.GetTime();
+                                                    failRec.Item2 = 1;
+                                                    Globals.FailedProducerDict[val] = failRec;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ConsoleWriterService.OutputVal($"\r\nFailed to reach consensus on {Height}");
+                                    _ = Broadcast("4", JsonConvert.SerializeObject(failedProducersList), "");
+                                    _ = P2PValidatorClient.FailedToReachConsensus(failedProducersList);
                                 }
                             }
                             else
@@ -578,10 +615,11 @@ namespace ReserveBlockCore.Nodes
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight)
                                 {
                                     bool blockFound = false;
+                                    bool failedToReachConsensus = false;
                                     var swb = Stopwatch.StartNew();
                                     while (!blockFound && swb.ElapsedMilliseconds < BLOCK_REQUEST_WINDOW)
                                     {
-                                        if(Globals.LastBlock.Height == finalizedWinner.BlockHeight)
+                                        if (Globals.LastBlock.Height == finalizedWinner.BlockHeight)
                                         {
                                             _ = Broadcast("7", JsonConvert.SerializeObject(Globals.LastBlock), "");
                                             _ = P2PValidatorClient.BroadcastBlock(Globals.LastBlock);
@@ -593,7 +631,7 @@ namespace ReserveBlockCore.Nodes
                                             using (var client = Globals.HttpClientFactory.CreateClient())
                                             {
                                                 var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
-                                                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0,0,0,0,BLOCK_REQUEST_WINDOW));
+                                                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 0, 0, BLOCK_REQUEST_WINDOW));
 
                                                 if (response != null)
                                                 {
@@ -604,9 +642,12 @@ namespace ReserveBlockCore.Nodes
                                                         {
                                                             if (responseBody == "0")
                                                             {
+                                                                failedToReachConsensus = true;
                                                                 await Task.Delay(200);
                                                                 continue;
                                                             }
+
+                                                            failedToReachConsensus = false;
 
                                                             var block = JsonConvert.DeserializeObject<Block>(responseBody);
                                                             if (block != null)
@@ -666,28 +707,28 @@ namespace ReserveBlockCore.Nodes
                                         await Task.Delay(200);
                                     }
 
-                                    if(!blockFound)
+                                    if (!blockFound && !failedToReachConsensus)
                                     {
                                         Globals.FailedProducerDict.TryGetValue(finalizedWinner.Address, out var failRec);
-                                        if(failRec.Item1 != 0)
+                                        if (failRec.Item1 != 0)
                                         {
                                             var currentTime = TimeUtil.GetTime(0, 0, -1);
                                             failRec.Item2 += 1;
                                             Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
-                                            if(failRec.Item2 >= 30)
+                                            if (failRec.Item2 >= 30)
                                             {
-                                                if(currentTime > failRec.Item1)
+                                                if (currentTime > failRec.Item1)
                                                 {
                                                     var exist = Globals.FailedProducers.Where(x => x == finalizedWinner.Address).FirstOrDefault();
-                                                    if(exist == null)
+                                                    if (exist == null)
                                                         Globals.FailedProducers.Add(finalizedWinner.Address);
                                                 }
                                             }
 
                                             //Reset timer
-                                            if(failRec.Item2 < 30)
+                                            if (failRec.Item2 < 30)
                                             {
-                                                if(failRec.Item1 < currentTime)
+                                                if (failRec.Item1 < currentTime)
                                                 {
                                                     failRec.Item1 = TimeUtil.GetTime();
                                                     failRec.Item2 = 1;
@@ -700,19 +741,22 @@ namespace ReserveBlockCore.Nodes
                                             Globals.FailedProducerDict.TryAdd(finalizedWinner.Address, (TimeUtil.GetTime(), 1));
                                         }
                                         ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
-                                        if(finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
+                                        if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
                                             ProofUtility.AddFailedProducer(finalizedWinner.Address);
                                     }
                                     else
                                     {
-                                        var winnerFound = Globals.ProducerDict.TryGetValue(finalizedWinner.Address, out var winningCount);
-                                        if (winnerFound)
+                                        if(!failedToReachConsensus)
                                         {
-                                            Globals.ProducerDict[finalizedWinner.Address] = winningCount + 1;
-                                        }
-                                        else
-                                        {
-                                            Globals.ProducerDict.TryAdd(finalizedWinner.Address, 1);
+                                            var winnerFound = Globals.ProducerDict.TryGetValue(finalizedWinner.Address, out var winningCount);
+                                            if (winnerFound)
+                                            {
+                                                Globals.ProducerDict[finalizedWinner.Address] = winningCount + 1;
+                                            }
+                                            else
+                                            {
+                                                Globals.ProducerDict.TryAdd(finalizedWinner.Address, 1);
+                                            }
                                         }
                                     }
                                 }
@@ -747,6 +791,9 @@ namespace ReserveBlockCore.Nodes
                     break;
                 case "3":
                     _ = ReceiveNetworkValidator(data);
+                    break;
+                case "4":
+                    _ = FailedToReachConsensus(data);
                     break;
                 case "7":
                     _ = ReceiveConfirmedBlock(data);
@@ -805,6 +852,46 @@ namespace ReserveBlockCore.Nodes
             catch (Exception ex)
             {
 
+            }
+        }
+        //4
+        public static async Task FailedToReachConsensus(string data)
+        {
+            if (string.IsNullOrEmpty(data)) return;
+
+            var failedProducersList = JsonConvert.DeserializeObject<List<string>>(data);
+
+            if (failedProducersList == null) return;
+
+            foreach (var val in failedProducersList)
+            {
+                Globals.FailedProducerDict.TryGetValue(val, out var failRec);
+                if (failRec.Item1 != 0)
+                {
+                    var currentTime = TimeUtil.GetTime(0, 0, -1);
+                    failRec.Item2 += 1;
+                    Globals.FailedProducerDict[val] = failRec;
+                    if (failRec.Item2 >= 10)
+                    {
+                        if (currentTime > failRec.Item1)
+                        {
+                            var exist = Globals.FailedProducers.Where(x => x == val).FirstOrDefault();
+                            if (exist == null)
+                                Globals.FailedProducers.Add(val);
+                        }
+                    }
+
+                    //Reset timer
+                    if (failRec.Item2 < 10)
+                    {
+                        if (failRec.Item1 < currentTime)
+                        {
+                            failRec.Item1 = TimeUtil.GetTime();
+                            failRec.Item2 = 1;
+                            Globals.FailedProducerDict[val] = failRec;
+                        }
+                    }
+                }
             }
         }
 
