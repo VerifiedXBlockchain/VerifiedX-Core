@@ -588,6 +588,11 @@ namespace ReserveBlockCore.Controllers
                 if(tokenAccount.Balance < topic.MinimumVoteRequirement)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"You do not meet the minimum required to vote." });
 
+                var voteExist = TokenVote.CheckSpecificAddressTokenVoteOnTopic(fromAddress, topicUID);
+
+                if (voteExist)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"This address has already casted a vote." });
+
                 var result = await TokenContractService.CastTokenVoteTopic(sc, tokenAccount, fromAddress, topicUID, voteType);
 
                 return JsonConvert.SerializeObject(new { Success = result.Item1, Message = $"Result: {result.Item2}" });

@@ -1517,14 +1517,33 @@ namespace ReserveBlockCore.Data
                         var topic = scStateTreiRec.TokenDetails.TokenTopicList.Where(x => x.TopicUID == topicUID).FirstOrDefault();
                         if (topic != null)
                         {
-                            if (voteType == VoteType.Yes)
-                                topic.VoteYes += 1;
-                            if (voteType == VoteType.No)
-                                topic.VoteNo += 1;
+                            if (string.IsNullOrEmpty(fromAddress) || string.IsNullOrEmpty(topicUID) || !voteType.HasValue)
+                            {
+                                //bad vote don't save.
+                            }
+                            else
+                            {
+                                TokenVote tkVote = new TokenVote
+                                {
+                                    Address = fromAddress,
+                                    BlockHeight = tx.Height,
+                                    SmartContractUID = scUID,
+                                    TopicUID = topicUID,
+                                    TransactionHash = tx.Hash,
+                                    VoteType = voteType.Value
+                                };
 
-                            int fromIndex = scStateTreiRec.TokenDetails.TokenTopicList.FindIndex(a => a.TopicUID == topicUID);
-                            scStateTreiRec.TokenDetails.TokenTopicList[fromIndex] = topic;
-                            SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                                TokenVote.SaveVote(tkVote);
+
+                                if (voteType == VoteType.Yes)
+                                    topic.VoteYes += 1;
+                                if (voteType == VoteType.No)
+                                    topic.VoteNo += 1;
+
+                                int fromIndex = scStateTreiRec.TokenDetails.TokenTopicList.FindIndex(a => a.TopicUID == topicUID);
+                                scStateTreiRec.TokenDetails.TokenTopicList[fromIndex] = topic;
+                                SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                            }
                         }
                     }
                 }

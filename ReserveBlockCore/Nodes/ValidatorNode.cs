@@ -160,7 +160,7 @@ namespace ReserveBlockCore.Nodes
 
                     comingOnline = false;
                     AlertValidatorsOfStatusDone = true;
-                    await Task.Delay(new TimeSpan(0, 1, 30));
+                    await Task.Delay(new TimeSpan(0, 1, 0));
                 }
             }
             else
@@ -380,6 +380,12 @@ namespace ReserveBlockCore.Nodes
                 }
 
                 if (!AlertValidatorsOfStatusDone || !ActiveValidatorRequestDone)
+                {
+                    await delay;
+                    continue;
+                }
+
+                if(!Globals.NetworkValidators.Any())
                 {
                     await delay;
                     continue;
@@ -707,7 +713,7 @@ namespace ReserveBlockCore.Nodes
                                         await Task.Delay(200);
                                     }
 
-                                    if (!blockFound && !failedToReachConsensus)
+                                    if (!blockFound && failedToReachConsensus)
                                     {
                                         Globals.FailedProducerDict.TryGetValue(finalizedWinner.Address, out var failRec);
                                         if (failRec.Item1 != 0)
@@ -757,6 +763,43 @@ namespace ReserveBlockCore.Nodes
                                             {
                                                 Globals.ProducerDict.TryAdd(finalizedWinner.Address, 1);
                                             }
+                                        }
+                                        else
+                                        {
+                                            Globals.FailedProducerDict.TryGetValue(finalizedWinner.Address, out var failRec);
+                                            if (failRec.Item1 != 0)
+                                            {
+                                                var currentTime = TimeUtil.GetTime(0, 0, -1);
+                                                failRec.Item2 += 1;
+                                                Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
+                                                if (failRec.Item2 >= 30)
+                                                {
+                                                    if (currentTime > failRec.Item1)
+                                                    {
+                                                        var exist = Globals.FailedProducers.Where(x => x == finalizedWinner.Address).FirstOrDefault();
+                                                        if (exist == null)
+                                                            Globals.FailedProducers.Add(finalizedWinner.Address);
+                                                    }
+                                                }
+
+                                                //Reset timer
+                                                if (failRec.Item2 < 30)
+                                                {
+                                                    if (failRec.Item1 < currentTime)
+                                                    {
+                                                        failRec.Item1 = TimeUtil.GetTime();
+                                                        failRec.Item2 = 1;
+                                                        Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
+                                                    }
+                                                }
+                                            }
+                                            else
+                                            {
+                                                Globals.FailedProducerDict.TryAdd(finalizedWinner.Address, (TimeUtil.GetTime(), 1));
+                                            }
+                                            ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
+                                            if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
+                                                ProofUtility.AddFailedProducer(finalizedWinner.Address);
                                         }
                                     }
                                 }

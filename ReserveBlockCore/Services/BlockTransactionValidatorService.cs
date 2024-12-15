@@ -115,17 +115,17 @@ namespace ReserveBlockCore.Services
                         var topicUID = jobj["TopicUID"]?.ToObject<string?>();
                         var voteType = jobj["VoteType"]?.ToObject<VoteType?>();
 
-                        var vote = new TokenVote
-                        {
-                            Address = tx.FromAddress,
-                            BlockHeight = blockHeight,
-                            TopicUID = topicUID,
-                            TransactionHash = tx.Hash,
-                            VoteType = voteType.Value,
-                            SmartContractUID = scUID
-                        };
+                        //var vote = new TokenVote
+                        //{
+                        //    Address = tx.FromAddress,
+                        //    BlockHeight = blockHeight,
+                        //    TopicUID = topicUID,
+                        //    TransactionHash = tx.Hash,
+                        //    VoteType = voteType.Value,
+                        //    SmartContractUID = scUID
+                        //};
 
-                        TokenVote.SaveVote(vote);
+                        //TokenVote.SaveVote(vote);
                     }
                 }
 
@@ -632,16 +632,16 @@ namespace ReserveBlockCore.Services
                             var topicUID = jobj["TopicUID"]?.ToObject<string?>();
                             var voteType = jobj["VoteType"]?.ToObject<VoteType?>();
 
-                            var vote = new TokenVote { 
-                                Address = tx.FromAddress,
-                                BlockHeight = blockHeight,
-                                TopicUID = topicUID,
-                                TransactionHash = tx.Hash,
-                                VoteType = voteType.Value,
-                                SmartContractUID = scUID
-                            };
+                            //var vote = new TokenVote { 
+                            //    Address = tx.FromAddress,
+                            //    BlockHeight = blockHeight,
+                            //    TopicUID = topicUID,
+                            //    TransactionHash = tx.Hash,
+                            //    VoteType = voteType.Value,
+                            //    SmartContractUID = scUID
+                            //};
 
-                            TokenVote.SaveVote(vote);
+                            //TokenVote.SaveVote(vote);
                         }
 
                         if (function == "Transfer()")

@@ -245,7 +245,7 @@ namespace ReserveBlockCore.P2P
                         currentNode.NodeLatency = node.NodeLatency;
                     }
 
-                    ConsoleWriterService.OutputSameLine($"Connected to {Globals.Nodes.Count}/14");
+                    ConsoleWriterService.OutputSameLine($"Connected to {Globals.Nodes.Count}/{Globals.MaxPeers}");
                     peer.IsOutgoing = true;
                     peer.FailCount = 0; //peer responded. Reset fail count
                     Peers.GetAll()?.UpdateSafe(peer);

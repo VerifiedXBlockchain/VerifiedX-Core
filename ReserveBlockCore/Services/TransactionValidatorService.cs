@@ -543,6 +543,9 @@ namespace ReserveBlockCore.Services
                                             var topicUID = jobj["TopicUID"]?.ToObject<string?>();
                                             var voteType = jobj["VoteType"]?.ToObject<VoteType?>();
 
+                                            if (string.IsNullOrEmpty(topicUID))
+                                                return (txResult, "TopicUID cannot be null");
+
                                             var stateAccount = StateData.GetSpecificAccountStateTrei(fromAddress);
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
 
@@ -583,6 +586,11 @@ namespace ReserveBlockCore.Services
 
                                             if (tokenAccount.Balance < topic.MinimumVoteRequirement)
                                                 return (txResult, "Insufficient Balance to cast a vote.");
+
+                                            var voteExist = TokenVote.CheckSpecificAddressTokenVoteOnTopic(fromAddress, topicUID);
+
+                                            if(voteExist)
+                                                return (txResult, "Token Holder has already voted.");
 
                                             break;
                                         }
@@ -1645,9 +1653,9 @@ namespace ReserveBlockCore.Services
                                     if (txRequest.FromAddress != vote.Address)
                                         return (txResult, "Vote address must match the transactions From Address.");
 
-                                    var voteExixt = Vote.CheckSpecificAddressVoteOnTopic(vote.Address, vote.TopicUID);
+                                    var voteExist = Vote.CheckSpecificAddressVoteOnTopic(vote.Address, vote.TopicUID);
 
-                                    if(voteExixt)
+                                    if(voteExist)
                                         return (txResult, "You have already voted on this topic and may not do so again.");
 
                                     if(Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)

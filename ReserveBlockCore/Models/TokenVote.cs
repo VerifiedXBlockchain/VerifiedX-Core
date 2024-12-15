@@ -92,6 +92,22 @@ namespace ReserveBlockCore.Models
         }
         #endregion
 
+        #region Get Specific Address Vote For Topic - Returns bool
+        public static bool CheckSpecificAddressTokenVoteOnTopic(string address, string topicUID)
+        {
+            var votes = GetTokenVoteDB();
+            if (votes != null)
+            {
+                var vote = votes.Query().Where(x => x.Address == address && x.TopicUID == topicUID).FirstOrDefault();
+                if (vote != null)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        #endregion
+
         #region Get Specific Address Votes
         public static IEnumerable<TokenVote>? GetSpecificAddressVotes(string address)
         {

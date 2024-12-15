@@ -259,7 +259,7 @@ namespace ReserveBlockCore.Utilities
                 var timeSinceFailure = currentTime - val.Value.lastFailTime;
 
                 // Remove from exclusion list if enough time has passed
-                if (timeSinceFailure > Globals.BlockTime * 10) // Exclude for 10 block times
+                if (timeSinceFailure > Globals.BlockTime * 100) // Exclude for 100 block times
                 {
                     Globals.FailedBlockProducers.TryRemove(val.Key, out _);
                 }
@@ -275,7 +275,7 @@ namespace ReserveBlockCore.Utilities
                 var timeSinceFailure = currentTime - failureInfo.lastFailTime;
 
                 // Remove from exclusion list if enough time has passed
-                if (timeSinceFailure > Globals.BlockTime * 10) // Exclude for 10 block times
+                if (timeSinceFailure > Globals.BlockTime * 100) // Exclude for 100 block times
                 {
                     Globals.FailedBlockProducers.TryRemove(address, out _);
                     return false;
