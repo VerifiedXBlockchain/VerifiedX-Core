@@ -2,56 +2,56 @@
 [![Generic badge](https://img.shields.io/badge/C%23-10%2E0-blue.svg)](https://shields.io/)
 [![Generic badge](https://img.shields.io/badge/%2ENet%20Core-6%2E0-blue.svg)](https://shields.io/)
 
-![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/ReserveBlockIO/ReserveBlock-Core)
-![GitHub repo size](https://img.shields.io/github/repo-size/ReserveBlockIO/ReserveBlock-Core)
+![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/VerifiedXBlockchain/VerifiedX-Core)
+![GitHub repo size](https://img.shields.io/github/repo-size/VerifiedXBlockchain/VerifiedX-Core)
 
-![license](https://img.shields.io/github/license/ReserveBlockIO/ReserveBlock-Core)
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/ReserveBlockIO/ReserveBlock-Core/dotnet.yml)
-![issues](https://img.shields.io/github/issues/ReserveBlockIO/ReserveBlock-Core)
+![license](https://img.shields.io/github/license/VerifiedXBlockchain/VerifiedX-Core)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/VerifiedXBlockchain/VerifiedX-Core/dotnet.yml)
+![issues](https://img.shields.io/github/issues/VerifiedXBlockchain/VerifiedX-Core)
 ![Discord](https://img.shields.io/discord/917499597692211260?label=discord)
 
 ## TestNet Branch 
-![GitHub commit activity (branch)](https://img.shields.io/github/commit-activity/m/ReserveBlockIO/ReserveBlock-Core/testnet)
-![GitHub last commit (branch)](https://img.shields.io/github/last-commit/ReserveBlockIO/ReserveBlock-Core/testnet) 
+![GitHub commit activity (branch)](https://img.shields.io/github/commit-activity/m/VerifiedXBlockchain/VerifiedX-Core/testnet)
+![GitHub last commit (branch)](https://img.shields.io/github/last-commit/VerifiedXBlockchain/VerifiedX-Core/testnet) 
 
 ## Dev Branch
-![GitHub commit activity (branch)](https://img.shields.io/github/commit-activity/m/ReserveBlockIO/ReserveBlock-Core/dev)
-![GitHub last commit (branch)](https://img.shields.io/github/last-commit/ReserveBlockIO/ReserveBlock-Core/dev) 
+![GitHub commit activity (branch)](https://img.shields.io/github/commit-activity/m/VerifiedXBlockchain/VerifiedX-Core/dev)
+![GitHub last commit (branch)](https://img.shields.io/github/last-commit/VerifiedXBlockchain/VerifiedX-Core/dev) 
 
 ##  Main Branch 
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/ReserveBlockIO/ReserveBlock-Core)
-![GitHub last commit (branch)](https://img.shields.io/github/last-commit/ReserveBlockIO/ReserveBlock-Core/main)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/m/VerifiedXBlockchain/VerifiedX-Core)
+![GitHub last commit (branch)](https://img.shields.io/github/last-commit/VerifiedXBlockchain/VerifiedX-Core/main)
 
 Last Release
 
-![GitHub Release Date](https://img.shields.io/github/release-date/ReserveBlockIO/ReserveBlock-Core)
+![GitHub Release Date](https://img.shields.io/github/release-date/VerifiedXBlockchain/VerifiedX-Core)
 
 Last Pre-Release
 
-![GitHub (Pre-)Release Date](https://img.shields.io/github/release-date-pre/ReserveBlockIO/ReserveBlock-Core)
+![GitHub (Pre-)Release Date](https://img.shields.io/github/release-date-pre/VerifiedXBlockchain/VerifiedX-Core)
 
-# ReserveBlock Core-CLI
+# VerifiedX Core-CLI
 For more information and to follow latest news go to:
-https://reserveblock.io
+https://verifiedx.io
 
-This repo is currently a work in progress. New commits pushing more of the RBX wallet are staged. Keep an eye out for releases to test the blockchain.
+This repo is currently a work in progress. New commits pushing more of the VFX wallet are staged. Keep an eye out for releases to test the blockchain.
 During January we will be committing multiples stages of the code. Please follow to get latest updates!
 
-# What is ReserveBlock?
-ReserveBlock is an NFT centric blockchain aiming to focus on NFTs and deliver a blockchain built around them. 
-ReserveBlock Foundation (reserveblock.io), is the first open-source platform allowing for the creation of a decentralized NFT Centric Blockchain, which is independently governed and democratizes NFTs for everyone.
+# What is VerifiedX?
+VerifiedX is an smart contract centric blockchain aiming to focus on SCs and deliver a blockchain built around them. 
+VerifiedX Foundation (verifiedx.io), is the first open-source platform allowing for the creation of a decentralized NFT Centric Blockchain, which is independently governed and democratizes NFTs for everyone.
 
-For more information please read the ReserverBlock whitepaper or litepaper.
+For more information please read the VerifiedX whitepaper or litepaper.
 
-### ReserveBlock Is Built on the Following ###
+### VerifiedX Is Built on the Following ###
 
-* RBX CLI Main Code REPO
+* VFX CLI Main Code REPO
 * C#
 * .Net 6.0 | https://dotnet.microsoft.com/en-us/download/dotnet/6.0
 * CLI
 * Visual Studio 2022 | https://visualstudio.microsoft.com/vs/
 
-# Contributing to ReserveBlock
+# Contributing to VerifiedX
 We love your input! We want to make contributing to this project as easy and transparent as possible, whether it's:
 
 - Reporting a bug
@@ -138,7 +138,7 @@ This document was adapted from the open-source contribution guidelines for [Face
 
 # License
 
-ReserveBlock-CLI is released under the terms of the MIT license. See [COPYING](COPYING) for more
+VerifiedX-Core is released under the terms of the MIT license. See [COPYING](COPYING) for more
 information or see https://opensource.org/licenses/MIT.
 
 ### References, Libraries, and Thank you's ###
@@ -152,5 +152,5 @@ information or see https://opensource.org/licenses/MIT.
 * Docnet.Core
 * Magick.Net-Q16
 * Swagger
-* Trillium [Source Code](https://github.com/ReserveBlockIO/Trillium)
+* Trillium [Source Code](https://github.com/VerifiedXBlockchain/VerifiedX-Trillium)
 * Bitcoin source [Source Code](https://github.com/bitcoin/bitcoin)
