@@ -138,7 +138,7 @@ namespace ReserveBlockCore.Services
                     if(aqDB != null)
                     {
                         var aqList = aqDB.Find(x => x.NextAttempt != null && x.NextAttempt <= currentDate && x.IsComplete != true && 
-                            x.AssetTransferType == AssetQueue.TransferType.Download).ToList();
+                            x.AssetTransferType == AssetQueue.TransferType.Download && x.Attempts < 4).ToList();
 
                         if(aqList.Count() > 0)
                         {
@@ -155,7 +155,7 @@ namespace ReserveBlockCore.Services
                                         var result = await NFTAssetFileUtility.DownloadAssetFromBeacon(aq.SmartContractUID, aq.Locator, "NA", aq.MD5List);
                                         if (result == "Success")
                                         {
-                                            NFTLogUtility.Log($"Download Request has been sent", "ClientCallService.DoAssetWork()");
+                                            SCLogUtility.Log($"Download Request has been sent", "ClientCallService.DoAssetWork()");
                                             aq.IsComplete = true;
                                             aq.Attempts = 0;
                                             aq.NextAttempt = DateTime.UtcNow;
@@ -163,14 +163,14 @@ namespace ReserveBlockCore.Services
                                         }
                                         else
                                         {
-                                            NFTLogUtility.Log($"Download Request has not been sent. Reason: {result}", "ClientCallService.DoAssetWork()");
+                                            SCLogUtility.Log($"Download Request has not been sent. Reason: {result}", "ClientCallService.DoAssetWork()");
                                             aqDB.UpdateSafe(aq);
                                         }
 
                                     }
                                     catch (Exception ex)
                                     {
-                                        NFTLogUtility.Log($"Error Performing Asset Download. Error: {ex.ToString()}", "ClientCallService.DoAssetWork()");
+                                        SCLogUtility.Log($"Error Performing Asset Download. Error: {ex.ToString()}", "ClientCallService.DoAssetWork()");
                                     }
                                 }
                                 Globals.NFTsDownloading = false;
@@ -614,7 +614,7 @@ namespace ReserveBlockCore.Services
                 await Task.Delay(20);
 
             var EpochTime = Globals.IsTestNet ? 1673397583280L : 1674172800000L;
-            var BeginBlock = Globals.IsTestNet ? 16L : Globals.V3Height;
+            var BeginBlock = Globals.IsTestNet ? 101013 : Globals.V3Height;
 
             var PreviousHeight = -1L;            
             var BlockDelay = Task.CompletedTask;

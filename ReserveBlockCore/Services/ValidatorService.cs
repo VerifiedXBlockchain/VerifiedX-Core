@@ -10,6 +10,10 @@ using Microsoft.AspNetCore.SignalR.Client;
 using System.Net;
 using LiteDB;
 using System.Linq;
+using ReserveBlockCore.Beacon;
+using System.Text;
+using Microsoft.AspNetCore.SignalR;
+using Newtonsoft.Json;
 
 namespace ReserveBlockCore.Services
 {
@@ -17,6 +21,105 @@ namespace ReserveBlockCore.Services
     {
         static SemaphoreSlim ValidatorMonitorServiceLock = new SemaphoreSlim(1, 1);
         static SemaphoreSlim ValidatorCountServiceLock = new SemaphoreSlim(1, 1);
+
+        public static async Task StartValidatorServer()
+        {
+            try
+            {
+                string url = "http://*:" + Globals.ValPort;
+
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    var builder = Host.CreateDefaultBuilder()
+                    .ConfigureWebHostDefaults(webBuilder =>
+                    {
+                        webBuilder.UseKestrel(options =>
+                        {
+                            // Configure Kestrel with specific limits
+                            options.Limits.MaxConcurrentConnections = 100;
+                            options.Limits.MaxConcurrentUpgradedConnections = 100;
+                            options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10MB
+                            options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+
+                            // Configure connection timeouts
+                            options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
+                            options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+
+                            // Configure backpressure
+                            options.Limits.MinRequestBodyDataRate = null;
+                            options.Limits.MinResponseDataRate = null;
+
+                            // Listen settings
+                            options.ListenAnyIP(Globals.ValPort, listenOptions =>
+                            {
+                                listenOptions.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1AndHttp2;
+                                listenOptions.UseConnectionLogging();
+                            });
+                        })
+                        .UseStartup<StartupP2PValidator>()
+                        .UseUrls(url)
+                        .ConfigureLogging(loggingBuilder =>
+                        {
+                            loggingBuilder.ClearProviders();
+                        });
+                        
+                    });
+
+                    _ = builder.RunConsoleAsync();
+
+                    //var app = builder.Build();
+                    //_ = app.RunAsync();
+
+                    //await Task.Delay(-1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+            }
+        }
+
+        public static async Task StartupValidatorProcess()
+        {
+            if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                while (!Globals.IsChainSynced)
+                {
+                    await Task.Delay(1000);
+                }
+                _ = Task.Run(() => { StartValidatorServer(); });
+                //_ = ValidatorService.StartValidatorServer();
+                _ = StartupValidators();
+                _ = Task.Run(BlockHeightCheckLoop);
+            }
+        }
+
+        internal static async Task StartupValidators()
+        {
+            //wait 25 seconds
+            await Task.Delay(new TimeSpan(0,0,5));
+            while (true)
+            {
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                    return;
+
+                var startupCount = Globals.ValidatorNodes.Count / 2 + 1;
+                var delay = Globals.ValidatorNodes.Count < startupCount ? new TimeSpan(0,0,10) : new TimeSpan(0,1,0);
+
+                try
+                {
+                    var ConnectedCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
+                    if (ConnectedCount < Globals.MaxValPeers)
+                        await P2PValidatorClient.ConnectToValidators();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.ToString());
+                }
+
+                await Task.Delay(delay);
+            }
+        }
         public static async void DoValidate()
         {
             try
@@ -112,25 +215,38 @@ namespace ReserveBlockCore.Services
             string output = "";
             Validators validator = new Validators();
 
-            if (account == null) { throw new ArgumentNullException(nameof(account)); }
+            if(Globals.V4Height == Globals.LastBlock.Height + 1)
+            {
+                await GenesisValidatorStart(account, uName);
+                return "Account found and activated as a validator! Thank you for service to the network!";
+            }
+
+            var valCount = Globals.Nodes.Values.Where(x => x.IsValidator).Count();
+            valCount = valCount == 0 ? Globals.ValidatorNodes.Count : valCount;
+            if(valCount == 0)
+            {
+                return "Validator connection count is currently zero. Please stop and restart wallet to attempt to reconnect to validators."; 
+            }    
+
+            if (account == null) 
+            {
+                return "Account not found locally. Please ensure the account specified is stored locally.";
+            }
             else
             {
                 var sTreiAcct = StateData.GetSpecificAccountStateTrei(account.Address);
 
                 if (sTreiAcct == null)
                 {
-                    output = "Account not found in the State Trei. Please send funds to desired account and wait for at least 1 confirm.";
-                    return output;
+                    return "Account not found in the State Trei. Please send funds to desired account and wait for at least 1 confirm.";
                 }
                 if (sTreiAcct != null && sTreiAcct.Balance < ValidatorRequiredAmount())
                 {
-                    output = $"Account Found, but does not meet the minimum of {ValidatorRequiredAmount()} RBX. Please send funds to get account balance to {Globals.ValidatorRequiredRBX} RBX.";
-                    return output;
+                    return $"Account Found, but does not meet the minimum of {ValidatorRequiredAmount()} RBX. Please send funds to get account balance to {Globals.ValidatorRequiredRBX} RBX.";
                 }
                 if (!string.IsNullOrWhiteSpace(uName) && UniqueNameCheck(uName) == false)
                 {
-                    output = "Unique name has already been taken. Please choose another.";
-                    return output;
+                    return "Unique name has already been taken. Please choose another.";
                 }
                 if (sTreiAcct != null && sTreiAcct.Balance >= ValidatorRequiredAmount())
                 {
@@ -141,8 +257,7 @@ namespace ReserveBlockCore.Services
 
                     if (verifySig == false)
                     {
-                        output = "Signature check has failed. Please provide correct private key for public address: " + account.Address;
-                        return output;
+                        return "Signature check has failed. Please provide correct private key for public address: " + account.Address;
                     }
 
                     //need to request validator list from someone. 
@@ -151,17 +266,15 @@ namespace ReserveBlockCore.Services
                     var IsThereValidator = accounts.FindOne(x => x.IsValidating == true);
                     if (IsThereValidator != null)
                     {
-                        output = "This wallet already has a validator active on it. You can only have 1 validator active per wallet: " + IsThereValidator.Address;
-                        return output;
+                        return "This wallet already has a validator active on it. You can only have 1 validator active per wallet: " + IsThereValidator.Address;
                     }
 
                     var validatorTable = Validators.Validator.GetAll();
 
-                    var validatorCount = validatorTable.FindAll().Count();
+                    var validatorCount = validatorTable.Query().Where(x => x.NodeIP != "SELF").Count();
                     if (validatorCount > 0)
                     {
-                        output = "Account is already a validator";
-                        return output;
+                        return "Account is already a validator";
                     }
                     else
                     {
@@ -187,16 +300,22 @@ namespace ReserveBlockCore.Services
                         var saveResult = accountTable.UpdateSafe(account);
 
                         Globals.ValidatorAddress = validator.Address;
+                        Globals.ValidatorPublicKey = account.PublicKey;
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 
-                        if(!argsPassed)
-                            _ = StartupService.GetAdjudicatorPool();
+                        if (!argsPassed)
+                        {
+                            _ = StartValidatorServer();
+                            _ = StartupValidators();
+                        }
+
+                        //TODO: start performing some looped actions
                     }
                 }
                 else
                 {
-                    output = "Insufficient balance to validate.";
+                    return "Insufficient balance to validate.";
                 }
             }
 
@@ -222,7 +341,7 @@ namespace ReserveBlockCore.Services
                 var validators = Validators.Validator.GetAll();
                 validators.DeleteAllSafe();
 
-                await P2PClient.DisconnectAdjudicators();
+                await P2PValidatorClient.DisconnectValidators();
 
 
                 Console.WriteLine("Validator database records have been reset.");
@@ -245,6 +364,7 @@ namespace ReserveBlockCore.Services
                     valAccount.IsValidating = false;
                     accounts.UpdateSafe(valAccount);
                     Globals.ValidatorAddress = "";
+                    Globals.ValidatorPublicKey = "";
                     return valAccount.Address;
                 }
             }
@@ -256,6 +376,31 @@ namespace ReserveBlockCore.Services
             return null;
         }
 
+        public static async Task UpdateBlockMemory(long height)
+        {
+            try
+            {
+                Globals.BlockQueueBroadcasted.TryRemove(height, out _);
+                Globals.NetworkBlockQueue.TryRemove(height, out _);
+                Globals.BackupProofs.TryRemove(height, out _);
+                Globals.WinningProofs.TryRemove(height, out _);
+                Globals.FinalizedWinner.TryRemove(height, out _);
+            }
+            catch(Exception ex) { ErrorLogUtility.LogError($"Error: {ex}", "ValidatorService.UpdateBlockMemory()"); }
+        }
+
+        public static async Task UpdateProofBlockHashDictionary(long currentHeight, string hash)
+        {
+            if(currentHeight % 7 == 0)
+            {
+                Globals.ProofBlockHashDict.TryAdd(currentHeight + 7, hash);
+                if (Globals.ProofBlockHashDict.Count() > 3)
+                {
+                    var oldestRecord = Globals.ProofBlockHashDict.OrderBy(kv => kv.Key).FirstOrDefault();
+                    Globals.ProofBlockHashDict.TryRemove(oldestRecord.Key, out _);
+                }
+            }
+        }
 
         public static async Task PerformErrorCountCheck()
         {
@@ -348,8 +493,6 @@ namespace ReserveBlockCore.Services
 
         public static async void StopValidating(Validators validator)
         {           
-            //Validators.Validator.GetAll().DeleteSafe(validator.Id);
-
             var accounts = AccountData.GetAccounts();
             var myAccount = accounts.FindOne(x => x.Address == validator.Address);
 
@@ -359,10 +502,9 @@ namespace ReserveBlockCore.Services
             var validators = Validators.Validator.GetAll();
             validators.Delete(validator.Id);
 
-            await P2PClient.DisconnectAdjudicators();
+            await P2PValidatorClient.DisconnectValidators();
 
-            ValidatorLogUtility.Log($"Funds have dropped below {ValidatorService.ValidatorRequiredAmount()} RBX. Removing from pool.", "ValidatorService.StopValidating()");
-
+            ValidatorLogUtility.Log($"Validating has stopped.", "ValidatorService.StopValidating()");
         }
 
         public static int ValidatorRequiredAmount()
@@ -371,9 +513,13 @@ namespace ReserveBlockCore.Services
             {
                 return 1000;
             }
+            else if(Globals.LastBlock.Height < Globals.V2ValHeight)
+            {
+                return 12_000;
+            }
             else
             {
-                return 12000;
+                return 50_000;
             }
         }
 
@@ -401,6 +547,7 @@ namespace ReserveBlockCore.Services
                     validators.DeleteAllSafe();
 
                     Globals.ValidatorAddress = "";
+                    Globals.ValidatorPublicKey = "";
 
                     await P2PClient.DisconnectAdjudicators();
                 }
@@ -678,14 +825,152 @@ namespace ReserveBlockCore.Services
 
         public static async Task UpdateActiveValidators(Block? block)
         {
-            if (block != null)
+            try
             {
-                if (!Globals.ActiveValidatorDict.ContainsKey(block.Validator))
-                    Globals.ActiveValidatorDict.TryAdd(block.Validator, block.Timestamp);
+                if (block != null)
+                {
+                    if (!Globals.ActiveValidatorDict.ContainsKey(block.Validator))
+                        Globals.ActiveValidatorDict.TryAdd(block.Validator, block.Timestamp);
+                    else
+                        Globals.ActiveValidatorDict[block.Validator] = block.Timestamp;
+                }
+            }
+            catch(Exception ex) { ErrorLogUtility.LogError($"Error: {ex}", "ValidatorService.UpdateActiveValidators()"); }
+            
+        }
+
+        private static async Task<string> GenesisValidatorStart(Account account, string uName = "")
+        {
+            string output = "";
+            Validators validator = new Validators();
+
+            if (account == null)
+            {
+                return "Account not found locally. Please ensure the account specified is stored locally.";
+            }
+            else
+            {
+                var sTreiAcct = StateData.GetSpecificAccountStateTrei(account.Address);
+
+                if (sTreiAcct == null)
+                {
+                    return "Account not found in the State Trei. Please send funds to desired account and wait for at least 1 confirm.";
+                }
+                if (sTreiAcct != null && sTreiAcct.Balance < ValidatorRequiredAmount())
+                {
+                    return $"Account Found, but does not meet the minimum of {ValidatorRequiredAmount()} RBX. Please send funds to get account balance to {Globals.ValidatorRequiredRBX} RBX.";
+                }
+                if (!string.IsNullOrWhiteSpace(uName) && UniqueNameCheck(uName) == false)
+                {
+                    return "Unique name has already been taken. Please choose another.";
+                }
+                if (sTreiAcct != null && sTreiAcct.Balance >= ValidatorRequiredAmount())
+                {
+                    //validate account with signature check
+                    var signature = SignatureService.CreateSignature(account.Address, AccountData.GetPrivateKey(account), account.PublicKey);
+
+                    var verifySig = SignatureService.VerifySignature(account.Address, account.Address, signature);
+
+                    if (verifySig == false)
+                    {
+                        return "Signature check has failed. Please provide correct private key for public address: " + account.Address;
+                    }
+
+                    //need to request validator list from someone. 
+
+                    var accounts = AccountData.GetAccounts();
+                    var IsThereValidator = accounts.FindOne(x => x.IsValidating == true);
+                    if (IsThereValidator != null)
+                    {
+                        return "This wallet already has a validator active on it. You can only have 1 validator active per wallet: " + IsThereValidator.Address;
+                    }
+
+                    var validatorTable = Validators.Validator.GetAll();
+
+                    var validatorCount = validatorTable.Query().Where(x => x.NodeIP != "SELF").Count();
+                    if (validatorCount > 0)
+                    {
+                        return "Account is already a validator";
+                    }
+                    else
+                    {
+
+                        //add total num of validators to block
+                        validator.NodeIP = "SELF"; //this is as new as other users will fill this in once connected
+                        validator.Amount = account.Balance;
+                        validator.Address = account.Address;
+                        validator.EligibleBlockStart = -1;
+                        validator.UniqueName = uName == "" ? Guid.NewGuid().ToString() : uName;
+                        validator.IsActive = true;
+                        validator.Signature = signature;
+                        validator.FailCount = 0;
+                        validator.Position = validatorTable.FindAll().Count() + 1;
+                        validator.NodeReferenceId = BlockchainData.ChainRef;
+                        validator.WalletVersion = Globals.CLIVersion;
+                        validator.LastChecked = DateTime.UtcNow;
+
+                        validatorTable.InsertSafe(validator);
+
+                        account.IsValidating = true;
+                        var accountTable = AccountData.GetAccounts();
+                        var saveResult = accountTable.UpdateSafe(account);
+
+                        Globals.ValidatorAddress = validator.Address;
+                        Globals.ValidatorPublicKey = account.PublicKey;
+
+                        output = "Account found and activated as a validator! Thank you for service to the network!";
+
+                        _ = StartValidatorServer();
+                        _ = StartupValidators();
+
+                    }
+                }
                 else
-                    Globals.ActiveValidatorDict[block.Validator] = block.Timestamp;
+                {
+                    return "Insufficient balance to validate.";
+                }
+            }
+
+            return output;
+        }
+
+        #region Block Height Check
+        public static async Task BlockHeightCheckLoop()
+        {
+            while (true)
+            {
+                try
+                {
+                    while (!Globals.ValidatorNodes.Any())
+                        await Task.Delay(20);
+
+                    await P2PValidatorClient.UpdateNodeHeights();
+
+                    var maxHeight = Globals.ValidatorNodes.Values.Select(x => x.NodeHeight).OrderByDescending(x => x).FirstOrDefault();
+                    if (maxHeight > Globals.LastBlock.Height)
+                    {
+                        P2PValidatorClient.UpdateMaxHeight(maxHeight);
+                        _ = BlockDownloadService.GetAllBlocks();
+                    }
+                    else
+                        P2PValidatorClient.UpdateMaxHeight(maxHeight);
+
+                    var MaxHeight = P2PValidatorClient.MaxHeight();
+
+                    foreach (var node in Globals.ValidatorNodes.Values)
+                    {
+                        if (node.NodeHeight < MaxHeight - 3)
+                            await P2PValidatorClient.RemoveNode(node);
+                    }
+
+                }
+                catch { }
+
+                await Task.Delay(10000);
             }
         }
+
+        #endregion
 
     }
 }

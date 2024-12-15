@@ -26,6 +26,9 @@ using System.Data;
 using System.Diagnostics;
 using ReserveBlockCore.DST;
 using ReserveBlockCore.Models.DST;
+using ReserveBlockCore.Arbiter;
+using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.Bitcoin.Models;
 
 namespace ReserveBlockCore.Services
 {
@@ -433,6 +436,75 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        public static async Task GetArbiters()
+        {
+            if(Globals.IsTestNet)
+            {
+                Globals.Arbiters = new List<Models.Arbiter>
+                {
+                    new Models.Arbiter {
+                        Address = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+                        SigningAddress = "xPqVbS8X6X9ofeD5F2VsEV4KHBeMZoVawa",
+                        Generation = 0,
+                        IPAddress = "66.94.124.2",
+                        StartOfService = 1715745443,
+                        Title = "Arbiter1"
+                    },
+                    new Models.Arbiter {
+                        Address = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
+                        SigningAddress = "",
+                        Generation = 0,
+                        IPAddress = "144.126.156.102",
+                        StartOfService = 1715745443,
+                        Title = "Arbiter2"
+                    }
+                };
+            }
+            else
+            {
+                //TODO: Call to SEED/Peers
+                //TODO.2: Create initial seeding protocol.
+                
+            }
+        }
+
+        public static void ArbiterCheck()
+        {
+            if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                if (Globals.Arbiters.Any(x => x.Address == Globals.ValidatorAddress))
+                {
+                    Globals.IsArbiter = true;
+                    //TODO: Create Address
+                    var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
+                    if(account != null)
+                    {
+                        var signingAccount = AccountData.GenerateArbiterSigningAccount(account.GetKey);
+                        Globals.ArbiterSigningAddress = signingAccount;
+                    }
+                    else
+                    {
+                        Globals.IsArbiter = false;
+                    }
+                }
+            }
+        }
+
+        internal static async Task StartArbiter()
+        {
+            try
+            {
+                if (Globals.IsArbiter)
+                {
+                    _ = ArbiterServer.Start();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+            }
+        }
+
         internal static async Task StartDSTServer()
         {
             try
@@ -526,8 +598,8 @@ namespace ReserveBlockCore.Services
                     //add testnet beacons
                     List<Beacons> beaconList = new List<Beacons>
                     {
-                        new Beacons { IPAddress = "173.254.253.106", Name = "Lily Beacon TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
-                        new Beacons { IPAddress = "162.251.121.150", Name = "Lotus Beacon V2 TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                        new Beacons { IPAddress = "66.94.124.2", Name = "Lily Beacon TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                        new Beacons { IPAddress = "144.126.156.102", Name = "Lotus Beacon V2 TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
                     };
 
                     foreach (var beacon in beaconList)
@@ -598,12 +670,14 @@ namespace ReserveBlockCore.Services
                 if (myAccountTest != null)
                 {
                     Globals.ValidatorAddress = myAccountTest.Address;
+                    Globals.ValidatorPublicKey = myAccountTest.PublicKey;
                 }
             }
             var myAccount = accounts.FindOne(x => x.IsValidating == true && x.Address != Globals.GenesisAddress);
             if (myAccount != null)
             {
                 Globals.ValidatorAddress = myAccount.Address;
+                Globals.ValidatorPublicKey = myAccount.PublicKey;
             }
         }
 
@@ -617,6 +691,7 @@ namespace ReserveBlockCore.Services
             {
                 var valResult = await ValidatorService.StartValidating(myAccount, uname, true);
                 Globals.ValidatorAddress = myAccount.Address;
+                Globals.ValidatorPublicKey = myAccount.PublicKey;
             }
         }
 
@@ -685,11 +760,11 @@ namespace ReserveBlockCore.Services
                 if (Globals.AdjBench.TryGetValue(signer.Key, out var bench))
                 {                    
                     var url = "http://" + bench.IPAddress + ":" + Globals.Port + "/adjudicator";
-                    if (await P2PClient.ConnectAdjudicator(url, validator.Address, time, validator.UniqueName, signature))
-                    {
-                        _ = UpdateBenchIpAndSigners();
-                        break;
-                    }                    
+                    //if (await P2PClient.ConnectAdjudicator(url, validator.Address, time, validator.UniqueName, signature))
+                    //{
+                    //    _ = UpdateBenchIpAndSigners();
+                    //    break;
+                    //}                    
                 }
 
             }                       
@@ -734,6 +809,16 @@ namespace ReserveBlockCore.Services
             var blockChain = BlockchainData.GetBlocks();
             Globals.MemBlocks = new ConcurrentDictionary<string, long>(blockChain.Find(LiteDB.Query.All(LiteDB.Query.Descending)).Take(400)
                 .Select(x => x.Transactions.Select(y => new { y.Hash, x.Height})).SelectMany(x => x).ToDictionary(x => x.Hash, x => x.Height));
+        }
+
+        internal static void StartupBlockHashes()
+        {
+            var blockChain = BlockchainData.GetBlocks();
+            Globals.BlockHashes = new ConcurrentDictionary<long, string>(
+                blockChain.Find(LiteDB.Query.All(LiteDB.Query.Descending)).Take(400)
+                    .Select(x => new { x.Hash, x.Height })
+                    .ToDictionary(x => x.Height, x => x.Hash)
+                );
         }
 
         public static async Task ConnectToConsensusNodes()
@@ -893,7 +978,7 @@ namespace ReserveBlockCore.Services
                                 continue;
 
                             var url = "http://" + NewAdjudicator.IpAddress + ":" + Globals.Port + "/adjudicator";
-                            await P2PClient.ConnectAdjudicator(url, validator.Address, time, validator.UniqueName, signature);
+                            //await P2PClient.ConnectAdjudicator(url, validator.Address, time, validator.UniqueName, signature);
                         }
 
                         if (!Globals.AdjNodes.Any())
@@ -986,10 +1071,15 @@ namespace ReserveBlockCore.Services
 
                     }
 
+                    var highestReportedBlock = Globals.Nodes.Values.OrderByDescending(x => x.NodeHeight).FirstOrDefault();
+
                     var lastBlock = Globals.LastBlock;
                     var currentTimestamp = TimeUtil.GetTime(-90);
 
-                    if(lastBlock.Timestamp >= currentTimestamp || Globals.AdjudicateAccount != null)
+                    if ((lastBlock.Height - 5) > highestReportedBlock?.NodeHeight)
+                        continue;
+
+                    if((lastBlock.Timestamp >= currentTimestamp || Globals.IsTestNet) && (lastBlock.Height + 2 >= highestReportedBlock?.NodeHeight))
                     {
                         DateTime endTime = DateTime.UtcNow;
                         ConsoleWriterService.Output($"Block downloads finished on: {endTime.ToLocalTime()}");
@@ -1272,6 +1362,95 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        internal static async Task UpdateSCOwnership()
+        {
+            var scList = SmartContractMain.SmartContractData.GetSmartContractList();
+            var vBTCList = await TokenizedBitcoin.GetTokenizedList();
+            if(scList != null)
+            {
+                foreach(var sc in scList)
+                {
+                    var scUID = sc.SmartContractUID;
+                    var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                    if(scStateTreiRec != null)
+                    {
+                        var owner = scStateTreiRec.OwnerAddress;
+                        if(owner != null)
+                        {
+                            var isReserve = scStateTreiRec.OwnerAddress.StartsWith("xRBX") ? true : false;
+
+                            var account = AccountData.GetSingleAccount(scStateTreiRec.OwnerAddress);
+                            var resAccount = ReserveAccount.GetReserveAccountSingle(scStateTreiRec.OwnerAddress);
+
+                            if (account == null && resAccount == null)
+                            {
+                                //not owner
+                                if (sc.Features != null)
+                                {
+                                    if (sc.Features.Exists(x => x.FeatureName == FeatureName.Evolving))
+                                    {
+                                        if (scStateTreiRec != null)
+                                        {
+                                            if (scStateTreiRec.MinterAddress != null)
+                                            {
+                                                var evoOwner = AccountData.GetAccounts().FindOne(x => x.Address == scStateTreiRec.MinterAddress);
+                                                if (evoOwner == null)
+                                                {
+                                                    SmartContractMain.SmartContractData.DeleteSmartContract(scUID);//deletes locally if they transfer it.
+                                                }
+                                            }
+                                            else
+                                            {
+                                                SmartContractMain.SmartContractData.DeleteSmartContract(scUID);//deletes locally if they transfer it.
+                                            }
+                                        }
+                                        else
+                                        {
+                                            SmartContractMain.SmartContractData.DeleteSmartContract(scUID);//deletes locally if they transfer it.
+                                        }
+                                    }
+                                    if (sc.Features.Exists(x => x.FeatureName == FeatureName.Tokenization && x.FeatureName != FeatureName.Evolving))
+                                    {
+                                        SmartContractMain.SmartContractData.DeleteSmartContract(scUID);//deletes locally if they transfer it.
+                                        TokenizedBitcoin.DeleteSmartContract(scUID);
+                                    }
+                                    else
+                                    {
+                                        SmartContractMain.SmartContractData.DeleteSmartContract(scUID);//deletes locally if they transfer it.
+                                    }
+                                }
+                                else
+                                {
+                                    SmartContractMain.SmartContractData.DeleteSmartContract(scUID);//deletes locally if they transfer it.
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if(vBTCList != null)
+            {
+                foreach (var vBTC in vBTCList)
+                {
+                    var scUID = vBTC.SmartContractUID;
+                    var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                    if (scStateTreiRec != null)
+                    {
+                        var owner = scStateTreiRec.OwnerAddress;
+
+                        var account = AccountData.GetSingleAccount(owner);
+                        var resAccount = ReserveAccount.GetReserveAccountSingle(owner);
+                        if (account == null && resAccount == null)
+                        {
+                            SmartContractMain.SmartContractData.DeleteSmartContract(scUID);//deletes locally if they transfer it.
+                            TokenizedBitcoin.DeleteSmartContract(scUID);
+                        }
+                    }
+                }
+            }
+        }
+
         internal static void DisplayValidatorAddress()
         {
             var accounts = AccountData.GetAccounts();
@@ -1279,6 +1458,7 @@ namespace ReserveBlockCore.Services
             if (myAccount != null)
             {
                 Globals.ValidatorAddress = myAccount.Address;
+                Globals.ValidatorPublicKey = myAccount.PublicKey;
                 LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
             }
         }
@@ -1330,21 +1510,8 @@ namespace ReserveBlockCore.Services
                 await delay;
             }
         }
-        internal static async Task<bool> DownloadBlocks() //download genesis block
-        {
-            var peersConnected = await P2PClient.ArePeersConnected();
 
-            if (peersConnected)
-            {
-                if(Globals.LastBlock.Height == -1)
-                {
-                    //This just gets first few blocks to start chain off.
-                    Console.WriteLine("Downloading Blocks First.");
-                    await BlockDownloadService.GetAllBlocks();         
-                }
-            }
-            return true;
-        }
+
 
         internal static void StartupMenu()
         {
@@ -1409,6 +1576,7 @@ namespace ReserveBlockCore.Services
                 Console.WriteLine("|======================================|");
                 Console.WriteLine("|type /help for menu options           |");
                 Console.WriteLine("|type /menu to come back to main area  |");
+                Console.WriteLine("|type /btc to access the bitcoin menu  |");
                 Console.WriteLine("|======================================|");
 
                 if (Globals.DuplicateAdjAddr)
@@ -1422,8 +1590,15 @@ namespace ReserveBlockCore.Services
                 }
                 if (!Globals.UpToDate)
                 {
-                    AnsiConsole.MarkupLine("[red]|          **CLI Is Outdated**         |[/]");
-                    AnsiConsole.MarkupLine("[red]|Please type /update to download latest|[/]");
+                    if(Globals.IsTestNet)
+                    {
+                        AnsiConsole.MarkupLine($"[blue]|Testnet Build - {Globals.CLIVersion}        |[/]");
+                        AnsiConsole.MarkupLine($"[blue]|~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~|[/]");
+                    }
+                    else
+                    {
+
+                    }
                 }
                 else
                 {

@@ -253,9 +253,12 @@ namespace ReserveBlockCore.Controllers
                 }
                 else
                 {
+                    //LiteDB.LiteException: 'Any/All requires simple parameter on left side. Eg: `
+                    //x => x.Phones.Select(p => p.Number).Any(n => n > 5)`'
                     scs = SmartContractMain.SmartContractData.GetSCs()
-                   .FindAll()
-                   .ToList();
+                    .Find(x => x.Features == null ||
+                        !x.Features.Where(y => y != null && y.FeatureName == FeatureName.Tokenization).Any())
+                    .ToList();
                 }
 
                 var scStateTrei = SmartContractStateTrei.GetSCST();
@@ -553,6 +556,30 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// GetSmartContractsState
+        /// </summary>
+        /// <param name="address"></param>
+        /// <returns></returns>
+        [HttpGet("GetSmartContractsState/{**scUID}")]
+        public async Task<string> GetSmartContractsState(string scUID)
+        {
+            string output = "";
+            var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+
+            if (scState != null)
+            {
+                output = JsonConvert.SerializeObject(new { Success = true, Message = $"Smart Contracts Found", SCState = scState }, Formatting.Indented);
+            }
+            else
+            {
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"No Smart Contracts Found" }, Formatting.Indented);
+            }
+
+            return output;
+
+        }
+
+        /// <summary>
         /// Returns the locator beacon information for a smart contract assets.
         /// </summary>
         /// <param name="scUID"></param>
@@ -703,11 +730,11 @@ namespace ReserveBlockCore.Controllers
 
                 if (scMain != null)
                 {
-                    NFTLogUtility.Log($"Creating Smart Contract: {scMain.SmartContractUID}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData)");
+                    SCLogUtility.Log($"Creating Smart Contract: {scMain.SmartContractUID}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData)");
                 }
                 else
                 {
-                    NFTLogUtility.Log($"scMain is null", "SCV1Controller.CreateSmartContract([FromBody] object jsonData) - Line 190");
+                    SCLogUtility.Log($"scMain is null", "SCV1Controller.CreateSmartContract([FromBody] object jsonData) - Line 190");
                     throw new Exception("Smart Contract was null.");
                 }
                 try
@@ -740,7 +767,6 @@ namespace ReserveBlockCore.Controllers
                     scReturnData.Success = true;
                     scReturnData.SmartContractCode = result.Item1;
                     scReturnData.SmartContractMain = result.Item2;
-                    SmartContractMain.SmartContractData.SaveSmartContract(result.Item2, result.Item1);
 
                     var txData = "";
 
@@ -765,7 +791,7 @@ namespace ReserveBlockCore.Controllers
                         Amount = 0.0M,
                         Fee = 0,
                         Nonce = AccountStateTrei.GetNextNonce(scMain.MinterAddress),
-                        TransactionType = TransactionType.NFT_MINT,
+                        TransactionType = !result.Item3 ? TransactionType.NFT_MINT : TransactionType.FTKN_MINT,
                         Data = txData
                     };
 
@@ -774,8 +800,12 @@ namespace ReserveBlockCore.Controllers
 
                     nTx.Build();
 
-
                     var checkSize = await TransactionValidatorService.VerifyTXSize(nTx);
+
+                    if(!checkSize)
+                        throw new Exception("Image is too large for token image. Must be 25kb or less.");
+
+                    SmartContractMain.SmartContractData.SaveSmartContract(result.Item2, result.Item1);
 
                     var scInfo = new[]
                     {
@@ -783,11 +813,11 @@ namespace ReserveBlockCore.Controllers
                     };
                     var json = JsonConvert.SerializeObject(scInfo, Formatting.Indented);
                     output = json;
-                    NFTLogUtility.Log($"Smart Contract Creation Success: {scMain.SmartContractUID}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData)");
+                    SCLogUtility.Log($"Smart Contract Creation Success: {scMain.SmartContractUID}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData)");
                 }
                 catch (Exception ex)
                 {
-                    NFTLogUtility.Log($"Failed to create TX for Smartcontract. Error: {ex.ToString()}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData) - Line 231 catch");
+                    SCLogUtility.Log($"Failed to create TX for Smartcontract. Error: {ex.ToString()}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData) - Line 231 catch");
                     scReturnData.Success = false;
                     scReturnData.SmartContractCode = "Failure";
                     scReturnData.SmartContractMain = scMain;
@@ -803,7 +833,7 @@ namespace ReserveBlockCore.Controllers
             }
             catch (Exception ex)
             {
-                NFTLogUtility.Log($"Failed to create smart contract. Error Message: {ex.ToString()}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData) - Line 247 catch");
+                SCLogUtility.Log($"Failed to create smart contract. Error Message: {ex.ToString()}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData) - Line 247 catch");
                 output = $"Error - {ex.ToString()}. Please Try Again...";
             }
 
@@ -826,7 +856,7 @@ namespace ReserveBlockCore.Controllers
             if (scMain.IsPublished == true)
             {
                 output = "This NFT has already been published";
-                NFTLogUtility.Log($"This NFT has already been published", "SCV1Controller.MintSmartContract(string id)");
+                SCLogUtility.Log($"This NFT has already been published", "SCV1Controller.MintSmartContract(string id)");
             }
             else
             {
@@ -834,12 +864,12 @@ namespace ReserveBlockCore.Controllers
                 if (scTx == null)
                 {
                     output = "Failed to publish smart contract: " + scMain.Name + ". Id: " + id;
-                    NFTLogUtility.Log($"Failed to publish smart contract: {scMain.SmartContractUID}", "SCV1Controller.MintSmartContract(string id)");
+                    SCLogUtility.Log($"Failed to publish smart contract: {scMain.SmartContractUID}", "SCV1Controller.MintSmartContract(string id)");
                 }
                 else
                 {
                     output = "Smart contract has been published to mempool";
-                    NFTLogUtility.Log($"Smart contract has been published to mempool : {scMain.SmartContractUID}", "SCV1Controller.MintSmartContract(string id)");
+                    SCLogUtility.Log($"Smart contract has been published to mempool : {scMain.SmartContractUID}", "SCV1Controller.MintSmartContract(string id)");
                 }
             }
 
@@ -872,7 +902,7 @@ namespace ReserveBlockCore.Controllers
                         if (!Globals.Beacons.Any())
                         {
                             output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "You do not have any beacons stored." });
-                            NFTLogUtility.Log("Error - You do not have any beacons stored.", "SCV1Controller.TransferNFT()");
+                            SCLogUtility.Log("Error - You do not have any beacons stored.", "SCV1Controller.TransferNFT()");
                             return output;
                         }
                         else
@@ -883,7 +913,7 @@ namespace ReserveBlockCore.Controllers
                                 if(!beaconConnectionResult)
                                 {
                                     output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "You failed to connect to any beacons." });
-                                    NFTLogUtility.Log("Error - You failed to connect to any beacons.", "SCV1Controller.TransferNFT()");
+                                    SCLogUtility.Log("Error - You failed to connect to any beacons.", "SCV1Controller.TransferNFT()");
                                     return output;
                                 }
                             }
@@ -891,7 +921,7 @@ namespace ReserveBlockCore.Controllers
                             if(connectedBeacon == null)
                             {
                                 output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "You have lost connection to beacons. Please attempt to resend." });
-                                NFTLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "SCV1Controller.TransferNFT()");
+                                SCLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "SCV1Controller.TransferNFT()");
                                 return output;
                             }
                             toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
@@ -900,13 +930,13 @@ namespace ReserveBlockCore.Controllers
                             var assets = await NFTAssetFileUtility.GetAssetListFromSmartContract(sc);
                             var md5List = await MD5Utility.GetMD5FromSmartContract(sc);
 
-                            NFTLogUtility.Log($"Sending the following assets for upload: {md5List}", "SCV1Controller.TransferNFT()");
+                            SCLogUtility.Log($"Sending the following assets for upload: {md5List}", "SCV1Controller.TransferNFT()");
 
                             bool result = false;
                             if (localAddress == null)
                             {
                                 result = await P2PClient.BeaconUploadRequest(connectedBeacon, assets, sc.SmartContractUID, toAddress, md5List).WaitAsync(new TimeSpan(0,0,10));
-                                NFTLogUtility.Log($"NFT Beacon Upload Request Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
+                                SCLogUtility.Log($"NFT Beacon Upload Request Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
                             }
                             else
                             {
@@ -917,7 +947,7 @@ namespace ReserveBlockCore.Controllers
                             {
                                 var aqResult = AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
                                     AssetQueue.TransferType.Upload);
-                                NFTLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
+                                SCLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
 
                                 if (aqResult)
                                 {
@@ -925,20 +955,20 @@ namespace ReserveBlockCore.Controllers
                                         
                                     var success = JsonConvert.SerializeObject(new {Result = "Success", Message = "NFT Transfer has been started." });
                                     output = success;
-                                    NFTLogUtility.Log($"NFT Process Completed in CLI. SCUID: {sc.SmartContractUID}. Response: {output}", "SCV1Controller.TransferNFT()");
+                                    SCLogUtility.Log($"NFT Process Completed in CLI. SCUID: {sc.SmartContractUID}. Response: {output}", "SCV1Controller.TransferNFT()");
                                     return output;
                                 }
                                 else
                                 {
                                     output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "Failed to add upload to Asset Queue. Please check logs for more details." });
-                                    NFTLogUtility.Log($"Failed to add upload to Asset Queue - TX terminated. Data: scUID: {sc.SmartContractUID} | toAddres: {toAddress} | Locator: {connectedBeacon.Beacons.BeaconLocator} | MD5List: {md5List} | backupURL: {backupURL}", "SCV1Controller.TransferNFT()");
+                                    SCLogUtility.Log($"Failed to add upload to Asset Queue - TX terminated. Data: scUID: {sc.SmartContractUID} | toAddres: {toAddress} | Locator: {connectedBeacon.Beacons.BeaconLocator} | MD5List: {md5List} | backupURL: {backupURL}", "SCV1Controller.TransferNFT()");
                                 }
 
                             }
                             else
                             {
                                 output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Beacon upload failed. Result was : {result}" });
-                                NFTLogUtility.Log($"Beacon upload failed. Result was : {result}", "SCV1Controller.TransferNFT()");
+                                SCLogUtility.Log($"Beacon upload failed. Result was : {result}", "SCV1Controller.TransferNFT()");
                             }
                         }
                     }
@@ -955,7 +985,7 @@ namespace ReserveBlockCore.Controllers
             catch(Exception ex)
             {
                 output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error Occurred. Error: {ex.ToString()}" });
-                NFTLogUtility.Log($"Unknown Error Transfering NFT. Error: {ex.ToString()}", "SCV1Controller.TransferNFT()");
+                SCLogUtility.Log($"Unknown Error Transfering NFT. Error: {ex.ToString()}", "SCV1Controller.TransferNFT()");
             }
             
             
@@ -1018,7 +1048,7 @@ namespace ReserveBlockCore.Controllers
 
                     if (!Globals.Beacons.Any())
                     {
-                        NFTLogUtility.Log("Error - You do not have any beacons stored.", "SCV1Controller.TransferNFT()");
+                        SCLogUtility.Log("Error - You do not have any beacons stored.", "SCV1Controller.TransferNFT()");
                         return JsonConvert.SerializeObject(new { Success = false, Message = "You do not have any beacons stored." });
                     }
 
@@ -1027,14 +1057,14 @@ namespace ReserveBlockCore.Controllers
                         var beaconConnectionResult = await BeaconUtility.EstablishBeaconConnection(true, false);
                         if (!beaconConnectionResult)
                         {
-                            NFTLogUtility.Log("Error - You failed to connect to any beacons.", "SCV1Controller.TransferNFT()");
+                            SCLogUtility.Log("Error - You failed to connect to any beacons.", "SCV1Controller.TransferNFT()");
                             return  JsonConvert.SerializeObject(new { Success = false, Message = "You failed to connect to any beacons." });
                         }
                     }
                     var connectedBeacon = Globals.Beacon.Values.Where(x => x.IsConnected).FirstOrDefault();
                     if (connectedBeacon == null)
                     {
-                        NFTLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "SCV1Controller.TransferNFT()");
+                        SCLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "SCV1Controller.TransferNFT()");
                         return JsonConvert.SerializeObject(new { Success = false, Message = "You have lost connection to beacons. Please attempt to resend." });
                     }
 
@@ -1048,7 +1078,7 @@ namespace ReserveBlockCore.Controllers
                         scUID, toAddress, saleAmount, purchaseKey, connectedBeacon, md5List, backupURL));
 
                     var success = JsonConvert.SerializeObject(new { Success = true, Message = "NFT Transfer has been started." });
-                    NFTLogUtility.Log($"NFT Process Completed in CLI. SCUID: {sc.SmartContractUID}. Response: {success}", "SCV1Controller.TransferNFT()");
+                    SCLogUtility.Log($"NFT Process Completed in CLI. SCUID: {sc.SmartContractUID}. Response: {success}", "SCV1Controller.TransferNFT()");
                     return success;                    
 
                 }
@@ -1202,7 +1232,7 @@ namespace ReserveBlockCore.Controllers
 
                 if (!isCompletedSuccessfully)
                 {
-                    NFTLogUtility.Log("Failed to decompile smart contract for transfer in time.", "SCV1Controller.AddNFTDataFromNetwork()");
+                    SCLogUtility.Log("Failed to decompile smart contract for transfer in time.", "SCV1Controller.AddNFTDataFromNetwork()");
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"NFT was not created. Failed to decompile smart contract." });
                 }
 
@@ -1210,7 +1240,7 @@ namespace ReserveBlockCore.Controllers
             }
             else
             {
-                NFTLogUtility.Log("SC was not null. Contract already exist.", "SCV1Controller.AddNFTDataFromNetwork()");
+                SCLogUtility.Log("SC was not null. Contract already exist.", "SCV1Controller.AddNFTDataFromNetwork()");
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"NFT Already Exist." });
             }
         }
@@ -1510,7 +1540,7 @@ namespace ReserveBlockCore.Controllers
 
             var assetList = await MD5Utility.GetAssetList(md5List);
             var aqResult = AssetQueue.CreateAssetQueueItem(scUID, account.Address, locators, md5List, assetList, AssetQueue.TransferType.Download, true);
-            NFTLogUtility.Log($"NFT Transfer - Asset Queue items created.", "SCV1Controller.CallMediaFromBeacon()");
+            SCLogUtility.Log($"NFT Transfer - Asset Queue items created.", "SCV1Controller.CallMediaFromBeacon()");
 
             output = JsonConvert.SerializeObject(new { Success = true, Message = "Call to beacon process has started. Please check your NFT or logs for more details." });
             

@@ -18,6 +18,7 @@ namespace ReserveBlockCore.Config
 		public bool AlwaysRequireWalletPassword { get; set; }
 		public string? APIPassword { get; set; }
 		public bool AlwaysRequireAPIPassword { get; set; }
+		public string? ArbiterPassword { get; set; }
 		public string? APICallURL { get; set; }
 		public int WalletUnlockTime { get; set; }
         public bool ChainCheckPoint { get; set; }
@@ -44,8 +45,13 @@ namespace ReserveBlockCore.Config
 		public string? STUNServers { get; set; }
 		public bool SelfSTUNServer { get; set; }
         public int SelfSTUNPort { get; set; }
+		public string? ElectrumServers { get; set; }
 		public bool LogMemory { get; set; }
 		public bool BlockSeedCalls { get; set; }
+		public string? SkipIPs { get; set; }
+		public int ElmahFileStore { get; set; }
+		public string? ReportedIP { get; set; }
+		public Bitcoin.Bitcoin.BitcoinAddressFormat BitcoinAddressFormat { get; set; }
 
         public static Config ReadConfigFile()
         {
@@ -83,7 +89,8 @@ namespace ReserveBlockCore.Config
 				config.WalletPassword = dict.ContainsKey("WalletPassword") ? dict["WalletPassword"] : null;
 				config.AlwaysRequireWalletPassword = dict.ContainsKey("AlwaysRequireWalletPassword") ? Convert.ToBoolean(dict["AlwaysRequireWalletPassword"]) : false;
 				config.APIPassword = dict.ContainsKey("APIPassword") ? dict["APIPassword"] : null;
-				config.AlwaysRequireAPIPassword = dict.ContainsKey("AlwaysRequireAPIPassword") ? Convert.ToBoolean(dict["AlwaysRequireAPIPassword"]) : false;
+                config.ArbiterPassword = dict.ContainsKey("ArbiterPassword") ? dict["ArbiterPassword"] : null;
+                config.AlwaysRequireAPIPassword = dict.ContainsKey("AlwaysRequireAPIPassword") ? Convert.ToBoolean(dict["AlwaysRequireAPIPassword"]) : false;
 				config.APICallURL = dict.ContainsKey("APICallURL") ? dict["APICallURL"] : null;
 				config.ValidatorAddress = dict.ContainsKey("ValidatorAddress") ? dict["ValidatorAddress"] : null;
 				config.ValidatorName = dict.ContainsKey("ValidatorName") ? dict["ValidatorName"] : Guid.NewGuid().ToString();
@@ -102,15 +109,19 @@ namespace ReserveBlockCore.Config
                 config.STUNServers = dict.ContainsKey("STUNServers") ? dict["STUNServers"] : null;
                 config.SelfSTUNServer = dict.ContainsKey("STUN") ? Convert.ToBoolean(dict["STUN"]) : false;
                 config.SelfSTUNPort = dict.ContainsKey("SelfSTUNPort") ? Convert.ToInt32(dict["SelfSTUNPort"]) : 3340;
+                config.ElectrumServers = dict.ContainsKey("ElectrumServers") ? dict["ElectrumServers"] : null;
                 config.LogMemory = dict.ContainsKey("LogMemory") ? Convert.ToBoolean(dict["LogMemory"]) : false;
                 config.BlockSeedCalls = dict.ContainsKey("BlockSeedCalls") ? Convert.ToBoolean(dict["BlockSeedCalls"]) : false;
-
+                config.BitcoinAddressFormat = dict.ContainsKey("BitcoinAddressFormat") ? (Bitcoin.Bitcoin.BitcoinAddressFormat)Convert.ToInt32(dict["BitcoinAddressFormat"]) : Bitcoin.Bitcoin.BitcoinAddressFormat.Segwit;
+                config.SkipIPs = dict.ContainsKey("SkipIPs") ? dict["SkipIPs"] : null;
+                config.ReportedIP = dict.ContainsKey("ReportedIP") ? dict["ReportedIP"] : null;
 
                 config.AutoDownloadNFTAsset = dict.ContainsKey("AutoDownloadNFTAsset") ? Convert.ToBoolean(dict["AutoDownloadNFTAsset"]) : false;
                 config.IgnoreIncomingNFTs = dict.ContainsKey("IgnoreIncomingNFTs") ? Convert.ToBoolean(dict["IgnoreIncomingNFTs"]) : false;
 				config.RejectAssetExtensionTypes = new List<string>();
+                config.ElmahFileStore = dict.ContainsKey("ElmahFileStore") ? Convert.ToInt32(dict["ElmahFileStore"]) : 10000;
 
-				var rejExtList = new List<string> { ".exe", ".pif", ".application", ".gadget", ".msi", ".msp", ".com", ".scr", ".hta",
+                var rejExtList = new List<string> { ".exe", ".pif", ".application", ".gadget", ".msi", ".msp", ".com", ".scr", ".hta",
 					".cpl", ".msc", ".jar", ".bat", ".cmd", ".vb", ".vbs", ".vbe", ".js", ".jse", ".ws", ".wsf" , ".wsc", ".wsh", ".ps1",
 					".ps1xml", ".ps2", ".ps2xml", ".psc1", ".psc2", ".msh", ".msh1", ".msh2", ".mshxml", ".msh1xml", ".msh2xml", ".scf",
 					".lnk", ".inf", ".reg", ".doc", ".xls", ".ppt", ".docm", ".dotm", ".xlsm", ".xltm", ".xlam", ".pptm", ".potm", ".ppam",
@@ -166,7 +177,8 @@ namespace ReserveBlockCore.Config
         {
 			Globals.Port = config.Port;
 			Globals.APIPort = config.APIPort;
-			Globals.APICallURL = config.APICallURL;
+			Globals.ElmahFileStore = config.ElmahFileStore;
+            Globals.APICallURL = config.APICallURL;
 			Globals.APICallURLLogging = config.APICallURLLogging;
 			Globals.NFTTimeout = config.NFTTimeout;
 			Globals.PasswordClearTime = config.PasswordClearTime;
@@ -184,8 +196,80 @@ namespace ReserveBlockCore.Config
 			Globals.SelfSTUNServer = config.SelfSTUNServer;
 			Globals.LogMemory = config.LogMemory;
 			Globals.BlockSeedCalls = config.BlockSeedCalls;
-			
-			if (config.STUNServers?.Count() > 0)
+            Globals.BTCNetwork = NBitcoin.Network.Main;
+			Globals.SegwitP2SHStartPrefix = "3";
+			Globals.SegwitTaprootStartPrefix = "bc1";
+			Globals.BitcoinAddressFormat = config.BitcoinAddressFormat;
+
+			if(!string.IsNullOrEmpty(config.ReportedIP))
+			{
+				Globals.ReportedIP = config.ReportedIP;
+				Globals.ReportedIPs.TryAdd(Globals.ReportedIP, 99999);
+			}
+
+            Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "electrum.blockstream.info",
+                        Port = 50002,
+                        UseSsl = true,
+						Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "bitcoin.lu.ke",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "electrum.emzy.de",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "electrum.bitaroo.net",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "electrum.diynodes.com",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "fulcrum.sethforprivacy.com",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    }
+                };
+
+            Globals.ScriptPubKeyType = Globals.BitcoinAddressFormat == Bitcoin.Bitcoin.BitcoinAddressFormat.SegwitP2SH ? NBitcoin.ScriptPubKeyType.SegwitP2SH :
+				Globals.BitcoinAddressFormat == Bitcoin.Bitcoin.BitcoinAddressFormat.Segwit ? NBitcoin.ScriptPubKeyType.Segwit : NBitcoin.ScriptPubKeyType.TaprootBIP86;
+
+			if(!string.IsNullOrEmpty(config.SkipIPs))
+			{
+				var ips = config.SkipIPs.Split(',').ToList();
+				foreach(var ip in ips) 
+				{
+					if(!string.IsNullOrEmpty(ip))
+					{
+                        var ipSani = ip.Replace(" ", "");
+                        Globals.SkipPeers.TryAdd(ipSani, 0);
+						Globals.SkipValPeers.TryAdd(ipSani, 0);
+                    }
+                }
+			}
+
+            if (config.STUNServers?.Count() > 0)
 			{
 				var serverList = config.STUNServers.Split(',');
 				foreach( var server in serverList)
@@ -195,7 +279,7 @@ namespace ReserveBlockCore.Config
 			}
 			else
 			{
-				var port = Globals.IsTestNet ? 13340 : Globals.MinorVer == 5 && Globals.MajorVer == 3 ? 3440 : Globals.SelfSTUNPort; //needs to be 3340 **patched  DSTServer.cs Line: 20**
+				var port = Globals.IsTestNet ? 13340 : Globals.SelfSTUNPort; //needs to be 3340 **patched  DSTServer.cs Line: 20**
 
 				if(!Globals.IsTestNet)
 				{
@@ -215,23 +299,89 @@ namespace ReserveBlockCore.Config
                 }
 				else
 				{
-                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"162.251.121.150:{port}", Group = 1, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.156.102:{port}", Group = 1, IsNetwork = true });
                 }
             }
 
-            if (config.TestNet == true)
-            {
-                Globals.ADJPort = 13339;
-                Globals.IsTestNet = true;
+			if (config.TestNet == true)
+			{
+				Globals.ADJPort = 13339;
+				Globals.ValPort = 13339;
+				Globals.ArbiterPort = 13342;
+				Globals.IsTestNet = true;
 				Globals.GenesisAddress = "xAfPR4w2cBsvmB7Ju5mToBLtJYuv1AZSyo";
 				Globals.Port = 13338;
 				Globals.APIPort = 17292;
+				Globals.APIPortSSL = 17777;
 				Globals.AddressPrefix = 0x89; //address prefix 'x'
 				Globals.V1ValHeight = 200;
 				Globals.TXHeightRule1 = 200;
 				Globals.TXHeightRule2 = 200;
 				Globals.DSTClientPort = 13341;
-                Globals.SelfSTUNPort = 13340;
+				Globals.SelfSTUNPort = 13340;
+				Globals.BTCNetwork = NBitcoin.Network.TestNet4;
+				Globals.SegwitP2SHStartPrefix = "2";
+				Globals.SegwitTaprootStartPrefix = "tb1";
+				Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString();
+				Globals.TotalArbiterParties = 2;
+				Globals.TotalArbiterThreshold = 2;
+				Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> { 
+					new Bitcoin.ElectrumX.ClientSettings {
+						Host = "mempool.space",
+						Port = 40002,
+						UseSsl = true,
+                        Count = 0,
+						FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "testnet4-electrumx.wakiyamap.dev",
+                        Port = 51002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "blackie.c3-soft.com",
+                        Port = 57010,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    }
+
+                };
+            }
+
+            if (config.ElectrumServers != null)
+            {
+                var clientSettings = new List<Bitcoin.ElectrumX.ClientSettings>();
+                Globals.ClientSettings.Clear();
+
+                var serverList = config.ElectrumServers.Split(',');
+                foreach (var server in serverList)
+                {
+                    bool isSsl = server.ToLower().Contains("https://") ? true : false;
+                    string serverFormat = isSsl ? server.ToLower().Replace("https://", "") : server.ToLower().Replace("http://", "");
+                    var hostport = serverFormat.Split(':');
+                    var host = hostport[0];
+                    var port = hostport[1];
+                    var clientSetting = new Bitcoin.ElectrumX.ClientSettings
+                    {
+                        Host = host,
+                        Port = Convert.ToInt32(port),
+                        UseSsl = isSsl,
+                        Count = 0,
+                        FailCount = 0
+                    };
+
+                    clientSettings.Add(clientSetting);
+                }
+
+                Globals.ClientSettings = clientSettings;
+            }
+
+            if (!string.IsNullOrEmpty(config.ArbiterPassword))
+			{
+                Globals.ArbiterEncryptPassword = config.ArbiterPassword.ToSecureString();
             }
 
 			if (!string.IsNullOrWhiteSpace(config.WalletPassword))
@@ -273,8 +423,43 @@ namespace ReserveBlockCore.Config
 			}
 			
         }
+        public static void ProcessABL()
+        {
+            var path = GetPathUtility.GetConfigPath();
+            if (File.Exists(path + "abl.txt"))
+            {
+                try
+                {
+                    var records = ReadAblFile(path + "abl.txt");
 
-		public static async void EstablishConfigFile()
+                    Globals.ABL.Clear();
+                    Globals.ABL = new List<string>();
+                    Globals.ABL = records;
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError("Error processing ABL File.", "Config.ProcessABL()");
+                }
+            }
+
+        }
+        private static List<string> ReadAblFile(string filePath)
+        {
+            var records = new List<string>();
+
+            using (var reader = new StreamReader(filePath))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    records.Add(line);
+                }
+            }
+
+            return records;
+        }
+
+        public static async void EstablishConfigFile()
 		{
 			var path = GetPathUtility.GetConfigPath();
 			var fileExist = File.Exists(path + "config.txt");
@@ -288,6 +473,7 @@ namespace ReserveBlockCore.Config
 					File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=false");
 					File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                 }
                 else
                 {
@@ -296,9 +482,25 @@ namespace ReserveBlockCore.Config
 					File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=true");
 					File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                 }
 				
 			}
 		}
+
+        public static async void EstablishABLFile()
+        {
+            var path = GetPathUtility.GetABLPath();
+            var fileExist = File.Exists(path + "abl.txt");
+
+            if (!fileExist)
+            {
+                if (Globals.IsTestNet == false)
+                {
+                    File.AppendAllText(path + "abl.txt", "");
+
+                }
+            }
+        }
     }
 }

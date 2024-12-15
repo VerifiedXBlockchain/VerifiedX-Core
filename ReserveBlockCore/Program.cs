@@ -23,6 +23,13 @@ using System.Reflection;
 using ReserveBlockCore.DST;
 using ReserveBlockCore.Engines;
 using ReserveBlockCore.Config;
+using ReserveBlockCore.Bitcoin.Utilities;
+using ReserveBlockCore.Bitcoin.Integrations;
+using ElmahCore.Mvc;
+using ElmahCore;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
 
 namespace ReserveBlockCore
 {
@@ -62,6 +69,12 @@ namespace ReserveBlockCore
 
             //Forced Testnet
             Globals.IsTestNet = true;
+            Globals.V4Height = Globals.IsTestNet ? 1 : 99999999999999;//change for mainnet.
+            Globals.V2ValHeight = Globals.IsTestNet ? 0 : 99999999999999;//change for mainnet.
+            Globals.SpecialBlockHeight = Globals.IsTestNet ? 89696 : 99999999999999;//change for mainnet.
+            //Globals.SpecialBlockHeight = Globals.IsTestNet ? 82480 : 99999999999999;//change for mainnet.
+            Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "SomeMainnetAddress";
+
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
@@ -112,6 +125,8 @@ namespace ReserveBlockCore
 
 
             Globals.BuildVer = WalletVersionUtility.GetBuildVersion();
+
+            _ = NFTAssetFileUtility.GeneratevBTCDefaultLogo();
 
             Globals.CLIVersion = $"{Globals.MajorVer}.{Globals.MinorVer}.{Globals.RevisionVer}.{WalletVersionUtility.GetBuildVersion()}-beta";
 
@@ -261,15 +276,17 @@ namespace ReserveBlockCore
             Globals.SystemMemory = MemoryService.GetTotalMemory();
 
             Config.Config.EstablishConfigFile();
+            Config.Config.EstablishABLFile();
             var config = Config.Config.ReadConfigFile();
             Config.Config.ProcessConfig(config);
+            Config.Config.ProcessABL();
 
             LogUtility.Log(logCLIVer, "Main", true);
             LogUtility.Log($"RBX Wallet - {logCLIVer}", "Main");
 
-            NFTLogUtility.Log(logCLIVer, "Main", true);
+            SCLogUtility.Log(logCLIVer, "Main", true);
 
-            NFTLogUtility.Log($"RBX NFT ver. - {logCLIVer}", "Main");
+            SCLogUtility.Log($"RBX NFT ver. - {logCLIVer}", "Main");
 
             APILogUtility.Log(logCLIVer, "Main", true);
 
@@ -281,9 +298,11 @@ namespace ReserveBlockCore
 
             await DbContext.CheckPoint(); //checkpoints db log files
 
+            await VFXLogging.ClearElmah();
             StartupService.SetBlockHeight(); //sets current block height
             StartupService.SetLastBlock(); //puts last known block into memory
             StartupService.StartupMemBlocks(); //puts 400 blocks into memory (height, hash)
+            StartupService.StartupBlockHashes();
             StartupService.PopulateTokenDictionary();
 
             StartupService.SetBlockchainChainRef(); // sets blockchain reference id
@@ -292,17 +311,20 @@ namespace ReserveBlockCore
             StartupService.EncryptedWalletCheck(); //checks if wallet is encrypted
             SeedNodeService.SeedNodes(); //adds nodes to initial find blocks
             SeedNodeService.SeedBench(); //seeds adj bench
+            await StartupService.GetArbiters();
             await BadTransaction.PopulateBadTXList(); //adds bad txs to ignore
             await WalletService.BalanceRectify(); //checks balance local against state
 
             Globals.V3Height = Globals.IsTestNet == true ? 0 : (int)Globals.V3Height;
 
             Globals.BlockLock = Globals.IsTestNet ? 0 : Globals.BlockLock;
-            //var adjGenAccount = AccountData.GetSingleAccount("xBRxhFC2C4qE21ai3cQuBrkyjXnvP1HqZ8");
-            //if(adjGenAccount != null)
+
+            //uncomment to create genesis block
             //await BlockchainData.InitializeChain();
 
             StartupService.SetValidator();
+            StartupService.ArbiterCheck();
+
             //To update this go to project -> right click properties -> go To debug -> general -> open debug launch profiles
             if (args.Length != 0)
             {
@@ -325,6 +347,13 @@ namespace ReserveBlockCore
                     {
                         //Launch testnet
                         Globals.TestURL = true;
+                    }
+                    if (argC == "gui")
+                    {
+                        Explorers.PopulateExplorerDictionary();
+                        _ = NodeFinder.GetNode();
+                        _ = Bitcoin.Bitcoin.AccountCheck();
+                        _ = Bitcoin.Bitcoin.ElectrumXRun();
                     }
                     if (argC.Contains("privkey"))
                     {
@@ -382,12 +411,10 @@ namespace ReserveBlockCore
                 StartupService.SetConfigValidator();
             }
 
+            //deprecate in v5.0.1 or greater
             StartupService.SetAdjudicatorAddresses();
+            //deprecate in v5.0.1 or greater
             Signer.UpdateSigningAddresses();
-
-            //check for new IPs here
-            //_ = StartupService.GetAdjudicatorPool_New();
-
 
             if (Globals.IsWalletEncrypted && !string.IsNullOrEmpty(Globals.ValidatorAddress) && !Globals.GUI)
             {
@@ -414,24 +441,22 @@ namespace ReserveBlockCore
             await StartupService.RunSettingChecks(skipStateSync);
 
             //This is for consensus start.
-            await StartupService.GetAdjudicatorPool();
+
+            //deprecate in v5.0.1 or greater
+            //await StartupService.GetAdjudicatorPool();
             StartupService.DisplayValidatorAddress();
             StartupService.CheckForDuplicateBlocks();
+
+
             await StartupService.SetSelfBeacon();
 
             _ = Task.Run(LogUtility.LogLoop);
+
+            //deprecate in v5.0.1 or greater
             _ = Task.Run(P2PClient.UpdateMethodCodes);
+
             _ = Task.Run(StartupService.StartupPeers);
-
-            if (Globals.AdjudicateAccount != null)
-            {
-                Globals.StopAllTimers = true;
-                StartupService.SetLastBlockchainPoint();
-                _ = Task.Run(BlockHeightCheckLoop);
-                _ = StartupService.DownloadBlocksOnStart();
-                _ = Task.Run(ClientCallService.DoWorkV3);
-            }
-
+            
             await StartupService.ClearStaleMempool();
 
             StartupService.RunRules(); //rules for cleaning up wallet data.
@@ -443,21 +468,14 @@ namespace ReserveBlockCore
             //Removes validator record from DB_Peers as its now within the wallet.
             StartupService.ClearOldValidatorDups();
 
-            //blockTimer = new Timer(blockBuilder_Elapsed); // 1 sec = 1000, 60 sec = 60000
-            //blockTimer.Change(60000, 10000); //waits 1 minute, then runs every 10 seconds for new blocks
-
-            //Globals.DBCommitTimer = new Timer(dbCommitCheckTimer_Elapsed); // 1 sec = 1000, 60 sec = 60000
-            //Globals.DBCommitTimer.Change(90000, 3 * 10 * 6000); //waits 1.5 minute, then runs every 3 minutes
-
             Globals.ConnectionHistoryTimer = new Timer(connectionHistoryTimer_Elapsed); // 1 sec = 1000, 60 sec = 60000
             Globals.ConnectionHistoryTimer.Change(90000, 3 * 10 * 6000); //waits 1.5 minute, then runs every 3 minutes
 
             //API Port URL
-            string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:7777";
+            string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL
             string url2 = "http://*:" + Globals.Port;
             //Consensus Port URL
-            string url3 = "http://*:" + Globals.ADJPort;
 
             var commandLoopTask = Task.Run(() => CommandLoop(url));
             var commandLoopTask2 = Task.Run(() => CommandLoop2(url2));
@@ -466,8 +484,15 @@ namespace ReserveBlockCore
             while (Globals.StopAllTimers || Globals.BlocksDownloadSlim.CurrentCount == 0)
                 await Task.Delay(20);
 
+            string dbPath = GetPathUtility.GetDatabasePath();
             //for web API using Kestrel
             var builder = Host.CreateDefaultBuilder(args)
+                .ConfigureServices((context, services) => { 
+                services.AddElmah<XmlFileErrorLog>(options =>
+                {
+                    options.LogPath = Path.Combine(dbPath, "elmah.xml");
+                });
+                })
                 .ConfigureWebHostDefaults(webBuilder =>
                 {
                     webBuilder.UseKestrel(options =>
@@ -487,7 +512,7 @@ namespace ReserveBlockCore
                     .UseStartup<Startup>()
                     //.UseUrls(new string[] {$"http://*:{Globals.APIPort}", $"https://*:{Globals.APIPort}" })
                     .ConfigureLogging(!keslog ? loggingBuilder => loggingBuilder.ClearProviders() : loggingBuilder => loggingBuilder.AddSimpleConsole());
-                });
+                }).Build();
 
             //for p2p using signalr
             var builder2 = Host.CreateDefaultBuilder(args)
@@ -504,39 +529,34 @@ namespace ReserveBlockCore
                     });
                 });
 
-            //for consensus adjs using signalr p2p
-            var builder3 = Host.CreateDefaultBuilder(args)
-                .ConfigureWebHostDefaults(webBuilder =>
-                {
-                    webBuilder.UseKestrel()
-                    .UseStartup<StartupP2PConsensus>()
-                    .UseUrls(url3)
-                    .ConfigureLogging(!signalrLog ? loggingBuilder => loggingBuilder.ClearProviders() : loggingBuilder => loggingBuilder.AddSimpleConsole());
-                    webBuilder.ConfigureKestrel(options =>
-                    {
+            var errorLog = builder.Services.GetRequiredService<ErrorLog>();
+            VFXLogging.Initialize(errorLog);
 
-
-                    });
-                });
-
-            _ = builder.RunConsoleAsync();
+            _ = builder.RunAsync();
             _ = builder2.RunConsoleAsync();
 
             StartupService.SetLastBlockchainPoint();
 
-            if (Globals.AdjudicateAccount != null)
+            if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
-                _ = builder3.RunConsoleAsync();
+                _ = ValidatorService.StartupValidatorProcess();
+                //while (!Globals.IsChainSynced)
+                //{
+                //    await Task.Delay(1000);
+                //}
+                //_ = Task.Run(() => { ValidatorService.StartValidatorServer(); });
+                ////_ = ValidatorService.StartValidatorServer();
+                //_ = ValidatorService.StartupValidators();
+                //_ = Task.Run(ValidatorService.BlockHeightCheckLoop);
             }
             
-            if (Globals.AdjudicateAccount == null)
-            {
-                Globals.StopAllTimers = true;
-                _ = Task.Run(BlockHeightCheckLoop);
-                _ = StartupService.DownloadBlocksOnStart();
-                _ = Task.Run(ClientCallService.DoWorkV3);
-            }
+            Globals.StopAllTimers = true;
+            _ = Task.Run(BlockHeightCheckLoop);
+            _ = StartupService.DownloadBlocksOnStart();
 
+            //TODO need new validator running method
+            //_ = Task.Run(ClientCallService.DoWorkV3);
+            
             LogUtility.Log("Wallet Starting...", "Program:Before CheckLastBlock()");
 
             if (Globals.DatabaseCorruptionDetected == true)
@@ -567,6 +587,7 @@ namespace ReserveBlockCore
                     myAccount.IsValidating = true;
                     accounts.UpdateSafe(myAccount);
                     Globals.ValidatorAddress = myAccount.Address;
+                    Globals.ValidatorPublicKey = myAccount.PublicKey;
                     Globals.GUIPasswordNeeded = false;
                     LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
                 }
@@ -574,28 +595,34 @@ namespace ReserveBlockCore
 
             await TransactionData.UpdateWalletTXTask();
 
-            _ = StartupService.ConnectToAdjudicators();
+            ////deprecate in v5.0.1 or greater
+            //_ = StartupService.ConnectToAdjudicators();//MODIFY - Connect to other VALS
+
             _ = BanService.PeerBanUnbanService();
             _ = BeaconService.BeaconRunService();
             _ = SeedNodeService.Start();
             _ = SeedNodeService.CallToSeed();
             _ = FortisPoolService.PopulateFortisPoolCache();
             _ = MempoolBroadcastService.RunBroadcastService();
-            _ = ValidatorService.ValidatingMonitorService();
+
+            //_ = ValidatorService.ValidatingMonitorService();
+
             _ = ValidatorService.GetActiveValidators();
             _ = ValidatorService.ValidatorCountRun();
             _ = DSTClient.Run();
+            _ = StartupService.UpdateSCOwnership();
+            _ = ReserveService.RunUnlockWipe();
 
-            if(startGUI)
+            if (startGUI)
             {
-                Process[] pname = Process.GetProcessesByName("RBXWallet");
+                Process[] pname = Process.GetProcessesByName("VFXWallet");
 
                 if(pname.Length == 0)
                 {
                     Globals.GUIProcess = new Process();
                     Globals.GUIProcess.StartInfo = new ProcessStartInfo
                     {
-                        FileName = @"C:\Program Files (x86)\RBXWallet\RBXWallet.exe",
+                        FileName = @"C:\Program Files (x86)\RBXWallet\VFXWallet.exe",
                         Verb = "runas",
                         WorkingDirectory = @"C:\Program Files (x86)\RBXWallet\"
                     };
@@ -624,16 +651,14 @@ namespace ReserveBlockCore
             if (Globals.SelfSTUNServer)
                 _ = Task.Run(() => { StartupService.StartDSTServer(); });//launching off the main thread.
 
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                _ = WindowsUtilities.AdjAutoRestart();
+            //deprecate in v5.0.1 or greater
+            //if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            //    _ = WindowsUtilities.AdjAutoRestart();
 
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-                _ = LinuxUtilities.AdjAutoRestart();
+            //if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            //    _ = LinuxUtilities.AdjAutoRestart();
 
-            
-            await Task.Delay(2000);
-
-            //_ = DSTServer.Run();
+            await Task.Delay(1000);
 
             var tasks = new Task[] {
                 commandLoopTask, //CLI console
@@ -652,6 +677,8 @@ namespace ReserveBlockCore
 
             _ = MemoryService.Run();
             _ = MemoryService.RunGlobals();
+
+            _ = ArbiterService.GetArbiterSigningAddress();
 
             await Task.WhenAll(tasks);
 
@@ -778,6 +805,7 @@ namespace ReserveBlockCore
         private static void CommandLoop2(string url)
         {
             //Console.ReadKey();
+            _ = StartupService.StartArbiter();
         }
 
         private static void CommandLoop3()

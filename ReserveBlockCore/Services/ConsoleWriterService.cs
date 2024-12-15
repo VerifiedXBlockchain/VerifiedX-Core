@@ -35,5 +35,37 @@ namespace ReserveBlockCore.Services
                 AnsiConsole.Markup($"\r{text}");
             }
         }
+
+        public static void OutputVal(string text)
+        {
+            if (Globals.StopValConsoleOutput != true)
+            {
+                Console.WriteLine(text);
+            }
+        }
+
+        public static void OutputValSameLine(string text)
+        {
+            if (Globals.StopValConsoleOutput != true)
+            {
+                Console.Write($"\r{text}");
+            }
+        }
+
+        public static void OutputValMarked(string text)
+        {
+            if (Globals.StopValConsoleOutput != true)
+            {
+                AnsiConsole.MarkupLine($"{text}");
+            }
+        }
+
+        public static void OutputValSameLineMarked(string text)
+        {
+            if (Globals.StopValConsoleOutput != true)
+            {
+                AnsiConsole.Markup($"\r{text}");
+            }
+        }
     }
 }

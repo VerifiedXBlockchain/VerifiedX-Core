@@ -159,6 +159,11 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        public static async Task GetArbiterFromSeed()
+        {
+            //TODO
+        }
+
         public static async Task GetSeedNodePeersTestnet()
         {
 
@@ -171,23 +176,30 @@ namespace ReserveBlockCore.Services
                     IsIncoming = false,
                     IsOutgoing = true,
                     PeerIP = "162.248.14.123",
-                    FailCount = 0
+                    FailCount = 0,
+                    IsValidator = false
                 };
 
                 Peers n2Peer = new Peers
                 {
                     IsIncoming = false,
                     IsOutgoing = true,
-                    PeerIP = "164.92.105.169",
-                    FailCount = 0
+                    PeerIP = "144.126.156.102",
+                    FailCount = 0,
+                    IsValidator = true,
+                    ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
+                    ValidatorPublicKey = "0498ea84777552a3609143275b0e083086071a6b1453bd46b87a05461d24e0ee99e7de2870a018240026ad6ba892a087df39447f91c5a8f8e50a53b6643c9e713c"
                 };
 
                 Peers n3Peer = new Peers
                 {
                     IsIncoming = false,
                     IsOutgoing = true,
-                    PeerIP = "137.184.158.154",
-                    FailCount = 0
+                    PeerIP = "66.94.124.2",
+                    FailCount = 0,
+                    IsValidator = true,
+                    ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+                    ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
                 };
 
                 peerList.Add(nPeer);
@@ -206,6 +218,7 @@ namespace ReserveBlockCore.Services
                     else
                     {
                         peerExist.FailCount = 0;
+                        //peerExist.IsValidator = true;
                         dbPeers.UpdateSafe(peerExist);
                     }
                 }
@@ -271,11 +284,12 @@ namespace ReserveBlockCore.Services
                 {
                     //main adjs
                     List<AdjBench> mainList = new List<AdjBench>{
+                        //retired
                         new AdjBench { IPAddress = "144.126.156.102", PulledFromBench= true, RBXAddress= "RBxy1XGZ72f6YqktseaLJ1sJsE9u5DF3sp", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
                         new AdjBench { IPAddress = "144.126.156.101", PulledFromBench = true, RBXAddress = "RBxkrs6snuTuHjAfzedXGzRixfeyvQfy7m", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
                         new AdjBench { IPAddress = "66.94.124.3", PulledFromBench = true, RBXAddress = "RBxz1j5veSPrBg4RSyYD4CZ9BY6LPQ65gM", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
                         new AdjBench { IPAddress = "66.94.124.2", PulledFromBench = true, RBXAddress = "RBx1FNEvjB97HRdreDg3zHCNCSSEvSyBTE", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
-                        //Working
+                        //Working - Active
                         new AdjBench { IPAddress = "66.175.236.113", PulledFromBench = true, RBXAddress = "RBxuRe1PorrpUCSbcmBk4JDHCxeADAkXyX", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
                         new AdjBench { IPAddress = "15.204.9.117", PulledFromBench = true, RBXAddress = "RBxc2kz67W2zvb3yGxzACEQqgFiiBfYSTY", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
                         //Original

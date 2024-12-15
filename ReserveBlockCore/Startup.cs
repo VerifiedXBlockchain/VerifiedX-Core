@@ -1,9 +1,14 @@
-﻿using Microsoft.AspNetCore.Builder;
+﻿using ElmahCore;
+using ElmahCore.Mvc;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.OpenApi.Models;
+using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.DST;
 using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.Utilities;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -29,15 +34,19 @@ namespace ReserveBlockCore
 
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddControllers();
+            string path = GetPathUtility.GetDatabasePath();
+            var logDirectory = path;
+            var logFilePath = Path.Combine(logDirectory, "elmah.xml");
 
+            services.AddControllers();
             //services.AddApiVersioning(options =>
             //{
             //    options.ReportApiVersions = true;
             //    options.DefaultApiVersion = new Microsoft.AspNetCore.Mvc.ApiVersion(1, 0);
             //});
-
             services.AddSwaggerGen(c => {
+                c.CustomSchemaIds(type => type.ToString());
+                c.CustomSchemaIds(type => $"{type.Name}_{System.Guid.NewGuid().ToString().Replace("-", "")}");
                 c.SwaggerDoc("v1", new OpenApiInfo { Title = "ReserveBlock CLI API", Version = "v1" });
                 c.DocumentFilter<SwaggerDocumentFilter<Account>>();
                 c.DocumentFilter<SwaggerDocumentFilter<AccountKeystore>>();
@@ -51,7 +60,14 @@ namespace ReserveBlockCore
                 c.DocumentFilter<SwaggerDocumentFilter<Auction>>();
                 c.DocumentFilter<SwaggerDocumentFilter<Beacons>>();
                 c.DocumentFilter<SwaggerDocumentFilter<Bid>>();
+                c.DocumentFilter<SwaggerDocumentFilter<BitcoinAccount>>();
+                c.DocumentFilter<SwaggerDocumentFilter<BitcoinAdnr>>();
+                c.DocumentFilter<SwaggerDocumentFilter<BitcoinTransaction>>();
+                c.DocumentFilter<SwaggerDocumentFilter<BitcoinUTXO>>();
                 c.DocumentFilter<SwaggerDocumentFilter<Block>>();
+                c.DocumentFilter<SwaggerDocumentFilter<BTCTokenizePayload>>();
+                c.DocumentFilter<SwaggerDocumentFilter<BTCTokenizeTransaction>>();
+                c.DocumentFilter<SwaggerDocumentFilter<BTCTokenizeWithdrawalRaw>>();
                 c.DocumentFilter<SwaggerDocumentFilter<DecShop>>();
                 c.DocumentFilter<SwaggerDocumentFilter<DSTConnection>>();
                 c.DocumentFilter<SwaggerDocumentFilter<FortisPool>>();
@@ -81,6 +97,7 @@ namespace ReserveBlockCore
                 c.DocumentFilter<SwaggerDocumentFilter<TokenAccount>>();
                 c.DocumentFilter<SwaggerDocumentFilter<TokenDetails>>();
                 c.DocumentFilter<SwaggerDocumentFilter<TokenFeature>>();
+                c.DocumentFilter<SwaggerDocumentFilter<TokenizationFeature>>();
                 c.DocumentFilter<SwaggerDocumentFilter<TopicTrei>>();
                 c.DocumentFilter<SwaggerDocumentFilter<Transaction>>();
                 c.DocumentFilter<SwaggerDocumentFilter<Validators>>();
@@ -92,6 +109,7 @@ namespace ReserveBlockCore
                 if(Globals.APIToken?.Length > 0)
                     c.OperationFilter<SwaggerHeaderFilter>();
             });
+
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -102,12 +120,12 @@ namespace ReserveBlockCore
                 app.UseDeveloperExceptionPage();
             }
 
+            app.UseElmah();
             app.UseSwagger();
             app.UseSwaggerUI(c => {
                 c.SwaggerEndpoint("/swagger/v1/swagger.json", "ReserveBlock API v1");
                 c.DisplayRequestDuration();
             });
-
 
             app.Use((context, func) =>
             {
@@ -155,6 +173,10 @@ namespace ReserveBlockCore
             {
                 endpoints.MapControllers();
             });
+
+            
         }
     }
+
+    
 }

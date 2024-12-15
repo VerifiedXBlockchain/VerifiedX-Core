@@ -37,7 +37,7 @@ namespace ReserveBlockCore.Utilities
             var beaconConnection = P2PClient.IsBeaconConnected.ToString();            
             var isChainSynced = Globals.IsChainSynced.ToString();
             var peerCount = P2PServer.GetConnectedPeerCount();
-            var valCount = await P2PAdjServer.GetConnectedValCount();            
+            var valCount = await P2PValidatorServer.GetConnectedValCount();            
             var hdWallet = Globals.HDWallet.ToString();
             var reportedIPs = string.Join("<-->", Globals.ReportedIPs.Select(x => new { IP = x.Key, Occurrences = x.Value }));
             var mostLikelyIP = P2PClient.MostLikelyIP();
@@ -46,6 +46,7 @@ namespace ReserveBlockCore.Utilities
             var dupIPs = Globals.DuplicateAdjIP.ToString();
             var dupAddr = Globals.DuplicateAdjAddr.ToString();
             var explorerData = Globals.ExplorerValDataLastSendSuccess.ToString();
+            var explorerDataResponse = Globals.ExplorerValDataLastSendResponseCode;
             var explorerDataLastSent = Globals.ExplorerValDataLastSend.ToString();
             var blockLastSent = Globals.LastBlockAddedTimestamp.ToLocalDateTimeFromUnix().ToString();
             var lastDiff = Globals.BlockTimeDiff.ToString();
@@ -68,29 +69,6 @@ namespace ReserveBlockCore.Utilities
             var isResyncing = "Chain Resyncing? : " + Globals.IsResyncing.ToString();
             var isCorrupt = "Database Corruption Detected? : " + Globals.DatabaseCorruptionDetected.ToString();
             var adjConnection = "Adjudicator Connected?: " + adjudicatorConnection;
-
-            
-            //adj only info
-            var adjudicatorText = "Is Adjudicating?: " + adjudicator;
-            var fortisPoolText = "*Only for Adjudicators* Fortis Pool Count: " + Globals.FortisPool.Count.ToString();
-            var valCountText = "*Only for Adjudicators* Validator Pool Count: " + valCount.ToString();
-            var conCountText = $"Consenseus successes: {Globals.ConsensusSucceses} Consensus failures: {Globals.LastBlock.Height - Globals.ConsensusStartHeight - Globals.ConsensusSucceses + 1}";
-
-            //val only info
-            var lastWinningTaskErrorText = string.Join("\r\n", Globals.AdjNodes.Values.Where(x => x.IsConnected).Select(x =>
-            $"ADJ: {x.Address} " + "*Only for Validators* Last Winning task Error?: " + x.LastWinningTaskError));
-            var lastWinningTaskSentTimeText = string.Join("\r\n", Globals.AdjNodes.Values.Where(x => x.IsConnected).Select(x =>
-                $"ADJ: {x.Address} " + "*Only for Validators* Last Winng Task Sent Time: " + x.LastWinningTaskSentTime));
-            var lastTaskSentText = string.Join("\r\n", Globals.AdjNodes.Values.Where(x => x.IsConnected).Select(x =>
-                $"ADJ: {x.Address} " + "*Only for Validators* Most Recent Task (Unsolved) Sent at: " + x.LastTaskSentTime));
-            var lastTaskResultText = string.Join("\r\n", Globals.AdjNodes.Values.Where(x => x.IsConnected).Select(x =>
-                $"ADJ: {x.Address} " + "*Only for Validators* Latest Task (Solved) Result Received at: " + x.LastTaskResultTime));
-            var lastTaskBlockHeightText = string.Join("\r\n", Globals.AdjNodes.Values.Where(x => x.IsConnected).Select(x =>
-                $"ADJ: {x.Address} " + "*Only for Validators* Last Task Block Height : " + x.LastSentBlockHeight));
-            var lastTaskErrorText = string.Join("\r\n", Globals.AdjNodes.Values.Where(x => x.IsConnected).Select(x =>
-                $"ADJ: {x.Address} " + "*Only for Validators* Last Task Error : " + x.LastTaskError));
-            var lastTaskErrorCountText = string.Join("\r\n", Globals.AdjNodes.Values.Where(x => x.IsConnected).Select(x =>
-                $"ADJ: {x.Address} " + "*Only for Validators* Last Task Error Count: " + x.LastTaskErrorCount));
                                             
             var hdWalletText = $"HD Wallet? : {hdWallet}";
             var reportedIPText = $"Reported IPs: {reportedIPs}";
@@ -103,6 +81,7 @@ namespace ReserveBlockCore.Utilities
             var dupAddrText = $"Duplicate Addresses found Validating? {dupAddr}";
             var explorerDataText = $"Explorer Last Send Success? {explorerData}";
             var explorerLastSendText = $"Explorer Last Send Date: {explorerDataLastSent}";
+            var explorerLastSendResponseText = $"Explorer Last Send Date: {explorerDataResponse}";
 
             var blockLastSentText = $"Block last sent at: {blockLastSent}";
             var lastDiffText = $"Block last delay: {lastDiff}";
@@ -126,9 +105,14 @@ namespace ReserveBlockCore.Utilities
             var stunServerRunning = $"STUN Server Active: {Globals.STUNServerRunning}";
 
             var lastBlockWon = Globals.LastWonBlock != null ? $"Last Block Won: {Globals.LastWonBlock.Height}" : "No blocks reported yet.";
+            var valCountText = $"Validators Connected to you: {valCount}";
 
             var lastBlockInfo = "Height: " + lastBlock.Height.ToString() + " - Hash: " + lastBlock.Hash + " Timestamp: " + lastBlock.Timestamp
                 + " - Validator: " + lastBlock.Validator;
+
+            var electrumxConnected = Globals.ElectrumXConnected ? "ElectrumX Connected? : Yes" : "ElectrumX Connected? : No";
+            var lastElectrumXCommunication = $"ElectrumX Last Communication: {Globals.ElectrumXLastCommunication}";
+            var btcAccountCheck = Globals.BTCAccountCheckRunning ? "Account Check Running? : Yes" : "Account Check Running? : No";
 
             StringBuilder strBld = new StringBuilder();
             strBld.AppendLine("---------------------------------------------------------------------");
@@ -188,15 +172,21 @@ namespace ReserveBlockCore.Utilities
             strBld.AppendLine("---------------------------------------------------------------------");
             strBld.AppendLine(isResyncing);
             strBld.AppendLine("---------------------------------------------------------------------");
-            strBld.AppendLine(adjudicatorText);
-            strBld.AppendLine("---------------------------------------------------------------------");
             strBld.AppendLine(explorerDataText);
             strBld.AppendLine("---------------------------------------------------------------------");
             strBld.AppendLine(explorerLastSendText);
             strBld.AppendLine("---------------------------------------------------------------------");
+            strBld.AppendLine(explorerLastSendResponseText);
+            strBld.AppendLine("---------------------------------------------------------------------");
             strBld.AppendLine(adjConnection);
             strBld.AppendLine("---------------------------------------------------------------------");
-            if(Globals.SelfSTUNServer)
+            strBld.AppendLine(btcAccountCheck);
+            strBld.AppendLine("---------------------------------------------------------------------");
+            strBld.AppendLine(electrumxConnected);
+            strBld.AppendLine("---------------------------------------------------------------------");
+            strBld.AppendLine(lastElectrumXCommunication);
+            strBld.AppendLine("---------------------------------------------------------------------");
+            if (Globals.SelfSTUNServer)
             {
                 strBld.AppendLine(stunServerText);
                 strBld.AppendLine("---------------------------------------------------------------------");
@@ -205,32 +195,12 @@ namespace ReserveBlockCore.Utilities
                 strBld.AppendLine(stunServerRunning);
                 strBld.AppendLine("---------------------------------------------------------------------");
             }
-            if(Globals.AdjudicateAccount != null)
-            {
-                strBld.AppendLine(fortisPoolText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(valCountText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(conCountText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-            }
+
             if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 strBld.AppendLine(lastBlockWon);
                 strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(lastTaskResultText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(lastTaskSentText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(lastTaskBlockHeightText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(lastTaskErrorText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(lastTaskErrorCountText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(lastWinningTaskErrorText);
-                strBld.AppendLine("---------------------------------------------------------------------");
-                strBld.AppendLine(lastWinningTaskSentTimeText);
+                strBld.AppendLine(valCountText);
                 strBld.AppendLine("---------------------------------------------------------------------");
             }
             strBld.AppendLine("-------------------------------Node Info-----------------------------");
@@ -245,6 +215,20 @@ namespace ReserveBlockCore.Utilities
                     strBld.AppendLine("Node: " + ip + " - Last Checked: " + lastcheck + " - Height: " + height + " - Latency: " + latency);
                     strBld.AppendLine("---------------------------------------------------------------------");
                 });
+            }
+            if(Globals.ValidatorNodes.Count() > 0)
+            {
+                strBld.AppendLine("--------------------------Validator Node Info------------------------");
+                Globals.ValidatorNodes.Values.ToList().ForEach(x => {
+                    var ip = x.NodeIP;
+                    var lastcheck = x.NodeLastChecked != null ? x.NodeLastChecked.Value.ToLocalTime().ToLongTimeString() : "NA";
+                    var height = x.NodeHeight.ToString();
+                    var latency = x.NodeLatency.ToString();
+
+                    strBld.AppendLine("Node: " + ip + " - Last Checked: " + lastcheck + " - Height: " + height + " - Latency: " + latency);
+                    strBld.AppendLine("---------------------------------------------------------------------");
+                });
+
             }
             if(seeds.Count() > 0)
             {

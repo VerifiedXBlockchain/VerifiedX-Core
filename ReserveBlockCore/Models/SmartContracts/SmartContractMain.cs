@@ -36,6 +36,20 @@ namespace ReserveBlockCore.Models.SmartContracts
                 var scs = DbContext.DB_Assets.GetCollection<SmartContractMain>(DbContext.RSRV_ASSETS);
                 return scs;
             }
+            public static List<SmartContractMain>? GetSmartContractList()
+            {
+                var scs = GetSCs();
+                if (scs != null)
+                {
+                    var sc = scs.FindAll().ToList();
+                    if (sc != null)
+                    {
+                        return sc;
+                    }
+                }
+
+                return null;
+            }
 
             public static SmartContractMain? GetSmartContract(string smartContractUID)
             {
@@ -60,7 +74,7 @@ namespace ReserveBlockCore.Models.SmartContracts
                 if(scMain != null)
                 {
                     scMain.IsPublished = true;
-                    NFTLogUtility.Log($"Smart Contract Has Been Minted to Network : {scMain.SmartContractUID}", "SmartContractMain.SetSmartContractIsPublished(string scUID)");
+                    SCLogUtility.Log($"Smart Contract Has Been Minted to Network : {scMain.SmartContractUID}", "SmartContractMain.SetSmartContractIsPublished(string scUID)");
                     scs.UpdateSafe(scMain);
                 }              
             }
@@ -189,7 +203,7 @@ namespace ReserveBlockCore.Models.SmartContracts
                 }
                 catch (Exception ex)
                 {
-                    NFTLogUtility.Log($"Failed to save smart contract locally: {scMain.SmartContractUID}. Error Message: {ex.ToString()}",
+                    SCLogUtility.Log($"Failed to save smart contract locally: {scMain.SmartContractUID}. Error Message: {ex.ToString()}",
                     "SmartContractMain.SaveSCLocally(SmartContractMain scMain, string scText)");
                 }
             }
@@ -285,6 +299,34 @@ namespace ReserveBlockCore.Models.SmartContracts
                                             }
                                             break;
                                         }
+                                    case FeatureName.Tokenization:
+                                        {
+                                            var assetName = repl.Run(@"AssetName").Value;
+                                            var assetTicker = repl.Run(@"AssetTicker").Value;
+                                            var depositAddress = repl.Run(@"DepositAddress").Value;
+                                            var pubKeyProofs = repl.Run(@"GetPublicKeyProofs()").Value;
+                                            var imageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
+
+                                            if (assetName != null && assetTicker != null && depositAddress != null && pubKeyProofs != null)
+                                            {
+                                                TokenizationFeature tokenizationFeature = new TokenizationFeature
+                                                {
+                                                    AssetName = assetName.ToString(),
+                                                    AssetTicker = assetTicker.ToString(),
+                                                    PublicKeyProofs = pubKeyProofs.ToString(),
+                                                    DepositAddress = depositAddress.ToString(),
+                                                    ImageBase = imageBase
+                                                    
+                                                };
+
+                                                scFeature.FeatureName = FeatureName.Tokenization;
+                                                scFeature.FeatureFeatures = tokenizationFeature;
+
+                                                featuresList.Add(scFeature);
+                                            }
+
+                                            break;
+                                        }
                                     case FeatureName.MultiAsset:
                                         var multiAssetList = new List<string>();
                                         var multiAssetCount = Convert.ToInt32(repl.Run(@"MultiAssetCount").Value.ToString());
@@ -342,7 +384,7 @@ namespace ReserveBlockCore.Models.SmartContracts
 
                             }
                         }
-                        else
+                        else /////////////////////////////////////////////////////////////////////////////////////////////////////
                         {
                             SmartContractFeatures scFeature = new SmartContractFeatures();
                             var featureName = (FeatureName)Convert.ToInt32(feats);
@@ -373,6 +415,34 @@ namespace ReserveBlockCore.Models.SmartContracts
                                                 smartContractMain.IsToken = true;
                                             }
                                         }
+                                        break;
+                                    }
+
+                                case FeatureName.Tokenization:
+                                    {
+                                        var assetName = repl.Run(@"AssetName").Value;
+                                        var assetTicker = repl.Run(@"AssetTicker").Value;
+                                        var depositAddress = repl.Run(@"DepositAddress").Value;
+                                        var pubKeyProofs = repl.Run(@"GetPublicKeyProofs()").Value;
+                                        var imageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
+
+                                        if (assetName != null && assetTicker != null && depositAddress != null && pubKeyProofs != null)
+                                        {
+                                            TokenizationFeature tokenizationFeature = new TokenizationFeature
+                                            {
+                                                AssetName = assetName.ToString(),
+                                                AssetTicker = assetTicker.ToString(),
+                                                PublicKeyProofs = pubKeyProofs.ToString(),
+                                                DepositAddress = depositAddress.ToString(),
+                                                ImageBase = imageBase
+                                            };
+
+                                            scFeature.FeatureName = FeatureName.Tokenization;
+                                            scFeature.FeatureFeatures = tokenizationFeature;
+
+                                            featuresList.Add(scFeature);
+                                        }
+
                                         break;
                                     }
                                 case FeatureName.MultiAsset:
@@ -538,6 +608,27 @@ namespace ReserveBlockCore.Models.SmartContracts
                                     }
                                     break;
                                 }
+                            case FeatureName.Tokenization:
+                                {
+                                    var assetName = repl.Run(@"AssetName").Value != null ? (string)repl.Run(@"AssetName").Value : "vBTC Token";
+                                    var assetTicket = repl.Run(@"AssetTicker").Value != null ? (string)repl.Run(@"AssetTicker").Value : "BTC";
+                                    var depositAddress = repl.Run(@"DepositAddress").Value != null ? (string)repl.Run(@"DepositAddress").Value : "ERROR";
+                                    var proofs =  repl.Run(@"GetPublicKeyProofs()").Value != null ? repl.Run(@"GetPublicKeyProofs()").Value.ToString() : "ERROR";
+                                    var imageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
+
+                                    var tokenizationFeature = new TokenizationFeature { 
+                                        AssetName = assetName,
+                                        AssetTicker = assetTicket,
+                                        DepositAddress = depositAddress,
+                                        PublicKeyProofs = proofs,
+                                        ImageBase = imageBase
+                                    };
+
+                                    scFeature.FeatureName = FeatureName.Tokenization;
+                                    scFeature.FeatureFeatures = tokenizationFeature;
+                                    featuresList.Add(scFeature);
+                                    break;
+                                }
                             case FeatureName.MultiAsset:
                                 var multiAssetList = new List<string>();
                                 var multiAssetCount = Convert.ToInt32(repl.Run(@"MultiAssetCount").Value.ToString());
@@ -641,6 +732,28 @@ namespace ReserveBlockCore.Models.SmartContracts
                                         smartContractMain.IsToken = true;
                                     }
                                 }
+                                break;
+                            }
+                        case FeatureName.Tokenization:
+                            {
+                                var assetName = repl.Run(@"AssetName").Value != null ? (string)repl.Run(@"AssetName").Value : "vBTC Token";
+                                var assetTicket = repl.Run(@"AssetTicker").Value != null ? (string)repl.Run(@"AssetTicker").Value : "BTC";
+                                var depositAddress = repl.Run(@"DepositAddress").Value != null ? (string)repl.Run(@"DepositAddress").Value : "ERROR";
+                                var proofs = repl.Run(@"GetPublicKeyProofs()").Value.ToString();
+                                var imageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
+
+                                var tokenizationFeature = new TokenizationFeature
+                                {
+                                    AssetName = assetName,
+                                    AssetTicker = assetTicket,
+                                    DepositAddress = depositAddress,
+                                    PublicKeyProofs = proofs,
+                                    ImageBase = imageBase
+                                };
+
+                                scFeature.FeatureName = FeatureName.Tokenization;
+                                scFeature.FeatureFeatures = tokenizationFeature;
+                                featuresList.Add(scFeature);
                                 break;
                             }
                         case FeatureName.MultiAsset:

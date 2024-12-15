@@ -71,7 +71,18 @@ namespace ReserveBlockCore.Models
         DSTR, //DST shop registration
         VOTE_TOPIC, //voting topic for validators to vote on
         VOTE, //cast vote for topic
-        RESERVE //create a reserve TX
+        RESERVE, //create a reserve TX
+        SC_MINT, //standard sc mint
+        SC_TX, //standard sc tx
+        SC_BURN, //standard sc burn
+        FTKN_MINT, //fungible token mint
+        FTKN_TX, //fungible token tx
+        FTKN_BURN, //fungible token burn
+        TKNZ_MINT,//tokenization token mint
+        TKNZ_TX,//tokenization token tx
+        TKNZ_BURN,//tokenization token burn
+        TKNZ_WD_ARB,
+        TKNZ_WD_OWNER
     }
 
     public enum ReserveTransactionType
@@ -88,7 +99,8 @@ namespace ReserveBlockCore.Models
         Failed,
         Reserved,
         CalledBack,
-        Recovered
+        Recovered,
+        Invalid = 999
     }
 
     public enum TransactionRating

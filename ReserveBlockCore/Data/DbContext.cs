@@ -39,6 +39,9 @@ namespace ReserveBlockCore.Data
         public static LiteDatabase DB_Vote { set; get; }
         public static LiteDatabase DB_Settings { set; get; }
         public static LiteDatabase DB_Reserve { set; get; }
+        public static LiteDatabase DB_Bitcoin { set; get; }
+        public static LiteDatabase DB_TokenizedWithdrawals { set; get; }
+        public static LiteDatabase DB_Shares { set; get; }
 
 
         //Database names
@@ -64,6 +67,9 @@ namespace ReserveBlockCore.Data
         public const string RSRV_DB_VOTE = @"rsrvvote.db";
         public const string RSRV_DB_SETTINGS = @"rsrvsettings.db";
         public const string RSRV_DB_RESERVE = @"rsrvreserve.db";
+        public const string RSRV_DB_BITCOIN = @"rsrvbitcoin.db";
+        public const string RSRV_DB_TOKENIZED_WITHDRAWALS = @"rsrvtokenizedwithdrawals.db";
+        public const string RSRV_DB_SHARES = @"rsrvshares.db";
 
         //Database tables
         public const string RSRV_BLOCKCHAIN = "rsrv_blockchain";
@@ -113,6 +119,13 @@ namespace ReserveBlockCore.Data
         public const string RSRV_BID = "rsrv_bid";
         public const string RSRV_LISTING = "rsrv_listing";
         public const string RSRV_CHAIN_SIZE = "rsrv_chain_size";
+        public const string RSRV_BITCOIN = "rsrv_bitcoin";
+        public const string RSRV_BITCOIN_UTXO = "rsrv_bitcoin_utxo";
+        public const string RSRV_BITCOIN_TXS = "rsrv_bitcoin_txs";
+        public const string RSRV_BITCOIN_ADNR = "rsrv_bitcoin_adnr";
+        public const string RSRV_BITCOIN_TOKENS = "rsrv_bitcoin_tokens";
+        public const string RSRV_TOKENIZED_WITHDRAWALS = "rsrv_tokenized_withdrawals";
+        public const string RSRV_SHARES = "rsrv_shares";
 
         internal static void Initialize()
         {
@@ -148,6 +161,9 @@ namespace ReserveBlockCore.Data
             DB_Settings = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SETTINGS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Reserve = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_RESERVE, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Blockchain = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BLOCKCHAIN, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_Bitcoin = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BITCOIN, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
 
             var blocks = DB.GetCollection<Block>(RSRV_BLOCKS);
             blocks.EnsureIndexSafe(x => x.Height);
@@ -232,19 +248,22 @@ namespace ReserveBlockCore.Data
             DB_Settings.Commit();
             DB_Reserve.Commit();
             DB_Blockchain.Commit();
+            DB_Bitcoin.Commit();
+            DB_TokenizedWithdrawals.Commit();
+            DB_Shares.Commit();
         }
 
-        public static void Rollback(string location = "")
+        public static void Rollback(string location = "", string message = "")
         {
             bool isStateUpdating = Globals.TreisUpdating;
 
             if(isStateUpdating)
             {
-                ErrorLogUtility.LogError("Rollback Has Occurred during Trei Update!", location);
+                ErrorLogUtility.LogError($"Rollback Has Occurred during Trei Update! Message: {message}", location);
             }
             else
             {
-                ErrorLogUtility.LogError("Rollback Has Occurred!", location);
+                ErrorLogUtility.LogError($"Rollback Has Occurred! Message: {message}", location);
             }
             
 
@@ -309,6 +328,9 @@ namespace ReserveBlockCore.Data
             DB_Settings.Commit();
             DB_Reserve.Commit();
             DB_Blockchain.Commit();
+            DB_Bitcoin.Commit();
+            DB_TokenizedWithdrawals.Commit();
+            DB_Shares.Commit();
 
             //dispose connection to DB
             CloseDB();
@@ -354,6 +376,9 @@ namespace ReserveBlockCore.Data
             File.Delete(path + RSRV_DB_SETTINGS);
             File.Delete(path + RSRV_DB_RESERVE);
             File.Delete(path + RSRV_DB_BLOCKCHAIN);
+            File.Delete(path + RSRV_DB_BITCOIN);
+            File.Delete(path + RSRV_DB_TOKENIZED_WITHDRAWALS);
+            File.Delete(path + RSRV_DB_SHARES);
 
             var mapper = new BsonMapper();
             mapper.RegisterType<DateTime>(
@@ -386,7 +411,9 @@ namespace ReserveBlockCore.Data
             DB_Settings = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SETTINGS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Reserve = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_RESERVE, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Blockchain = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BLOCKCHAIN, Connection = ConnectionType.Direct, ReadOnly = false });
-
+            DB_Bitcoin = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BITCOIN, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
 
             DB_Assets.Pragma("UTC_DATE", true);
             DB_AssetQueue.Pragma("UTC_DATE", true);
@@ -419,6 +446,9 @@ namespace ReserveBlockCore.Data
             DB_Settings.Dispose();
             DB_Reserve.Dispose();
             DB_Blockchain.Dispose();
+            DB_Bitcoin.Dispose();
+            DB_TokenizedWithdrawals.Dispose();
+            DB_Shares.Dispose();
         }
 
         public static async Task CheckPoint()
@@ -526,6 +556,21 @@ namespace ReserveBlockCore.Data
             try
             {
                 DB_Blockchain.Checkpoint();
+            }
+            catch { }
+            try
+            {
+                DB_Bitcoin.Checkpoint();
+            }
+            catch { }
+            try
+            {
+                DB_TokenizedWithdrawals.Checkpoint();
+            }
+            catch { }
+            try
+            {
+                DB_Shares.Checkpoint();
             }
             catch { }
         }

@@ -278,17 +278,28 @@ namespace ReserveBlockCore.Data
 
         public static async Task<bool> HasTxBeenCraftedIntoBlock(Transaction tx)
         {
-            var result = false;
-            
             if (Globals.MemBlocks.Any())
             {
                 var txExist = Globals.MemBlocks.ContainsKey(tx.Hash);
                 if (txExist == true)
                 {
-                    result = true;
+                    return true;
                 }
             }
-            return result;
+            if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                if (Globals.NetworkBlockQueue.Any())
+                {
+                    foreach (var block in Globals.NetworkBlockQueue)
+                    {
+                        var txExist = block.Value.Transactions.Where(x => x.Hash == tx.Hash).FirstOrDefault();
+                        if (txExist != null)
+                            return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         public static async Task<bool> IsTxTimestampStale(Transaction tx)
@@ -327,6 +338,13 @@ namespace ReserveBlockCore.Data
             }
             
         }
+
+        public static async Task ClearMempool()
+        {
+            var pool = GetPool();
+
+            pool.DeleteAllSafe();
+        }
         public static void PrintMemPool()
         {
             var pool = GetPool();
@@ -349,7 +367,7 @@ namespace ReserveBlockCore.Data
         public static List<Transaction>? GetMempool()
         {
             var pool = GetPool();
-            if (pool.Count() != 0)
+            if (pool != null)
             {
                 var txs = pool.FindAll().ToList();
                 if(txs.Count() != 0)
@@ -374,6 +392,9 @@ namespace ReserveBlockCore.Data
             var sizedMempoolList = MempoolSizeUtility.SizeMempoolDown(memPoolTxList);
 
             var approvedMemPoolList = new List<Transaction>();
+            var queuedMempoolTxList = new List<Transaction>();
+
+            queuedMempoolTxList = Globals.NetworkBlockQueue.Values.SelectMany(x => x.Transactions).ToList();
 
             var adnrNameList = new List<string>();
 
@@ -384,9 +405,16 @@ namespace ReserveBlockCore.Data
                     try
                     {
                         var txExist = approvedMemPoolList.Exists(x => x.Hash == tx.Hash);
-                        if (!txExist)
+                        var queuedTxExist = queuedMempoolTxList.Exists(x => x.Hash == tx.Hash);
+
+                        if (!txExist && !queuedTxExist)
                         {
                             var reject = false;
+
+                            var fromAddress = tx.FromAddress;
+                            if (Globals.ABL.Exists(x => x == fromAddress))
+                                reject = true;
+
                             if (tx.TransactionType != TransactionType.TX &&
                                 tx.TransactionType != TransactionType.ADNR &&
                                 tx.TransactionType != TransactionType.VOTE_TOPIC &&

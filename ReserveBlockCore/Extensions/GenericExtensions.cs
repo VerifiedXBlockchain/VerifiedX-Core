@@ -1,4 +1,5 @@
-﻿using ReserveBlockCore.Models;
+﻿using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Models;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Collections.Concurrent;
@@ -264,7 +265,7 @@ namespace ReserveBlockCore.Extensions
 
         public static string ToAddressNormalize(this string source)
         {
-            var adnrCheck = source.ToLower().Contains(".rbx");
+            var adnrCheck = (source.ToLower().Contains(".rbx") || source.ToLower().Contains(".vfx")) ? true : false;
 
             if (adnrCheck)
             {
@@ -281,7 +282,25 @@ namespace ReserveBlockCore.Extensions
 
             return source;
         }
+        public static string ToBTCAddressNormalize(this string source)
+        {
+            var adnrCheck = source.ToLower().Contains(".btc");
 
+            if (adnrCheck)
+            {
+                var result = BitcoinAdnr.GetAddress(source);
+                if (result.Item1 == true)
+                {
+                    return result.Item2;
+                }
+                else
+                {
+                    return source;
+                }
+            }
+
+            return source;
+        }
         public static string ToStringFromBase64(this string source)
         {
             var base64EncodedString = Convert.FromBase64String(source);
@@ -404,6 +423,35 @@ namespace ReserveBlockCore.Extensions
 
             return Convert.ToBase64String(array);
         }
+        public static string ToEncrypt(this string source, string passPhrase)
+        {
+            byte[] key = GetKey(passPhrase);
+            byte[] iv = new byte[16];
+            byte[] array;
+
+            using (Aes aes = Aes.Create())
+            {
+                aes.Key = key;
+                aes.IV = iv;
+
+                ICryptoTransform encryptor = aes.CreateEncryptor(aes.Key, aes.IV);
+
+                using (MemoryStream memoryStream = new MemoryStream())
+                {
+                    using (CryptoStream cryptoStream = new CryptoStream((Stream)memoryStream, encryptor, CryptoStreamMode.Write))
+                    {
+                        using (StreamWriter streamWriter = new StreamWriter((Stream)cryptoStream))
+                        {
+                            streamWriter.Write(source);
+                        }
+
+                        array = memoryStream.ToArray();
+                    }
+                }
+            }
+
+            return Convert.ToBase64String(array);
+        }
         public static string ToDecrypt(this string cipherText, string passPhrase)
         {
             try
@@ -490,6 +538,18 @@ namespace ReserveBlockCore.Extensions
             if(wordCount > count)
                 return false;
             return true;
+        }
+        public static byte[] ToDecompress(this byte[] data)
+        {
+            using (MemoryStream compressedStream = new MemoryStream(data))
+            using (MemoryStream decompressedStream = new MemoryStream())
+            {
+                using (GZipStream gzipStream = new GZipStream(compressedStream, CompressionMode.Decompress))
+                {
+                    gzipStream.CopyTo(decompressedStream);
+                }
+                return decompressedStream.ToArray();
+            }
         }
 
         public static string ToDecompress(this string s)

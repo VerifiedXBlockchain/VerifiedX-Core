@@ -29,9 +29,10 @@ namespace ReserveBlockCore.Services
 
                     var currentTimeMinusFiveMins = TimeUtil.GetTime(-300);
 
-                    var mempool = TransactionData.GetMempool()?.Where(x => x.Timestamp <= currentTimeMinusFiveMins);
-                    if (mempool != null)
+                    var mempoolList = TransactionData.GetMempool();
+                    if (mempoolList != null)
                     {
+                        var mempool = mempoolList.Where(x => x.Timestamp <= currentTimeMinusFiveMins).ToList();
                         if (mempool.Count() > 0)
                         {
                             foreach (var mempoolEntry in mempool)
@@ -46,7 +47,7 @@ namespace ReserveBlockCore.Services
                                         {
                                             if (account.IsValidating || !string.IsNullOrEmpty(Globals.ValidatorAddress))
                                             {
-                                                await P2PClient.SendTXToAdjudicator(mempoolEntry);//send directly to adjs
+                                                await P2PValidatorClient.SendTXMempool(mempoolEntry);//send directly to adjs
                                             }
                                             else
                                             {
@@ -63,7 +64,7 @@ namespace ReserveBlockCore.Services
                                     {
                                         if (account.IsValidating || !string.IsNullOrEmpty(Globals.ValidatorAddress))
                                         {
-                                            await P2PClient.SendTXToAdjudicator(mempoolEntry);//send directly to adjs
+                                            await P2PValidatorClient.SendTXMempool(mempoolEntry);//send directly to adjs
                                         }
                                         else
                                         {

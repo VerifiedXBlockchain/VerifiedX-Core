@@ -319,11 +319,11 @@ namespace ReserveBlockCore.Controllers
         [HttpGet("GetNFTAssets/{scUID}")]
         public async Task<bool> GetNFTAssets(string scUID)
         {
-            NFTLogUtility.Log($"Asset Download Started for: {scUID}", "DSTV1Controller.GetNFTAssets()");
+            SCLogUtility.Log($"Asset Download Started for: {scUID}", "DSTV1Controller.GetNFTAssets()");
             var connectedShop = Globals.ConnectedClients.Where(x => x.Value.IsConnected).Take(1);
             if (connectedShop.Count() > 0)
             {
-                NFTLogUtility.Log($"Connected to shop, attempting download  for: {scUID}", "DSTV1Controller.GetNFTAssets()");
+                SCLogUtility.Log($"Connected to shop, attempting download  for: {scUID}", "DSTV1Controller.GetNFTAssets()");
                 Message message = new Message
                 {
                     Address = ConnectingAddress,
@@ -335,7 +335,7 @@ namespace ReserveBlockCore.Controllers
                 if (!Globals.AssetDownloadLock)
                 {
                     Globals.AssetDownloadLock = true;
-                    NFTLogUtility.Log($"Asset download unlocked for: {scUID}", "DSTV1Controller.GetNFTAssets()");
+                    SCLogUtility.Log($"Asset download unlocked for: {scUID}", "DSTV1Controller.GetNFTAssets()");
                     await DSTClient.DisconnectFromAsset();
                     var connected = await DSTClient.ConnectToShopForAssets();
                     if (connected)
@@ -347,7 +347,7 @@ namespace ReserveBlockCore.Controllers
                 }
                 else
                 {
-                    NFTLogUtility.Log($"Asset download locked for: {scUID}", "DSTV1Controller.GetNFTAssets()");
+                    SCLogUtility.Log($"Asset download locked for: {scUID}", "DSTV1Controller.GetNFTAssets()");
                 }
             }
 
@@ -618,13 +618,15 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Gets dec shop info from Network. Example : 'rbx://someurlgoeshere'
+        /// Gets dec shop info from Network. Example : 'rbx://someurlgoeshere' or 'vfx://someurlgoeshere'
         /// </summary>
         /// <returns></returns>
         [HttpGet("GetDecShopByURL/{**url}")]
         public async Task<string> GetDecShopByURL(string url)
         {
             string output = "";
+
+            url = WebUtility.UrlDecode(url);
 
             var decshop = await DecShop.GetDecShopStateTreiLeafByURL(url);
 
@@ -751,7 +753,7 @@ namespace ReserveBlockCore.Controllers
 
                             if(myDS.DecShopURL != decShop.DecShopURL)
                             {
-                                myDS.DecShopURL = $"rbx://{decShop.DecShopURL}";
+                                myDS.DecShopURL = $"vfx://{decShop.DecShopURL}";
                             }
 
                             if (decShop.HostingType == DecShopHostingType.SelfHosted)
@@ -976,13 +978,15 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Get network shop info rbx://someurlgoeshere'
+        /// Get network shop info rbx://someurlgoeshere' or 'vfx://someurlgoeshere'
         /// </summary>
         /// <param name="url"></param>
         /// <returns></returns>
         [HttpGet("GetNetworkDecShopInfo/{**url}")]
         public async Task<string> GetNetworkDecShopInfo(string url)
         {
+            url = WebUtility.UrlDecode(url);
+
             var decshop = await DecShop.GetDecShopStateTreiLeafByURL(url);
 
             if(decshop == null)
@@ -1009,7 +1013,7 @@ namespace ReserveBlockCore.Controllers
 
 
         /// <summary>
-        /// Connects to a shop : 'rbx://someurlgoeshere'
+        /// Connects to a shop : 'rbx://someurlgoeshere' or 'vfx://someurlgoeshere'
         /// </summary>
         /// <param name="address"></param>
         /// <param name="url"></param>
@@ -1017,6 +1021,8 @@ namespace ReserveBlockCore.Controllers
         [HttpGet("ConnectToDecShop/{address}/{**url}")]
         public async Task<bool> ConnectToDecShop(string address, string url)
         {
+            url = WebUtility.UrlDecode(url);
+
             var decshop = await DecShop.GetDecShopStateTreiLeafByURL(url);
 
             if (decshop != null)
@@ -1062,7 +1068,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Gets shop info : 'rbx://someurlgoeshere'
+        /// Gets shop info : 'rbx://someurlgoeshere' or 'vfx://someurlgoeshere'
         /// </summary>
         /// <returns></returns>
         [HttpGet("GetShopInfo")]

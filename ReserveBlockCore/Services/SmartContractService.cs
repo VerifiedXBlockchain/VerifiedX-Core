@@ -1,4 +1,5 @@
 ﻿using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.EllipticCurve;
 using ReserveBlockCore.Models;
@@ -20,14 +21,14 @@ namespace ReserveBlockCore.Services
     public static class SmartContractService
     {
         #region MintSmartContractTx
-        public static async Task<Transaction?> MintSmartContractTx(SmartContractMain scMain)
+        public static async Task<Transaction?> MintSmartContractTx(SmartContractMain scMain, TransactionType txType = TransactionType.NFT_MINT)
         {
             Transaction? scTx = null;
 
             var account = AccountData.GetSingleAccount(scMain.MinterAddress);
             if (account == null)
             {
-                NFTLogUtility.Log($"Minter address is not found for : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                SCLogUtility.Log($"Minter address is not found for : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
                 return null;//Minter address is not found
             }
 
@@ -35,7 +36,7 @@ namespace ReserveBlockCore.Services
 
             if(scStateTrei != null)
             {
-                NFTLogUtility.Log($"This NFT has already be minted : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                SCLogUtility.Log($"This SC has already be minted : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
                 return null;// record already exist
             }
 
@@ -70,7 +71,7 @@ namespace ReserveBlockCore.Services
                 Amount = 0.0M,
                 Fee = 0,
                 Nonce = AccountStateTrei.GetNextNonce(scMain.MinterAddress),
-                TransactionType = TransactionType.NFT_MINT,
+                TransactionType = scData.Item3 ? TransactionType.TKNZ_MINT : txType,
                 Data = txData
             };
 
@@ -81,7 +82,7 @@ namespace ReserveBlockCore.Services
             var senderBalance = AccountStateTrei.GetAccountBalance(account.Address);
             if ((scTx.Amount + scTx.Fee) > senderBalance)
             {
-                NFTLogUtility.Log($"Balance insufficient to send NFT : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                SCLogUtility.Log($"Balance insufficient to send SC : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
                 return null;//balance insufficient
             }
 
@@ -92,7 +93,7 @@ namespace ReserveBlockCore.Services
             var signature = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
             if (signature == "ERROR")
             {
-                NFTLogUtility.Log($"Signing NFT TX failed : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                SCLogUtility.Log($"Signing SC TX failed : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
                 return null; //TX sig failed
             }
 
@@ -125,7 +126,7 @@ namespace ReserveBlockCore.Services
                         TransactionData.AddToPool(scTx);
                         TransactionData.AddTxToWallet(scTx, true);
                         AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
-                        await P2PClient.SendTXToAdjudicator(scTx);//send directly to adjs
+                        await P2PValidatorClient.SendTXMempool(scTx);//send directly to adjs
                     }
                     else
                     {
@@ -138,7 +139,7 @@ namespace ReserveBlockCore.Services
                 }
                 else
                 {
-                    NFTLogUtility.Log($"Transaction Failed Verify and was not Sent to Mempool : {scMain.SmartContractUID}. Result: {result.Item2}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                    SCLogUtility.Log($"Transaction Failed Verify and was not Sent to Mempool : {scMain.SmartContractUID}. Result: {result.Item2}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
                     var output = "Fail! Transaction Verify has failed.";
                     return null;
                 }
@@ -146,7 +147,141 @@ namespace ReserveBlockCore.Services
             catch (Exception ex)
             {                
                 Console.WriteLine("Error: {0}", ex.ToString());
-                NFTLogUtility.Log($"Error Minting Smart Contract: {ex.ToString()}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                SCLogUtility.Log($"Error Minting Smart Contract: {ex.ToString()}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+            }
+
+            return null;
+        }
+
+        #endregion
+
+        #region Update SC for BTC Tokenize
+
+        public static async Task<Transaction?> UpdateSmartContractTX(SmartContractMain scMain)
+        {
+            Transaction? scTx = null;
+
+            var account = AccountData.GetSingleAccount(scMain.MinterAddress);
+            if (account == null)
+            {
+                SCLogUtility.Log($"Minter address is not found for : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                return null;//Minter address is not found
+            }
+
+            var scStateTrei = SmartContractStateTrei.GetSmartContractState(scMain.SmartContractUID);
+
+            if (scStateTrei != null)
+            {
+                SCLogUtility.Log($"This SC has already be minted : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                return null;// record already exist
+            }
+
+            var scData = await SmartContractReaderService.ReadSmartContract(scMain);
+
+            var txData = "";
+
+            if (!string.IsNullOrWhiteSpace(scData.Item1))
+            {
+                var bytes = Encoding.Unicode.GetBytes(scData.Item1);
+                var scBase64 = bytes.ToCompress().ToBase64();
+                string function = "Update()";
+                var newSCInfo = new[]
+                {
+                    new { Function = function, ContractUID = scMain.SmartContractUID, Data = scBase64 }
+                };
+
+                txData = JsonConvert.SerializeObject(newSCInfo);
+            }
+            else
+            {
+                return null;
+            }
+
+            scTx = new Transaction
+            {
+                Timestamp = TimeUtil.GetTime(),
+                FromAddress = scMain.MinterAddress,
+                ToAddress = scMain.MinterAddress,
+                Amount = 0.0M,
+                Fee = 0,
+                Nonce = AccountStateTrei.GetNextNonce(scMain.MinterAddress),
+                TransactionType = TransactionType.NFT_MINT,
+                Data = txData
+            };
+
+            scTx.Fee = FeeCalcService.CalculateTXFee(scTx);
+
+            scTx.Build();
+
+            var senderBalance = AccountStateTrei.GetAccountBalance(account.Address);
+            if ((scTx.Amount + scTx.Fee) > senderBalance)
+            {
+                SCLogUtility.Log($"Balance insufficient to send SC : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                return null;//balance insufficient
+            }
+
+            BigInteger b1 = BigInteger.Parse(account.GetKey, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
+            PrivateKey privateKey = new PrivateKey("secp256k1", b1);
+
+            var txHash = scTx.Hash;
+            var signature = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
+            if (signature == "ERROR")
+            {
+                SCLogUtility.Log($"Signing SC TX failed : {scMain.SmartContractUID}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                return null; //TX sig failed
+            }
+
+            scTx.Signature = signature; //sigScript  = signature + '.' (this is a split char) + pubKey in Base58 format
+
+            try
+            {
+                if (scTx.TransactionRating == null)
+                {
+                    var rating = await TransactionRatingService.GetTransactionRating(scTx);
+                    scTx.TransactionRating = rating;
+                }
+
+                var result = await TransactionValidatorService.VerifyTX(scTx);
+                if (result.Item1 == true)
+                {
+                    scTx.TransactionStatus = TransactionStatus.Pending;
+
+                    if (account.IsValidating == true && (account.Balance - (scTx.Fee + scTx.Amount) < ValidatorService.ValidatorRequiredAmount()))
+                    {
+                        var validator = Validators.Validator.GetAll().FindOne(x => x.Address.ToLower() == scTx.FromAddress.ToLower());
+                        ValidatorService.StopValidating(validator);
+                        TransactionData.AddToPool(scTx);
+                        TransactionData.AddTxToWallet(scTx, true);
+                        AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
+                        await P2PClient.SendTXMempool(scTx);//send out to mempool
+                    }
+                    else if (account.IsValidating)
+                    {
+                        TransactionData.AddToPool(scTx);
+                        TransactionData.AddTxToWallet(scTx, true);
+                        AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
+                        await P2PValidatorClient.SendTXMempool(scTx);//send directly to adjs
+                    }
+                    else
+                    {
+                        TransactionData.AddToPool(scTx);
+                        TransactionData.AddTxToWallet(scTx, true);
+                        AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
+                        await P2PClient.SendTXMempool(scTx);//send out to mempool
+                    }
+                    return scTx;
+                }
+                else
+                {
+                    SCLogUtility.Log($"Transaction Failed Verify and was not Sent to Mempool : {scMain.SmartContractUID}. Result: {result.Item2}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
+                    var output = "Fail! Transaction Verify has failed.";
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error: {0}", ex.ToString());
+                SCLogUtility.Log($"Error Minting Smart Contract: {ex.ToString()}", "SmartContractService.MintSmartContractTx(SmartContractMain scMain)");
             }
 
             return null;
@@ -155,7 +290,7 @@ namespace ReserveBlockCore.Services
         #endregion
 
         #region TransferSmartContract
-        public static async Task TransferSmartContract(SmartContractMain scMain, string toAddress, BeaconNodeInfo beaconNodeInfo, string md5List = "NA", string backupURL = "", bool isReserveAccount = false, PrivateKey? reserveAccountKey = null, int unlockTime = 0)
+        public static async Task TransferSmartContract(SmartContractMain scMain, string toAddress, BeaconNodeInfo beaconNodeInfo, string md5List = "NA", string backupURL = "", bool isReserveAccount = false, PrivateKey? reserveAccountKey = null, int unlockTime = 0, TransactionType txType = TransactionType.NFT_TX)
         {
             var scTx = new Transaction();
             try
@@ -163,7 +298,7 @@ namespace ReserveBlockCore.Services
                 var aqDB = AssetQueue.GetAssetQueue();
                 if(aqDB == null)
                 {
-                    NFTLogUtility.Log($"AssetQueue DB was null.", "SmartContractService.TransferSmartContract()");
+                    SCLogUtility.Log($"AssetQueue DB was null.", "SmartContractService.TransferSmartContract()");
                     return;
                 }
 
@@ -173,7 +308,7 @@ namespace ReserveBlockCore.Services
                 bool beaconSendFinalResult = true;
                 if (assets.Count() > 0)
                 {
-                    NFTLogUtility.Log($"NFT Asset Transfer Beginning for: {scMain.SmartContractUID}. Assets: {assets}", "SCV1Controller.TransferNFT()");
+                    SCLogUtility.Log($"SC Asset Transfer Beginning for: {scMain.SmartContractUID}. Assets: {assets}", "SCV1Controller.TransferSmartContract()");
                     foreach (var asset in assets)
                     {
                         var sendResult = await BeaconUtility.SendAssets_New(scMain.SmartContractUID, asset, beaconNodeInfo.Beacons.BeaconLocator);
@@ -186,7 +321,7 @@ namespace ReserveBlockCore.Services
                     beaconNodeInfo.Uploading = false;
                     Globals.Beacon[beaconNodeInfo.IPAddress] = beaconNodeInfo;
 
-                    NFTLogUtility.Log($"NFT Asset Transfer Done for: {scMain.SmartContractUID}.", "SCV1Controller.TransferNFT()");
+                    SCLogUtility.Log($"SC Asset Transfer Done for: {scMain.SmartContractUID}.", "SCV1Controller.TransferSmartContract()");
                 }
                 if (beaconSendFinalResult)
                 {
@@ -196,7 +331,7 @@ namespace ReserveBlockCore.Services
                     {
                         if (aq != null)
                             aqDB.DeleteSafe(aq.Id);
-                        NFTLogUtility.Log($"Failed to find SC Locally. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
+                        SCLogUtility.Log($"Failed to find SC Locally. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
                         return;
                     }
 
@@ -208,7 +343,7 @@ namespace ReserveBlockCore.Services
                     {
                         if (aq != null)
                             aqDB.DeleteSafe(aq.Id);
-                        NFTLogUtility.Log($"Minter address not found. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
+                        SCLogUtility.Log($"Minter address not found. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
                         return;
                     }
                     var fromAddress = !isReserveAccount ? account?.Address : rAccount?.Address;
@@ -241,7 +376,7 @@ namespace ReserveBlockCore.Services
                         Amount = 0.0M,
                         Fee = 0,
                         Nonce = AccountStateTrei.GetNextNonce(fromAddress),
-                        TransactionType = TransactionType.NFT_TX,
+                        TransactionType = txType,
                         Data = txData,
                         UnlockTime = rAccount != null ? TimeUtil.GetReserveTime(unlockTime) : null
                     };
@@ -257,7 +392,7 @@ namespace ReserveBlockCore.Services
                             aqDB.DeleteSafe(aq.Id);
                         scTx.TransactionStatus = TransactionStatus.Failed;
                         TransactionData.AddTxToWallet(scTx, true);
-                        NFTLogUtility.Log($"Balance insufficient. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
+                        SCLogUtility.Log($"Balance insufficient. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
                         return;
                     }
 
@@ -270,7 +405,7 @@ namespace ReserveBlockCore.Services
                             aqDB.DeleteSafe(aq.Id);
                         scTx.TransactionStatus = TransactionStatus.Failed;
                         TransactionData.AddTxToWallet(scTx, true);
-                        NFTLogUtility.Log($"Private key was null for account {fromAddress}", "SmartContractService.TransferSmartContract()");
+                        SCLogUtility.Log($"Private key was null for account {fromAddress}", "SmartContractService.TransferSmartContract()");
                         return;
                     }
 
@@ -282,7 +417,7 @@ namespace ReserveBlockCore.Services
                             aqDB.DeleteSafe(aq.Id);
                         scTx.TransactionStatus = TransactionStatus.Failed;
                         TransactionData.AddTxToWallet(scTx, true);
-                        NFTLogUtility.Log($"TX Signature Failed. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
+                        SCLogUtility.Log($"TX Signature Failed. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
                         return;
                     }
 
@@ -309,7 +444,7 @@ namespace ReserveBlockCore.Services
                             await WalletService.SendReserveTransaction(scTx, rAccount, true);
                         }
                         
-                        NFTLogUtility.Log($"TX Success. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
+                        SCLogUtility.Log($"TX Success. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
                         return;
                     }
                     else
@@ -319,7 +454,7 @@ namespace ReserveBlockCore.Services
                         var output = "Fail! Transaction Verify has failed.";
                         scTx.TransactionStatus = TransactionStatus.Failed;
                         TransactionData.AddTxToWallet(scTx, true);
-                        NFTLogUtility.Log($"Error Transfer Failed TX Verify: {scMain.SmartContractUID}. Result: {result.Item2}", "SmartContractService.TransferSmartContract()");
+                        SCLogUtility.Log($"Error Transfer Failed TX Verify: {scMain.SmartContractUID}. Result: {result.Item2}", "SmartContractService.TransferSmartContract()");
                         return;
                     }
                 
@@ -328,7 +463,7 @@ namespace ReserveBlockCore.Services
                 {
                     if (aq != null)
                         aqDB.DeleteSafe(aq.Id);
-                    NFTLogUtility.Log($"Failed to upload to Beacon - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {beaconNodeInfo.Beacons.BeaconLocator} | MD5List: {md5List} | backupURL: {backupURL}", "SCV1Controller.TransferNFT()");
+                    SCLogUtility.Log($"Failed to upload to Beacon - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {beaconNodeInfo.Beacons.BeaconLocator} | MD5List: {md5List} | backupURL: {backupURL}", "SCV1Controller.TransferNFT()");
                 }
             }
             catch (Exception ex)
@@ -336,7 +471,7 @@ namespace ReserveBlockCore.Services
                 var aqDB = AssetQueue.GetAssetQueue();
                 if (aqDB == null)
                 {
-                    NFTLogUtility.Log($"AssetQueue DB was null.", "SmartContractService.TransferSmartContract()");
+                    SCLogUtility.Log($"AssetQueue DB was null.", "SmartContractService.TransferSmartContract()");
                     return;
                 }
 
@@ -361,7 +496,7 @@ namespace ReserveBlockCore.Services
                 if(aq != null)
                     aqDB.DeleteSafe(aq.Id);
                 TransactionData.AddTxToWallet(scTx, true);
-                NFTLogUtility.Log($"Error Transferring Smart Contract: {ex.ToString()}", "SmartContractService.TransferSmartContract()");
+                SCLogUtility.Log($"Error Transferring Smart Contract: {ex.ToString()}", "SmartContractService.TransferSmartContract()");
             }
         }
 
@@ -374,20 +509,20 @@ namespace ReserveBlockCore.Services
 
             var smartContractStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
 
-            NFTLogUtility.Log("1", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("1", "SmartContractService.StartSaleSmartContractTX");
 
             if (smartContractStateTrei == null) return null;
 
-            NFTLogUtility.Log("2", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("2", "SmartContractService.StartSaleSmartContractTX");
 
             if (scMain == null) return null;
 
-            NFTLogUtility.Log("3", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("3", "SmartContractService.StartSaleSmartContractTX");
 
             var account = AccountData.GetSingleAccount(smartContractStateTrei.OwnerAddress);
             if (account == null) return null;//Owner address not found.
 
-            NFTLogUtility.Log("4", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("4", "SmartContractService.StartSaleSmartContractTX");
 
             var keyToSign = purchaseKey;
 
@@ -411,18 +546,18 @@ namespace ReserveBlockCore.Services
 
             var senderBalance = AccountStateTrei.GetAccountBalance(account.Address);
 
-            NFTLogUtility.Log("5", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("5", "SmartContractService.StartSaleSmartContractTX");
             if ((scTx.Amount + scTx.Fee) > senderBalance) return null;//balance insufficient
-            NFTLogUtility.Log("6", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("6", "SmartContractService.StartSaleSmartContractTX");
             var privateKey = account.GetPrivKey;
 
             if (privateKey == null) return null;
 
-            NFTLogUtility.Log("7", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("7", "SmartContractService.StartSaleSmartContractTX");
             var txHash = scTx.Hash;
             var signature = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
             if (signature == "ERROR") return null; //TX sig failed
-            NFTLogUtility.Log("8", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("8", "SmartContractService.StartSaleSmartContractTX");
             scTx.Signature = signature;
 
             try
@@ -436,15 +571,15 @@ namespace ReserveBlockCore.Services
                 var result = await TransactionValidatorService.VerifyTX(scTx);
 
                 if (!result.Item1)
-                    NFTLogUtility.Log($"Failed TX Verify. Reason: {result.Item2}", "SmartContractService.StartSaleSmartContractTX");
+                    SCLogUtility.Log($"Failed TX Verify. Reason: {result.Item2}", "SmartContractService.StartSaleSmartContractTX");
 
                 if (!result.Item1) return null;
 
-                NFTLogUtility.Log("9", "SmartContractService.StartSaleSmartContractTX");
+                SCLogUtility.Log("9", "SmartContractService.StartSaleSmartContractTX");
 
                 if (!Globals.Beacons.Any())
                 {
-                    NFTLogUtility.Log("Error - You do not have any beacons stored.", "SmartContratService.StartSaleSmartContractTX()");
+                    SCLogUtility.Log("Error - You do not have any beacons stored.", "SmartContratService.StartSaleSmartContractTX()");
                     return null;
                 }
                 else
@@ -455,13 +590,13 @@ namespace ReserveBlockCore.Services
 
                     var assets = await NFTAssetFileUtility.GetAssetListFromSmartContract(scMain);
 
-                    NFTLogUtility.Log($"Sending the following assets for upload: {md5List}", "SmartContratService.StartSaleSmartContractTX()");
+                    SCLogUtility.Log($"Sending the following assets for upload: {md5List}", "SmartContratService.StartSaleSmartContractTX()");
 
                     bool burResult = false;
                     if (localAddress == null)
                     {
                         burResult = await P2PClient.BeaconUploadRequest(beaconNodeInfo, assets, scMain.SmartContractUID, toAddress, md5List).WaitAsync(new TimeSpan(0, 0, 10));
-                        NFTLogUtility.Log($"NFT Beacon Upload Request Completed. SCUID: {scMain.SmartContractUID}", "SmartContratService.StartSaleSmartContractTX()");
+                        SCLogUtility.Log($"NFT Beacon Upload Request Completed. SCUID: {scMain.SmartContractUID}", "SmartContratService.StartSaleSmartContractTX()");
                     }
                     else
                     {
@@ -472,7 +607,7 @@ namespace ReserveBlockCore.Services
                     {
                         var aqResult = AssetQueue.CreateAssetQueueItem(scMain.SmartContractUID, toAddress, beaconNodeInfo.Beacons.BeaconLocator, md5List, assets,
                             AssetQueue.TransferType.Upload);
-                        NFTLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {scMain.SmartContractUID}", "SmartContratService.StartSaleSmartContractTX()");
+                        SCLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {scMain.SmartContractUID}", "SmartContratService.StartSaleSmartContractTX()");
 
                         if (aqResult)
                         {
@@ -480,7 +615,7 @@ namespace ReserveBlockCore.Services
                             bool beaconSendFinalResult = true;
                             if (assets.Count() > 0)
                             {
-                                NFTLogUtility.Log($"NFT Asset Transfer Beginning for: {scMain.SmartContractUID}. Assets: {assets}", "SCV1Controller.TransferNFT()");
+                                SCLogUtility.Log($"NFT Asset Transfer Beginning for: {scMain.SmartContractUID}. Assets: {assets}", "SCV1Controller.TransferNFT()");
                                 foreach (var asset in assets)
                                 {
                                     var sendResult = await BeaconUtility.SendAssets_New(scMain.SmartContractUID, asset, beaconNodeInfo.Beacons.BeaconLocator);
@@ -491,7 +626,7 @@ namespace ReserveBlockCore.Services
                                 beaconNodeInfo.Uploading = false;
                                 Globals.Beacon[beaconNodeInfo.IPAddress] = beaconNodeInfo;
 
-                                NFTLogUtility.Log($"NFT Asset Transfer Done for: {scMain.SmartContractUID}.", "SCV1Controller.TransferNFT()");
+                                SCLogUtility.Log($"NFT Asset Transfer Done for: {scMain.SmartContractUID}.", "SCV1Controller.TransferNFT()");
                             }
 
                             if (beaconSendFinalResult)
@@ -504,24 +639,24 @@ namespace ReserveBlockCore.Services
                             }
                             else
                             {
-                                NFTLogUtility.Log($"Failed to upload to Beacon - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {beaconNodeInfo.Beacons.BeaconLocator} | MD5List: {md5List}", "SmartContractService.StartSaleSmartContractTX()");
+                                SCLogUtility.Log($"Failed to upload to Beacon - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {beaconNodeInfo.Beacons.BeaconLocator} | MD5List: {md5List}", "SmartContractService.StartSaleSmartContractTX()");
                                 return null;
                             }
                         }
                         else
                         {
-                            NFTLogUtility.Log($"Failed to add upload to Asset Queue - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {beaconNodeInfo.Beacons.BeaconLocator} | MD5List: {md5List}", "SmartContratService.StartSaleSmartContractTX()");
+                            SCLogUtility.Log($"Failed to add upload to Asset Queue - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {beaconNodeInfo.Beacons.BeaconLocator} | MD5List: {md5List}", "SmartContratService.StartSaleSmartContractTX()");
                             return null;
                         }
                     }
                     else
                     {
-                        NFTLogUtility.Log($"Beacon upload failed. Result was : {burResult}", "SmartContratService.StartSaleSmartContractTX()");
+                        SCLogUtility.Log($"Beacon upload failed. Result was : {burResult}", "SmartContratService.StartSaleSmartContractTX()");
                     }
                 }
             }
-            catch { NFTLogUtility.Log("10", "SmartContractService.StartSaleSmartContractTX"); }
-            NFTLogUtility.Log("11", "SmartContractService.StartSaleSmartContractTX");
+            catch { SCLogUtility.Log("10", "SmartContractService.StartSaleSmartContractTX"); }
+            SCLogUtility.Log("11", "SmartContractService.StartSaleSmartContractTX");
 
             return null;
         }
@@ -885,7 +1020,7 @@ namespace ReserveBlockCore.Services
                         TransactionData.AddToPool(scTx);
                         TransactionData.AddTxToWallet(scTx, true);
                         AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
-                        await P2PClient.SendTXToAdjudicator(scTx);//send directly to adjs
+                        await P2PValidatorClient.SendTXMempool(scTx);//send directly to adjs
                     }
                     else
                     {
@@ -899,14 +1034,14 @@ namespace ReserveBlockCore.Services
                 else
                 {
                     var output = "Fail! Transaction Verify has failed.";
-                    NFTLogUtility.Log($"Error Evolve Failed TX Verify: {scMain.SmartContractUID}. Result: {result.Item2}", "SmartContractService.BurnSmartContract()");
+                    SCLogUtility.Log($"Error Evolve Failed TX Verify: {scMain.SmartContractUID}. Result: {result.Item2}", "SmartContractService.BurnSmartContract()");
                     return null;
                 }
             }
             catch (Exception ex)
             {                
                 Console.WriteLine("Error: {0}", ex.ToString());
-                NFTLogUtility.Log($"Error Burning Smart Contract: {ex.ToString()}", "SmartContractService.BurnSmartContract()");
+                SCLogUtility.Log($"Error Burning Smart Contract: {ex.ToString()}", "SmartContractService.BurnSmartContract()");
             }
 
             return null;
@@ -1001,7 +1136,7 @@ namespace ReserveBlockCore.Services
                         TransactionData.AddToPool(scTx);
                         TransactionData.AddTxToWallet(scTx, true);
                         AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
-                        await P2PClient.SendTXToAdjudicator(scTx);//send directly to adjs
+                        await P2PValidatorClient.SendTXMempool(scTx);//send directly to adjs
                     }
                     else
                     {
@@ -1015,14 +1150,14 @@ namespace ReserveBlockCore.Services
                 else
                 {
                     var output = "Fail! Transaction Verify has failed.";
-                    NFTLogUtility.Log($"Error Evolve Failed TX Verify: {scUID}. Result: {result.Item2}", "SmartContractService.BurnSmartContract()");
+                    SCLogUtility.Log($"Error Evolve Failed TX Verify: {scUID}. Result: {result.Item2}", "SmartContractService.BurnSmartContract()");
                     return null;
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Error: {0}", ex.ToString());
-                NFTLogUtility.Log($"Error Burning Smart Contract: {ex.ToString()}", "SmartContractService.BurnSmartContract()");
+                SCLogUtility.Log($"Error Burning Smart Contract: {ex.ToString()}", "SmartContractService.BurnSmartContract()");
             }
 
             return null;
@@ -1136,7 +1271,7 @@ namespace ReserveBlockCore.Services
                         TransactionData.AddToPool(scTx);
                         TransactionData.AddTxToWallet(scTx, true);
                         AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
-                        await P2PClient.SendTXToAdjudicator(scTx);//send directly to adjs
+                        await P2PValidatorClient.SendTXMempool(scTx);//send directly to adjs
                     }
                     else
                     {
@@ -1150,14 +1285,14 @@ namespace ReserveBlockCore.Services
                 else
                 {
                     var output = "Fail! Transaction Verify has failed.";
-                    NFTLogUtility.Log($"Error Evolve Failed TX Verify: {scUID}. Result {result.Item2}", "SmartContractService.EvolveSmartContract()");
+                    SCLogUtility.Log($"Error Evolve Failed TX Verify: {scUID}. Result {result.Item2}", "SmartContractService.EvolveSmartContract()");
                     return null;
                 }
             }
             catch (Exception ex)
             {                
                 Console.WriteLine("Error: {0}", ex.ToString());
-                NFTLogUtility.Log($"Error Evolving Smart Contract: {ex.ToString()}", "SmartContractService.EvolveSmartContract()");
+                SCLogUtility.Log($"Error Evolving Smart Contract: {ex.ToString()}", "SmartContractService.EvolveSmartContract()");
             }
 
             return null;
@@ -1272,7 +1407,7 @@ namespace ReserveBlockCore.Services
                         TransactionData.AddToPool(scTx);
                         TransactionData.AddTxToWallet(scTx, true);
                         AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
-                        await P2PClient.SendTXToAdjudicator(scTx);//send directly to adjs
+                        await P2PValidatorClient.SendTXMempool(scTx);//send directly to adjs
                     }
                     else
                     {
@@ -1286,14 +1421,14 @@ namespace ReserveBlockCore.Services
                 else
                 {
                     var output = "Fail! Transaction Verify has failed.";
-                    NFTLogUtility.Log($"Error Devolve Failed TX Verify: {scUID}. Result: {result.Item2}", "SmartContractService.DevolveSmartContract()");
+                    SCLogUtility.Log($"Error Devolve Failed TX Verify: {scUID}. Result: {result.Item2}", "SmartContractService.DevolveSmartContract()");
                     return null;
                 }
             }
             catch (Exception ex)
             {                
                 Console.WriteLine("Error: {0}", ex.ToString());
-                NFTLogUtility.Log($"Error Burning Smart Contract: {ex.ToString()}", "SmartContractService.DevolveSmartContract()");
+                SCLogUtility.Log($"Error Burning Smart Contract: {ex.ToString()}", "SmartContractService.DevolveSmartContract()");
             }
 
             return null;
@@ -1408,7 +1543,7 @@ namespace ReserveBlockCore.Services
                         TransactionData.AddToPool(scTx);
                         TransactionData.AddTxToWallet(scTx, true);
                         AccountData.UpdateLocalBalance(scTx.FromAddress, (scTx.Fee + scTx.Amount));
-                        await P2PClient.SendTXToAdjudicator(scTx);//send directly to adjs
+                        await P2PValidatorClient.SendTXMempool(scTx);//send directly to adjs
                     }
                     else
                     {
@@ -1422,14 +1557,14 @@ namespace ReserveBlockCore.Services
                 else
                 {
                     var output = "Fail! Transaction Verify has failed.";
-                    NFTLogUtility.Log($"Error Evo Specific Failed TX Verify: {scUID}. Result: {result.Item2}", "SmartContractService.ChangeEvolveStateSpecific()");
+                    SCLogUtility.Log($"Error Evo Specific Failed TX Verify: {scUID}. Result: {result.Item2}", "SmartContractService.ChangeEvolveStateSpecific()");
                     return null;
                 }
             }
             catch (Exception ex)
             {                
                 Console.WriteLine("Error: {0}", ex.ToString());
-                NFTLogUtility.Log($"Error Evo Specific Smart Contract: {ex.ToString()}", "SmartContractService.ChangeEvolveStateSpecific()");
+                SCLogUtility.Log($"Error Evo Specific Smart Contract: {ex.ToString()}", "SmartContractService.ChangeEvolveStateSpecific()");
             }
 
             return null;
@@ -1444,22 +1579,22 @@ namespace ReserveBlockCore.Services
 
             var smartContractStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
 
-            NFTLogUtility.Log("1", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("1", "SmartContractService.StartSaleSmartContractTX");
 
             if (smartContractStateTrei == null) return null;
 
-            NFTLogUtility.Log("2", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("2", "SmartContractService.StartSaleSmartContractTX");
 
             var scMain = SmartContractMain.GenerateSmartContractInMemory(smartContractStateTrei.ContractData);
 
             if(scMain == null) return null;
 
-            NFTLogUtility.Log("3", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("3", "SmartContractService.StartSaleSmartContractTX");
 
             var account = AccountData.GetSingleAccount(smartContractStateTrei.OwnerAddress);
             if (account == null) return null;//Owner address not found.
 
-            NFTLogUtility.Log("4", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("4", "SmartContractService.StartSaleSmartContractTX");
 
             var keyToSign = listing.PurchaseKey;
 
@@ -1468,14 +1603,14 @@ namespace ReserveBlockCore.Services
                 var beaconConnectionResult = await BeaconUtility.EstablishBeaconConnection(true, false);
                 if (!beaconConnectionResult)
                 {
-                    NFTLogUtility.Log("Error - You failed to connect to any beacons.", "SmartContratService.StartSaleSmartContractTX()");
+                    SCLogUtility.Log("Error - You failed to connect to any beacons.", "SmartContratService.StartSaleSmartContractTX()");
                     return null;
                 }
             }
             var connectedBeacon = Globals.Beacon.Values.Where(x => x.IsConnected).FirstOrDefault();
             if (connectedBeacon == null)
             {
-                NFTLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "SmartContratService.StartSaleSmartContractTX()");
+                SCLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "SmartContratService.StartSaleSmartContractTX()");
                 return null;
             }
 
@@ -1499,18 +1634,18 @@ namespace ReserveBlockCore.Services
 
             var senderBalance = AccountStateTrei.GetAccountBalance(account.Address);
 
-            NFTLogUtility.Log("5", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("5", "SmartContractService.StartSaleSmartContractTX");
             if ((scTx.Amount + scTx.Fee) > senderBalance) return null;//balance insufficient
-            NFTLogUtility.Log("6", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("6", "SmartContractService.StartSaleSmartContractTX");
             var privateKey = account.GetPrivKey;
 
             if(privateKey == null) return null;
 
-            NFTLogUtility.Log("7", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("7", "SmartContractService.StartSaleSmartContractTX");
             var txHash = scTx.Hash;
             var signature = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
             if (signature == "ERROR") return null; //TX sig failed
-            NFTLogUtility.Log("8", "SmartContractService.StartSaleSmartContractTX");
+            SCLogUtility.Log("8", "SmartContractService.StartSaleSmartContractTX");
             scTx.Signature = signature;
 
             try
@@ -1524,15 +1659,15 @@ namespace ReserveBlockCore.Services
                 var result = await TransactionValidatorService.VerifyTX(scTx);
 
                 if(!result.Item1)
-                    NFTLogUtility.Log($"Failed TX Verify. Reason: {result.Item2}", "SmartContractService.StartSaleSmartContractTX");
+                    SCLogUtility.Log($"Failed TX Verify. Reason: {result.Item2}", "SmartContractService.StartSaleSmartContractTX");
 
                 if (!result.Item1) return null;
 
-                NFTLogUtility.Log("9", "SmartContractService.StartSaleSmartContractTX");
+                SCLogUtility.Log("9", "SmartContractService.StartSaleSmartContractTX");
 
                 if (!Globals.Beacons.Any())
                 {
-                    NFTLogUtility.Log("Error - You do not have any beacons stored.", "SmartContratService.StartSaleSmartContractTX()");
+                    SCLogUtility.Log("Error - You do not have any beacons stored.", "SmartContratService.StartSaleSmartContractTX()");
                     return null;
                 }
                 else
@@ -1544,13 +1679,13 @@ namespace ReserveBlockCore.Services
                     var assets = await NFTAssetFileUtility.GetAssetListFromSmartContract(scMain);
                     var md5List = await MD5Utility.GetMD5FromSmartContract(scMain);
 
-                    NFTLogUtility.Log($"Sending the following assets for upload: {md5List}", "SmartContratService.StartSaleSmartContractTX()");
+                    SCLogUtility.Log($"Sending the following assets for upload: {md5List}", "SmartContratService.StartSaleSmartContractTX()");
 
                     bool burResult = false;
                     if (localAddress == null)
                     {
                         burResult = await P2PClient.BeaconUploadRequest(connectedBeacon, assets, scMain.SmartContractUID, toAddress, md5List).WaitAsync(new TimeSpan(0, 0, 10));
-                        NFTLogUtility.Log($"NFT Beacon Upload Request Completed. SCUID: {scMain.SmartContractUID}", "SmartContratService.StartSaleSmartContractTX()");
+                        SCLogUtility.Log($"NFT Beacon Upload Request Completed. SCUID: {scMain.SmartContractUID}", "SmartContratService.StartSaleSmartContractTX()");
                     }
                     else
                     {
@@ -1561,7 +1696,7 @@ namespace ReserveBlockCore.Services
                     {
                         var aqResult = AssetQueue.CreateAssetQueueItem(scMain.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
                             AssetQueue.TransferType.Upload);
-                        NFTLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {scMain.SmartContractUID}", "SmartContratService.StartSaleSmartContractTX()");
+                        SCLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {scMain.SmartContractUID}", "SmartContratService.StartSaleSmartContractTX()");
 
                         if (aqResult)
                         {
@@ -1569,7 +1704,7 @@ namespace ReserveBlockCore.Services
                             bool beaconSendFinalResult = true;
                             if (assets.Count() > 0)
                             {
-                                NFTLogUtility.Log($"NFT Asset Transfer Beginning for: {scMain.SmartContractUID}. Assets: {assets}", "SCV1Controller.TransferNFT()");
+                                SCLogUtility.Log($"NFT Asset Transfer Beginning for: {scMain.SmartContractUID}. Assets: {assets}", "SCV1Controller.TransferNFT()");
                                 foreach (var asset in assets)
                                 {
                                     var sendResult = await BeaconUtility.SendAssets_New(scMain.SmartContractUID, asset, connectedBeacon.Beacons.BeaconLocator);
@@ -1580,7 +1715,7 @@ namespace ReserveBlockCore.Services
                                 connectedBeacon.Uploading = false;
                                 Globals.Beacon[connectedBeacon.IPAddress] = connectedBeacon;
 
-                                NFTLogUtility.Log($"NFT Asset Transfer Done for: {scMain.SmartContractUID}.", "SCV1Controller.TransferNFT()");
+                                SCLogUtility.Log($"NFT Asset Transfer Done for: {scMain.SmartContractUID}.", "SCV1Controller.TransferNFT()");
                             }
 
                             if (beaconSendFinalResult)
@@ -1601,24 +1736,24 @@ namespace ReserveBlockCore.Services
                             }
                             else
                             {
-                                NFTLogUtility.Log($"Failed to upload to Beacon - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {connectedBeacon.Beacons.BeaconLocator} | MD5List: {md5List}", "SmartContractService.StartSaleSmartContractTX()");
+                                SCLogUtility.Log($"Failed to upload to Beacon - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {connectedBeacon.Beacons.BeaconLocator} | MD5List: {md5List}", "SmartContractService.StartSaleSmartContractTX()");
                                 return null;
                             }
                         }
                         else
                         {
-                            NFTLogUtility.Log($"Failed to add upload to Asset Queue - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {connectedBeacon.Beacons.BeaconLocator} | MD5List: {md5List}", "SmartContratService.StartSaleSmartContractTX()");
+                            SCLogUtility.Log($"Failed to add upload to Asset Queue - TX terminated. Data: scUID: {scMain.SmartContractUID} | toAddres: {toAddress} | Locator: {connectedBeacon.Beacons.BeaconLocator} | MD5List: {md5List}", "SmartContratService.StartSaleSmartContractTX()");
                             return null;
                         }
                     }
                     else
                     {
-                        NFTLogUtility.Log($"Beacon upload failed. Result was : {burResult}", "SmartContratService.StartSaleSmartContractTX()");
+                        SCLogUtility.Log($"Beacon upload failed. Result was : {burResult}", "SmartContratService.StartSaleSmartContractTX()");
                     }
                 }
             }
-            catch { NFTLogUtility.Log("10", "SmartContractService.StartSaleSmartContractTX"); }
-            NFTLogUtility.Log("11", "SmartContractService.StartSaleSmartContractTX");
+            catch { SCLogUtility.Log("10", "SmartContractService.StartSaleSmartContractTX"); }
+            SCLogUtility.Log("11", "SmartContractService.StartSaleSmartContractTX");
             if (listing != null)
             {
                 listing.SaleHasFailed = true;
@@ -1951,7 +2086,7 @@ namespace ReserveBlockCore.Services
                 var result = await TransactionValidatorService.VerifyTX(scTx);
 
                 if (!result.Item1)
-                    NFTLogUtility.Log($"Failed TX Verify. Reason: {result.Item2}", "SmartContractService.CancelNFTSaleTX()");
+                    SCLogUtility.Log($"Failed TX Verify. Reason: {result.Item2}", "SmartContractService.CancelNFTSaleTX()");
 
                 if (!result.Item1) return (null, $"Transaction failed to verify. Reason: {result.Item2}");
 

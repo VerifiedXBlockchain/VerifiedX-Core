@@ -10,6 +10,9 @@ using System.Xml.Linq;
 using LiteDB;
 using System.Net;
 using System.Security.Principal;
+using ReserveBlockCore.Bitcoin.Models;
+using NBitcoin.JsonConverters;
+using ReserveBlockCore.Models.DST;
 
 namespace ReserveBlockCore.Data
 {
@@ -173,8 +176,20 @@ namespace ReserveBlockCore.Data
 
                     if (tx.TransactionType != TransactionType.TX)
                     {
-                        if (tx.TransactionType == TransactionType.NFT_TX || tx.TransactionType == TransactionType.NFT_MINT
-                            || tx.TransactionType == TransactionType.NFT_BURN)
+                        if (tx.TransactionType == TransactionType.NFT_TX
+                            || tx.TransactionType == TransactionType.NFT_MINT
+                            || tx.TransactionType == TransactionType.NFT_BURN
+                            || tx.TransactionType == TransactionType.FTKN_MINT
+                            || tx.TransactionType == TransactionType.FTKN_TX
+                            || tx.TransactionType == TransactionType.FTKN_BURN
+                            || tx.TransactionType == TransactionType.TKNZ_MINT
+                            || tx.TransactionType == TransactionType.TKNZ_TX
+                            || tx.TransactionType == TransactionType.TKNZ_BURN
+                            || tx.TransactionType == TransactionType.SC_MINT
+                            || tx.TransactionType == TransactionType.SC_TX
+                            || tx.TransactionType == TransactionType.SC_BURN
+                            || tx.TransactionType == TransactionType.TKNZ_WD_ARB
+                            || tx.TransactionType == TransactionType.TKNZ_WD_OWNER)
                         {
                             string scUID = "";
                             string function = "";
@@ -208,6 +223,9 @@ namespace ReserveBlockCore.Data
                                 {
                                     case "Mint()":
                                         AddNewlyMintedContract(tx);
+                                        break;
+                                    case "Update()":
+                                        UpdateSmartContract(tx);
                                         break;
                                     case "Transfer()":
                                         TransferSmartContract(tx);
@@ -250,6 +268,15 @@ namespace ReserveBlockCore.Data
                                         break;
                                     case "TokenVoteTopicCast()":
                                         TokenVoteTopicCast(tx);
+                                        break;
+                                    case "TransferCoin()":
+                                        TransferCoin(tx);
+                                        break;
+                                    case "TokenizedWithdrawalRequest()":
+                                        TokenizedWithdrawalRequest(tx);
+                                        break;
+                                    case "TokenizedWithdrawalComplete()":
+                                        TokenizedWithdrawalComplete(tx);
                                         break;
                                     default:
                                         break;
@@ -310,6 +337,15 @@ namespace ReserveBlockCore.Data
                                             break;
                                         case "AdnrDelete()":
                                             DeleteAdnr(tx);
+                                            break;
+                                        case "BTCAdnrCreate()":
+                                            AddNewBTCAdnr(tx);
+                                            break;
+                                        case "BTCAdnrTransfer()":
+                                            TransferBTCAdnr(tx);
+                                            break;
+                                        case "BTCAdnrDelete()":
+                                            DeleteBTCAdnr(tx);
                                             break;
                                         default:
                                             break;
@@ -499,7 +535,10 @@ namespace ReserveBlockCore.Data
                             }
                         }
                     }
-                    if(rtx.TransactionType == TransactionType.NFT_TX)
+                    if (rtx.TransactionType == TransactionType.NFT_TX ||
+                        rtx.TransactionType == TransactionType.FTKN_TX ||
+                        rtx.TransactionType == TransactionType.TKNZ_TX ||
+                        rtx.TransactionType == TransactionType.SC_TX)
                     {
                         var scDataArray = JsonConvert.DeserializeObject<JArray>(rtx.Data);
                         var scData = scDataArray[0];
@@ -508,15 +547,32 @@ namespace ReserveBlockCore.Data
 
                         if(function != null)
                         {
+                            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+
                             if (function == "Transfer()")
                             {
-                                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                                 if (scStateTreiRec != null)
                                 {
                                     
                                     scStateTreiRec.OwnerAddress = rtx.ToAddress;
                                     scStateTreiRec.NextOwner = null;
                                     scStateTreiRec.IsLocked = false;
+
+                                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                                }
+                            }
+
+                            if(function == "TokenContractOwnerChange()")
+                            {
+                                if (scStateTreiRec != null)
+                                {
+                                    scStateTreiRec.OwnerAddress = rtx.ToAddress;
+                                    scStateTreiRec.NextOwner = null;
+                                    scStateTreiRec.IsLocked = false;
+                                    if (scStateTreiRec.TokenDetails != null)
+                                    {
+                                        scStateTreiRec.TokenDetails.ContractOwner = rtx.ToAddress;
+                                    }
 
                                     SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
                                 }
@@ -956,6 +1012,88 @@ namespace ReserveBlockCore.Data
             }
             catch { }
         }
+        private static void AddNewBTCAdnr(Transaction tx)
+        {
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                var name = (string?)jobj["Name"];
+                var btcAddress = (string?)jobj["BTCAddress"];
+
+                if(btcAddress != null)
+                {
+                    BitcoinAdnr adnr = new BitcoinAdnr
+                    {
+                        BTCAddress = btcAddress,
+                        RBXAddress = tx.FromAddress,
+                        Name = name + ".btc",
+                        Timestamp = tx.Timestamp,
+                        TxHash = tx.Hash
+                    };
+
+                    BitcoinAdnr.SaveAdnr(adnr);
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError("Failed to deserialized TX Data for BTC ADNR", "StateData.AddNewBTCAdnr()");
+            }
+        }
+
+        private static void TransferBTCAdnr(Transaction tx)
+        {
+            bool complete = false;
+            try
+            {
+                while (!complete)
+                {
+                    if (tx.Data != null)
+                    {
+                        var jobj = JObject.Parse(tx.Data);
+                        var BTCToAddress = (string?)jobj["BTCToAddress"];
+                        var BTCFromAddress = (string?)jobj["BTCFromAddress"];
+
+                        var adnrs = BitcoinAdnr.GetBitcoinAdnr();
+                        if (adnrs != null)
+                        {
+                            var adnr = adnrs.FindOne(x => x.BTCAddress == BTCFromAddress);
+                            if (adnr != null)
+                            {
+                                adnr.BTCAddress = BTCToAddress;
+                                adnr.RBXAddress = tx.ToAddress;
+                                adnr.TxHash = tx.Hash;
+                                adnrs.UpdateSafe(adnr);
+                                complete = true;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        complete = true;
+                    }
+                    
+                }
+            }
+            catch { complete = true; }
+        }
+
+        private static void DeleteBTCAdnr(Transaction tx)
+        {
+            try
+            {
+                if(tx.Data != null)
+                {
+                    var jobj = JObject.Parse(tx.Data);
+                    var BTCFromAddress = (string?)jobj["BTCFromAddress"];
+                    BitcoinAdnr.DeleteAdnr(BTCFromAddress);
+                }
+                
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to delete BTC ADNR at state level! Error: {ex}", "StateData.DeleteBTCAdnr()");
+            }
+        }
 
         private static void AddNewAdnr(Transaction tx)
         {
@@ -967,7 +1105,7 @@ namespace ReserveBlockCore.Data
 
                 adnr.Address = tx.FromAddress;
                 adnr.Timestamp = tx.Timestamp;
-                adnr.Name = name + ".rbx";
+                adnr.Name = Globals.V4Height > Globals.LastBlock.Height ? name + ".rbx" : name + ".vfx";
                 adnr.TxHash = tx.Hash;
 
                 Adnr.SaveAdnr(adnr);
@@ -975,7 +1113,7 @@ namespace ReserveBlockCore.Data
             }
             catch(Exception ex)
             {                
-                ErrorLogUtility.LogError("Failed to deserialized TX Data for ADNR", "TransactionValidatorService.VerifyTx()");
+                ErrorLogUtility.LogError("Failed to add ADNR at state level!", "StateData.AddNewAdnr()");
             }
         }
         private static void TransferAdnr(Transaction tx)
@@ -1007,7 +1145,7 @@ namespace ReserveBlockCore.Data
             }
             catch (Exception ex)
             {                
-                ErrorLogUtility.LogError("Failed to deserialized TX Data for ADNR", "TransactionValidatorService.VerifyTx()");
+                ErrorLogUtility.LogError("Failed to delete ADNR State Level!", "StateData.DeleteAdnr()");
             }
         }
 
@@ -1058,6 +1196,35 @@ namespace ReserveBlockCore.Data
                 //Save to state trei
                 SmartContractStateTrei.SaveSmartContract(scST);
             }
+        }
+        private static void UpdateSmartContract(Transaction tx)
+        {
+            try
+            {
+                SmartContractStateTrei scST = new SmartContractStateTrei();
+                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                var scData = scDataArray[0];
+                if (scData != null)
+                {
+                    var function = (string?)scData["Function"];
+                    var data = (string?)scData["Data"];
+                    var scUID = (string?)scData["ContractUID"];
+
+                    if (scUID != null)
+                    {
+                        var scMain = SmartContractStateTrei.GetSmartContractState(scUID);
+
+                        if(scMain != null)
+                        {
+                            //Update state level contract data.
+                            scMain.ContractData = data;
+                            SmartContractStateTrei.UpdateSmartContract(scMain);
+                        }
+                    }
+                }
+            }
+            catch { }
+            
         }
         private static void TransferSmartContract(Transaction tx)
         {
@@ -1277,9 +1444,20 @@ namespace ReserveBlockCore.Data
             {
                 if (scStateTreiRec.TokenDetails != null)
                 {
-                    scStateTreiRec.TokenDetails.ContractOwner = toAddress;
-                    scStateTreiRec.OwnerAddress = toAddress;
-                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                    if (tx.FromAddress.StartsWith("xRBX"))
+                    {
+                        scStateTreiRec.NextOwner = tx.ToAddress;
+                        scStateTreiRec.IsLocked = true;
+                        scStateTreiRec.Nonce += 1;
+                        SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                    }
+                    else
+                    {
+                        scStateTreiRec.TokenDetails.ContractOwner = toAddress;
+                        scStateTreiRec.OwnerAddress = toAddress;
+                        SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                    }
+                    
                 }
             }
         }
@@ -1339,14 +1517,33 @@ namespace ReserveBlockCore.Data
                         var topic = scStateTreiRec.TokenDetails.TokenTopicList.Where(x => x.TopicUID == topicUID).FirstOrDefault();
                         if (topic != null)
                         {
-                            if (voteType == VoteType.Yes)
-                                topic.VoteYes += 1;
-                            if (voteType == VoteType.No)
-                                topic.VoteNo += 1;
+                            if (string.IsNullOrEmpty(fromAddress) || string.IsNullOrEmpty(topicUID) || !voteType.HasValue)
+                            {
+                                //bad vote don't save.
+                            }
+                            else
+                            {
+                                TokenVote tkVote = new TokenVote
+                                {
+                                    Address = fromAddress,
+                                    BlockHeight = tx.Height,
+                                    SmartContractUID = scUID,
+                                    TopicUID = topicUID,
+                                    TransactionHash = tx.Hash,
+                                    VoteType = voteType.Value
+                                };
 
-                            int fromIndex = scStateTreiRec.TokenDetails.TokenTopicList.FindIndex(a => a.TopicUID == topicUID);
-                            scStateTreiRec.TokenDetails.TokenTopicList[fromIndex] = topic;
-                            SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                                TokenVote.SaveVote(tkVote);
+
+                                if (voteType == VoteType.Yes)
+                                    topic.VoteYes += 1;
+                                if (voteType == VoteType.No)
+                                    topic.VoteNo += 1;
+
+                                int fromIndex = scStateTreiRec.TokenDetails.TokenTopicList.FindIndex(a => a.TopicUID == topicUID);
+                                scStateTreiRec.TokenDetails.TokenTopicList[fromIndex] = topic;
+                                SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                            }
                         }
                     }
                 }
@@ -1604,6 +1801,63 @@ namespace ReserveBlockCore.Data
             }
         }
 
+        private static void TokenizedWithdrawalRequest(Transaction tx)
+        {
+            try
+            {
+                var txData = tx.Data;
+                var jobj = JObject.Parse(txData);
+
+                var function = (string?)jobj["Function"];
+
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var tw = jobj["TokenizedWithdrawal"]?.ToObject<TokenizedWithdrawals?>();
+
+                if(tw != null)
+                {
+                    TokenizedWithdrawals.SaveTokenizedWithdrawals(tw);
+                }
+                else
+                {
+                    ErrorLogUtility.LogError($"Tokenized Withdrawal was NULL.", "StateData.TokenizedWithdrawalRequest()");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to save TW From Arb. ERROR: {ex}", "StateData.TokenizedWithdrawalRequest()");
+            }
+        }
+
+        private static void TokenizedWithdrawalComplete(Transaction tx)
+        {
+            try
+            {
+                var txData = tx.Data;
+                var jobj = JObject.Parse(txData);
+
+                var function = (string?)jobj["Function"];
+
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var uniqueId = jobj["UniqueId"]?.ToObject<string?>();
+                var txHash = jobj["TransactionHash"]?.ToObject<string?>();
+                
+                if (uniqueId != null && scUID != null && txHash != null)
+                {
+                    TokenizedWithdrawals.CompleteTokenizedWithdrawals(tx.FromAddress, uniqueId, scUID, txHash);
+                }
+                else
+                {
+                    ErrorLogUtility.LogError($"Tokenized Withdrawal was NULL.", "StateData.TokenizedWithdrawalRequest()");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to save TW From Arb. ERROR: {ex}", "StateData.TokenizedWithdrawalRequest()");
+            }
+        }
+
+
+
         private static void StartSaleSmartContract(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
@@ -1841,6 +2095,74 @@ namespace ReserveBlockCore.Data
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             }
 
+        }
+
+        private static void TransferCoin(Transaction tx)
+        {
+            string scUID = "";
+            string function = "";
+            bool skip = false;
+            JToken? scData = null;
+            decimal? amountVal = null;
+
+            try
+            {
+                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                scData = scDataArray[0];
+
+                function = (string?)scData["Function"];
+                scUID = (string?)scData["ContractUID"];
+                amountVal = (decimal?)scData["Amount"];
+                skip = true;
+            }
+            catch { }
+
+            try
+            {
+                if (!skip)
+                {
+                    var jobj = JObject.Parse(tx.Data);
+                    scUID = jobj["ContractUID"]?.ToObject<string?>();
+                    function = jobj["Function"]?.ToObject<string?>();
+                    amountVal = jobj["Amount"]?.ToObject<decimal?>();
+                }
+            }
+            catch { }
+
+            if (amountVal.HasValue)
+            {
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+
+                if(scStateTreiRec != null)
+                {
+                    List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                    {
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = amountVal.Value,
+                            FromAddress = "+",
+                            ToAddress = tx.ToAddress
+                        },
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = amountVal.Value * -1.0M,
+                            FromAddress = tx.FromAddress,
+                            ToAddress = "-"
+                        }
+                    };
+
+                    if(scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                    {
+                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                    }
+                    else
+                    {
+                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                    }
+
+                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                }
+            }
         }
 
     }

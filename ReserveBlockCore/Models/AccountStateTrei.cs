@@ -28,6 +28,14 @@ namespace ReserveBlockCore.Models
             return balance;
         }
 
+        public static decimal GetNetworkTotal()
+        {
+            var accounts = DbContext.DB_AccountStateTrei.GetCollection<AccountStateTrei>(DbContext.RSRV_ASTATE_TREI);
+            var networkBalance = accounts.Query().Where(x => x.Balance > 0.00M).ToList().Sum(x => x.Balance);
+
+            return networkBalance;
+        }
+
         public static long GetNextNonce(string address)
         {
             long nonce = 0;

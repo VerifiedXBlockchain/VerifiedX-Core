@@ -9,14 +9,21 @@ namespace ReserveBlockCore.Utilities
 {
     internal class TimeUtil
     {
-        public static long GetTime(int addSeconds = 0)
+        public static long GetTime(int addSeconds = 0, int addMinutes = 0, int addHours = 0, int addDays = 0)
         {
-            return DateTimeOffset.UtcNow.AddSeconds(addSeconds).ToUnixTimeSeconds();
+            return DateTimeOffset.UtcNow.AddSeconds(addSeconds).AddMinutes(addMinutes).AddHours(addHours).AddDays(addDays).ToUnixTimeSeconds();
         }
 
         public static long GetMillisecondTime()
         {
             return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();            
+        }
+
+        public static long GetTime(string hexTimestamp)
+        {
+            var timestampUnix = Convert.ToUInt32(hexTimestamp, 16);
+
+            return timestampUnix < 0 ? 0 : timestampUnix;
         }
 
         public static long GetTimeFromDateTime(DateTime date)

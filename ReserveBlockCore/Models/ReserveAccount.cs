@@ -34,6 +34,7 @@ namespace ReserveBlockCore.Models
         public bool IsNetworkProtected { get; set; } // this is set once 4 RBX has been sent.
         public string GetKey { get { return GetPrivateKey(PrivateKey, Address, EncryptedDecryptKey); } }
         public decimal TotalBalance { get { return AvailableBalance + LockedBalance; } }
+        public PrivateKey? GetPrivKey { get { return GetClassPrivateKey(GetKey); } }
 
         public class ReserveAccountInfo
         {
@@ -178,6 +179,22 @@ namespace ReserveBlockCore.Models
 
         #endregion
 
+        #region Get Private key Class
+        private PrivateKey? GetClassPrivateKey(string privkey)
+        {
+            try
+            {
+                BigInteger b1 = BigInteger.Parse(privkey, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
+                PrivateKey privateKey = new PrivateKey("secp256k1", b1);
+
+                return privateKey;
+            }
+            catch { }
+
+            return null;
+        }
+        #endregion
+
         #region Get Reserve Accounts Db
         public static LiteDB.ILiteCollection<ReserveAccount>? GetReserveAccountsDb()
         {
@@ -317,16 +334,16 @@ namespace ReserveBlockCore.Models
         private string GetPrivateKey(string privkey, string address, string decryptKey)
         {
             //decrypt private key for send
-            if (Globals.DecryptPassword.Length == 0)
+            if (Globals.ReserveAccountUnlockKeys.TryGetValue(address, out var _address))
             {
-                return "0";
+                return GetPrivateKey(address, _address.Password.ToUnsecureString());
             }
             else
             {
                 try
                 {
 
-                    return privkey;
+                    return "0";
                 }
                 catch (Exception ex)
                 {
@@ -338,7 +355,7 @@ namespace ReserveBlockCore.Models
         #endregion
 
         #region Create New Reserve Account
-        public static ReserveAccountInfo CreateNewReserveAccount(string encryptionPassword, bool storeRecoveryKey = false)
+        public static ReserveAccountInfo CreateNewReserveAccount(string encryptionPassword, bool storeRecoveryKey = false, bool skipSave = false, string privKey = "")
         {
             ReserveAccount rAccount = new ReserveAccount();
             Account account = new Account();
@@ -360,6 +377,12 @@ namespace ReserveBlockCore.Models
                     rAccountInfo = new ReserveAccountInfo();
 
                     PrivateKey privateKey = new PrivateKey();
+                    if(!string.IsNullOrEmpty(privKey) )
+                    {
+                        var privateKeyMod = privKey.Replace(" ", ""); //remove any accidental spaces
+                        BigInteger b1 = BigInteger.Parse(privateKeyMod, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
+                        privateKey = new PrivateKey("secp256k1", b1);
+                    }
                     var privKeySecretHex = privateKey.secret.ToString("x");
                     var pubKey = privateKey.publicKey();
 
@@ -394,11 +417,15 @@ namespace ReserveBlockCore.Models
                     var sigScriptRecoAccount = SignatureService.CreateSignature("test", account.GetPrivKey, account.PublicKey);
                     var verifyRecoAccount = SignatureService.VerifySignature(account.Address, "test", sigScriptRecoAccount);
 
-                    if (verify && verifyRecoAccount && rAccount.Address.StartsWith("xRBX"))
+                    if (verify && verifyRecoAccount && rAccount.Address.StartsWith("xRBX") && !skipSave)
                     {
                         accountMade = true;
                         //save account here!
                         SaveReserveAccount(rAccount);
+                    }
+                    if(verify && verifyRecoAccount && rAccount.Address.StartsWith("xRBX") && skipSave)
+                    {
+                        accountMade = true;
                     }
                 }
                 catch (Exception ex)
@@ -965,7 +992,7 @@ namespace ReserveBlockCore.Models
                 //This will eventually need to be a chosen parameter someone chooses.                         
                 if (!Globals.Beacons.Any())
                 {
-                    NFTLogUtility.Log("Error - You do not have any beacons stored.", "SCV1Controller.TransferNFT()");
+                    SCLogUtility.Log("Error - You do not have any beacons stored.", "SCV1Controller.TransferNFT()");
                     return (false, "You do not have any beacons stored.");
                 }
                 else
@@ -975,14 +1002,14 @@ namespace ReserveBlockCore.Models
                         var beaconConnectionResult = await BeaconUtility.EstablishBeaconConnection(true, false);
                         if (!beaconConnectionResult)
                         {
-                            NFTLogUtility.Log("Error - You failed to connect to any beacons.", "SCV1Controller.TransferNFT()");
+                            SCLogUtility.Log("Error - You failed to connect to any beacons.", "SCV1Controller.TransferNFT()");
                             return (false, "You failed to connect to any beacons.");
                         }
                     }
                     var connectedBeacon = Globals.Beacon.Values.Where(x => x.IsConnected).FirstOrDefault();
                     if (connectedBeacon == null)
                     {
-                        NFTLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "SCV1Controller.TransferNFT()");
+                        SCLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "SCV1Controller.TransferNFT()");
                         return (false, "You have lost connection to beacons. Please attempt to resend.");
                     }
                     toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
@@ -991,7 +1018,7 @@ namespace ReserveBlockCore.Models
                     var assets = await NFTAssetFileUtility.GetAssetListFromSmartContract(sc);
                     var md5List = await MD5Utility.GetMD5FromSmartContract(sc);
 
-                    NFTLogUtility.Log($"Sending the following assets for upload: {md5List}", "SCV1Controller.TransferNFT()");
+                    SCLogUtility.Log($"Sending the following assets for upload: {md5List}", "SCV1Controller.TransferNFT()");
 
                     bool result = false;
 
@@ -1000,7 +1027,7 @@ namespace ReserveBlockCore.Models
                     {
                         var sig = SignatureService.CreateSignature(sc.SmartContractUID, key, fromAddress.PublicKey);
                         result = await P2PClient.BeaconUploadRequest(connectedBeacon, assets, sc.SmartContractUID, toAddress, md5List, sig).WaitAsync(new TimeSpan(0, 0, 10));
-                        NFTLogUtility.Log($"NFT Beacon Upload Request Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
+                        SCLogUtility.Log($"NFT Beacon Upload Request Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
                     }
                     else
                     {
@@ -1011,25 +1038,25 @@ namespace ReserveBlockCore.Models
                     {
                         var aqResult = AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
                             AssetQueue.TransferType.Upload);
-                        NFTLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
+                        SCLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
 
                         if (aqResult)
                         {
                             _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, connectedBeacon, md5List, backupURL, true, key, sendNFTTransferPayload.UnlockDelayHours));
 
                             var success = JsonConvert.SerializeObject(new { Success = true, Message = "NFT Transfer has been started." });
-                            NFTLogUtility.Log($"NFT Process Completed in CLI. SCUID: {sc.SmartContractUID}. Response: NFT Transfer has been started.", "SCV1Controller.TransferNFT()");
+                            SCLogUtility.Log($"NFT Process Completed in CLI. SCUID: {sc.SmartContractUID}. Response: NFT Transfer has been started.", "SCV1Controller.TransferNFT()");
                             return (true, "NFT Transfer has been started.");
                         }
                         else
                         {
-                            NFTLogUtility.Log($"Failed to add upload to Asset Queue - TX terminated. Data: scUID: {sc.SmartContractUID} | toAddres: {toAddress} | Locator: {connectedBeacon.Beacons.BeaconLocator} | MD5List: {md5List} | backupURL: {backupURL}", "SCV1Controller.TransferNFT()");
+                            SCLogUtility.Log($"Failed to add upload to Asset Queue - TX terminated. Data: scUID: {sc.SmartContractUID} | toAddres: {toAddress} | Locator: {connectedBeacon.Beacons.BeaconLocator} | MD5List: {md5List} | backupURL: {backupURL}", "SCV1Controller.TransferNFT()");
                             return (false, "Failed to add upload to Asset Queue. Please check logs for more details.");
                         }
                     }
                     else
                     {
-                        NFTLogUtility.Log($"Beacon upload failed. Result was : {result}", "SCV1Controller.TransferNFT()");
+                        SCLogUtility.Log($"Beacon upload failed. Result was : {result}", "SCV1Controller.TransferNFT()");
                         return (false,  $"Beacon upload failed. Result was : {result}");
                     }
                 }

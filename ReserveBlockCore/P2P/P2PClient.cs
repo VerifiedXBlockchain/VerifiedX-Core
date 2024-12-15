@@ -62,8 +62,28 @@ namespace ReserveBlockCore.P2P
         }
         public static string MostLikelyIP()
         {
+            // Function to check if an IP is within private ranges
+            bool IsPrivateIP(string ip)
+            {
+                var ipParts = ip.Split('.').Select(int.Parse).ToArray();
+                if (ipParts[0] == 10)
+                    return true; // 10.0.0.0/8
+                if (ipParts[0] == 172 && ipParts[1] >= 16 && ipParts[1] <= 31)
+                    return true; // 172.16.0.0/12
+                if (ipParts[0] == 192 && ipParts[1] == 168)
+                    return true; // 192.168.0.0/16
+                if (ip == "127.0.0.1")
+                    return true; // localhost loopback
+
+                return false;
+            }
+
             return Globals.ReportedIPs.Count != 0 ?
-                Globals.ReportedIPs.OrderByDescending(y => y.Value).Select(y => y.Key).First() : "NA";
+                Globals.ReportedIPs
+                    .Where(y => !IsPrivateIP(y.Key)) // Filter out private IPs
+                    .OrderByDescending(y => y.Value)
+                    .Select(y => y.Key)
+                    .FirstOrDefault() ?? "NA" : "NA";
         }
 
         public static async Task DropLowBandwidthPeers()
@@ -225,7 +245,7 @@ namespace ReserveBlockCore.P2P
                         currentNode.NodeLatency = node.NodeLatency;
                     }
 
-                    ConsoleWriterService.OutputSameLine($"Connected to {Globals.Nodes.Count}/14");
+                    ConsoleWriterService.OutputSameLine($"Connected to {Globals.Nodes.Count}/{Globals.MaxPeers}");
                     peer.IsOutgoing = true;
                     peer.FailCount = 0; //peer responded. Reset fail count
                     Peers.GetAll()?.UpdateSafe(peer);
@@ -314,17 +334,17 @@ namespace ReserveBlockCore.P2P
                         switch(message)
                         {
                             case "task":
-                                await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "taskResult":
-                                await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "sendWinningBlock":
-                                await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "fortisPool":
                                 if(Globals.AdjudicateAccount == null)
-                                    await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                    await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "status":
                                 //ConsoleWriterService.Output(data);
@@ -339,7 +359,7 @@ namespace ReserveBlockCore.P2P
                                 }
                                 break;
                             case "tx":
-                                await ValidatorProcessor.ProcessData(message, data, IPAddress);
+                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
                                 break;
                             case "badBlock":
                                 //do something
@@ -383,7 +403,7 @@ namespace ReserveBlockCore.P2P
                 };
                 }
 
-                ValidatorProcessor.RandomNumberTaskV3(Globals.LastBlock.Height + 1);
+                ValidatorProcessor_BAk.RandomNumberTaskV3(Globals.LastBlock.Height + 1);
 
                 return true;
             }
@@ -449,6 +469,22 @@ namespace ReserveBlockCore.P2P
                 .ToArray()
                 .OrderBy(x => rnd.Next()))
                 .ToArray();
+
+            if(!newPeers.Any())
+            {
+                SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys));
+
+                newPeers = peerDB.Find(x => x.IsOutgoing == true).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .Concat(peerDB.Find(x => x.IsOutgoing == false).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray()
+                .OrderBy(x => rnd.Next()))
+                .ToArray();
+            }
 
             var Diff = Globals.MaxPeers - Globals.Nodes.Count;
             newPeers.Take(Diff).ToArray().ParallelLoop(peer =>
@@ -674,7 +710,9 @@ namespace ReserveBlockCore.P2P
                     {
                         failCount += 1;
                     }
-                }                
+                }
+
+                failCount += 1;
             }
 
             ConsoleWriterService.Output($"Adj Success Count: {SuccessNodes.Count()}");
@@ -1232,11 +1270,11 @@ namespace ReserveBlockCore.P2P
                     //failed to connect. Cancel TX
                     if (beacon != null)
                     {
-                        NFTLogUtility.Log($"Failed to connect to beacon. Beacon Info: {beacon.Name} - {beacon.IPAddress}", "P2PClient.BeaconUploadRequest()");
+                        SCLogUtility.Log($"Failed to connect to beacon. Beacon Info: {beacon.Name} - {beacon.IPAddress}", "P2PClient.BeaconUploadRequest()");
                     }
                     else
                     {
-                        NFTLogUtility.Log($"Failed to connect to beacon. Beacon was null.", "P2PClient.BeaconUploadRequest()");
+                        SCLogUtility.Log($"Failed to connect to beacon. Beacon was null.", "P2PClient.BeaconUploadRequest()");
                     }
 
                     return result;
@@ -1511,7 +1549,7 @@ namespace ReserveBlockCore.P2P
                         if (!response)
                         {
                             var errorMsg = string.Format("Failed to talk to beacon.");
-                            NFTLogUtility.Log(errorMsg, "P2PClient.BeaconFileIsReady() - try");
+                            SCLogUtility.Log(errorMsg, "P2PClient.BeaconFileIsReady() - try");
                         }
                     }
                 }

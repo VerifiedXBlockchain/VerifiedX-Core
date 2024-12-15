@@ -1,5 +1,8 @@
-﻿using Newtonsoft.Json;
+﻿using NBitcoin.Protocol;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ReserveBlockCore.Arbiter;
+using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.DST;
@@ -10,12 +13,13 @@ using Spectre.Console;
 using System;
 using System.Net;
 using System.Security.Principal;
+using System.Xml.Linq;
 
 namespace ReserveBlockCore.Services
 {
     public class TransactionValidatorService
     {
-        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false)
+        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false)
         {
             bool txResult = false;
             bool runReserveCheck = true;
@@ -44,14 +48,14 @@ namespace ReserveBlockCore.Services
                 }
             }
 
-            if (txRequest.Fee <= 0)
+            if (txRequest.Fee <= 0 && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
             }
 
             if(Globals.LastBlock.Height > Globals.TXHeightRule2) //around April 7, 2023 at 18:30 UTC
             {
-                if (txRequest.Fee <= 0.000003M)
+                if (txRequest.Fee <= 0.000003M && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
                 {
                     return (txResult, "Fee cannot be less than 0.000003 RBX");
                 }
@@ -74,7 +78,8 @@ namespace ReserveBlockCore.Services
                 txRequest.ToAddress != "Topic_Base" && 
                 txRequest.ToAddress != "Vote_Base" && 
                 txRequest.ToAddress != "Reserve_Base" &&
-                txRequest.ToAddress != "Token_Base")
+                txRequest.ToAddress != "Token_Base" && 
+                txRequest.ToAddress != "TW_Base")
             {
                 if (!AddressValidateUtility.ValidateAddress(txRequest.ToAddress))
                     return (txResult, "To Address failed to validate");
@@ -85,7 +90,7 @@ namespace ReserveBlockCore.Services
 
             if (Globals.LastBlock.Height > Globals.TXHeightRule1) //March 31th, 2023 at 03:44 UTC
             {
-                if (txRequest.Amount < 0.0M)
+                if (txRequest.Amount < 0.0M && txRequest.FromAddress != "Coinbase_BlkRwd")
                 {
                     return (txResult, "Amount cannot be less than or equal to zero.");
                 }
@@ -118,7 +123,7 @@ namespace ReserveBlockCore.Services
 
             var checkSize = await VerifyTXSize(txRequest);
 
-            if (checkSize == false)
+            if (!checkSize)
             {
                 return (txResult, $"This transactions is too large. Max size allowed is 30 kb.");
             }
@@ -191,8 +196,20 @@ namespace ReserveBlockCore.Services
 
             if (txRequest.TransactionType != TransactionType.TX)
             {
-                if (txRequest.TransactionType == TransactionType.NFT_TX || txRequest.TransactionType == TransactionType.NFT_MINT
-                    || txRequest.TransactionType == TransactionType.NFT_BURN)
+                if (txRequest.TransactionType == TransactionType.NFT_TX 
+                    || txRequest.TransactionType == TransactionType.NFT_MINT
+                    || txRequest.TransactionType == TransactionType.NFT_BURN 
+                    || txRequest.TransactionType == TransactionType.FTKN_MINT 
+                    || txRequest.TransactionType == TransactionType.FTKN_TX
+                    || txRequest.TransactionType == TransactionType.FTKN_BURN 
+                    || txRequest.TransactionType == TransactionType.TKNZ_MINT 
+                    || txRequest.TransactionType == TransactionType.TKNZ_TX
+                    || txRequest.TransactionType == TransactionType.TKNZ_BURN 
+                    || txRequest.TransactionType == TransactionType.SC_MINT 
+                    || txRequest.TransactionType == TransactionType.SC_TX
+                    || txRequest.TransactionType == TransactionType.SC_BURN
+                    || txRequest.TransactionType == TransactionType.TKNZ_WD_ARB
+                    || txRequest.TransactionType == TransactionType.TKNZ_WD_OWNER)
                 {
                     try
                     {
@@ -238,6 +255,7 @@ namespace ReserveBlockCore.Services
                                             
                                             if(txRequest.FromAddress.StartsWith("xRBX"))
                                                 return (txResult, "A reserve account may not mint a smart contract.");
+
                                             break;
                                         }
 
@@ -339,6 +357,12 @@ namespace ReserveBlockCore.Services
                                             if (scStateTreiRec.TokenDetails.IsPaused)
                                                 return (txResult, "Contract is paused. NO TXs may go through.");
 
+                                            if (scStateTreiRec.IsLocked)
+                                                return (txResult, "You are attempting to transfer a Smart contract that is locked.");
+
+                                            if (scStateTreiRec.NextOwner != null)
+                                                return (txResult, "You are attempting to transfer a Smart contract that has a new owner assigned to it.");
+
                                             break;
                                         }
 
@@ -390,6 +414,9 @@ namespace ReserveBlockCore.Services
 
                                             if (stateAccount == null)
                                                 return (txResult, "Could not find account at state level.");
+
+                                            if(scStateTreiRec.KeyRevealed)
+                                                return (txResult, "Key has been revealed. This token may no longer be transferred.");
 
                                             var tokenDetails = scStateTreiRec.TokenDetails;
 
@@ -516,6 +543,9 @@ namespace ReserveBlockCore.Services
                                             var topicUID = jobj["TopicUID"]?.ToObject<string?>();
                                             var voteType = jobj["VoteType"]?.ToObject<VoteType?>();
 
+                                            if (string.IsNullOrEmpty(topicUID))
+                                                return (txResult, "TopicUID cannot be null");
+
                                             var stateAccount = StateData.GetSpecificAccountStateTrei(fromAddress);
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
 
@@ -557,9 +587,34 @@ namespace ReserveBlockCore.Services
                                             if (tokenAccount.Balance < topic.MinimumVoteRequirement)
                                                 return (txResult, "Insufficient Balance to cast a vote.");
 
+                                            var voteExist = TokenVote.CheckSpecificAddressTokenVoteOnTopic(fromAddress, topicUID);
+
+                                            if(voteExist)
+                                                return (txResult, "Token Holder has already voted.");
+
                                             break;
                                         }
+                                    case "Update()":
+                                        {
+                                            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                                            if (scStateTreiRec != null)
+                                            {
+                                                if (txRequest.FromAddress != scStateTreiRec.OwnerAddress)
+                                                    return (txResult, "You are attempting to update a SC you don't own.");
 
+                                                if (scStateTreiRec.IsLocked)
+                                                    return (txResult, "You are attempting to update a SC that is locked.");
+
+                                                if (scStateTreiRec.NextOwner != null)
+                                                    return (txResult, "You are attempting to update a SC that has a new owner assigned to it.");
+                                            }
+                                            else
+                                            {
+                                                return (txResult, "SC does not exist.");
+                                            }
+
+                                            break;
+                                        }
                                     case "Transfer()":
                                         {
                                             var toAddress = (string?)scData["ToAddress"];
@@ -678,6 +733,144 @@ namespace ReserveBlockCore.Services
                                                 }
                                             }
                                             //Run the Trillium REPL To ensure new state is valid again.
+                                            break;
+                                        }
+
+                                    case "TransferCoin()":
+                                        {
+                                            var amountVal = (decimal?)scData["Amount"];
+                                            if(!amountVal.HasValue)
+                                                return (txResult, "No amount specified.");
+
+                                            var amount = amountVal.Value;
+
+                                            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                                            if (scStateTreiRec != null)
+                                            {
+                                                bool isOwner = false;
+                                                if (txRequest.FromAddress == scStateTreiRec.OwnerAddress)
+                                                {
+                                                    isOwner = true;
+                                                    if (scStateTreiRec.IsLocked)
+                                                        return (txResult, "You cannot perform any actions on a Smart contract that is locked.");
+
+                                                }
+
+                                                
+
+                                                var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
+
+                                                if(sc == null)
+                                                {
+                                                    var scMain = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+
+                                                    if (scMain == null)
+                                                        return (txResult, $"Failed to generate Smart Contract Data: {scUID}");
+
+                                                    sc = scMain;
+                                                }
+
+                                                if (sc == null)
+                                                    return (txResult, $"Failed to find Smart Contract Data: {scUID}");
+
+                                                if (sc.Features == null)
+                                                    return (txResult, $"Contract has no features: {scUID}");
+
+                                                var tknzFeature = sc.Features.Where(x => x.FeatureName == FeatureName.Tokenization).Select(x => x.FeatureFeatures).FirstOrDefault();
+
+                                                if (tknzFeature == null)
+                                                    return (txResult, $"Contract missing a tokenization feature: {scUID}");
+
+                                                var tknz = (TokenizationFeature)tknzFeature;
+
+                                                if (tknz == null)
+                                                    return (txResult, $"Token feature error: {scUID}");
+
+                                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null)
+                                                {
+                                                    var balances = scStateTreiRec.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == txRequest.FromAddress || x.ToAddress == txRequest.FromAddress).ToList();
+
+                                                    if (balances.Any() && !isOwner)
+                                                    {
+                                                        var balance = balances.Sum(x => x.Amount);
+
+                                                        if (balance < amount)
+                                                            return (txResult, $"Insufficient Balance. Current Balance: {balance}");
+                                                    }
+                                                }
+                                            }
+
+                                            break;
+                                        }
+
+                                    case "TokenizedWithdrawalRequest()" :
+                                        {
+                                            var jobj = JObject.Parse(txData);
+                                            var tw = jobj["TokenizedWithdrawal"]?.ToObject<TokenizedWithdrawals?>();
+
+                                            if(tw == null)
+                                                return (txResult, $"Tokenized Withdrawal was null.");
+
+                                            var sigCheck = SignatureService.VerifySignature(tw.RequestorAddress, $"{tw.RequestorAddress}.{tw.OriginalRequestTime}.{tw.OriginalUniqueId}", tw.OriginalSignature);
+
+                                            if(!sigCheck)
+                                                return (txResult, $"Signature Check Failed.");
+
+                                            var twCheck = TokenizedWithdrawals.GetTokenizedRecord(tw.RequestorAddress, tw.OriginalUniqueId, tw.SmartContractUID);
+
+                                            if(twCheck != null)
+                                            {
+                                                if(twCheck.IsCompleted)
+                                                    return (txResult, $"TW is already complete.");
+                                            }
+
+                                            if(txRequest.Amount > 0.0M)
+                                                return (txResult, $"Amount not allowed in here.");
+
+                                            if (txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
+                                                return (txResult, $"Incorrect transaction type selected.");
+
+                                            if(txRequest.ToAddress != tw.RequestorAddress)
+                                                return (txResult, $"Request sent to incorrect address.");
+
+                                            break;
+                                        }
+
+                                    case "TokenizedWithdrawalComplete()":
+                                        {
+                                            var jobj = JObject.Parse(txData);
+                                            var uniqueId = jobj["UniqueId"]?.ToObject<string?>();
+                                            var txHash = jobj["TransactionHash"]?.ToObject<string?>();
+
+                                            if (txRequest.ToAddress != "TW_Base")
+                                                return (txResult, $"Incorrect To Address.");
+
+                                            if(uniqueId == null)
+                                                return (txResult, $"Unique ID cannot be null.");
+
+                                            if(scUID == null)
+                                                return (txResult, $"SmartContractUID cannot be null.");
+
+                                            if (txHash == null)
+                                                return (txResult, $"Transaction Hash cannot be null.");
+
+                                            if (txRequest.TransactionType != TransactionType.TKNZ_WD_OWNER)
+                                                return (txResult, $"Incorrect transaction type selected.");
+
+                                            if(!twSkipVerify)
+                                            {
+                                                var twCheck = TokenizedWithdrawals.GetTokenizedRecord(txRequest.FromAddress, uniqueId, scUID);
+
+                                                if (twCheck == null)
+                                                    return (txResult, $"There is no matching Request for UniqueId : {uniqueId} and SCUID: {scUID}");
+
+                                                if (twCheck.IsCompleted)
+                                                    return (txResult, $"Cannot attempt to complete an already completed withdrawal");
+
+                                                if (txRequest.FromAddress != twCheck.RequestorAddress)
+                                                    return (txResult, $"You are not the originator of this withdrawal.");
+                                            }
+                                            
                                             break;
                                         }
 
@@ -849,7 +1042,7 @@ namespace ReserveBlockCore.Services
                                         signatureVerify = true;
 
                                     if(!signatureVerify)
-                                        NFTLogUtility.Log($"Sig Bad. Key: {keySign} | Amount Sold For: {amountSoldFor.Value} | ToAddress {toAddress} | Sig Script: {bidSignature}", "TransactionValidatorService.VerifyTX");
+                                        SCLogUtility.Log($"Sig Bad. Key: {keySign} | Amount Sold For: {amountSoldFor.Value} | ToAddress {toAddress} | Sig Script: {bidSignature}", "TransactionValidatorService.VerifyTX");
 
                                     if (!signatureVerify)
                                         return (txResult, "Bid signature did not verify.");
@@ -1091,7 +1284,7 @@ namespace ReserveBlockCore.Services
                                 {
                                     if(!string.IsNullOrEmpty(name))
                                     {
-                                        var nameRBX = name.ToLower() + ".rbx";
+                                        var nameRBX = name.ToLower() + ".vfx";
                                         var nameCheck = adnrList.FindOne(x => x.Name == name || x.Name == nameRBX);
                                         if (nameCheck != null)
                                         {
@@ -1155,7 +1348,121 @@ namespace ReserveBlockCore.Services
                                 }
                             }
 
-                            if(Globals.LastBlock.Height >= Globals.V1ValHeight)
+                            if (function == "BTCAdnrCreate()")
+                            {
+                                if (txRequest.FromAddress.StartsWith("xRBX"))
+                                    return (txResult, "A reserve account may not create an ADNR.");
+
+                                var name = (string?)jobj["Name"];
+                                var btcAddress = (string?)jobj["BTCAddress"];
+                                var message = (string?)jobj["Message"];
+                                var signature = (string?)jobj["Signature"];
+
+                                if (name == null || btcAddress == null || message == null || signature == null)
+                                    return (txResult, "TX data not properly formatted. Something was null.");
+
+                                var adnrList = BitcoinAdnr.GetBitcoinAdnr();
+
+                                if (adnrList != null)
+                                {
+                                    if (!string.IsNullOrEmpty(name))
+                                    {
+                                        var nameRBX = name.ToLower() + ".btc";
+                                        var nameCheck = adnrList.FindOne(x => x.Name == name || x.Name == nameRBX);
+                                        if (nameCheck != null)
+                                        {
+                                            return (txResult, "Name has already been taken.");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        return (txResult, "Name may not be blank or empty.");
+                                    }
+
+                                    var addressCheck = adnrList.FindOne(x => x.BTCAddress == btcAddress);
+                                    if (addressCheck != null)
+                                    {
+                                        return (txResult, "Address is already associated with an active DNR");
+                                    }
+
+                                    if (txRequest.ToAddress != "Adnr_Base")
+                                    {
+                                        return (txResult, "To Address was not the Adnr_Base.");
+                                    }
+
+                                    //This part is very important
+                                    //Ensure that someone else is not attempting to assign an ADNR to another BTC address they don't own
+                                    //Rules:
+                                    //1. Must be a valid signature from the BTC address
+                                    //2. Message must be a timestamp no older than 30 minutes. 
+                                    var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
+                                    if (!signatureValid)
+                                        return (txResult, "Invalid BTC Signature");
+                                    var messageParse = long.TryParse(message, out var messageTimestamp);
+
+                                    if (!messageParse)
+                                        return (txResult, "Improper Message Format. Message must be a timestamp.");
+
+                                    if (!blockDownloads)
+                                    {
+                                        if (messageTimestamp < TimeUtil.GetTime(0, -30))
+                                            return (txResult, "Signature message is too old. Please resubmit a new tx.");
+                                    }
+                                }
+                            }
+
+                            if(function == "BTCAdnrTransfer()")
+                            {
+                                if (txRequest.FromAddress.StartsWith("xRBX"))
+                                    return (txResult, "A reserve account may not transfer an ADNR.");
+
+                                var BTCToAddress = (string?)jobj["BTCToAddress"];
+                                var BTCFromAddress = (string?)jobj["BTCFromAddress"];
+
+                                if (BTCToAddress == null || BTCFromAddress == null)
+                                    return (txResult, "TX data not properly formatted. Something was null.");
+
+                                var adnrList = BitcoinAdnr.GetBitcoinAdnr();
+
+                                if (adnrList != null)
+                                {
+                                    var addressCheck = adnrList.FindOne(x => x.BTCAddress == BTCFromAddress && x.RBXAddress == txRequest.FromAddress);
+                                    if (addressCheck == null)
+                                    {
+                                        return (txResult, "Address is not associated with an active DNR");
+                                    }
+
+                                    var toAddressCheck = adnrList.FindOne(x => x.BTCAddress == BTCToAddress);
+                                    if (toAddressCheck != null)
+                                    {
+                                        return (txResult, "Address is already associated with an active DNR");
+                                    }
+                                }
+
+                            }
+                            if (function == "BTCAdnrDelete()")
+                            {
+                                if (txRequest.FromAddress.StartsWith("xRBX"))
+                                    return (txResult, "A reserve account may not delete an ADNR.");
+
+                                var BTCFromAddress = (string?)jobj["BTCFromAddress"];
+
+                                if (BTCFromAddress == null)
+                                    return (txResult, "TX data not properly formatted. Something was null.");
+
+                                var adnrList = BitcoinAdnr.GetBitcoinAdnr();
+
+                                if (adnrList != null)
+                                {
+                                    var addressCheck = adnrList.FindOne(x => x.BTCAddress == BTCFromAddress && x.RBXAddress == txRequest.FromAddress);
+                                    if (addressCheck == null)
+                                    {
+                                        return (txResult, "Address is not associated with an active DNR");
+                                    }
+                                }
+                            }
+
+                            if (Globals.LastBlock.Height >= Globals.V1ValHeight)
                             {
                                 if (txRequest.Amount < Globals.ADNRRequiredRBX)
                                     return (txResult, $"There must be at least {Globals.ADNRRequiredRBX} RBX to perform an ADNR Function.");
@@ -1346,9 +1653,9 @@ namespace ReserveBlockCore.Services
                                     if (txRequest.FromAddress != vote.Address)
                                         return (txResult, "Vote address must match the transactions From Address.");
 
-                                    var voteExixt = Vote.CheckSpecificAddressVoteOnTopic(vote.Address, vote.TopicUID);
+                                    var voteExist = Vote.CheckSpecificAddressVoteOnTopic(vote.Address, vote.TopicUID);
 
-                                    if(voteExixt)
+                                    if(voteExist)
                                         return (txResult, "You have already voted on this topic and may not do so again.");
 
                                     if(Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
@@ -1662,7 +1969,12 @@ namespace ReserveBlockCore.Services
 
             if (txRequest.FromAddress.StartsWith("xRBX") && runReserveCheck)
             {
-                if (txRequest.TransactionType != TransactionType.TX && txRequest.TransactionType != TransactionType.RESERVE && txRequest.TransactionType != TransactionType.NFT_TX)
+                if (txRequest.TransactionType != TransactionType.TX && 
+                    txRequest.TransactionType != TransactionType.RESERVE && 
+                    txRequest.TransactionType != TransactionType.NFT_TX &&
+                    txRequest.TransactionType != TransactionType.FTKN_TX &&
+                    txRequest.TransactionType != TransactionType.TKNZ_TX &&
+                    txRequest.TransactionType != TransactionType.SC_TX)
                     return (txResult, "Invalid Transaction Type was selected.");
 
                 var balanceTooLow = from.Balance - (txRequest.Fee + txRequest.Amount) < 0.5M ? true : false;
@@ -1736,6 +2048,7 @@ namespace ReserveBlockCore.Services
             var txJsonSize = JsonConvert.SerializeObject(txRequest);
             var size = txJsonSize.Length;
 
+            //30720 bytes
             if (size > (1024 * 30))
             {
                 return false;

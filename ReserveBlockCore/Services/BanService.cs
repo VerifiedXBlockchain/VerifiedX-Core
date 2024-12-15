@@ -49,7 +49,7 @@ namespace ReserveBlockCore.Services
             }
             else
             {
-                if(!peer.IsPermaBanned)
+                if(!peer.IsPermaBanned && !peer.IsValidator)
                 {
                     if (peer.BannedFromAreasList != null)
                     {
@@ -136,7 +136,6 @@ namespace ReserveBlockCore.Services
 
         public static async Task PeerBanUnbanService()
         {
-            bool RunLock = false;
             while(true)
             {
                 var delay = Task.Delay(60000);
@@ -148,11 +147,13 @@ namespace ReserveBlockCore.Services
                 await BanServiceLock.WaitAsync();
                 try
                 {
-                    RunUnban();
+                    await UpdateABL();
 
-                    RunBanReset();
+                    await RunUnban();
 
-                    RunPermaBan();
+                    await RunBanReset();
+
+                    await RunPermaBan();
                 }
                 finally
                 {
@@ -161,6 +162,10 @@ namespace ReserveBlockCore.Services
 
                 await delay;
             }
+        }
+        private static async Task UpdateABL()
+        {
+            Config.Config.ProcessABL();
         }
 
         private static void ReleasePeer(string ipAddress)
@@ -179,7 +184,7 @@ namespace ReserveBlockCore.Services
             catch { }
         }
 
-        private static void RunUnban()
+        public static async Task RunUnban()
         {
             try
             {
@@ -211,7 +216,7 @@ namespace ReserveBlockCore.Services
             
         }
 
-        private static void RunBanReset()
+        private static async Task RunBanReset()
         {
             try
             {
@@ -245,7 +250,7 @@ namespace ReserveBlockCore.Services
             catch { }
         }
 
-        private static void RunPermaBan()
+        private static async Task RunPermaBan()
         {
             try
             {

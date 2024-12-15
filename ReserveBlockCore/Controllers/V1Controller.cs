@@ -57,6 +57,26 @@ namespace ReserveBlockCore.Controllers
             return output;
         }
 
+        [HttpGet("getabl")]
+        public async Task<string> getabl()
+        {
+            var list = JsonConvert.SerializeObject(Globals.ABL, Formatting.Indented);
+            return list;
+        }
+
+        [HttpGet("checkaddress/{addr}")]
+        public async Task<string> checkaddress(string addr)
+        {
+            var result = Globals.ABL.Exists(x => x.Equals(addr));
+            return result.ToString();
+        }
+        [HttpGet("processabl")]
+        public async Task<string> processabl()
+        {
+            Config.Config.ProcessABL();
+            return "done";
+        }
+
         /// <summary>
         /// Unlock the API using Password
         /// </summary>
@@ -208,7 +228,6 @@ namespace ReserveBlockCore.Controllers
         public async Task<string> GetIsWalletEncrypted()
         {
             var output = "false";
-
             if (Globals.IsWalletEncrypted)
                 output = "true";
 
@@ -707,7 +726,8 @@ namespace ReserveBlockCore.Controllers
                         {
                             account.IsValidating = true;
                             accounts.UpdateSafe(account);
-                            Globals.ValidatorAddress = account.Address;                            
+                            Globals.ValidatorAddress = account.Address;  
+                            Globals.ValidatorPublicKey = account.PublicKey;
                             output = "Success! The requested account has been turned on: " + account.Address;
                         }
                     }
@@ -1657,7 +1677,7 @@ namespace ReserveBlockCore.Controllers
             var url = $"http://localhost:{Globals.APIPort}/api/v1/mother";
 
             if(Globals.TestURL)
-                url = $"https://localhost:7777/api/v1/mother";
+                url = $"https://localhost:{Globals.APIPortSSL}/api/v1/mother";
 
             output = url;
 
@@ -1886,6 +1906,102 @@ namespace ReserveBlockCore.Controllers
             var output = await StaticVariableUtility.GetStaticVars();
 
             return output;
+        }
+
+        [HttpGet("Debug")]
+        public async Task<IActionResult> Debug()
+        {
+            var output = await StaticVariableUtility.GetStaticVars();
+
+            // Split the output into lines
+            var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+            // Create a StringBuilder to build the HTML content
+            var htmlBuilder = new StringBuilder();
+            //htmlBuilder.AppendLine("<style>body {margin: 0; padding: 0}</style>");
+            //// Add each line wrapped in a <div> element with inline styling for background color
+            //foreach (var line in lines)
+            //{
+            //    // Use inline styling for retro look
+            //    htmlBuilder.Append($"<div style=\"color: #00FF00; background-color: #000000; font-family: 'Courier New', Courier, monospace; font-weight: bold; padding: 5px;\">{line}</div>");
+            //}
+            // Add the CSS styling
+            htmlBuilder.AppendLine("<style>");
+            htmlBuilder.AppendLine("body {");
+            htmlBuilder.AppendLine("    margin: 0;");
+            htmlBuilder.AppendLine("    padding: 0;");
+            htmlBuilder.AppendLine("    background-color: #000; /* Set background color to black */");
+            htmlBuilder.AppendLine("    position: relative; /* Required for absolute positioning of noise layer */");
+            htmlBuilder.AppendLine("}");
+            htmlBuilder.AppendLine(".noise-layer {");
+            htmlBuilder.AppendLine("    position: absolute;");
+            htmlBuilder.AppendLine("    top: 0;");
+            htmlBuilder.AppendLine("    left: 0;");
+            htmlBuilder.AppendLine("    width: 100%;");
+            htmlBuilder.AppendLine("    height: 100%;");
+            htmlBuilder.AppendLine("    background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwBAMAAAClLOS0AAAAElBMVEUAAABUVlRMSkxMTkxUUlRERkTBhCBjAAAAAXRSTlMAQObYZgAAAAlwSFlzAAAOxAAADsQBlSsOGwAAAu5JREFUOI0Vk+2xxSAIRG3hmqSAoBYQPwoQpAAB+2/l8Wac8Y9ZNruHsCDZoRXrFQusIc2qfsgSzqyQMdZF8KxE981vzI9xoLr2kXFpTp3OgDd3SiO3oLWliUkaW+5Lv9Xgye2rgR8tLQ/YIw3tOSbuqZzmUucDjEa69rqoX6u9BSWXMIu7ErMzWqk45Rfd2jUt5EdW5wEKL3aO1p+vLV4QELFLg2KG1loSmUT4Sg2HuNmdz3OazjgSQJuq5lIbmVgk59jzM0+h1EF0h5lOnnWVCkWvekzRSgPTEPHOTTuvxrhX3dZ0IZoEfX5y9yl266H0Fsr79KYQUi6XXgOa+2n16Xs863oWhrOetHz0HUkqH8qjQq3vCMAp67XKPuvXkxk1XqNnDS+/0lyJ0j3uMjkqpsSZw7mG9Lm47tnfIaU/03or/oPpalmGZ+JTMbcyIRPdNeQzzUaHtHpxkQSDIxXSsDomRVZVseIPtJNd9vQwm1gb+JVr9OKgmCCPzBw2XvrDWl5JarR67iYJcg2vD45QUsKles8Rn+Y40QmwrGOrrGsZvQ7IgphXG15USw4F0rbjDRM6aDplh/epy6lS8LZmbbt5RPniFggX344poGFPn5Qt62PKgX+ZTuXFv+cRVIE0qGe7Qzm36ke9Z74pqxdeyo82h/ddApamYDN2oCWfu2Q54YgjLGqFejonFXcSH3trqO+EeNzym84mchM9F60W+utgCHX8VV+S5OBWQqgn3DS7nnaJAhjfLtywXrSDxLxn/vhibJtk4MhV/QrxHBpC6MDGmGp3jqXGWsMoeSE9u5ejeTnp1XgkzaHH6tuYYTczA60EAgDrFxq3872/lFbi6t8ynyUPYDBn5H+XmeJqpqK17kIOw0ZgPO6/YWHPcSrbZqBAH3za/8vKTl51UhIlhRzMXwgp/mTUfPcll2NGUIIHsvSwGMrywGfhtK5ZTlD4Et9uaFNy0pufnzflkWDF7iFhkwq9x+v2NXfG/gCa+vw3oBtmggAAAABJRU5ErkJggg==');");
+            htmlBuilder.AppendLine("    pointer-events: none; /* Allow clicks to pass through the noise layer */");
+            htmlBuilder.AppendLine("    opacity: 0.38; /* Adjust opacity for subtle effect */");
+            htmlBuilder.AppendLine("    animation: grainy-background-movement 10s linear infinite; /* Adjust duration and timing as needed */");
+            htmlBuilder.AppendLine("}");
+            htmlBuilder.AppendLine(".retro-text {");
+            htmlBuilder.AppendLine("    color: #00FF00; /* Green text color */");
+            htmlBuilder.AppendLine("    font-family: 'Courier New', Courier, monospace; /* Monospace font for retro look */");
+            htmlBuilder.AppendLine("    font-weight: bold; /* Thicker font for emphasis */");
+            htmlBuilder.AppendLine("    text-shadow: ");
+            htmlBuilder.AppendLine("        0 0 1px #00FF00, /* Slight phosphor glow */");
+            htmlBuilder.AppendLine("        0 0 2px #00FF00, /* Larger phosphor glow */");
+            htmlBuilder.AppendLine("        0 0 3px #00FF00, /* Even larger phosphor glow */");
+            htmlBuilder.AppendLine("        0 0 4px #00FF00; /* Largest phosphor glow */");
+            htmlBuilder.AppendLine("    background: ");
+            htmlBuilder.AppendLine("        linear-gradient(rgba(0, 0, 0, 0.1) 50%, transparent 50%), /* Scanlines effect */");
+            htmlBuilder.AppendLine("        linear-gradient(to right, rgba(0, 0, 0, 0.1) 50%, transparent 50%);");
+            htmlBuilder.AppendLine("    background-size: 100% 10px; /* Scanlines size and spacing */");
+            htmlBuilder.AppendLine("    padding: 10px; /* Add padding for better readability */");
+            htmlBuilder.AppendLine("}");
+            htmlBuilder.AppendLine(".gray-line {");
+            htmlBuilder.AppendLine("    position: absolute;");
+            htmlBuilder.AppendLine("    width: 100%;");
+            htmlBuilder.AppendLine("    height: 1px;");
+            htmlBuilder.AppendLine("    background-color: #888; /* Gray color for the line */");
+            htmlBuilder.AppendLine("    animation: gray-line-movement 20s linear infinite; /* Adjust duration and timing as needed */");
+            htmlBuilder.AppendLine("}");
+            htmlBuilder.AppendLine("@keyframes grainy-background-movement {");
+            htmlBuilder.AppendLine("    0% {");
+            htmlBuilder.AppendLine("        background-position: 0 100%; /* Start position at bottom */");
+            htmlBuilder.AppendLine("    }");
+            htmlBuilder.AppendLine("    100% {");
+            htmlBuilder.AppendLine("        background-position: 0 -100%; /* End position at top */");
+            htmlBuilder.AppendLine("    }");
+            htmlBuilder.AppendLine("}");
+            htmlBuilder.AppendLine("@keyframes gray-line-movement {");
+            htmlBuilder.AppendLine("    0% {");
+            htmlBuilder.AppendLine("        top: 0; /* Start position at top */");
+            htmlBuilder.AppendLine("    }");
+            htmlBuilder.AppendLine("    100% {");
+            htmlBuilder.AppendLine("        top: 100%; /* End position at bottom */");
+            htmlBuilder.AppendLine("    }");
+            htmlBuilder.AppendLine("}");
+            htmlBuilder.AppendLine("</style>");
+
+            // Add noise layer for grainy effect
+            htmlBuilder.AppendLine("<div class=\"noise-layer\"></div>");
+            htmlBuilder.AppendLine("<div class=\"gray-line\"></div>");
+            htmlBuilder.AppendLine("<script>");
+            htmlBuilder.AppendLine("document.addEventListener('DOMContentLoaded', function() {");
+            htmlBuilder.AppendLine("    var glitchElement = document.querySelector('.glitch');");
+            htmlBuilder.AppendLine("    glitchElement.style.animation = 'glitch-animation 0.1s infinite alternate';");
+            htmlBuilder.AppendLine("});");
+            htmlBuilder.AppendLine("</script>");
+            // Add each line with retro styling
+            foreach (var line in lines)
+            {
+                // Use inline styling for retro look
+                htmlBuilder.Append($"<div class=\"retro-text\">{line}</div>");
+            }
+
+            // Return the HTML content with content type set to text/html
+            return Content(htmlBuilder.ToString(), "text/html");
         }
 
         /// <summary>

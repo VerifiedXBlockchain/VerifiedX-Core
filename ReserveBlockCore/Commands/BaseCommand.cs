@@ -51,6 +51,10 @@ namespace ReserveBlockCore.Commands
                     Globals.StopConsoleOutput = !Globals.StopConsoleOutput;
                     Console.WriteLine($"Stop Console Output set to: {Globals.StopConsoleOutput}");
                     break;
+                case "/stopvalco":
+                    Globals.StopValConsoleOutput = !Globals.StopValConsoleOutput;
+                    Console.WriteLine($"Stop Val Console Output set to: {Globals.StopValConsoleOutput}");
+                    break;
                 case "/exit":
                     commandResult = "_EXIT";
                     break;
@@ -91,6 +95,11 @@ namespace ReserveBlockCore.Commands
                     await Voting.Voting.StartVoteProgram();
                     Globals.StopConsoleOutput = false;
                     break;
+                case "/btc":
+                    Globals.StopConsoleOutput = true;
+                    await Bitcoin.Bitcoin.StartBitcoinProgram();
+                    Globals.StopConsoleOutput = false;
+                    break;
                 case "/benchip":
                     Globals.StopConsoleOutput = true;
                     await BaseCommandServices.BenchIP();
@@ -124,6 +133,11 @@ namespace ReserveBlockCore.Commands
                     Console.WriteLine("Printing Mempool Results: ");
                     TransactionData.PrintMemPool();
                     break;
+                case "/clearmempool":
+                    Console.WriteLine("Clearing Mempool...");
+                    await TransactionData.ClearMempool();
+                    Console.WriteLine("Mempool Cleared");
+                    break;
                 case "/resblocks":
                     Globals.StopConsoleOutput = true;
                     await BaseCommandServices.ResyncBlocks();
@@ -146,6 +160,12 @@ namespace ReserveBlockCore.Commands
                 case "/switchbeacon":
                     Globals.StopConsoleOutput = true;
                     BaseCommandServices.SwitchBeaconState();
+                    Globals.StopConsoleOutput = false;
+                    break;
+                case "/testbeacon":
+                    Globals.StopConsoleOutput = true;
+                    var beaconConnectionResult = await BeaconUtility.EstablishBeaconConnection(true, false);
+                    Console.WriteLine($"Beacon Connection Result: {beaconConnectionResult}");
                     Globals.StopConsoleOutput = false;
                     break;
                 case "/unlock":
@@ -202,7 +222,8 @@ namespace ReserveBlockCore.Commands
                     break;
                 case "/synctrei":
                     Globals.StopConsoleOutput = true;
-                    await BaseCommandServices.SyncTreis();
+                    //Deprecated: v5.0.0
+                    //await BaseCommandServices.SyncTreis();
                     Globals.StopConsoleOutput = false;
                     break;
                 case "/setto":

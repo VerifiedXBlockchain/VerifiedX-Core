@@ -469,8 +469,8 @@ namespace ReserveBlockCore.Controllers
                     var height = Convert.ToInt32(Globals.LastBlock.Height) - startAtBlock;
                     bool resultFound = false;
 
-                    var integerList = startAtBeginning
-                        ? Enumerable.Range(startAtBlock, height + 1)
+                    var integerList = startAtBeginning 
+                        ? Enumerable.Range(startAtBlock, height + 1) 
                         : Enumerable.Range(startAtBlock, height + 1).Reverse();
 
                     foreach (var blockHeight in integerList)
@@ -502,9 +502,8 @@ namespace ReserveBlockCore.Controllers
             return output;
         }
 
-
         /// <summary>
-        /// Creates a minting tranasctions
+        /// Creates a minting tranasctions *Deprecated*
         /// </summary>
         /// <param name="jsonData"></param>
         /// <returns></returns>
@@ -529,12 +528,15 @@ namespace ReserveBlockCore.Controllers
                     var md5List = await MD5Utility.GetMD5FromSmartContract(scMain);
                     var bytes = Encoding.Unicode.GetBytes(result.Item1);
                     var scBase64 = bytes.ToCompress().ToBase64();
+
+                    var function = result.Item3 ? "TokenDeploy()" : "Mint()";
                     var newSCInfo = new[]
                     {
-                            new { Function = "Mint()", ContractUID = scMain.SmartContractUID, Data = scBase64, MD5List = md5List}
+                            new { Function = function, ContractUID = scMain.SmartContractUID, Data = scBase64, MD5List = md5List}
                     };
 
                     txData = JsonConvert.SerializeObject(newSCInfo);
+
                     var txJToken = JToken.Parse(txData.ToString());
                     //Type type = typeof(string);
                     //var dataTest = txJToken["Data"] != null ? txJToken["Data"].ToString(Formatting.None) : null;//sometest["Data"].ToObject<string>();
@@ -545,6 +547,61 @@ namespace ReserveBlockCore.Controllers
             catch(Exception ex)
             {
                 output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString()});
+            }
+
+            return output;
+        }
+
+        /// <summary>
+        /// Creates a minting tranasctions
+        /// </summary>
+        /// <param name="jsonData"></param>
+        /// <returns></returns>
+        [HttpPost("GetSCMintDeployData")]
+        public async Task<string> GetSCMintDeployData([FromBody] object jsonData)
+        {
+            var output = "";
+            var defaultMD5 = "defaultvBTC.png::150b90aa9d06f7e4fc5703ca6d7f01db";
+            string? md5List = null;
+            var scMain = JsonConvert.DeserializeObject<SmartContractMain>(jsonData.ToString());
+
+            try
+            {
+                if (scMain == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SC Main was null" });
+
+                var result = await SmartContractWriterService.WriteSmartContract(scMain);
+
+                var txData = "";
+
+                if (result.Item1 != null)
+                {
+                    if (scMain.SmartContractAsset.Location != "default")
+                        md5List = await MD5Utility.GetMD5FromSmartContract(scMain);
+                    else
+                        md5List = defaultMD5;
+
+                    var bytes = Encoding.Unicode.GetBytes(result.Item1);
+                    var scBase64 = bytes.ToCompress().ToBase64();
+
+                    var function = result.Item3 ? "TokenDeploy()" : "Mint()";
+                    var newSCInfo = new[]
+                    {
+                            new { Function = function, ContractUID = scMain.SmartContractUID, Data = scBase64, MD5List = md5List}
+                    };
+
+                    txData = JsonConvert.SerializeObject(newSCInfo);
+
+                    var txJToken = JToken.Parse(txData.ToString());
+                    //Type type = typeof(string);
+                    //var dataTest = txJToken["Data"] != null ? txJToken["Data"].ToString(Formatting.None) : null;//sometest["Data"].ToObject<string>();
+                    //txJToken["Data"] = dataTest;
+                    output = txData;
+                }
+            }
+            catch (Exception ex)
+            {
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
             }
 
             return output;
@@ -577,7 +634,7 @@ namespace ReserveBlockCore.Controllers
                             if (!beaconConnectionResult)
                             {
                                 output = JsonConvert.SerializeObject(new { Success = false, Message = "You are not connected to any beacons."});
-                                NFTLogUtility.Log("Error - You failed to connect to any beacons.", "TXV1Controller.CreateBeaconUploadRequest()");
+                                SCLogUtility.Log("Error - You failed to connect to any beacons.", "TXV1Controller.CreateBeaconUploadRequest()");
                                 return output;
                             }
                         }
@@ -587,7 +644,7 @@ namespace ReserveBlockCore.Controllers
                             if (connectedBeacon == null)
                             {
                                 output = JsonConvert.SerializeObject(new { Success = false, Message = "You have lost connection to beacons. Please attempt to resend." });
-                                NFTLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "TXV1Controller.CreateBeaconUploadRequest()");
+                                SCLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "TXV1Controller.CreateBeaconUploadRequest()");
                                 return output;
                             }
 
@@ -902,7 +959,8 @@ namespace ReserveBlockCore.Controllers
                     transaction.ToAddress = transaction.ToAddress.ToAddressNormalize();
                     transaction.Amount = transaction.Amount.ToNormalizeDecimal();
 
-                    var result = await TransactionValidatorService.VerifyTX(transaction);
+                    var twSkipVerify = transaction.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
+                    var result = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
                     if (result.Item1 == true)
                     {
 
@@ -948,7 +1006,8 @@ namespace ReserveBlockCore.Controllers
                     transaction.ToAddress = transaction.ToAddress.ToAddressNormalize();
                     transaction.Amount = transaction.Amount.ToNormalizeDecimal();
 
-                    var result = await TransactionValidatorService.VerifyTX(transaction);
+                    var twSkipVerify = transaction.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
+                    var result = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
                     if (result.Item1 == true)
                     {
                         if (transaction.TransactionRating == null)
@@ -1053,7 +1112,7 @@ namespace ReserveBlockCore.Controllers
                             }
                             else
                             {
-                                var nameRBX = name.ToLower() + ".rbx";
+                                var nameRBX = name.ToLower() + ".vfx";
                                 var nameCheck = adnr.FindOne(x => x.Name == nameRBX);
                                 if (nameCheck == null)
                                 {

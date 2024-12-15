@@ -1,5 +1,7 @@
 ﻿using ImageMagick;
 using Microsoft.AspNetCore.SignalR;
+using ReserveBlockCore.Bitcoin.ElectrumX;
+using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.DST;
 using ReserveBlockCore.EllipticCurve;
@@ -30,6 +32,12 @@ namespace ReserveBlockCore
             public int Exceptions { get; set; }
         }
 
+        public class SwaggerResponse
+        {
+            public bool Success { get; set; }
+            public string Message { get; set; }
+        }
+
 
         #region Timers
         public static bool IsTestNet = false;
@@ -50,6 +58,8 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, ReserveTransactions> ReserveTransactionsDict = new ConcurrentDictionary<string, ReserveTransactions>();
         public static ConcurrentDictionary<string, string> SeedDict = new ConcurrentDictionary<string, string>();
         public static ConcurrentDictionary<string, TokenDetails> Tokens = new ConcurrentDictionary<string, TokenDetails>();
+        public static ConcurrentDictionary<long, string> ProofBlockHashDict = new ConcurrentDictionary<long, string>();
+        public static ConcurrentDictionary<string, ReserveAccountUnlockKey> ReserveAccountUnlockKeys = new ConcurrentDictionary<string, ReserveAccountUnlockKey>();
         public static string SignerCache = "";
         public static string IpAddressCache = "";
         public static object SignerCacheLock = new object();
@@ -64,14 +74,29 @@ namespace ReserveBlockCore
         public static Block? LastWonBlock = null;
         public static Process GUIProcess;
         public static bool IsFork = false;
+        public static bool ElectrumXConnected = false;
+        public static DateTime ElectrumXLastCommunication = DateTime.Now;
+        public static bool BTCAccountCheckRunning = false;
         public static Blockchain Blockchain { get; set; }
+        public static List<ClientSettings> ClientSettings { get; set; }
+        public static NBitcoin.Network BTCNetwork { get; set; }
+        public static string SegwitP2SHStartPrefix { get; set; }
+        public static string SegwitTaprootStartPrefix { get; set; }
+        public static Bitcoin.Bitcoin.BitcoinAddressFormat BitcoinAddressFormat { get; set; }
+        public static Account ArbiterSigningAddress { get; set; }
+        public static NBitcoin.ScriptPubKeyType ScriptPubKeyType { get; set; }
+        public static DateTime BTCAccountLastCheckedDate = DateTime.Now;
+        public static DateTime LastRanBTCReset = DateTime.Now.AddMinutes(-5);
+        public static decimal BTCMinimumAmount = 0.00001M;
+        public static bool BTCSyncing = false;  
 
         public static DateTime? RemoteCraftLockTime = null;        
         public static DateTime? CLIWalletUnlockTime = null;
         public static DateTime? APIUnlockTime = null;
         public static DateTime? ExplorerValDataLastSend = null;
 
-        public const int ValidatorRequiredRBX = 12000;
+
+        public const int ValidatorRequiredRBX = 50_000;
         public const decimal ADNRRequiredRBX = 5.0M;
         public const decimal ADNRTransferRequiredRBX = 1.0M;
         public const decimal ADNRDeleteRequiredRBX = 0.0M;
@@ -84,10 +109,18 @@ namespace ReserveBlockCore
         public const int ADNRLimit = 65;
         public static int BlockLock = 1079488;
         public static long V3Height = 579015;
+        public static long V4Height = 0;
         public static long V1ValHeight = 832000;
+        public static long V2ValHeight = 999999999999;
+        public static long SpecialBlockHeight = 999999999999;
         public static long TXHeightRule1 = 820457; //March 31th, 2023 at 03:44 UTC
         public static long TXHeightRule2 = 847847; //around April 7, 2023 at 18:30 UTC
         public static long TXHeightRule3 = 1079488; //around June 13th, 2023 at 19:30 UTC
+        public static int BlockTime = 12000; //12 seconds
+        public static int BlockTimeMin = 10000; //10 seconds
+        public static int BlockTimeMax = 15000; //15 seconds
+
+        //public static long Validating
         public static long LastAdjudicateTime = 0;
         public static SemaphoreSlim BlocksDownloadSlim = new SemaphoreSlim(1, 1);
         public static SemaphoreSlim BlocksDownloadV2Slim = new SemaphoreSlim(1, 1);
@@ -97,12 +130,16 @@ namespace ReserveBlockCore
         public static int PasswordClearTime = 10;
         public static int NFTTimeout = 0;
         public static int Port = 3338;
+        //deprecate in v5.0.1 or greater
         public static int ADJPort = 3339;
+        public static int ValPort = 3339;
         public static int SelfSTUNPort = 3340;
         public static int DSTClientPort = 3341;
+        public static int ArbiterPort = 3342;
         public static int APIPort = 7292;
-        public static int MajorVer = 4;
-        public static int MinorVer = 1;
+        public static int APIPortSSL = 7777;
+        public static int MajorVer = 5;
+        public static int MinorVer = 0;
         public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
@@ -127,9 +164,13 @@ namespace ReserveBlockCore
         public static decimal CurrentMemory = 0;
         public static decimal ProjectedMemory = 0;
         public static long SystemMemory = 1;
+        public static int TotalArbiterParties = 5;
+        public static int TotalArbiterThreshold = 3;
+        
 
         public static string Platform = "";
         public static string ValidatorAddress = "";
+        public static string ValidatorPublicKey = "";
         public static string? WalletPassword = null;
         public static string? APIPassword = null;
         public static string? APICallURL = null;
@@ -140,11 +181,16 @@ namespace ReserveBlockCore
         public static string CLIVersion = "";
         public static string? MotherAddress = null;
         public static string? CustomPath = null;
+        public static string GenesisValidator = "";
+        public static string ArbiterURI = "";
+        public static List<Models.Arbiter> Arbiters = new List<Models.Arbiter>();
+        public static string? ExplorerValDataLastSendResponseCode = null;
 
         public static bool Lock = true;
         public static bool AlwaysRequireWalletPassword = false;
         public static bool AlwaysRequireAPIPassword = false;
-        public static bool StopConsoleOutput = false;        
+        public static bool StopConsoleOutput = false;
+        public static bool StopValConsoleOutput = false;
         public static int AdjudicateLock = 0;        
         public static Account AdjudicateAccount;
         public static PrivateKey AdjudicatePrivateKey;
@@ -190,10 +236,12 @@ namespace ReserveBlockCore
         public static bool LogMemory = false;
         public static bool BlockSeedCalls = false;
         public static bool UseV2BlockDownload = false;
+        public static bool IsArbiter = false;
         
         public static CancellationToken CancelledToken;
 
         public static ConcurrentDictionary<string, long> MemBlocks = new ConcurrentDictionary<string, long>();
+        public static ConcurrentDictionary<long, string> BlockHashes = new ConcurrentDictionary<long, string>();
         public static ConcurrentDictionary<string, NodeInfo> Nodes = new ConcurrentDictionary<string, NodeInfo>(); // IP Address
         public static ConcurrentDictionary<string, AdjBench> AdjBench = new ConcurrentDictionary<string, AdjBench>(); // IP Address:Key
         public static ConcurrentDictionary<string, Validators> InactiveValidators = new ConcurrentDictionary<string, Validators>(); // RBX address        
@@ -206,28 +254,58 @@ namespace ReserveBlockCore
         public static ConcurrentQueue<int> BlockDiffQueue = new ConcurrentQueue<int>();
         public static ConcurrentDictionary<string, long> ActiveValidatorDict = new ConcurrentDictionary<string, long>();
         public static ConcurrentBag<StunServer> STUNServers = new ConcurrentBag<StunServer>();
+        public static ConcurrentDictionary<string, BitcoinValShares> ArbiterValidatorShares = new ConcurrentDictionary<string, BitcoinValShares>();
+        public static ConcurrentDictionary<string, (int failCount, long lastFailTime)> FailedBlockProducers = new ConcurrentDictionary<string, (int failCount, long lastFailTime)>();
+
 
 
         public static SecureString EncryptPassword = new SecureString();
         public static SecureString DecryptPassword = new SecureString();
         public static SecureString? MotherPassword = null;
+        public static SecureString ArbiterEncryptPassword = new SecureString();
 
-        public static IHttpClientFactory HttpClientFactory;        
+        public static IHttpClientFactory HttpClientFactory;
+
+        public static List<string> ABL = new List<string>();
+
+        public static DateTime ValidatorStartDate = DateTime.UtcNow;
+
+        public static ConcurrentDictionary<string, long> FailedValidators = new ConcurrentDictionary<string, long>();
+        public static int ElmahFileStore = 10000;
+        public static string ReportedIP = "";
 
         #endregion
 
         #region P2P Client Variables
 
-        public const int MaxPeers = 14;
+        public const int MaxPeers = 10;
+        public const int MaxValPeers = 30;
+        public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;
         public static ConcurrentDictionary<string, int> SkipPeers = new ConcurrentDictionary<string, int>();
+        public static ConcurrentDictionary<string, int> SkipValPeers = new ConcurrentDictionary<string, int>();
+        public static ConcurrentDictionary<string, NetworkValidator> NetworkValidators = new ConcurrentDictionary<string, NetworkValidator>(); //key = vfx address
+        public static ConcurrentDictionary<string, Peers> ValidatorPool = new ConcurrentDictionary<string, Peers>();
+        public static ConcurrentDictionary<string, NodeInfo> ValidatorNodes = new ConcurrentDictionary<string, NodeInfo>(); //key = ipaddress
+        public static ConcurrentDictionary<long, Proof> WinningProofs = new ConcurrentDictionary<long, Proof>();
+        public static ConcurrentDictionary<long, string> FinalizedWinner = new ConcurrentDictionary<long, string>();
+        public static ConcurrentBag<Proof> Proofs = new ConcurrentBag<Proof>();
+        public static ConcurrentDictionary<long, Block> NetworkBlockQueue = new ConcurrentDictionary<long, Block>();
+        public static ConcurrentDictionary<long, List<Proof>> BackupProofs = new ConcurrentDictionary<long, List<Proof>>();
+        public static ConcurrentDictionary<string, DateTime?> ProofsBroadcasted = new ConcurrentDictionary<string, DateTime?>();
+        public static ConcurrentDictionary<long, DateTime?> BlockQueueBroadcasted = new ConcurrentDictionary<long, DateTime?>();
+        public static ConcurrentDictionary<string, (long, int)> FailedProducerDict = new ConcurrentDictionary<string, (long, int)>();
+        public static ConcurrentDictionary<string, int> ProducerDict = new ConcurrentDictionary<string, int>();
+        public static ConcurrentQueue<ConsensusHeader> ConsensusHeaderQueue = new ConcurrentQueue<ConsensusHeader>();
+        public static ConcurrentBag<string> FailedProducers = new ConcurrentBag<string>();
 
         #endregion
 
         #region P2P Server Variables
 
         public static ConcurrentDictionary<string, HubCallerContext> P2PPeerDict = new ConcurrentDictionary<string, HubCallerContext>();
+        public static ConcurrentDictionary<string, HubCallerContext> P2PValDict = new ConcurrentDictionary<string, HubCallerContext>();
         public static ConcurrentDictionary<string, HubCallerContext> BeaconPeerDict = new ConcurrentDictionary<string, HubCallerContext>();        
         public static ConcurrentDictionary<string, MessageLock> MessageLocks = new ConcurrentDictionary<string, MessageLock>();
         public static ConcurrentDictionary<string, int> TxRebroadcastDict = new ConcurrentDictionary<string, int>();

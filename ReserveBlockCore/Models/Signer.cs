@@ -59,17 +59,6 @@ namespace ReserveBlockCore.Models
                 }));
             }
 
-            if (Globals.AdjudicateAccount == null)
-            {
-                var Accounts = AccountData.GetAccounts().FindAll().ToArray();
-                Globals.AdjudicateAccount = Accounts.Where(x => Globals.Signers.ContainsKey(x.Address)).FirstOrDefault();
-                if (Globals.AdjudicateAccount != null)
-                {
-                    BigInteger b1 = BigInteger.Parse(Globals.AdjudicateAccount.GetKey, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
-                    Globals.AdjudicatePrivateKey = new PrivateKey("secp256k1", b1);
-                    _ = Task.Run(StartupService.ConnectToConsensusNodes);
-                }
-            }
         }        
         public static int NumSigners()
         {
