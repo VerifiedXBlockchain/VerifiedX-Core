@@ -69,13 +69,13 @@ namespace ReserveBlockCore.Commands
                 Console.SetCursorPosition(Console.CursorLeft, Console.CursorTop);
 
                 AnsiConsole.Write(
-                new FigletText("RBX Private Keys")
+                new FigletText("VFX Private Keys")
                 .Centered()
                 .Color(Color.Green));
 
                 var table = new Table();
 
-                table.Title("[yellow]RBX Private Keys[/]").Centered();
+                table.Title("[yellow]VFX Private Keys[/]").Centered();
                 table.AddColumn(new TableColumn(new Panel("Address")));
                 table.AddColumn(new TableColumn(new Panel("Private Key"))).Centered();
 
@@ -267,8 +267,8 @@ namespace ReserveBlockCore.Commands
                                     Console.WriteLine($"TXHash: {result.Hash}");
                                     Console.WriteLine($"To: {result.ToAddress}");
                                     Console.WriteLine($"From: {result.FromAddress}");
-                                    Console.WriteLine($"Amount: {result.Amount} RBX");
-                                    Console.WriteLine($"Fee {result.Fee} RBX");
+                                    Console.WriteLine($"Amount: {result.Amount} VFX");
+                                    Console.WriteLine($"Fee {result.Fee} VFX");
                                     Console.WriteLine($"TX Rating {result.TransactionRating}");
                                     Console.WriteLine($"TX Type: {result.TransactionType}");
                                     Console.WriteLine($"Timestamp : {result.Timestamp}");
@@ -932,7 +932,7 @@ namespace ReserveBlockCore.Commands
             //}
             //else
             //{
-            //    Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 RBX to create a shop.");
+            //    Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 VFX to create a shop.");
             //    MainMenuReturn();
             //}
         }
@@ -1456,7 +1456,7 @@ namespace ReserveBlockCore.Commands
             }
             else
             {
-                Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 RBX to create a dnr.");
+                Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 VFX to create a dnr.");
                 return output;
             }
 
@@ -1567,7 +1567,7 @@ namespace ReserveBlockCore.Commands
                                 }
                                 else
                                 {
-                                    Console.WriteLine("Invalid RBX address has been entered. Please try again.");
+                                    Console.WriteLine("Invalid VFX address has been entered. Please try again.");
                                 }
                             }
                             else
@@ -1586,7 +1586,7 @@ namespace ReserveBlockCore.Commands
             }
             else
             {
-                Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 RBX to create a dnr.");
+                Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 VFX to create a dnr.");
                 return output;
             }
 
@@ -1796,7 +1796,7 @@ namespace ReserveBlockCore.Commands
             }
             else
             {
-                Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 RBX to create a dnr.");
+                Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 VFX to create a dnr.");
                 return output;
             }
 
@@ -2126,13 +2126,13 @@ namespace ReserveBlockCore.Commands
             Console.SetCursorPosition(Console.CursorLeft, Console.CursorTop);
 
             AnsiConsole.Write(
-            new FigletText("RBX Info")
+            new FigletText("VFX Info")
             .Centered()
             .Color(Color.Green));
 
             var table = new Table();
 
-            table.Title("[yellow]RBX Info[/]").Centered();
+            table.Title("[yellow]VFX Info[/]").Centered();
             table.AddColumn(new TableColumn(new Panel("Title")));
             table.AddColumn(new TableColumn(new Panel("Description"))).Centered();
 
@@ -2166,13 +2166,13 @@ namespace ReserveBlockCore.Commands
             Console.SetCursorPosition(Console.CursorLeft, Console.CursorTop);
 
             AnsiConsole.Write(
-            new FigletText("RBX Chain Info")
+            new FigletText("VFX Chain Info")
             .Centered()
             .Color(Color.Green));
 
             var table = new Table();
 
-            table.Title("[yellow]RBX Info[/]").Centered();
+            table.Title("[yellow]VFX Info[/]").Centered();
             table.AddColumn(new TableColumn(new Panel("Title")));
             table.AddColumn(new TableColumn(new Panel("Description"))).Centered();
 
@@ -2195,26 +2195,26 @@ namespace ReserveBlockCore.Commands
             Console.SetCursorPosition(Console.CursorLeft, Console.CursorTop);
 
             AnsiConsole.Write(
-            new FigletText("RBX Help")
+            new FigletText("VFX Help")
             .Centered()
             .Color(Color.Green));
 
             var table = new Table();
 
-            table.Title("[yellow]RBX Wallet Commands[/]").Centered();
+            table.Title("[yellow]VFX Wallet Commands[/]").Centered();
             table.AddColumn(new TableColumn(new Panel("Command")));
             table.AddColumn(new TableColumn(new Panel("Description"))).Centered();
 
 
-            table.AddRow("[blue]/help[/]", "[green]This will print out the RBX wallet help menu.[/]");
-            table.AddRow("[blue]/info[/]", "[green]This will print out the RBX wallet client information.[/]");
+            table.AddRow("[blue]/help[/]", "[green]This will print out the VFX wallet help menu.[/]");
+            table.AddRow("[blue]/info[/]", "[green]This will print out the VFX wallet client information.[/]");
             table.AddRow("[blue]/debug[/]", "[green]This will print out the debug information for the current state of the wallet.[/]");
             table.AddRow("[blue]/stopco[/]", "[green]This will stop the automatic printout of text in CLI.[/]");
             table.AddRow("[blue]/basic[/]", "[green]This will turn the basic CLI menu on/off[/]");
             table.AddRow("[blue]/exit[/]", "[green]This will close the wallet.[/]");
             table.AddRow("[blue]/menu[/]", "[green]This will return you to the main menu[/]");
             table.AddRow("[blue]/clear[/]", "[green]This will clear the current console window.[/]");
-            table.AddRow("[blue]/update[/]", "[green]This will download latest CLI client to RBX folder location under 'Download'.[/]");
+            table.AddRow("[blue]/update[/]", "[green]This will download latest CLI client to VFX folder location under 'Download'.[/]");
             table.AddRow("[blue]/mempool[/]", "[green]This will print out the current state of the mempool.[/]");
             table.AddRow("[blue]/recp[/]", "[green]This will attempt to perform a reconnect to peers.[/]");
             table.AddRow("[blue]/optlog[/]", "[green]Turns on optional logging for adjudicators.[/]");
@@ -2244,7 +2244,7 @@ namespace ReserveBlockCore.Commands
             table.AddRow("[blue]2r[/]", "[green]This will create an Reserve Account.[/]");
             table.AddRow("[blue]3[/]", "[green]This will restore an account with a provided key.[/]");
             table.AddRow("[blue]3hd[/]", "[green]Restores an HD wallet with a provided Mnemonic (12 or 24 words).[/]");
-            table.AddRow("[blue]4[/]", "[green]This will start an RBX transactions for coins only.[/]");
+            table.AddRow("[blue]4[/]", "[green]This will start an VFX transactions for coins only.[/]");
             table.AddRow("[blue]5[/]", "[green]This will print out the most recent block synced to wallet.[/]");
             table.AddRow("[blue]6[/]", "[green]This will print out your most recent 10 transactions.[/]");
             table.AddRow("[blue]7[/]", "[green]This will print out your wallet accounts.[/]");

@@ -242,7 +242,7 @@ namespace ReserveBlockCore.Services
                 }
                 if (sTreiAcct != null && sTreiAcct.Balance < ValidatorRequiredAmount())
                 {
-                    return $"Account Found, but does not meet the minimum of {ValidatorRequiredAmount()} RBX. Please send funds to get account balance to {Globals.ValidatorRequiredRBX} RBX.";
+                    return $"Account Found, but does not meet the minimum of {ValidatorRequiredAmount()} VFX. Please send funds to get account balance to {Globals.ValidatorRequiredRBX} RBX.";
                 }
                 if (!string.IsNullOrWhiteSpace(uName) && UniqueNameCheck(uName) == false)
                 {
@@ -858,7 +858,7 @@ namespace ReserveBlockCore.Services
                 }
                 if (sTreiAcct != null && sTreiAcct.Balance < ValidatorRequiredAmount())
                 {
-                    return $"Account Found, but does not meet the minimum of {ValidatorRequiredAmount()} RBX. Please send funds to get account balance to {Globals.ValidatorRequiredRBX} RBX.";
+                    return $"Account Found, but does not meet the minimum of {ValidatorRequiredAmount()} VFX. Please send funds to get account balance to {Globals.ValidatorRequiredRBX} RBX.";
                 }
                 if (!string.IsNullOrWhiteSpace(uName) && UniqueNameCheck(uName) == false)
                 {

@@ -500,7 +500,7 @@ namespace ReserveBlockCore.Bitcoin
             table.AddColumn(new TableColumn(new Panel("#")));
             table.AddColumn(new TableColumn(new Panel("Token Name")));
             table.AddColumn(new TableColumn(new Panel("Token Desc."))).Centered();
-            table.AddColumn(new TableColumn(new Panel("RBX Address")));
+            table.AddColumn(new TableColumn(new Panel("VFX Address")));
             table.AddColumn(new TableColumn(new Panel("SmartContractUID")));
 
 
@@ -727,7 +727,7 @@ namespace ReserveBlockCore.Bitcoin
             }
             else
             {
-                Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 RBX to create a dnr.");
+                Console.WriteLine("No eligible accounts were detected. You must have an account with at least 1 VFX to create a dnr.");
                 return output;
             }
 

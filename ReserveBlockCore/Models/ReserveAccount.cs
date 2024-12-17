@@ -29,9 +29,9 @@ namespace ReserveBlockCore.Models
         public string Address { get; set; }
         public string RecoveryAddress { get; set; }
         public string EncryptedDecryptKey { get; set; }
-        public decimal AvailableBalance { get; set; } //funds reserved or locked must always be above 0.5 RBX
+        public decimal AvailableBalance { get; set; } //funds reserved or locked must always be above 0.5 VFX
         public decimal LockedBalance { get; set; } //funds currently pending use
-        public bool IsNetworkProtected { get; set; } // this is set once 4 RBX has been sent.
+        public bool IsNetworkProtected { get; set; } // this is set once 4 VFX has been sent.
         public string GetKey { get { return GetPrivateKey(PrivateKey, Address, EncryptedDecryptKey); } }
         public decimal TotalBalance { get { return AvailableBalance + LockedBalance; } }
         public PrivateKey? GetPrivKey { get { return GetClassPrivateKey(GetKey); } }
@@ -931,7 +931,7 @@ namespace ReserveBlockCore.Models
 
             var balanceTooLow = account.AvailableBalance - (tx.Fee + tx.Amount) < 0.5M ? true : false;
             if (balanceTooLow)
-                return (null, "This transaction will make the balance too low. Must maintain a balance above 0.5 RBX with a Reserve Account.");
+                return (null, "This transaction will make the balance too low. Must maintain a balance above 0.5 VFX with a Reserve Account.");
 
             var sig = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
             if (sig == "ERROR")
@@ -1106,7 +1106,7 @@ namespace ReserveBlockCore.Models
 
             //var balanceTooLow = account.AvailableBalance - (tx.Fee + tx.Amount) < 0.5M ? true : false;
             //if (balanceTooLow)
-            //    return (null, "This transaction will make the balance too low. Must maintain a balance above 0.5 RBX with a Reserve Account.");
+            //    return (null, "This transaction will make the balance too low. Must maintain a balance above 0.5 VFX with a Reserve Account.");
 
             var sig = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
             if (sig == "ERROR")
@@ -1183,7 +1183,7 @@ namespace ReserveBlockCore.Models
 
             var balanceTooLow = account.AvailableBalance - (tx.Fee + tx.Amount) < 0.5M ? true : false;
             if (balanceTooLow)
-                return (null, "This transaction will make the balance too low. Must maintain a balance above 0.5 RBX with a Reserve Account.");
+                return (null, "This transaction will make the balance too low. Must maintain a balance above 0.5 VFX with a Reserve Account.");
 
             var sig = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
             if (sig == "ERROR")

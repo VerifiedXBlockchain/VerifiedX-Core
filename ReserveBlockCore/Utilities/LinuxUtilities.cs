@@ -27,7 +27,7 @@ namespace ReserveBlockCore.Utilities
 
                 await Settings.InitiateShutdownUpdate();
 
-                Environment.SetEnvironmentVariable("RBX-Restart", "1", EnvironmentVariableTarget.User);
+                Environment.SetEnvironmentVariable("VFX-Restart", "1", EnvironmentVariableTarget.User);
                 var exeLocation = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
 
                 var path = exeLocation + @$"{Path.DirectorySeparatorChar}ReserveBlockCore.dll";
@@ -69,7 +69,7 @@ namespace ReserveBlockCore.Utilities
 
                 await Settings.InitiateShutdownUpdate();
 
-                Environment.SetEnvironmentVariable("RBX-Restart", "1", EnvironmentVariableTarget.User);
+                Environment.SetEnvironmentVariable("VFX-Restart", "1", EnvironmentVariableTarget.User);
                 var exeLocation = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
 
                 var path = exeLocation + @$"{Path.DirectorySeparatorChar}ReserveBlockCore.dll";
@@ -128,7 +128,7 @@ namespace ReserveBlockCore.Utilities
 
                             await Settings.InitiateShutdownUpdate();
 
-                            Environment.SetEnvironmentVariable("RBX-Restart", "1", EnvironmentVariableTarget.User);
+                            Environment.SetEnvironmentVariable("VFX-Restart", "1", EnvironmentVariableTarget.User);
                             var exeLocation = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
 
                             var path = exeLocation + @$"{Path.DirectorySeparatorChar}ReserveBlockCore.dll";

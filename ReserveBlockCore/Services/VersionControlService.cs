@@ -191,7 +191,7 @@ namespace ReserveBlockCore.Services
                                     else
                                     {
                                         StartupService.MainMenu();
-                                        AnsiConsole.MarkupLine("[yellow]There was an issue with download URL. Please go to RBX GitHub for latest version. Returned to main menu.[/]");
+                                        AnsiConsole.MarkupLine("[yellow]There was an issue with download URL. Please go to VFX GitHub for latest version. Returned to main menu.[/]");
                                     }
                                 }
                                 else
@@ -313,7 +313,7 @@ namespace ReserveBlockCore.Services
                             }
                         }
 
-                        Environment.SetEnvironmentVariable("RBX-Updated", "1", EnvironmentVariableTarget.User);
+                        Environment.SetEnvironmentVariable("VFX-Updated", "1", EnvironmentVariableTarget.User);
                         StartupService.MainMenu();
                         AnsiConsole.MarkupLine("[green]Update Has Finished. Please restart client to complete update.[/]");
                         AnsiConsole.MarkupLine("[yellow]Failure to restart may result in client glitches. Please restart now.[/]");
@@ -404,7 +404,7 @@ namespace ReserveBlockCore.Services
                     var url = Globals.GitHubApiURL + Globals.GitHubRBXRepoURL;
                     using (var client = Globals.HttpClientFactory.CreateClient())
                     {
-                        var productValue = new ProductInfoHeaderValue("RBX-Version-Check", "1.0");
+                        var productValue = new ProductInfoHeaderValue("VFX-Version-Check", "1.0");
                         client.DefaultRequestHeaders.UserAgent.Add(productValue);
 
                         using (var Response = await client.GetAsync(url, new CancellationTokenSource(5000).Token))

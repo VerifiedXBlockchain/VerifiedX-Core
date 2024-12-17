@@ -32,7 +32,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         [HttpGet]
         public IEnumerable<string> Get()
         {
-            return new string[] { "RBX/BTC-Wallet", "BTC API Standard V2" };
+            return new string[] { "VFX/BTC-Wallet", "BTC API Standard V2" };
         }
 
         /// <summary>
@@ -454,7 +454,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                         }
                         else
                         {
-                            output = JsonConvert.SerializeObject(new { Success = false, Message = $"To Address is not a valid RBX address." });
+                            output = JsonConvert.SerializeObject(new { Success = false, Message = $"To Address is not a valid VFX address." });
                         }
 
                     }

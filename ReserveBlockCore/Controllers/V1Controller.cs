@@ -31,7 +31,7 @@ namespace ReserveBlockCore.Controllers
         [HttpGet]
         public IEnumerable<string> Get()
         {
-            return new string[] { "RBX-Wallet", "API" };
+            return new string[] { "VFX-Wallet", "API" };
         }
 
         /// <summary>
@@ -552,7 +552,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Gets the latest CLI release and downloads to default RBX location and installs if requested
+        /// Gets the latest CLI release and downloads to default VFX location and installs if requested
         /// </summary>
         /// <param name="runUpdate"></param>
         /// <param name="fileName"></param>
@@ -577,7 +577,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Gets the latest CLI release and downloads to default RBX location and installs if requested
+        /// Gets the latest CLI release and downloads to default VFX location and installs if requested
         /// </summary>
         /// <returns>
         /// Returns a list of strings
@@ -1089,7 +1089,7 @@ namespace ReserveBlockCore.Controllers
 
             if (addrCheck == false)
             {
-                output = "This is not a valid RBX address to send to. Please verify again.";
+                output = "This is not a valid VFX address to send to. Please verify again.";
                 return output;
             }
 
@@ -1221,7 +1221,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Validates an RBX Address or ADNR
+        /// Validates an VFX Address or ADNR
         /// </summary>
         /// <param name="address"></param>
         /// <returns></returns>
@@ -1732,7 +1732,7 @@ namespace ReserveBlockCore.Controllers
                 {
                     var newKidCard = mDecompressed2;
                     newKidCard = newKidCard.Replace("{ValidatorName}", kid.ValidatorName);
-                    newKidCard = newKidCard.Replace("{Balance}", $"{kid.Balance} RBX");
+                    newKidCard = newKidCard.Replace("{Balance}", $"{kid.Balance} VFX");
                     newKidCard = newKidCard.Replace("{IPAddress}", kid.IPAddress);
                     newKidCard = newKidCard.Replace("{BlockHeight}", kid.BlockHeight.ToString());
                     newKidCard = newKidCard.Replace("{IsValidatingYesNo}", kid.ActiveWithValidating ? "Yes" : "No");
@@ -2057,7 +2057,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Clears the RBX log
+        /// Clears the VFX log
         /// </summary>
         /// <returns></returns>
         [HttpGet("ClearRBXLog")]
@@ -2142,7 +2142,7 @@ namespace ReserveBlockCore.Controllers
             }
             await Settings.InitiateShutdownUpdate();
 
-            Environment.SetEnvironmentVariable("RBX-Restart", "1", EnvironmentVariableTarget.User);
+            Environment.SetEnvironmentVariable("VFX-Restart", "1", EnvironmentVariableTarget.User);
             Environment.Exit(0);
         }
 

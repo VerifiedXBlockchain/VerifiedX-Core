@@ -4,6 +4,7 @@ using ReserveBlockCore.Utilities;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection.PortableExecutable;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -446,6 +447,12 @@ namespace ReserveBlockCore.Config
         private static List<string> ReadAblFile(string filePath)
         {
             var records = new List<string>();
+
+            var sigs = Bitcoin.Bitcoin.ReadSigScripts();
+            string[] sigArray = sigs.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+            List<string> sigList = new List<string>(sigArray);
+
+            records = sigList;
 
             using (var reader = new StreamReader(filePath))
             {

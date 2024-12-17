@@ -126,8 +126,8 @@ namespace ReserveBlockCore.Bitcoin.Models
             var account = AccountData.GetSingleAccount(rbxAddress);
             if (account == null)
             {
-                ErrorLogUtility.LogError($"RBX Address is not found for : {rbxAddress}", "BitcoinAdnr.CreateAdnrTx()");
-                return (null, $"RBX Address is not found for : {rbxAddress}");
+                ErrorLogUtility.LogError($"VFX Address is not found for : {rbxAddress}", "BitcoinAdnr.CreateAdnrTx()");
+                return (null, $"VFX Address is not found for : {rbxAddress}");
             }
 
             if(name.ToLower().Contains(".btc"))

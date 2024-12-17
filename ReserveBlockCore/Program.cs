@@ -85,12 +85,12 @@ namespace ReserveBlockCore
             bool valEncryptCheck = false;
             string? valEncryptAddr = "";
 
-            var isRestarted = Environment.GetEnvironmentVariable("RBX-Restart", EnvironmentVariableTarget.User);
-            var isUpdated = Environment.GetEnvironmentVariable("RBX-Updated", EnvironmentVariableTarget.User);
+            var isRestarted = Environment.GetEnvironmentVariable("VFX-Restart", EnvironmentVariableTarget.User);
+            var isUpdated = Environment.GetEnvironmentVariable("VFX-Updated", EnvironmentVariableTarget.User);
             if (isRestarted == "1")
             {
                 Console.WriteLine("Restarted Detected!");
-                Environment.SetEnvironmentVariable("RBX-Restart", null, EnvironmentVariableTarget.User);
+                Environment.SetEnvironmentVariable("VFX-Restart", null, EnvironmentVariableTarget.User);
                 bool exit = false;
                 while(!exit)
                 {
@@ -116,13 +116,12 @@ namespace ReserveBlockCore
             {
                 Console.WriteLine("Update Detected!");
                 await VersionControlService.DeleteOldFiles();
-                Environment.SetEnvironmentVariable("RBX-Updated", null, EnvironmentVariableTarget.User);
+                Environment.SetEnvironmentVariable("VFX-Updated", null, EnvironmentVariableTarget.User);
             }
 
             //to enable again right click the cmd -> Properties -> check Quick Edit 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 WindowsUtilities.DisableConsoleQuickEdit.Go();
-
 
             Globals.BuildVer = WalletVersionUtility.GetBuildVersion();
 
@@ -282,15 +281,15 @@ namespace ReserveBlockCore
             Config.Config.ProcessABL();
 
             LogUtility.Log(logCLIVer, "Main", true);
-            LogUtility.Log($"RBX Wallet - {logCLIVer}", "Main");
+            LogUtility.Log($"VFX Wallet - {logCLIVer}", "Main");
 
             SCLogUtility.Log(logCLIVer, "Main", true);
 
-            SCLogUtility.Log($"RBX NFT ver. - {logCLIVer}", "Main");
+            SCLogUtility.Log($"VFX NFT ver. - {logCLIVer}", "Main");
 
             APILogUtility.Log(logCLIVer, "Main", true);
 
-            APILogUtility.Log($"RBX API ver. - {logCLIVer}", "Main");
+            APILogUtility.Log($"VFX API ver. - {logCLIVer}", "Main");
 
             StartupService.AnotherInstanceCheck(); //checks for another instance
 

@@ -29,7 +29,7 @@ namespace ReserveBlockCore.Controllers
         [HttpGet]
         public IEnumerable<string> Get()
         {
-            return new string[] { "RBX-Wallet", "Token API Standard V2" };
+            return new string[] { "VFX-Wallet", "Token API Standard V2" };
         }
 
         /// <summary>

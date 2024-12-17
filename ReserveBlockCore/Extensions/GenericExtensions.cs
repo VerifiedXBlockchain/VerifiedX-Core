@@ -587,5 +587,11 @@ namespace ReserveBlockCore.Extensions
                 list[n] = value;
             }
         }
+
+        public static string ToReverse(this string source)
+        {
+            string strReversed = new string(source.Reverse().ToArray());
+            return strReversed;
+        }
     }
 }

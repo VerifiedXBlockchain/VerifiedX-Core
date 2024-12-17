@@ -69,7 +69,7 @@ namespace ReserveBlockCore.Utilities
             await Settings.InitiateShutdownUpdate();
             await BaseCommandServices.ConsensusNodeInfo();
 
-            Environment.SetEnvironmentVariable("RBX-Restart", "1", EnvironmentVariableTarget.User);
+            Environment.SetEnvironmentVariable("VFX-Restart", "1", EnvironmentVariableTarget.User);
             var exeLocation = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);   
             var path = exeLocation + @"ReserveBlockCore.exe";
             ProcessStartInfo info = new ProcessStartInfo(path);
@@ -111,7 +111,7 @@ namespace ReserveBlockCore.Utilities
                             await BaseCommandServices.ConsensusNodeInfo();
                             await Settings.InitiateShutdownUpdate();
                             
-                            Environment.SetEnvironmentVariable("RBX-Restart", "1", EnvironmentVariableTarget.User);
+                            Environment.SetEnvironmentVariable("VFX-Restart", "1", EnvironmentVariableTarget.User);
                             var exeLocation = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
 
                             var path = exeLocation + @"ReserveBlockCore.exe";

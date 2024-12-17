@@ -698,7 +698,7 @@ namespace ReserveBlockCore.Controllers
         ///     {
         ///     "Id":0,
         ///     "Name":"Trillium NFT",
-        ///     "Description":"The First NFT From Trillium for RBX",
+        ///     "Description":"The First NFT From Trillium for VFX",
         ///     "MinterName":"The Minter",
         ///     "MinterAddress":"xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
         ///     "SmartContractAsset":

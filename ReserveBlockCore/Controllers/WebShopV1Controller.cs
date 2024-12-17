@@ -24,7 +24,7 @@ namespace ReserveBlockCore.Controllers
         [HttpGet]
         public IEnumerable<string> Get()
         {
-            return new string[] { "RBX-Wallet Web Shop API", "WS API" };
+            return new string[] { "VFX-Wallet Web Shop API", "WS API" };
         }
 
         /// <summary>

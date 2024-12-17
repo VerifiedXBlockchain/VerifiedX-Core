@@ -397,7 +397,7 @@ namespace ReserveBlockCore.Voting
                     {
                         var table = new Table();
 
-                        table.Title("[yellow]RBX Search Topic Results[/]").Centered();
+                        table.Title("[yellow]VFX Search Topic Results[/]").Centered();
                         table.AddColumn(new TableColumn(new Panel("Topic ID")));
                         table.AddColumn(new TableColumn(new Panel("Topic Owner")));
                         table.AddColumn(new TableColumn(new Panel("Name")));
@@ -460,13 +460,13 @@ namespace ReserveBlockCore.Voting
                 Console.SetCursorPosition(Console.CursorLeft, Console.CursorTop);
 
                 AnsiConsole.Write(
-                new FigletText("RBX Topics")
+                new FigletText("VFX Topics")
                 .Centered()
                 .Color(Color.Green));
 
                 var table = new Table();
 
-                table.Title("[yellow]RBX Active Topics[/]").Centered();
+                table.Title("[yellow]VFX Active Topics[/]").Centered();
                 table.AddColumn(new TableColumn(new Panel("Topic ID")));
                 table.AddColumn(new TableColumn(new Panel("Topic Owner")));
                 table.AddColumn(new TableColumn(new Panel("Name")));
@@ -515,13 +515,13 @@ namespace ReserveBlockCore.Voting
                 Console.SetCursorPosition(Console.CursorLeft, Console.CursorTop);
 
                 AnsiConsole.Write(
-                new FigletText("RBX Topics")
+                new FigletText("VFX Topics")
                 .Centered()
                 .Color(Color.Green));
 
                 var table = new Table();
 
-                table.Title("[yellow]RBX Inactive Topics[/]").Centered();
+                table.Title("[yellow]VFX Inactive Topics[/]").Centered();
                 table.AddColumn(new TableColumn(new Panel("Topic ID")));
                 table.AddColumn(new TableColumn(new Panel("Topic Owner")));
                 table.AddColumn(new TableColumn(new Panel("Name")));
@@ -568,25 +568,25 @@ namespace ReserveBlockCore.Voting
             if (Globals.IsTestNet != true)
             {
                 AnsiConsole.Write(
-                new FigletText("RBX Voting")
+                new FigletText("VFX Voting")
                 .LeftJustified()
                 .Color(Color.Blue));
             }
             else
             {
                 AnsiConsole.Write(
-                new FigletText("RBX Voting - TestNet")
+                new FigletText("VFX Voting - TestNet")
                 .LeftJustified()
                 .Color(Color.Green));
             }
 
             if (Globals.IsTestNet != true)
             {
-                Console.WriteLine("ReserveBlock Voting");
+                Console.WriteLine("VerifiedX Voting");
             }
             else
             {
-                Console.WriteLine("ReserveBlock Voting **TestNet**");
+                Console.WriteLine("VerifiedX Voting **TestNet**");
             }
 
             Console.WriteLine("|========================================|");

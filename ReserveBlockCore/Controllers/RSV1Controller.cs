@@ -249,7 +249,7 @@ namespace ReserveBlockCore.Controllers
 
                         if (addrCheck == false)
                         {
-                            output = JsonConvert.SerializeObject(new { Success = false, Message = "This is not a valid RBX address to send to. Please verify again." });
+                            output = JsonConvert.SerializeObject(new { Success = false, Message = "This is not a valid VFX address to send to. Please verify again." });
                             return output;
                         }
 
@@ -356,7 +356,7 @@ namespace ReserveBlockCore.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Account cannot be null" });
 
                 if(account.AvailableBalance < 5) 
-                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Account must have a balance of 5 RBX." });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Account must have a balance of 5 VFX." });
 
                 if(account.IsNetworkProtected)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Account has already been published to the network." });
@@ -417,7 +417,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Recover a Reserve Accounts entire chain worth (NFTs and RBX) to Recovery Account
+        /// Recover a Reserve Accounts entire chain worth (NFTs and VFX) to Recovery Account
         /// </summary>
         /// <param name="recoveryPhrase"></param>
         /// <param name="address"></param>

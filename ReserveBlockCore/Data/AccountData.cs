@@ -250,13 +250,13 @@ namespace ReserveBlockCore.Data
 				Console.SetCursorPosition(Console.CursorLeft, Console.CursorTop);
 
 				AnsiConsole.Write(
-				new FigletText("RBX Accounts")
+				new FigletText("VFX Accounts")
 				.Centered()
 				.Color(Color.Green));
 
 				var table = new Table();
 
-				table.Title("[yellow]RBX Wallet Accounts[/]").Centered();
+				table.Title("[yellow]VFX Wallet Accounts[/]").Centered();
 				table.AddColumn(new TableColumn(new Panel("Address")));
 				table.AddColumn(new TableColumn(new Panel("Balance"))).Centered();
 

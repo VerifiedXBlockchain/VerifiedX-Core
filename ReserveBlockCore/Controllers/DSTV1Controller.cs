@@ -33,7 +33,7 @@ namespace ReserveBlockCore.Controllers
         [HttpGet]
         public IEnumerable<string> Get()
         {
-            return new string[] { "RBX-Wallet DST", "DST API" };
+            return new string[] { "VFX-Wallet DST", "DST API" };
         }
 
         /// <summary>
@@ -1847,7 +1847,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Delete a chat message tree. Key = the identifier. For a client it would be the URL. for a Shop it would from the from RBX address.
+        /// Delete a chat message tree. Key = the identifier. For a client it would be the URL. for a Shop it would from the from VFX address.
         /// </summary>
         /// <param name="key"></param>
         /// <returns></returns>

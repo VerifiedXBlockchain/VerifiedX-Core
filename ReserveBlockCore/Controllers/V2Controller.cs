@@ -23,11 +23,11 @@ namespace ReserveBlockCore.Controllers
         [HttpGet]
         public IEnumerable<string> Get()
         {
-            return new string[] { "RBX-Wallet", "API V2" };
+            return new string[] { "VFX-Wallet", "API V2" };
         }
 
         /// <summary>
-        /// Gets RBX and Token Balances
+        /// Gets VFX and Token Balances
         /// </summary>
         /// <returns></returns>
         [HttpGet]
@@ -194,7 +194,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Gets RBX and Token Balances from State for specific address. Local or Remote
+        /// Gets VFX and Token Balances from State for specific address. Local or Remote
         /// </summary>
         /// <param name="address"></param>
         /// <returns></returns>
@@ -240,7 +240,7 @@ namespace ReserveBlockCore.Controllers
                     }
                     else
                     {
-                        return JsonConvert.SerializeObject(new { Success = false, Message = $"ADNR Could not be resolved for RBX" });
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"ADNR Could not be resolved for VFX" });
                     }
                 }
 
@@ -282,7 +282,7 @@ namespace ReserveBlockCore.Controllers
                     }
                     else
                     {
-                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Address Could not be resolved for RBX" });
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Address Could not be resolved for VFX" });
                     }
                 }
 

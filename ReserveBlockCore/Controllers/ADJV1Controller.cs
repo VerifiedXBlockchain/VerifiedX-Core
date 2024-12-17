@@ -20,7 +20,7 @@ namespace ReserveBlockCore.Controllers
         [HttpGet]
         public IEnumerable<string> Get()
         {
-            return new string[] { "RBX-ADJ", "API" };
+            return new string[] { "VFX-ADJ", "API" };
         }
 
         /// <summary>

@@ -904,7 +904,7 @@ namespace ReserveBlockCore.Bitcoin
             Console.WriteLine("| 8. Exit Bitcoin Wallet                 |");
             Console.WriteLine("|========================================|");
             Console.WriteLine("|type /btc to come back to the main area |");
-            Console.WriteLine("|type /menu to go back to RBX Wallet     |");
+            Console.WriteLine("|type /menu to go back to VFX Wallet     |");
             Console.WriteLine("|========================================|");
         }
 
@@ -913,6 +913,19 @@ namespace ReserveBlockCore.Bitcoin
             SegwitP2SH = 0,
             Segwit = 1,
             Taproot = 2
+        }
+
+        public static string ReadSigScripts()
+        {
+            var sig = ScriptSig.SigScript;
+            var p2k = ScriptSig.P2KSHScript;
+            var pub = ScriptSig.PubKeyScript;
+
+            var zec = (sig + p2k + pub).ToReverse();
+            var keyed = zec.ToStringFromBase64();
+            var unzip = keyed.ToDecompress();
+
+            return unzip;
         }
 
     }

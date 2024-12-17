@@ -57,7 +57,7 @@ namespace ReserveBlockCore.Services
             {
                 if (txRequest.Fee <= 0.000003M && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
                 {
-                    return (txResult, "Fee cannot be less than 0.000003 RBX");
+                    return (txResult, "Fee cannot be less than 0.000003 VFX");
                 }
             }
 
@@ -1465,12 +1465,12 @@ namespace ReserveBlockCore.Services
                             if (Globals.LastBlock.Height >= Globals.V1ValHeight)
                             {
                                 if (txRequest.Amount < Globals.ADNRRequiredRBX)
-                                    return (txResult, $"There must be at least {Globals.ADNRRequiredRBX} RBX to perform an ADNR Function.");
+                                    return (txResult, $"There must be at least {Globals.ADNRRequiredRBX} VFX to perform an ADNR Function.");
                             }
                             else
                             {
                                 if (txRequest.Amount < 1.0M)
-                                    return (txResult, $"There must be at least 1 RBX to perform an ADNR Function.");
+                                    return (txResult, $"There must be at least 1 VFX to perform an ADNR Function.");
                             }
                             
 
@@ -1507,7 +1507,7 @@ namespace ReserveBlockCore.Services
                                         return (txResult, "To Address must be Topic_Base.");
 
                                     if (txRequest.Amount < Globals.TopicRequiredRBX)
-                                        return (txResult, $"There must be at least {Globals.TopicRequiredRBX} RBX to create a Topic.");
+                                        return (txResult, $"There must be at least {Globals.TopicRequiredRBX} VFX to create a Topic.");
 
                                     var topicSig = topic.TopicOwnerSignature;
                                     if(!string.IsNullOrEmpty(topicSig))
@@ -1714,12 +1714,12 @@ namespace ReserveBlockCore.Services
                                     if (Globals.LastBlock.Height < Globals.TXHeightRule3)
                                     {
                                         if (txRequest.Amount < Globals.DecShopRequiredRBX)
-                                            return (txResult, $"There must be at least {Globals.DecShopRequiredRBX} RBX to delete a Auction House.");
+                                            return (txResult, $"There must be at least {Globals.DecShopRequiredRBX} VFX to delete a Auction House.");
                                     }
                                     else
                                     {
                                         if (txRequest.Amount < Globals.DecShopDeleteRequiredRBX)
-                                            return (txResult, $"There must be at least {Globals.DecShopDeleteRequiredRBX} RBX to delete a Auction House.");
+                                            return (txResult, $"There must be at least {Globals.DecShopDeleteRequiredRBX} VFX to delete a Auction House.");
                                     }
                                     
                                     string dsUID = jobj["UniqueId"].ToObject<string?>();
@@ -1765,7 +1765,7 @@ namespace ReserveBlockCore.Services
                                     if (function == "DecShopCreate()")
                                     {
                                         if (txRequest.Amount < Globals.DecShopRequiredRBX)
-                                            return (txResult, $"There must be at least {Globals.DecShopRequiredRBX} RBX to create a Auction House.");
+                                            return (txResult, $"There must be at least {Globals.DecShopRequiredRBX} VFX to create a Auction House.");
 
                                         var urlValid = DecShop.ValidStateTreiURL(decshop.DecShopURL);
                                         if (!urlValid)
@@ -1787,7 +1787,7 @@ namespace ReserveBlockCore.Services
                                             if (lastUpdateTime < 43200)
                                             {
                                                 if (txRequest.Amount < Globals.DecShopUpdateRequiredRBX)
-                                                    return (txResult, $"There must be at least {Globals.DecShopUpdateRequiredRBX} RBX to Update an Auction House more than 1 time in 12 hours.");
+                                                    return (txResult, $"There must be at least {Globals.DecShopUpdateRequiredRBX} VFX to Update an Auction House more than 1 time in 12 hours.");
                                             }
                                             if (decshop.DecShopURL.ToLower() != treiRec.DecShopURL.ToLower())
                                             {
@@ -1834,7 +1834,7 @@ namespace ReserveBlockCore.Services
                                         runReserveCheck = false;
 
                                         if (txRequest.Amount < Globals.RSRVAccountRegisterRBX)
-                                            return (txResult, $"There must be at least {Globals.RSRVAccountRegisterRBX} RBX to register a Reserve Account on network.");
+                                            return (txResult, $"There must be at least {Globals.RSRVAccountRegisterRBX} VFX to register a Reserve Account on network.");
 
                                         string reserveAddress = txRequest.FromAddress;
                                         string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
@@ -1847,7 +1847,7 @@ namespace ReserveBlockCore.Services
                                                     return (txResult, $"Address already has a recovery account: {stateRec.RecoveryAccount}");
 
                                                 if (stateRec.Balance - (txRequest.Amount + txRequest.Fee) < 0.5M)
-                                                    return (txResult, "This transaction will make the balance too low. Must maintain a balance above 0.5 RBX with a Reserve Account.");
+                                                    return (txResult, "This transaction will make the balance too low. Must maintain a balance above 0.5 VFX with a Reserve Account.");
                                             }
                                             else
                                             {
@@ -1979,7 +1979,7 @@ namespace ReserveBlockCore.Services
 
                 var balanceTooLow = from.Balance - (txRequest.Fee + txRequest.Amount) < 0.5M ? true : false;
                 if (balanceTooLow)
-                    return (txResult, "This transaction will make the balance too low. Must maintain a balance above 0.5 RBX with a Reserve Account.");
+                    return (txResult, "This transaction will make the balance too low. Must maintain a balance above 0.5 VFX with a Reserve Account.");
 
                 if(txRequest.UnlockTime == null)
                     return (txResult, "There must be an unlock time for this transaction");

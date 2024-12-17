@@ -316,7 +316,7 @@ namespace ReserveBlockCore.Services
                 BlockchainData.ChainRef = "t_testnet1";
             }
 
-            LogUtility.Log("RBX ChainRef - " + BlockchainData.ChainRef, "StartupService.SetBlockchainChainRef()");
+            LogUtility.Log("VFX ChainRef - " + BlockchainData.ChainRef, "StartupService.SetBlockchainChainRef()");
         }
 
         internal static void CheckBlockRefVerToDb()
@@ -376,7 +376,7 @@ namespace ReserveBlockCore.Services
         internal static void SetBlockHeight()
         {
             Globals.LastBlock.Height = BlockchainData.GetHeight();
-            LogUtility.Log("RBX Height - " + Globals.LastBlock.Height.ToString(), "Main");
+            LogUtility.Log("VFX Height - " + Globals.LastBlock.Height.ToString(), "Main");
         }
 
         internal static void SetLastBlock()
@@ -1538,25 +1538,25 @@ namespace ReserveBlockCore.Services
                 if (Globals.IsTestNet != true)
                 {
                     AnsiConsole.Write(
-                    new FigletText("RBX Wallet")
+                    new FigletText("VFX Wallet")
                     .LeftJustified()
                     .Color(Color.Blue));
                 }
                 else
                 {
                     AnsiConsole.Write(
-                    new FigletText("RBX Wallet - TestNet")
+                    new FigletText("VFX Wallet - TestNet")
                     .LeftJustified()
                     .Color(Color.Green));
                 }
 
                 if (Globals.IsTestNet != true)
                 {
-                    Console.WriteLine("ReserveBlock Main Menu");
+                    Console.WriteLine("VerifiedX Main Menu");
                 }
                 else
                 {
-                    Console.WriteLine("ReserveBlock Main Menu **TestNet**");
+                    Console.WriteLine("VerifiedX Main Menu **TestNet**");
                 }
                 Console.WriteLine("|======================================|");
                 Console.WriteLine("| 1. Genesis Block (Check)             |");

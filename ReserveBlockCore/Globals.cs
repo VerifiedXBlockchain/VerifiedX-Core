@@ -151,7 +151,7 @@ namespace ReserveBlockCore
         public static long ValidatorLastBlockHeight = 0;
         public static string GitHubVersion = $"beta{MajorVer}.{MinorVer}.{RevisionVer}";
         public static string GitHubApiURL = "https://api.github.com/";
-        public static string GitHubRBXRepoURL = "repos/ReserveBlockIO/ReserveBlock-Core/releases/latest";
+        public static string GitHubRBXRepoURL = "repos/VerifiedXBlockchain/VerifiedX-Core/releases/latest";
         public static string GitHubLatestReleaseVersion = "";
         public static ConcurrentDictionary<string, string> GitHubLatestReleaseAssetsDict = new ConcurrentDictionary<string, string>();
         public static bool UpToDate = true;
@@ -244,7 +244,7 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<long, string> BlockHashes = new ConcurrentDictionary<long, string>();
         public static ConcurrentDictionary<string, NodeInfo> Nodes = new ConcurrentDictionary<string, NodeInfo>(); // IP Address
         public static ConcurrentDictionary<string, AdjBench> AdjBench = new ConcurrentDictionary<string, AdjBench>(); // IP Address:Key
-        public static ConcurrentDictionary<string, Validators> InactiveValidators = new ConcurrentDictionary<string, Validators>(); // RBX address        
+        public static ConcurrentDictionary<string, Validators> InactiveValidators = new ConcurrentDictionary<string, Validators>(); // VFX address        
         //public static ConcurrentDictionary<string, string> Locators = new ConcurrentDictionary<string, string>(); // BeaconUID
         public static ConcurrentDictionary<string, Mother.Kids> MothersKids = new ConcurrentDictionary<string, Mother.Kids>(); //Mothers Children
         public static ConcurrentDictionary<string, HubCallerContext> MothersKidsContext = new ConcurrentDictionary<string, HubCallerContext>(); //Mothers Children
@@ -314,7 +314,7 @@ namespace ReserveBlockCore
 
         #region P2P Adj Server Variables
 
-        public static ConcurrentMultiDictionary<string, string, FortisPool> FortisPool = new ConcurrentMultiDictionary<string, string, FortisPool>(); // IP address, RBX address        
+        public static ConcurrentMultiDictionary<string, string, FortisPool> FortisPool = new ConcurrentMultiDictionary<string, string, FortisPool>(); // IP address, VFX address        
         public static ConcurrentMultiDictionary<string, string, BeaconPool> BeaconPool = new ConcurrentMultiDictionary<string, string, BeaconPool>(); // IP address, Reference
         public static ConcurrentDictionary<string, ConnectionHistory.ConnectionHistoryQueue> ConnectionHistoryDict = new ConcurrentDictionary<string, ConnectionHistory.ConnectionHistoryQueue>();
         public static ConcurrentBag<ConnectionHistory> ConnectionHistoryList = new ConcurrentBag<ConnectionHistory>();
@@ -328,7 +328,7 @@ namespace ReserveBlockCore
         public static long ConsensusStartHeight = -1;
         public static long ConsensusSucceses = 0;
         
-        public static ConcurrentDictionary<(string RBXAddress, long Height), Block> TaskWinnerDictV3 = new ConcurrentDictionary<(string RBXAddress, long Height), Block>(); // RBX address        
+        public static ConcurrentDictionary<(string RBXAddress, long Height), Block> TaskWinnerDictV3 = new ConcurrentDictionary<(string RBXAddress, long Height), Block>(); // VFX address        
         public static ConcurrentDictionary<(string RBXAddress, long Height), (string IPAddress, string RBXAddress, int Answer)> TaskSelectedNumbersV3 = new ConcurrentDictionary<(string RBXAddres, long height), (string IPAddress, string RBXAddress, int Answer)>();        
         public static ConcurrentDictionary<(string RBXAddress, long Height), (string IPAddress, string RBXAddress, int Answer)> TaskAnswerDictV3 = new ConcurrentDictionary<(string RBXAddres, long height), (string IPAddress, string RBXAddress, int Answer)>();        
         public static ConcurrentDictionary<string, Transaction> BroadcastedTrxDict = new ConcurrentDictionary<string, Transaction>(); // TX Hash
