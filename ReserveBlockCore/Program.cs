@@ -621,9 +621,9 @@ namespace ReserveBlockCore
                     Globals.GUIProcess = new Process();
                     Globals.GUIProcess.StartInfo = new ProcessStartInfo
                     {
-                        FileName = @"C:\Program Files (x86)\RBXWallet\VFXWallet.exe",
+                        FileName = @"C:\Program Files\VFXWallet\VFXWallet.exe",
                         Verb = "runas",
-                        WorkingDirectory = @"C:\Program Files (x86)\RBXWallet\"
+                        WorkingDirectory = @"C:\Program Files\VFXWallet\"
                     };
                     Globals.GUIProcess.Start();
                 }
