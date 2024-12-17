@@ -721,7 +721,7 @@ namespace ReserveBlockCore.Nodes
                                             var currentTime = TimeUtil.GetTime(0, 0, -1);
                                             failRec.Item2 += 1;
                                             Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
-                                            if (failRec.Item2 >= 30)
+                                            if (failRec.Item2 >= 3)
                                             {
                                                 if (currentTime > failRec.Item1)
                                                 {
@@ -732,7 +732,7 @@ namespace ReserveBlockCore.Nodes
                                             }
 
                                             //Reset timer
-                                            if (failRec.Item2 < 30)
+                                            if (failRec.Item2 < 3)
                                             {
                                                 if (failRec.Item1 < currentTime)
                                                 {
@@ -749,6 +749,10 @@ namespace ReserveBlockCore.Nodes
                                         ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
                                         if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
                                             ProofUtility.AddFailedProducer(finalizedWinner.Address);
+
+                                        //have to add immediately if this happens.
+                                        if(failedToReachConsensus)
+                                            Globals.FailedProducers.Add(finalizedWinner.Address);
                                     }
                                     else
                                     {

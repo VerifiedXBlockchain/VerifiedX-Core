@@ -24,7 +24,9 @@ namespace ReserveBlockCore.Utilities
             //Force unban quicker
             await BanService.RunUnban();
 
-            var newPeers = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount <= 3).ToList();
+            var badList = Globals.FailedProducers.ToList();
+
+            var newPeers = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount <= 3 && !badList.Contains(x.Address)).ToList();
 
             List<NetworkValidator> peersMissingDataList = new List<NetworkValidator>();
             List<string> CompletedIPs = new List<string>();
@@ -36,7 +38,8 @@ namespace ReserveBlockCore.Utilities
                 {
                     if (CompletedIPs.Contains(val.IPAddress) || 
                         CompletedAddresses.Contains(val.Address) ||
-                        IsProducerExcluded(val.Address))
+                        IsProducerExcluded(val.Address) || 
+                        badList.Contains(val.Address))
                         continue;
 
                     CompletedIPs.Add(val.IPAddress);
