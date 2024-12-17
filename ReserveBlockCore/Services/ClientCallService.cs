@@ -472,7 +472,7 @@ namespace ReserveBlockCore.Services
                         {
                             using (var client = Globals.HttpClientFactory.CreateClient())
                             {
-                                string endpoint = Globals.IsTestNet ? "https://testnet-data.rbx.network/api/masternodes/send/" : "https://data.rbx.network/api/masternodes/send/";
+                                string endpoint = Globals.IsTestNet ? "https://data-testnet.verifiedx.io/api/masternodes/send/" : "https://data.verifiedx.io/api/masternodes/send/";
                                 var httpContent = new StringContent(fortisPoolStr, Encoding.UTF8, "application/json");
                                 using (var Response = await client.PostAsync(endpoint, httpContent))
                                 {
