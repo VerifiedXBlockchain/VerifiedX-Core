@@ -502,11 +502,7 @@ namespace ReserveBlockCore.Config
 
             if (!fileExist)
             {
-                if (Globals.IsTestNet == false)
-                {
-                    File.AppendAllText(path + "abl.txt", "");
-
-                }
+                File.AppendAllText(path + "abl.txt", "");
             }
         }
     }

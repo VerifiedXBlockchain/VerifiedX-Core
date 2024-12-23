@@ -57,6 +57,15 @@ namespace ReserveBlockCore.P2P
             }
         }
 
+        public static async Task DropDisconnectedBlockcaster()
+        {
+            foreach (var node in Globals.BlockCasterNodes.Values)
+            {
+                if (!node.IsConnected)
+                    await RemoveNode(node);
+            }
+        }
+
         public static string MostLikelyIP()
         {
             return Globals.ReportedIPs.Count != 0 ?
@@ -360,6 +369,191 @@ namespace ReserveBlockCore.P2P
 
 
         #endregion
+
+        #region Connect to Blockcaster
+
+        public static async Task<bool> ConnectToBlockcaster()
+        {
+            await NodeConnector.StartNodeConnecting(); //TODO: update this for validator peers!
+            var peerDB = Peers.GetAll();
+
+            await DropDisconnectedBlockcaster();
+
+            //Force unban quicker
+            await BanService.RunUnban();
+
+            var SkipIPs = new HashSet<string>(Globals.BlockCasterNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+            var connectedNodes = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).ToArray();
+
+            foreach (var validator in connectedNodes)
+            {
+                SkipIPs.Add(validator.NodeIP);
+            }
+
+            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
+            {
+                SkipIPs.Add("66.94.124.2");
+            }
+
+            Random rnd = new Random();
+            var newPeers = Globals.BlockCasters.ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .ThenBy(x => x.FailCount)
+                .ToArray();
+
+            if (!newPeers.Any())
+            {
+                //clear out skipped peers to try again
+                Globals.SkipValPeers.Clear();
+
+                SkipIPs = new HashSet<string>(Globals.BlockCasterNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+                connectedNodes = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).ToArray();
+
+                foreach (var validator in connectedNodes)
+                {
+                    SkipIPs.Add(validator.NodeIP);
+                }
+
+                newPeers = Globals.BlockCasters.ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .ThenBy(x => x.FailCount)
+                .ToArray();
+            }
+
+            var Diff = Globals.MaxBlockCasterPeers - Globals.BlockCasterNodes.Count;
+            newPeers.Take(Diff).ToArray().ParallelLoop(peer =>
+            {
+                _ = ConnectBlockcaster(peer);
+            });
+
+            return Globals.MaxValPeers != 0;
+        }
+
+        private static ConcurrentDictionary<string, bool> ConnectBlockcasterLock = new ConcurrentDictionary<string, bool>();
+        public static async Task ConnectBlockcaster(Peers peer)
+        {
+            var url = "http://" + peer.PeerIP.Replace("::ffff:", "") + ":" + Globals.ValPort + "/blockcaster";
+            try
+            {
+                if (!ConnectBlockcasterLock.TryAdd(url, true))
+                    return;
+
+                var account = AccountData.GetLocalValidator();
+                var validators = Validators.Validator.GetAll();
+                var validator = validators.FindOne(x => x.Address == account.Address);
+                if (validator == null)
+                    return;
+
+                var time = TimeUtil.GetTime().ToString();
+                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+
+                var hubConnection = new HubConnectionBuilder()
+                       .WithUrl(url, options =>
+                       {
+                           options.Headers.Add("address", validator.Address);
+                           options.Headers.Add("time", time);
+                           options.Headers.Add("uName", validator.UniqueName);
+                           options.Headers.Add("signature", signature);
+                           options.Headers.Add("walver", Globals.CLIVersion);
+                           options.Headers.Add("publicKey", account.PublicKey);
+                           options.Transports = Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets;
+                           options.SkipNegotiation = false; // Important: Allow negotiation
+                           options.WebSocketConfiguration = conf => {
+                               conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
+                           };
+                       })
+                       .Build();
+
+                var IPAddress = GetPathUtility.IPFromURL(url);
+                hubConnection.On<string, string>("GetCasterMessage", async (message, data) =>
+                {
+                    _ = BlockcasterNode.ProcessData(message, data, IPAddress);
+                });
+
+                await hubConnection.StartAsync(new CancellationTokenSource(8000).Token);
+                if (hubConnection.ConnectionId == null)
+                {
+                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    peer.FailCount += 1;
+                    if (peer.FailCount > 600)
+                        peer.IsOutgoing = false;
+                    Peers.GetAll()?.UpdateSafe(peer);
+                    return;
+                }
+
+                var node = new NodeInfo
+                {
+                    Connection = hubConnection,
+                    NodeIP = IPAddress,
+                    NodeHeight = 0,
+                    NodeLastChecked = null,
+                    NodeLatency = 0,
+                    IsSendingBlock = 0,
+                    SendingBlockTime = 0,
+                    TotalDataSent = 0
+                };
+                (node.NodeHeight, node.NodeLastChecked, node.NodeLatency) = await GetNodeHeight(hubConnection);
+
+                node.IsValidator = await GetValidatorStatus(node.Connection);
+                var walletVersion = await GetWalletVersion(node.Connection);
+
+                if (walletVersion != null)
+                {
+                    peer.WalletVersion = walletVersion.Substring(0, 3);
+                    node.WalletVersion = walletVersion.Substring(0, 3);
+
+                    Globals.BlockCasterNodes.TryAdd(IPAddress, node);
+
+                    if (Globals.BlockCasterNodes.TryGetValue(IPAddress, out var currentNode))
+                    {
+                        currentNode.Connection = hubConnection;
+                        currentNode.NodeIP = IPAddress;
+                        currentNode.NodeHeight = node.NodeHeight;
+                        currentNode.NodeLastChecked = node.NodeLastChecked;
+                        currentNode.NodeLatency = node.NodeLatency;
+                    }
+
+                    ConsoleWriterService.OutputSameLine($"Connected to Block Casters {Globals.BlockCasterNodes.Count}/{Globals.MaxBlockCasterPeers}");
+                    peer.IsOutgoing = true;
+                    peer.FailCount = 0; //peer responded. Reset fail count
+                    Peers.GetAll()?.UpdateSafe(peer);
+                }
+                else
+                {
+                    peer.WalletVersion = "2.1";
+                    Peers.GetAll()?.UpdateSafe(peer);
+                    //not on latest version. Disconnecting
+                    await node.Connection.DisposeAsync();
+                }
+            }
+            catch
+            {
+                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                peer.FailCount += 1;
+                if (peer.FailCount > 600)
+                    peer.IsOutgoing = false;
+                Peers.GetAll()?.UpdateSafe(peer);
+            }
+            finally
+            {
+                ConnectBlockcasterLock.TryRemove(url, out _);
+            }
+        }
+
+        #endregion
+
 
         #region Get Height of Nodes for Timed Events
 

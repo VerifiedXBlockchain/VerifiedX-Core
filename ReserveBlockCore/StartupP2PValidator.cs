@@ -44,10 +44,16 @@ namespace ReserveBlockCore
             {
                 options.EnableDetailedErrors = true;
                 options.MaximumReceiveMessageSize = 8388608;
-            });
+            })
+            .AddHubOptions<P2PBlockcasterServer>(options =>
+            {
+                options.EnableDetailedErrors = true;
+                options.MaximumReceiveMessageSize = 8388608;
+            }); ;
 
             //Create hosted service for just consensus measures
             services.AddHostedService<ValidatorNode>();
+            services.AddHostedService<BlockcasterNode>();
 
             // Add routing with strict constraints
             services.AddRouting(options =>
@@ -80,6 +86,10 @@ namespace ReserveBlockCore
 
                 // Allow SignalR negotiation and WebSocket upgrade requests
                 if (path?.StartsWith("/consensus") == true)
+                {
+                    await next();
+                }
+                else if (path?.StartsWith("/blockcaster") == true)
                 {
                     await next();
                 }
@@ -116,6 +126,16 @@ namespace ReserveBlockCore
                             HttpTransportType.LongPolling;
                         options.WebSockets.CloseTimeout = TimeSpan.FromSeconds(30);
                     }).WithDisplayName("ConsensusHub");
+
+                    endpoints.MapHub<P2PBlockcasterServer>("/blockcaster", options =>
+                    {
+                        options.ApplicationMaxBufferSize = 8388608;
+                        options.TransportMaxBufferSize = 8388608;
+                        options.Transports =
+                            HttpTransportType.WebSockets |
+                            HttpTransportType.LongPolling;
+                        options.WebSockets.CloseTimeout = TimeSpan.FromSeconds(30);
+                    }).WithDisplayName("BlockcasterHub");
                 }
             });
         }

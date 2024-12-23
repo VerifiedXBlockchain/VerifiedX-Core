@@ -280,6 +280,8 @@ namespace ReserveBlockCore
 
         public const int MaxPeers = 10;
         public const int MaxValPeers = 30;
+        public const int MaxBlockCasterPeers = 3;
+        public const int MaxBlockCasters = 5;
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;
@@ -288,6 +290,7 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, NetworkValidator> NetworkValidators = new ConcurrentDictionary<string, NetworkValidator>(); //key = vfx address
         public static ConcurrentDictionary<string, Peers> ValidatorPool = new ConcurrentDictionary<string, Peers>();
         public static ConcurrentDictionary<string, NodeInfo> ValidatorNodes = new ConcurrentDictionary<string, NodeInfo>(); //key = ipaddress
+        public static ConcurrentDictionary<string, NodeInfo> BlockCasterNodes = new ConcurrentDictionary<string, NodeInfo>(); //key = ipaddress
         public static ConcurrentDictionary<long, Proof> WinningProofs = new ConcurrentDictionary<long, Proof>();
         public static ConcurrentDictionary<long, string> FinalizedWinner = new ConcurrentDictionary<long, string>();
         public static ConcurrentBag<Proof> Proofs = new ConcurrentBag<Proof>();
@@ -299,6 +302,7 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, int> ProducerDict = new ConcurrentDictionary<string, int>();
         public static ConcurrentQueue<ConsensusHeader> ConsensusHeaderQueue = new ConcurrentQueue<ConsensusHeader>();
         public static ConcurrentBag<string> FailedProducers = new ConcurrentBag<string>();
+        public static ConcurrentBag<Peers> BlockCasters = new ConcurrentBag<Peers>();
 
         #endregion
 

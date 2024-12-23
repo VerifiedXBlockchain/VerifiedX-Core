@@ -93,7 +93,6 @@ namespace ReserveBlockCore.Services
                 _ = Task.Run(BlockHeightCheckLoop);
             }
         }
-
         internal static async Task StartupValidators()
         {
             //wait 25 seconds
@@ -104,13 +103,20 @@ namespace ReserveBlockCore.Services
                     return;
 
                 var startupCount = Globals.ValidatorNodes.Count / 2 + 1;
-                var delay = Globals.ValidatorNodes.Count < startupCount ? new TimeSpan(0,0,10) : new TimeSpan(0,1,0);
+                var delay = new TimeSpan(0,0,15);
 
                 try
                 {
                     var ConnectedCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
                     if (ConnectedCount < Globals.MaxValPeers)
                         await P2PValidatorClient.ConnectToValidators();
+
+                    if(Globals.BlockCasters.Any())
+                    {
+                        var CasterConnectCount = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).Count();
+                        if (CasterConnectCount < Globals.MaxBlockCasterPeers)
+                            await P2PValidatorClient.ConnectToBlockcaster();
+                    }
                 }
                 catch (Exception ex)
                 {

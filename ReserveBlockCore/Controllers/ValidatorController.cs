@@ -145,6 +145,17 @@ namespace ReserveBlockCore.Controllers
         }
 
         [HttpGet]
+        [Route("Blockcasters")]
+        public ActionResult<string> Blockcasters()
+        {
+            var casterList = Globals.BlockCasters.ToList();
+            if (casterList.Any())
+                return Ok(JsonConvert.SerializeObject(casterList));
+
+            return Ok("0");
+        }
+
+        [HttpGet]
         [Route("ValidatorInfo")]
         public ActionResult<string> ValidatorInfo()
         {
