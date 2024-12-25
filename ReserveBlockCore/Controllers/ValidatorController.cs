@@ -146,7 +146,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         [HttpGet]
-        [Route("VerifyBlock/{nextBlock}/{proofHash}")]
+        [Route("VerifyBlock/{nextBlock}/{**proofHash}")]
         public async Task<ActionResult<string>> VerifyBlock(long nextBlock, string proofHash)
         {
             var block = await BlockchainData.CraftBlock_V5(

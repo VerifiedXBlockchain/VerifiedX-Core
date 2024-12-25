@@ -117,8 +117,9 @@ namespace ReserveBlockCore.Nodes
                     var winningProof = await ProofUtility.SortProofs(proofs);
                     ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
 
-                    if (winningProof != null)
+                    if (winningProof != null && proofs.Count() > 1)
                     {
+                        ConsoleWriterService.OutputVal($"\r\nAttempting Proof on Address: {winningProof.Address}");
                         var verificationResult = false;
                         List<string> ExcludeValList = new List<string>();
                         while (!verificationResult)
@@ -187,6 +188,8 @@ namespace ReserveBlockCore.Nodes
                             var finalizedWinner = finalizedWinnerGroup.FirstOrDefault();
                             if (finalizedWinner != null)
                             {
+                                ConsoleWriterService.OutputVal($"\r\nFinalized winner : {finalizedWinner.Address}");
+
                                 if (finalizedWinner.Address != winningProof.Address)
                                     block = null;
 
