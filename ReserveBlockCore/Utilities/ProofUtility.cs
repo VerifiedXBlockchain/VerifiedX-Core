@@ -1,4 +1,5 @@
-﻿using ReserveBlockCore.Data;
+﻿using Newtonsoft.Json;
+using ReserveBlockCore.Data;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Services;
@@ -195,7 +196,7 @@ namespace ReserveBlockCore.Utilities
 
         }
 
-        public static async Task<bool> VerifyWinnerAvailability(Proof winningProof)
+        public static async Task<(bool, Block?)> VerifyWinnerAvailability(Proof winningProof, long nextBlock)
         {
             using (var client = Globals.HttpClientFactory.CreateClient())
             {
@@ -204,15 +205,26 @@ namespace ReserveBlockCore.Utilities
                     //skip call because current winner is our node.
                     if (winningProof.Address == Globals.ValidatorAddress)
                     {
-                        return true;
+                        return (true, null);
                     }
-                    var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
-                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 1));
+                    var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
+                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 7));
 
                     if (response != null)
                     {
                         if (response.IsSuccessStatusCode)
-                            return true;
+                        {
+                            var blockJson = await response.Content.ReadAsStringAsync();
+                            if(blockJson == null)
+                                return (false, null);
+
+                            var block = JsonConvert.DeserializeObject<Block>(blockJson);
+
+                            if(block == null)
+                                return (false, null);
+
+                            return (true, block);
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -220,7 +232,7 @@ namespace ReserveBlockCore.Utilities
                 }
             }
 
-            return false;
+            return (false, null);
         }
 
         public static async Task<Proof?> SortProofs(List<Proof> proofs, bool isWinnerList = false)

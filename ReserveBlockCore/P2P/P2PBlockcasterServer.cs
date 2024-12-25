@@ -190,6 +190,50 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
+        #region Receive Block - Receives Block and then Broadcast out.
+        public async Task<bool> ReceiveBlockVal(Block nextBlock)
+        {
+            try
+            {
+                //return await SignalRQueue(Context, (int)nextBlock.Size, async () =>
+                //{
+                if (nextBlock.ChainRefId == BlockchainData.ChainRef)
+                {
+                    var IP = GetIP(Context);
+                    var nextHeight = Globals.LastBlock.Height + 1;
+                    var currentHeight = nextBlock.Height;
+
+                    if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                    {
+                        await Task.Delay(2000);
+
+                        if (Globals.LastBlock.Height < nextBlock.Height)
+                            await BlockValidatorService.ValidateBlocks();
+
+                        if (nextHeight == currentHeight)
+                        {
+                            string data = "";
+                            data = JsonConvert.SerializeObject(nextBlock);
+                            await Clients.All.SendAsync("GetCasterMessage", "blk", data);
+                        }
+
+                        if (nextHeight < currentHeight)
+                            await BlockDownloadService.GetAllBlocks();
+
+                        return true;
+                    }
+                }
+
+                return false;
+                //});
+            }
+            catch { }
+
+            return false;
+        }
+
+        #endregion
+
         #region Get IP
         private static string GetIP(HubCallerContext context)
         {

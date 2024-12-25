@@ -166,19 +166,9 @@ namespace ReserveBlockCore.Services
 
         public static async Task GetSeedNodePeersTestnet()
         {
-
             if (Globals.IsTestNet == true)
             {
                 List<Peers> peerList = new List<Peers>();
-                //manually add testnet IPs
-                Peers nPeer = new Peers
-                {
-                    IsIncoming = false,
-                    IsOutgoing = true,
-                    PeerIP = "162.248.14.123",
-                    FailCount = 0,
-                    IsValidator = false
-                };
 
                 Peers n2Peer = new Peers
                 {
@@ -202,7 +192,6 @@ namespace ReserveBlockCore.Services
                     ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
                 };
 
-                peerList.Add(nPeer);
                 peerList.Add(n2Peer);
                 peerList.Add(n3Peer);
 
@@ -214,12 +203,14 @@ namespace ReserveBlockCore.Services
                     if (peerExist == null)
                     {
                         dbPeers.InsertSafe(peer);
+                        Globals.BlockCasters.Add(peer);
                     }
                     else
                     {
                         peerExist.FailCount = 0;
                         //peerExist.IsValidator = true;
                         dbPeers.UpdateSafe(peerExist);
+                        Globals.BlockCasters.Add(peerExist);
                     }
                 }
             }

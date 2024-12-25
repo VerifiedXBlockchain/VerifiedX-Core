@@ -42,9 +42,435 @@ namespace ReserveBlockCore.Nodes
 
         public async Task StartAsync(CancellationToken stoppingToken)
         {
-            //Request latest val list - RequestValidatorList()
-            _ = ActiveValidatorRequest();
+            _ = StartConsensus();
+        }
 
+        private static async Task StartConsensus()
+        {
+            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                if(!Globals.IsBlockCaster)
+                {
+                    await Task.Delay(new TimeSpan(0, 0, 30));
+                    continue;
+                }
+
+                //start consensus run here.  
+                var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                var EpochTime = Globals.IsTestNet ? 1731454926600L : 1674172800000L;
+                var BeginBlock = Globals.IsTestNet ? Globals.V4Height : Globals.V3Height;
+                var PreviousHeight = -1L;
+                var BlockDelay = Task.CompletedTask;
+                Block? block = null;
+
+                ConsoleWriterService.OutputVal("Booting up consensus loop");
+
+                if (!Globals.BlockCasters.Any())
+                {
+                    //Get blockcasters if empty.
+                    await ValidatorNode.GetBlockcasters();
+                    await delay;
+                    continue;
+                }
+
+                try
+                {
+                    var Height = Globals.LastBlock.Height + 1;
+
+                    if (Height != Globals.LastBlock.Height + 1)
+                        continue;
+
+                    if (PreviousHeight == -1L) // First time running
+                    {
+                        await WaitForNextConsensusRound();
+                    }
+
+                    if (PreviousHeight != Height)
+                    {
+                        PreviousHeight = Height;
+                        await Task.WhenAll(BlockDelay, Task.Delay(1500));
+                        var CurrentTime = TimeUtil.GetMillisecondTime();
+                        var DelayTimeCorrection = Globals.BlockTime * (Height - BeginBlock) - (CurrentTime - EpochTime);
+                        var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
+                        BlockDelay = Task.Delay((int)DelayTime);
+                        ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
+                    }
+
+                    var consensusHeader = new ConsensusHeader();
+                    consensusHeader.Height = Height;
+                    consensusHeader.Timestamp = TimeUtil.GetTime();
+                    consensusHeader.NetworkValidatorCount = Globals.NetworkValidators.Count;
+
+                    ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
+                    //Generate Proofs for ALL vals
+                    ConsoleWriterService.OutputVal("\r\nGenerating Proofs");
+                    var proofs = await ProofUtility.GenerateProofs();
+                    ConsoleWriterService.OutputVal($"\r\n{proofs.Count()} Proofs Generated");
+                    var winningProof = await ProofUtility.SortProofs(proofs);
+                    ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
+
+                    if (winningProof != null)
+                    {
+                        var verificationResult = false;
+                        List<string> ExcludeValList = new List<string>();
+                        while (!verificationResult)
+                        {
+                            if (winningProof != null)
+                            {
+                                //TODO:turn this into getting a block!
+                                var nextblock = Globals.LastBlock.Height + 1;
+                                var verificationResultTuple = await ProofUtility.VerifyWinnerAvailability(winningProof, nextblock);
+                                verificationResult = verificationResultTuple.Item1;
+
+                                if (!verificationResult)
+                                {
+                                    block = verificationResultTuple.Item2;
+
+                                    ExcludeValList.Add(winningProof.Address);
+                                    winningProof = await ProofUtility.SortProofs(
+                                        proofs.Where(x => !ExcludeValList.Contains(x.Address)).ToList()
+                                    );
+
+                                    if (winningProof == null)
+                                    {
+                                        ExcludeValList.Clear();
+                                        ExcludeValList = new List<string>();
+                                    }
+                                }
+                                else
+                                {
+                                    ExcludeValList.Clear();
+                                    ExcludeValList = new List<string>();
+                                }
+
+                            }
+                            else
+                            {
+                                ExcludeValList.Clear();
+                                ExcludeValList = new List<string>();
+                                break;
+                            }
+                        }
+
+                        if (winningProof == null)
+                        {
+                            ConsoleWriterService.OutputVal($"\r\nCould not connect to any nodes for winning proof. Starting over.");
+                            continue;
+                        }
+
+                        ConsoleWriterService.OutputVal($"\r\nPotential Winner Found! Address: {winningProof.Address}");
+                        Globals.Proofs.Add(winningProof);
+
+                        _ = SendWinningProof(winningProof);
+
+                        await Task.Delay(PROOF_COLLECTION_TIME);
+
+                        var proofSnapshot = Globals.Proofs.ToList();
+
+                        var finalizedWinnerGroup = proofSnapshot
+                            .OrderBy(x => Math.Abs(x.VRFNumber))
+                            .GroupBy(x => x.Address)
+                            .OrderByDescending(x => x.Count())
+                            .ThenBy(x => x.Min(y => Math.Abs(y.VRFNumber)))
+                            .FirstOrDefault();
+
+                        if (finalizedWinnerGroup != null)
+                        {
+                            var finalizedWinner = finalizedWinnerGroup.FirstOrDefault();
+                            if (finalizedWinner != null)
+                            {
+                                if (finalizedWinner.Address != winningProof.Address)
+                                    block = null;
+
+                                if (finalizedWinner.Address == Globals.ValidatorAddress)
+                                {
+                                    consensusHeader.WinningAddress = finalizedWinner.Address;
+                                    ConsoleWriterService.OutputVal($"\r\nYou Won! Awaiting Approval To Craft Block");
+                                    bool approved = false;
+                                    ValidatorApprovalBag.Add(("local", finalizedWinner.BlockHeight, Globals.ValidatorAddress));
+
+                                    var producers = ValidatorApprovalBag.Select(x => x.Item3).ToList();
+                                    consensusHeader.ValidatorAddressReceiveList = producers;
+                                    var failedProducersList = Globals.NetworkValidators.Values.Where(x => !producers.Contains(x.Address)).Select(x => x.Address).ToList();
+                                    consensusHeader.ValidatorAddressFailList = failedProducersList;
+
+                                    ProofUtility.PruneFailedProducers();
+
+                                    var sw = Stopwatch.StartNew();
+                                    while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
+                                    {
+                                        var approvalRate = (decimal)ValidatorApprovalBag
+                                            .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.MaxBlockCasters;
+
+                                        if (approvalRate >= 0.51M)
+                                            approved = true;
+
+                                        await Task.Delay(100);
+                                    }
+
+                                    if (approved)
+                                    {
+                                        var winnerFound = Globals.ProducerDict.TryGetValue(finalizedWinner.Address, out var winningCount);
+                                        if (winnerFound)
+                                        {
+                                            Globals.ProducerDict[finalizedWinner.Address] = winningCount + 1;
+                                        }
+                                        else
+                                        {
+                                            Globals.ProducerDict.TryAdd(finalizedWinner.Address, 1);
+                                        }
+                                        var nextblock = Globals.LastBlock.Height + 1;
+                                        
+                                        if (block != null)
+                                        {
+                                            var addBlock = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
+
+                                            if(addBlock == true)
+                                            {
+                                                ConsoleWriterService.OutputVal($"\r\nSending block.");
+                                                _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                            }
+                                            else
+                                            {
+                                                ConsoleWriterService.OutputVal($"\r\nBLOCK DID NOT VALIDATE!.");
+                                            }
+                                            
+                                            //_ = P2PValidatorClient.BroadcastBlock(block);
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    var approvalSent = false;
+                                    consensusHeader.WinningAddress = finalizedWinner.Address;
+
+                                    var sw = Stopwatch.StartNew();
+                                    while (!approvalSent && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
+                                    {
+                                        using (var client = Globals.HttpClientFactory.CreateClient())
+                                        {
+                                            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(APPROVAL_WINDOW));
+                                            try
+                                            {
+                                                var valAddr = Globals.ValidatorAddress;
+                                                var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}/{valAddr}";
+                                                var response = await client.GetAsync(uri, cts.Token);
+                                                if (response.IsSuccessStatusCode)
+                                                {
+                                                    approvalSent = true;
+                                                }
+                                                else
+                                                {
+                                                    await Task.Delay(100);
+                                                }
+                                            }
+                                            catch (Exception e) { }
+                                        }
+                                    }
+
+                                    ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
+                                    if (Globals.LastBlock.Height < finalizedWinner.BlockHeight)
+                                    {
+                                        bool blockFound = false;
+                                        bool failedToReachConsensus = false;
+                                        var swb = Stopwatch.StartNew();
+                                        while (!blockFound && swb.ElapsedMilliseconds < BLOCK_REQUEST_WINDOW)
+                                        {
+                                            if (Globals.LastBlock.Height == finalizedWinner.BlockHeight)
+                                            {
+                                                _ = Broadcast("7", JsonConvert.SerializeObject(Globals.LastBlock), "");
+                                                //_ = P2PValidatorClient.BroadcastBlock(Globals.LastBlock);
+                                                blockFound = true;
+                                                break;
+                                            }
+
+                                            try
+                                            {
+                                                using (var client = Globals.HttpClientFactory.CreateClient())
+                                                {
+                                                    foreach (var casters in Globals.BlockCasters)
+                                                    {
+                                                        var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
+                                                        var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 0, 0, BLOCK_REQUEST_WINDOW));
+                                                        if (response != null)
+                                                        {
+                                                            if (response.IsSuccessStatusCode)
+                                                            {
+                                                                var responseBody = await response.Content.ReadAsStringAsync();
+                                                                if (responseBody != null)
+                                                                {
+                                                                    if (responseBody == "0")
+                                                                    {
+                                                                        failedToReachConsensus = true;
+                                                                        await Task.Delay(200);
+                                                                        continue;
+                                                                    }
+
+                                                                    failedToReachConsensus = false;
+
+                                                                    block = JsonConvert.DeserializeObject<Block>(responseBody);
+                                                                    if (block != null)
+                                                                    {
+                                                                        var IP = finalizedWinner.IPAddress;
+                                                                        var nextHeight = Globals.LastBlock.Height + 1;
+                                                                        var currentHeight = block.Height;
+
+                                                                        if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                                                        {
+                                                                            BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                                            if (nextHeight == currentHeight)
+                                                                                await BlockValidatorService.ValidateBlocks();
+                                                                            if (nextHeight < currentHeight)
+                                                                                await BlockDownloadService.GetAllBlocks();
+                                                                        }
+
+                                                                        if (currentHeight == nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (block, IP)))
+                                                                        {
+                                                                            blockFound = true;
+                                                                            //_ = AddConsensusHeaderQueue(consensusHeader);
+                                                                            if (Globals.LastBlock.Height < block.Height)
+                                                                                await BlockValidatorService.ValidateBlocks();
+
+                                                                            if (nextHeight == currentHeight)
+                                                                            {
+                                                                                _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                                                //_ = P2PValidatorClient.BroadcastBlock(block);
+                                                                            }
+
+                                                                            if (nextHeight < currentHeight)
+                                                                                await BlockDownloadService.GetAllBlocks();
+
+                                                                            break;
+                                                                        }
+                                                                        else
+                                                                        {
+                                                                            if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                                                            {
+                                                                                BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                                                if (nextHeight == currentHeight)
+                                                                                    await BlockValidatorService.ValidateBlocks();
+                                                                                if (nextHeight < currentHeight)
+                                                                                    await BlockDownloadService.GetAllBlocks();
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            catch (Exception ex) { }
+
+                                            await Task.Delay(200);
+                                        }
+
+                                        if (!blockFound && failedToReachConsensus)
+                                        {
+                                            Globals.FailedProducerDict.TryGetValue(finalizedWinner.Address, out var failRec);
+                                            if (failRec.Item1 != 0)
+                                            {
+                                                var currentTime = TimeUtil.GetTime(0, 0, -1);
+                                                failRec.Item2 += 1;
+                                                Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
+                                                if (failRec.Item2 >= 3)
+                                                {
+                                                    if (currentTime > failRec.Item1)
+                                                    {
+                                                        var exist = Globals.FailedProducers.Where(x => x == finalizedWinner.Address).FirstOrDefault();
+                                                        if (exist == null)
+                                                            Globals.FailedProducers.Add(finalizedWinner.Address);
+                                                    }
+                                                }
+
+                                                //Reset timer
+                                                if (failRec.Item2 < 3)
+                                                {
+                                                    if (failRec.Item1 < currentTime)
+                                                    {
+                                                        failRec.Item1 = TimeUtil.GetTime();
+                                                        failRec.Item2 = 1;
+                                                        Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
+                                                    }
+                                                }
+                                            }
+                                            else
+                                            {
+                                                Globals.FailedProducerDict.TryAdd(finalizedWinner.Address, (TimeUtil.GetTime(), 1));
+                                            }
+                                            ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
+                                            if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && 
+                                                finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
+                                                ProofUtility.AddFailedProducer(finalizedWinner.Address);
+
+                                            //have to add immediately if this happens.
+                                            if (failedToReachConsensus)
+                                                Globals.FailedProducers.Add(finalizedWinner.Address);
+                                        }
+                                        else
+                                        {
+                                            if (!failedToReachConsensus)
+                                            {
+                                                var winnerFound = Globals.ProducerDict.TryGetValue(finalizedWinner.Address, out var winningCount);
+                                                if (winnerFound)
+                                                {
+                                                    Globals.ProducerDict[finalizedWinner.Address] = winningCount + 1;
+                                                }
+                                                else
+                                                {
+                                                    Globals.ProducerDict.TryAdd(finalizedWinner.Address, 1);
+                                                }
+                                            }
+                                            else
+                                            {
+                                                Globals.FailedProducerDict.TryGetValue(finalizedWinner.Address, out var failRec);
+                                                if (failRec.Item1 != 0)
+                                                {
+                                                    var currentTime = TimeUtil.GetTime(0, 0, -1);
+                                                    failRec.Item2 += 1;
+                                                    Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
+                                                    if (failRec.Item2 >= 30)
+                                                    {
+                                                        if (currentTime > failRec.Item1)
+                                                        {
+                                                            var exist = Globals.FailedProducers.Where(x => x == finalizedWinner.Address).FirstOrDefault();
+                                                            if (exist == null)
+                                                                Globals.FailedProducers.Add(finalizedWinner.Address);
+                                                        }
+                                                    }
+
+                                                    //Reset timer
+                                                    if (failRec.Item2 < 30)
+                                                    {
+                                                        if (failRec.Item1 < currentTime)
+                                                        {
+                                                            failRec.Item1 = TimeUtil.GetTime();
+                                                            failRec.Item2 = 1;
+                                                            Globals.FailedProducerDict[finalizedWinner.Address] = failRec;
+                                                        }
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    Globals.FailedProducerDict.TryAdd(finalizedWinner.Address, (TimeUtil.GetTime(), 1));
+                                                }
+                                                ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
+                                                if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && 
+                                                    finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
+                                                    ProofUtility.AddFailedProducer(finalizedWinner.Address);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                }
+                catch (Exception ex) 
+                { 
+                }
+            }
         }
         public static async Task ActiveValidatorRequest()
         {
@@ -295,120 +721,16 @@ namespace ReserveBlockCore.Nodes
         }
         #endregion
 
-        #region Added ConsensusHeader to Queue
-        public static async Task AddConsensusHeaderQueue(ConsensusHeader cHeader)
-        {
-            Globals.ConsensusHeaderQueue.Enqueue(cHeader);
-
-            if(Globals.ConsensusHeaderQueue.Count() > 3456)
-                Globals.ConsensusHeaderQueue.TryDequeue(out _);
-        }
-
-        #endregion
-
-        #region Notify Explorer Status
-        public static async Task NotifyExplorer()
-        {
-            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
-            {
-                var delay = Task.Delay(new TimeSpan(0, 1, 0));
-                try
-                {
-                    if (Globals.StopAllTimers && !Globals.IsChainSynced)
-                    {
-                        await delay;
-                        continue;
-                    }
-
-                    if(!Globals.ValidatorNodes.Any())
-                    {
-                        await delay;
-                        continue;
-                    }
-
-                    var account = AccountData.GetLocalValidator();
-                    if (account == null)
-                        return;
-
-                    var validator = Validators.Validator.GetAll().FindOne(x => x.Address == account.Address);
-                    if (validator == null)
-                        return;
-
-                    var fortis = new FortisPool
-                    {
-                        Address = Globals.ValidatorAddress,
-                        ConnectDate = Globals.ValidatorStartDate,
-                        IpAddress = P2PClient.MostLikelyIP(),
-                        LastAnswerSendDate = DateTime.UtcNow,
-                        UniqueName = validator.UniqueName,
-                        WalletVersion = validator.WalletVersion
-                    };
-
-                    List<FortisPool> fortisPool = new List<FortisPool> { fortis };
-
-                    var listFortisPool = fortisPool.Select(x => new
-                    {
-                        ConnectionId = "NA",
-                        x.ConnectDate,
-                        x.LastAnswerSendDate,
-                        x.IpAddress,
-                        x.Address,
-                        x.UniqueName,
-                        x.WalletVersion
-                    }).ToList();
-
-                    //await NotifyExplorerLock.WaitAsync();
-
-                    var fortisPoolStr = JsonConvert.SerializeObject(listFortisPool);
-
-                    using (var client = Globals.HttpClientFactory.CreateClient())
-                    {
-                        string endpoint = Globals.IsTestNet ? "https://data-testnet.verifiedx.io/api/masternodes/send/" : "https://data.verifiedx.io/api/masternodes/send/";
-                        var httpContent = new StringContent(fortisPoolStr, Encoding.UTF8, "application/json");
-                        using (var Response = await client.PostAsync(endpoint, httpContent))
-                        {
-                            if (Response.StatusCode == System.Net.HttpStatusCode.OK)
-                            {
-                                //success
-                                Globals.ExplorerValDataLastSend = DateTime.Now;
-                                Globals.ExplorerValDataLastSendSuccess = true;
-                                Globals.ExplorerValDataLastSendResponseCode = "200-OK";
-                            }
-                            else
-                            {
-                                //ErrorLogUtility.LogError($"Error sending payload to explorer. Response Code: {Response.StatusCode}. Reason: {Response.ReasonPhrase}", "ClientCallService.DoFortisPoolWork()");
-                                Globals.ExplorerValDataLastSendSuccess = false;
-                                Globals.ExplorerValDataLastSendResponseCode = Response.StatusCode.ToString();
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    ErrorLogUtility.LogError($"Failed to send validator list to explorer API. Error: {ex.ToString()}", "ValidatorService.NotifyExplorer()");
-                    Globals.ExplorerValDataLastSendSuccess = false;
-                }
-                finally
-                {
-                    //NotifyExplorerLock.Release();
-                }
-                await delay;
-            }
-
-        }
-
-        #endregion
-
         #region Broadcast
         public static async Task Broadcast(string messageType, string data, string method = "")
         {
-            await HubContext.Clients.All.SendAsync("GetValMessage", messageType, data);
+            await HubContext.Clients.All.SendAsync("GetCasterMessage", messageType, data);
 
             if (method == "") return;
 
-            if (!Globals.ValidatorNodes.Any()) return;
+            if (!Globals.BlockCasterNodes.Any()) return;
 
-            var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+            var valNodeList = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).ToList();
 
             if (valNodeList == null || valNodeList.Count() == 0) return;
 
@@ -416,6 +738,23 @@ namespace ReserveBlockCore.Nodes
             {
                 var source = new CancellationTokenSource(2000);
                 await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
+            }
+        }
+
+        #endregion
+
+        #region Wait For Next Consensus Round
+        private static async Task WaitForNextConsensusRound()
+        {
+            var CurrentTime = TimeUtil.GetMillisecondTime();
+            var LastBlockTime = Globals.LastBlock.Timestamp;
+            var TimeSinceLastBlock = CurrentTime - LastBlockTime;
+
+            // If we're in the middle of a consensus round, wait for the next one
+            if (TimeSinceLastBlock < Globals.BlockTime)
+            {
+                var waitTime = Globals.BlockTime - TimeSinceLastBlock + 1000; // Add 1 second buffer
+                await Task.Delay((int)waitTime);
             }
         }
 
@@ -471,87 +810,6 @@ namespace ReserveBlockCore.Nodes
                 ErrorLogUtility.LogError($"Error in proof distribution: {ex.Message}", "ValidatorNode.SendWinningProof()");
             }
         }
-        #endregion
-
-        #region Get Val List
-        public static async Task<Peers[]?> GetValList(bool skipConnectedNodes = false)
-        {
-            var peerDB = Peers.GetAll();
-
-            var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-            .Union(Globals.BannedIPs.Keys)
-            .Union(Globals.SkipValPeers.Keys)
-            .Union(Globals.ReportedIPs.Keys));
-
-            if (!skipConnectedNodes)
-            {
-                var connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
-
-                foreach (var validator in connectedNodes)
-                {
-                    SkipIPs.Add(validator.NodeIP);
-                }
-            }
-
-            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
-            {
-                SkipIPs.Add("66.94.124.2");
-            }
-
-            var peerList = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
-                .ToArray();
-
-            if (!peerList.Any())
-            {
-                //clear out skipped peers to try again
-                Globals.SkipValPeers.Clear();
-
-                SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-                .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
-
-                peerList = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
-                .ToArray();
-            }
-
-            return peerList;
-        }
-        #endregion
-
-        #region Get Approval
-
-        public static async Task GetApproval(string? ip, long blockHeight, string validatorAddress)
-        {
-            if (ip == null)
-                return;
-
-            var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip).ToList();
-            if (alreadyApproved.Any())
-                return;
-
-            ValidatorApprovalBag.Add((ip.Replace("::ffff:", ""), blockHeight, validatorAddress));
-        }
-
-        #endregion
-
-        #region Wait For Next Consensus Round
-        private static async Task WaitForNextConsensusRound()
-        {
-            var CurrentTime = TimeUtil.GetMillisecondTime();
-            var LastBlockTime = Globals.LastBlock.Timestamp;
-            var TimeSinceLastBlock = CurrentTime - LastBlockTime;
-
-            // If we're in the middle of a consensus round, wait for the next one
-            if (TimeSinceLastBlock < Globals.BlockTime)
-            {
-                var waitTime = Globals.BlockTime - TimeSinceLastBlock + 1000; // Add 1 second buffer
-                await Task.Delay((int)waitTime);
-            }
-        }
-
         #endregion
 
         #region Stop/Dispose

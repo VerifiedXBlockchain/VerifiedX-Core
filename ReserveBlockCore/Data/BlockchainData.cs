@@ -320,7 +320,7 @@ namespace ReserveBlockCore.Data
         #endregion
 
         #region Craft Block V5 - WIP
-        public static async Task<Block?> CraftBlock_V5(string validator, int totalVals, string valAnswer, long height, bool skipTXs = false)
+        public static async Task<Block?> CraftBlock_V5(string validator, int totalVals, string valAnswer, long height, bool skipTXs = false, bool validateOnly = false)
         {
             try
             {
@@ -421,7 +421,7 @@ namespace ReserveBlockCore.Data
                     block.BCraftTime = buildTime.Milliseconds;
 
 
-                    blockCrafted = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
+                    blockCrafted = await BlockValidatorService.ValidateBlock(block, true, false, validateOnly, true);
                     if (blockCrafted == true)
                     {
                         break;

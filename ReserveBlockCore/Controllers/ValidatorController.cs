@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
+using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Services;
@@ -142,6 +143,21 @@ namespace ReserveBlockCore.Controllers
         public ActionResult<string> HeartBeat()
         {
             return Ok();
+        }
+
+        [HttpGet]
+        [Route("VerifyBlock/{nextBlock}/{proofHash}")]
+        public async Task<ActionResult<string>> VerifyBlock(long nextBlock, string proofHash)
+        {
+            var block = await BlockchainData.CraftBlock_V5(
+                                                    Globals.ValidatorAddress,
+                                                    Globals.NetworkValidators.Count(),
+                                                    proofHash, nextBlock);
+
+            if(block != null)
+                return Ok(JsonConvert.SerializeObject(block));
+            
+            return BadRequest();
         }
 
         [HttpGet]

@@ -237,6 +237,7 @@ namespace ReserveBlockCore
         public static bool BlockSeedCalls = false;
         public static bool UseV2BlockDownload = false;
         public static bool IsArbiter = false;
+        public static bool IsBlockCaster = false;
         
         public static CancellationToken CancelledToken;
 
@@ -281,7 +282,7 @@ namespace ReserveBlockCore
         public const int MaxPeers = 10;
         public const int MaxValPeers = 30;
         public const int MaxBlockCasterPeers = 3;
-        public const int MaxBlockCasters = 5;
+        public static int MaxBlockCasters = 5;
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;

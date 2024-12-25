@@ -241,7 +241,7 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
-        #region Receive Block - Receives Block and then Broadcast out.
+        #region FailedToReachConsensus
         public async Task<bool> FailedToReachConsensus(List<string> failedProducersList)
         {
             try
