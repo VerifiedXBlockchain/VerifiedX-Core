@@ -271,7 +271,6 @@ namespace ReserveBlockCore.Nodes
                                 var sw = Stopwatch.StartNew();
                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                                 sw.Stop();
-                                Globals.BlockCasterNodes.TryGetValue(peer.Address, out var caster);
                                 await Task.Delay(75);
                             }
                         }
@@ -297,7 +296,6 @@ namespace ReserveBlockCore.Nodes
                                 var sw = Stopwatch.StartNew();
                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                                 sw.Stop();
-                                Globals.BlockCasterNodes.TryGetValue(peer.Address, out var caster);
                                 await Task.Delay(75);
                             }
                         }
