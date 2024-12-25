@@ -775,7 +775,7 @@ namespace ReserveBlockCore.Nodes
         public static async Task SendWinningProof(Proof proof)
         {
             // Create a CancellationTokenSource with a timeout of 5 seconds
-            var validators = Globals.NetworkValidators.Values.ToList();
+            var validators = Globals.BlockCasterNodes.Values.ToList();
 
             try
             {
@@ -805,7 +805,7 @@ namespace ReserveBlockCore.Nodes
                         try
                         {
                             // Create a request-specific CancellationTokenSource with a 1-second timeout
-                            var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
+                            var uri = $"http://{validator.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
                             await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 2));
                             await Task.Delay(75);
                         }

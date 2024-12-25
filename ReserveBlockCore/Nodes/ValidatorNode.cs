@@ -277,6 +277,38 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     if(response.StatusCode == HttpStatusCode.Accepted)
                                     {
+                                        var account = AccountData.GetLocalValidator();
+                                        var validators = Validators.Validator.GetAll();
+                                        var validator = validators.FindOne(x => x.Address == account.Address);
+                                        if (validator != null)
+                                        {
+                                            var time = TimeUtil.GetTime().ToString();
+                                            var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+
+                                            var networkVal = new NetworkValidator
+                                            {
+                                                Address = validator.Address,
+                                                IPAddress = "0.0.0.0",
+                                                CheckFailCount = 0,
+                                                PublicKey = account.PublicKey,
+                                                Signature = signature,
+                                                UniqueName = validator.UniqueName,
+                                                SignatureMessage = validator.Address + ":" + time + ":" + account.PublicKey
+                                            };
+
+                                            var postData = JsonConvert.SerializeObject(networkVal);
+                                            var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
+
+                                            try
+                                            {
+                                                uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status";
+                                                await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 4));
+                                                await Task.Delay(100);
+                                            }
+                                            catch (Exception ex) { }
+                                        }
+
+                                        
                                         //TODO
                                         //send peer details
                                     }
@@ -311,8 +343,36 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     if (response.StatusCode == HttpStatusCode.Accepted)
                                     {
-                                        //TODO
-                                        //send peer details
+                                        var account = AccountData.GetLocalValidator();
+                                        var validators = Validators.Validator.GetAll();
+                                        var validator = validators.FindOne(x => x.Address == account.Address);
+                                        if (validator != null)
+                                        {
+                                            var time = TimeUtil.GetTime().ToString();
+                                            var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+
+                                            var networkVal = new NetworkValidator
+                                            {
+                                                Address = validator.Address,
+                                                IPAddress = "0.0.0.0",
+                                                CheckFailCount = 0,
+                                                PublicKey = account.PublicKey,
+                                                Signature = signature,
+                                                UniqueName = validator.UniqueName,
+                                                SignatureMessage = validator.Address + ":" + time + ":" + account.PublicKey
+                                            };
+
+                                            var postData = JsonConvert.SerializeObject(networkVal);
+                                            var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
+
+                                            try
+                                            {
+                                                uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status";
+                                                await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 4));
+                                                await Task.Delay(100);
+                                            }
+                                            catch (Exception ex) { }
+                                        }
                                     }
                                 }
                             }
