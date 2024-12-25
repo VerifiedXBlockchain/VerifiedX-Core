@@ -271,7 +271,16 @@ namespace ReserveBlockCore.Nodes
                                 var sw = Stopwatch.StartNew();
                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                                 sw.Stop();
-                                await Task.Delay(75);
+                                await Task.Delay(100);
+
+                                if(response.IsSuccessStatusCode)
+                                {
+                                    if(response.StatusCode == HttpStatusCode.Accepted)
+                                    {
+                                        //TODO
+                                        //send peer details
+                                    }
+                                }
                             }
                         }
                         catch (Exception ex)
@@ -296,7 +305,16 @@ namespace ReserveBlockCore.Nodes
                                 var sw = Stopwatch.StartNew();
                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                                 sw.Stop();
-                                await Task.Delay(75);
+                                await Task.Delay(100);
+
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    if (response.StatusCode == HttpStatusCode.Accepted)
+                                    {
+                                        //TODO
+                                        //send peer details
+                                    }
+                                }
                             }
                         }
                         catch (Exception ex)
