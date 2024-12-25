@@ -49,6 +49,14 @@ namespace ReserveBlockCore.Nodes
         {
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
+                var casterList = Globals.BlockCasters.ToList();
+                if (casterList.Any()) 
+                {
+                    if (casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress))
+                        Globals.IsBlockCaster = true;
+                    else
+                        Globals.IsBlockCaster = false;
+                }
                 if(!Globals.IsBlockCaster)
                 {
                     await Task.Delay(new TimeSpan(0, 0, 30));
