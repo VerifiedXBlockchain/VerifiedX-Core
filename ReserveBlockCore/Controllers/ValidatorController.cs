@@ -149,12 +149,15 @@ namespace ReserveBlockCore.Controllers
         [Route("VerifyBlock/{nextBlock}/{**proofHash}")]
         public async Task<ActionResult<string>> VerifyBlock(long nextBlock, string proofHash)
         {
-            var block = await BlockchainData.CraftBlock_V5(
-                                                    Globals.ValidatorAddress,
-                                                    Globals.NetworkValidators.Count(),
-                                                    proofHash, nextBlock, false, true);
+            var block = Globals.NextValidatorBlock;
 
-            if(block != null)
+            if (block.Height != nextBlock)
+            {
+                await Task.Delay(2000);
+                block = Globals.NextValidatorBlock;
+            }
+
+            if(block != null && block.Height == nextBlock)
                 return Ok(JsonConvert.SerializeObject(block));
             
             return BadRequest();

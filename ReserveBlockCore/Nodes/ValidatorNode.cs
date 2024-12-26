@@ -50,6 +50,7 @@ namespace ReserveBlockCore.Nodes
 
             _ = NotifyExplorer();
 
+            _ = GenerateValidBlock();
             //return Task.CompletedTask;
         }
         public static async Task ActiveValidatorRequest()
@@ -69,6 +70,60 @@ namespace ReserveBlockCore.Nodes
             await P2PValidatorClient.RequestActiveValidators();
 
             ActiveValidatorRequestDone = true;
+        }
+
+        public static async Task GenerateValidBlock()
+        {
+            var account = AccountData.GetLocalValidator();
+            var validators = Validators.Validator.GetAll();
+            var validator = validators.FindOne(x => x.Address == account.Address);
+            
+            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                if ((Globals.StopAllTimers || !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+                {
+                    await delay;
+                    continue;
+                }
+                if (validator == null)
+                {
+                    await delay;
+                    continue;
+                }
+                var currentHeight = Globals.LastBlock.Height;
+                var prevHash = Globals.LastBlock.Hash;
+                var nextHeight = currentHeight + 1;
+                var height = Globals.NextValidatorBlock.Height;
+
+                var proof = await ProofUtility.CreateProof(validator.Address, account.PublicKey, nextHeight, prevHash);
+
+                if (currentHeight >= height)
+                {
+                    //generate new block
+                    //produce proof
+                    if(Globals.NextValidatorBlock != null)
+                    {
+                        if(Globals.NextValidatorBlock.Height == nextHeight)
+                        {
+                            await Task.Delay(1000);
+                            continue;
+                        }
+                    }
+                    var block = await BlockchainData.CraftBlock_V5(
+                                                    Globals.ValidatorAddress,
+                                                    Globals.NetworkValidators.Count(),
+                                                    proof.Item2, nextHeight, false, true);
+
+                    if (block != null)
+                    {
+                        Globals.NextValidatorBlock = block;
+                    }
+                }
+
+                await Task.Delay(1000);
+                continue;
+            }
         }
 
         #region Get Block Casters and Caster Monitor

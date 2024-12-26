@@ -65,6 +65,7 @@ namespace ReserveBlockCore
         public static object SignerCacheLock = new object();
         public static string FortisPoolCache = "";
         public static Block LastBlock = new Block { Height = -1 };
+        public static Block NextValidatorBlock = new Block { Height = -1 };
         public static Adjudicators? LeadAdjudicator = null;
         public static Guid AdjudicatorKey = Adjudicators.AdjudicatorData.GetAdjudicatorKey();
         public static BeaconReference BeaconReference = new BeaconReference();
