@@ -337,22 +337,25 @@ namespace ReserveBlockCore.Nodes
                                                                 {
                                                                     if (responseBody == "0")
                                                                     {
+                                                                        ConsoleWriterService.OutputVal($"Response was 0 (zero)");
                                                                         failedToReachConsensus = true;
-                                                                        await Task.Delay(200);
+                                                                        await Task.Delay(75);
                                                                         continue;
                                                                     }
 
                                                                     failedToReachConsensus = false;
-
+                                                                    ConsoleWriterService.OutputVal($"Response had non-zero data");
                                                                     block = JsonConvert.DeserializeObject<Block>(responseBody);
                                                                     if (block != null)
                                                                     {
+                                                                        ConsoleWriterService.OutputVal($"Block deserialized. Height: {block.Height}");
                                                                         var IP = finalizedWinner.IPAddress;
                                                                         var nextHeight = Globals.LastBlock.Height + 1;
                                                                         var currentHeight = block.Height;
 
                                                                         if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
                                                                         {
+                                                                            ConsoleWriterService.OutputVal($"Inside block service A");
                                                                             BlockDownloadService.BlockDict[currentHeight] = (block, IP);
                                                                             if (nextHeight == currentHeight)
                                                                                 await BlockValidatorService.ValidateBlocks();
@@ -369,6 +372,7 @@ namespace ReserveBlockCore.Nodes
 
                                                                             if (nextHeight == currentHeight)
                                                                             {
+                                                                                ConsoleWriterService.OutputVal($"Inside block service B");
                                                                                 _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                                                                 //_ = P2PValidatorClient.BroadcastBlock(block);
                                                                             }
@@ -380,6 +384,7 @@ namespace ReserveBlockCore.Nodes
                                                                         }
                                                                         else
                                                                         {
+                                                                            ConsoleWriterService.OutputVal($"Inside block service C");
                                                                             if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
                                                                             {
                                                                                 BlockDownloadService.BlockDict[currentHeight] = (block, IP);
@@ -393,6 +398,8 @@ namespace ReserveBlockCore.Nodes
                                                                 }
                                                             }
                                                         }
+
+                                                        await Task.Delay(75);
                                                     }
                                                 }
                                             }
