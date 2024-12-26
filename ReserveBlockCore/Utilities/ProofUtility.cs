@@ -35,11 +35,11 @@ namespace ReserveBlockCore.Utilities
 
             foreach (var val in newPeers)
             {
-                if(val.Address != null && val.PublicKey != null)
+                if (val.Address != null && val.PublicKey != null)
                 {
-                    if (CompletedIPs.Contains(val.IPAddress) || 
+                    if (CompletedIPs.Contains(val.IPAddress) ||
                         CompletedAddresses.Contains(val.Address) ||
-                        IsProducerExcluded(val.Address) || 
+                        IsProducerExcluded(val.Address) ||
                         badList.Contains(val.Address))
                         continue;
 
@@ -94,7 +94,7 @@ namespace ReserveBlockCore.Utilities
 
         public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight, string prevBlockHash)
         {
-            
+
             uint vrfNum = 0;
             var proof = "";
             // Random seed
@@ -155,7 +155,7 @@ namespace ReserveBlockCore.Utilities
                 return false;
             }
             catch { return false; }
-            
+
         }
 
         public static bool VerifyProof(string publicKey, long blockHeight, string prevBlockHash, string proofHash)
@@ -215,12 +215,12 @@ namespace ReserveBlockCore.Utilities
                         if (response.IsSuccessStatusCode)
                         {
                             var blockJson = await response.Content.ReadAsStringAsync();
-                            if(blockJson == null)
+                            if (blockJson == null)
                                 return (false, null);
 
                             var block = JsonConvert.DeserializeObject<Block>(blockJson);
 
-                            if(block == null)
+                            if (block == null)
                                 return (false, null);
 
                             return (true, block);
@@ -264,12 +264,14 @@ namespace ReserveBlockCore.Utilities
                 (addr) => (1, currentTime),
                 (addr, existing) => (existing.failCount + 1, currentTime)
             );
+
+            ConsoleWriterService.OutputVal($"\r\nAddress: {address} added to failed block producers. (Globals.FailedBlockProducers)");
         }
 
         public static void PruneFailedProducers()
         {
             var currentTime = TimeUtil.GetMillisecondTime();
-            foreach(var val in  Globals.FailedBlockProducers)
+            foreach (var val in Globals.FailedBlockProducers)
             {
                 var timeSinceFailure = currentTime - val.Value.lastFailTime;
 

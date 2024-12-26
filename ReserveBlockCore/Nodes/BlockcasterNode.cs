@@ -50,14 +50,14 @@ namespace ReserveBlockCore.Nodes
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var casterList = Globals.BlockCasters.ToList();
-                if (casterList.Any()) 
+                if (casterList.Any())
                 {
                     if (casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress))
                         Globals.IsBlockCaster = true;
                     else
                         Globals.IsBlockCaster = false;
                 }
-                if(!Globals.IsBlockCaster)
+                if (!Globals.IsBlockCaster)
                 {
                     await Task.Delay(new TimeSpan(0, 0, 30));
                     continue;
@@ -231,12 +231,12 @@ namespace ReserveBlockCore.Nodes
                                             Globals.ProducerDict.TryAdd(finalizedWinner.Address, 1);
                                         }
                                         var nextblock = Globals.LastBlock.Height + 1;
-                                        
+
                                         if (block != null)
                                         {
                                             var addBlock = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
 
-                                            if(addBlock == true)
+                                            if (addBlock == true)
                                             {
                                                 ConsoleWriterService.OutputVal($"\r\nSending block.");
                                                 _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
@@ -245,7 +245,7 @@ namespace ReserveBlockCore.Nodes
                                             {
                                                 ConsoleWriterService.OutputVal($"\r\nBLOCK DID NOT VALIDATE!.");
                                             }
-                                            
+
                                             //_ = P2PValidatorClient.BroadcastBlock(block);
                                         }
                                         else
@@ -255,7 +255,7 @@ namespace ReserveBlockCore.Nodes
                                                     Globals.NetworkValidators.Count(),
                                                     finalizedWinner.ProofHash, finalizedWinner.BlockHeight);
 
-                                            if(block != null)
+                                            if (block != null)
                                             {
                                                 ConsoleWriterService.OutputVal($"\r\nSending block.");
                                                 _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
@@ -282,13 +282,19 @@ namespace ReserveBlockCore.Nodes
                                                 if (response.IsSuccessStatusCode)
                                                 {
                                                     approvalSent = true;
+                                                    ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {finalizedWinner.Address}.");
+                                                    ConsoleWriterService.OutputVal($"IP Address: {finalizedWinner.IPAddress}.");
                                                 }
                                                 else
                                                 {
                                                     await Task.Delay(100);
                                                 }
                                             }
-                                            catch (Exception e) { }
+                                            catch (Exception ex)
+                                            {
+                                                ConsoleWriterService.OutputVal($"\r\nError sending approval to address: {finalizedWinner.Address}.");
+                                                ConsoleWriterService.OutputVal($"ERROR: {ex}.");
+                                            }
                                         }
                                     }
 
@@ -302,6 +308,7 @@ namespace ReserveBlockCore.Nodes
                                         {
                                             if (Globals.LastBlock.Height == finalizedWinner.BlockHeight)
                                             {
+                                                ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
                                                 _ = Broadcast("7", JsonConvert.SerializeObject(Globals.LastBlock), "");
                                                 //_ = P2PValidatorClient.BroadcastBlock(Globals.LastBlock);
                                                 blockFound = true;
@@ -314,6 +321,7 @@ namespace ReserveBlockCore.Nodes
                                                 {
                                                     foreach (var casters in Globals.BlockCasters)
                                                     {
+                                                        ConsoleWriterService.OutputVal($"Request block from Caster: {casters.ValidatorAddress}");
                                                         var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
                                                         var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 0, 0, BLOCK_REQUEST_WINDOW));
                                                         if (response != null)
@@ -423,13 +431,17 @@ namespace ReserveBlockCore.Nodes
                                                 Globals.FailedProducerDict.TryAdd(finalizedWinner.Address, (TimeUtil.GetTime(), 1));
                                             }
                                             ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
-                                            if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && 
+                                            if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" &&
                                                 finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
                                                 ProofUtility.AddFailedProducer(finalizedWinner.Address);
 
                                             //have to add immediately if this happens.
                                             if (failedToReachConsensus)
+                                            {
                                                 Globals.FailedProducers.Add(finalizedWinner.Address);
+                                                ConsoleWriterService.OutputVal($"\r\nAddress: {finalizedWinner.Address} added to failed producers. (Globals.FailedProducers)");
+                                            }
+
                                         }
                                         else
                                         {
@@ -478,8 +490,8 @@ namespace ReserveBlockCore.Nodes
                                                 {
                                                     Globals.FailedProducerDict.TryAdd(finalizedWinner.Address, (TimeUtil.GetTime(), 1));
                                                 }
-                                                ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
-                                                if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" && 
+                                                ConsoleWriterService.OutputVal($"\r\n2-Validator failed to produce block: {finalizedWinner.Address}");
+                                                if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" &&
                                                     finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj")
                                                     ProofUtility.AddFailedProducer(finalizedWinner.Address);
                                             }
@@ -491,8 +503,8 @@ namespace ReserveBlockCore.Nodes
                     }
 
                 }
-                catch (Exception ex) 
-                { 
+                catch (Exception ex)
+                {
                 }
             }
         }
