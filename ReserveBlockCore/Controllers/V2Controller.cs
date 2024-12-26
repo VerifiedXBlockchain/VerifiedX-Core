@@ -416,6 +416,17 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// Get Next Validator BLock
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet]
+        [Route("GetNextValBlock")]
+        public async Task<string> GetNextValBlock()
+        {
+            return JsonConvert.SerializeObject(new { Success = true, Message = $"Block Found", Globals.NextValidatorBlock }, Formatting.Indented);
+        }
+
+        /// <summary>
         /// Get Network Block Queue
         /// </summary>
         /// <returns></returns>
