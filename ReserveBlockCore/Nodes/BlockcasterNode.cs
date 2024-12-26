@@ -47,8 +47,18 @@ namespace ReserveBlockCore.Nodes
 
         private static async Task StartConsensus()
         {
+            //start consensus run here.  
+            var delay = Task.Delay(new TimeSpan(0, 0, 5));
+            var EpochTime = Globals.IsTestNet ? 1731454926600L : 1674172800000L;
+            var BeginBlock = Globals.IsTestNet ? Globals.V4Height : Globals.V3Height;
+            var PreviousHeight = -1L;
+            var BlockDelay = Task.CompletedTask;
+            ConsoleWriterService.OutputVal("Booting up consensus loop");
+
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
+                ConsoleWriterService.OutputVal("Top of consensus loop");
+
                 var casterList = Globals.BlockCasters.ToList();
                 if (casterList.Any())
                 {
@@ -63,15 +73,7 @@ namespace ReserveBlockCore.Nodes
                     continue;
                 }
 
-                //start consensus run here.  
-                var delay = Task.Delay(new TimeSpan(0, 0, 5));
-                var EpochTime = Globals.IsTestNet ? 1731454926600L : 1674172800000L;
-                var BeginBlock = Globals.IsTestNet ? Globals.V4Height : Globals.V3Height;
-                var PreviousHeight = -1L;
-                var BlockDelay = Task.CompletedTask;
                 Block? block = null;
-
-                ConsoleWriterService.OutputVal("Booting up consensus loop");
 
                 if (!Globals.BlockCasters.Any())
                 {
@@ -104,6 +106,8 @@ namespace ReserveBlockCore.Nodes
                         ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
                     }
 
+
+
                     var consensusHeader = new ConsensusHeader();
                     consensusHeader.Height = Height;
                     consensusHeader.Timestamp = TimeUtil.GetTime();
@@ -111,7 +115,7 @@ namespace ReserveBlockCore.Nodes
 
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
                     //Generate Proofs for ALL vals
-                    ConsoleWriterService.OutputVal("\r\nGenerating Proofs");
+                    ConsoleWriterService.OutputVal($"\r\nGenerating Proofs for height: {Height}.");
                     var proofs = await ProofUtility.GenerateProofs();
                     ConsoleWriterService.OutputVal($"\r\n{proofs.Count()} Proofs Generated");
                     var winningProof = await ProofUtility.SortProofs(proofs);
@@ -321,7 +325,7 @@ namespace ReserveBlockCore.Nodes
                                                 {
                                                     foreach (var casters in Globals.BlockCasters)
                                                     {
-                                                        ConsoleWriterService.OutputVal($"Request block from Caster: {casters.ValidatorAddress}");
+                                                        ConsoleWriterService.OutputVal($"Requesting block from Caster: {casters.ValidatorAddress}");
                                                         var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
                                                         var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 0, 0, BLOCK_REQUEST_WINDOW));
                                                         if (response != null)

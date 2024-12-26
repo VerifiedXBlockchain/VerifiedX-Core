@@ -40,6 +40,9 @@ namespace ReserveBlockCore.Services
         {
             if (Globals.StopValConsoleOutput != true)
             {
+                int consoleWidth = Console.WindowWidth;
+                string dashes = new string('-', consoleWidth - 1);
+                Console.WriteLine(dashes);
                 Console.WriteLine(text);
             }
         }
