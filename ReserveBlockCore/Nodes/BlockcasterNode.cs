@@ -137,8 +137,6 @@ namespace ReserveBlockCore.Nodes
 
                                 if (!verificationResult)
                                 {
-                                    block = verificationResultTuple.Item2;
-
                                     ExcludeValList.Add(winningProof.Address);
                                     winningProof = await ProofUtility.SortProofs(
                                         proofs.Where(x => !ExcludeValList.Contains(x.Address)).ToList()
@@ -152,6 +150,8 @@ namespace ReserveBlockCore.Nodes
                                 }
                                 else
                                 {
+                                    block = verificationResultTuple.Item2;
+
                                     ExcludeValList.Clear();
                                     ExcludeValList = new List<string>();
                                 }
@@ -310,6 +310,44 @@ namespace ReserveBlockCore.Nodes
                                         var swb = Stopwatch.StartNew();
                                         while (!blockFound && swb.ElapsedMilliseconds < BLOCK_REQUEST_WINDOW)
                                         {
+                                            //This is done if non-caster wins the block
+                                            if(block != null)
+                                            {
+                                                ConsoleWriterService.OutputVal($"Already have block. Height: {block.Height}");
+                                                var IP = finalizedWinner.IPAddress;
+                                                var nextHeight = Globals.LastBlock.Height + 1;
+                                                var currentHeight = block.Height;
+
+                                                if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                                {
+                                                    ConsoleWriterService.OutputVal($"Processing Block");
+                                                    BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                    if (nextHeight == currentHeight)
+                                                        await BlockValidatorService.ValidateBlocks();
+                                                    if (nextHeight < currentHeight)
+                                                        await BlockDownloadService.GetAllBlocks();
+                                                }
+
+                                                if (currentHeight < nextHeight)
+                                                {
+                                                    blockFound = true;
+                                                    //_ = AddConsensusHeaderQueue(consensusHeader);
+                                                    if (Globals.LastBlock.Height < block.Height)
+                                                        await BlockValidatorService.ValidateBlocks();
+
+                                                    if (nextHeight == currentHeight)
+                                                    {
+                                                        ConsoleWriterService.OutputVal($"Inside block service B");
+                                                        _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                        //_ = P2PValidatorClient.BroadcastBlock(block);
+                                                    }
+
+                                                    if (nextHeight < currentHeight)
+                                                        await BlockDownloadService.GetAllBlocks();
+
+                                                    break;
+                                                }
+                                            }
                                             if (Globals.LastBlock.Height == finalizedWinner.BlockHeight)
                                             {
                                                 ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
@@ -319,6 +357,7 @@ namespace ReserveBlockCore.Nodes
                                                 break;
                                             }
 
+                                            //This is done if non-caster wins, and block IS NULL. We must request from other casters as at least 2/3 should have it.
                                             try
                                             {
                                                 using (var client = Globals.HttpClientFactory.CreateClient())
