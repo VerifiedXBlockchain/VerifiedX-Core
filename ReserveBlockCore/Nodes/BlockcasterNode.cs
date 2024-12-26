@@ -32,6 +32,8 @@ namespace ReserveBlockCore.Nodes
         const int PROOF_COLLECTION_TIME = 7000; // 7 seconds
         const int APPROVAL_WINDOW = 12000;      // 12 seconds
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
+        public static ReplacementRound _currentRound;
+        public static List<string> _allCasterAddresses;
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -43,7 +45,93 @@ namespace ReserveBlockCore.Nodes
         public async Task StartAsync(CancellationToken stoppingToken)
         {
             _ = StartConsensus();
+
+            _ = MonitorCasters();
         }
+
+        private static async Task MonitorCasters()
+        {
+            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                var casterList = Globals.BlockCasters.ToList();
+
+                if (!Globals.IsBlockCaster)
+                {
+                    await Task.Delay(new TimeSpan(0, 0, 30));
+                    continue;
+                }
+
+                if (!Globals.BlockCasters.Any())
+                {
+                    //Get blockcasters if empty.
+                    await ValidatorNode.GetBlockcasters();
+                    await delay;
+                    continue;
+                }
+
+                if(casterList.Count() != Globals.MaxBlockCasters)
+                {
+                    //DO SOMETHING
+                    await InitiateReplacement(Globals.LastBlock.Height);
+                }
+
+                await Task.Delay(10000);
+
+            }
+        }
+
+        public static async Task<bool> InitiateReplacement(long blockHeight)
+        {
+            // Only start a new round if there isn't one in progress
+            if (_currentRound != null && (DateTime.UtcNow - _currentRound.StartTime).TotalMinutes < 5)
+                return false;
+
+            // Find the missing caster address
+            var activeCasterAddresses = Globals.BlockCasterNodes.Select(c => c.Value.Address).ToHashSet();
+            var missingCasterAddress = _allCasterAddresses.FirstOrDefault(addr => !activeCasterAddresses.Contains(addr));
+
+            if (missingCasterAddress == null)
+                return false; // No missing caster found
+
+            _currentRound = new ReplacementRound
+            {
+                RoundId = $"round-{blockHeight}",
+                MissingCasterAddress = missingCasterAddress,
+                StartTime = DateTime.UtcNow
+            };
+
+            var myRandomness = GenerateRandomContribution();
+            _currentRound.RandomnessContributions[Globals.ValidatorAddress] = myRandomness;
+
+            foreach (var caster in Globals.BlockCasterNodes.Values.Where(c => c.IsConnected))
+            {
+                try
+                {
+                    await caster.Connection.InvokeAsync("ContributeRandomness",
+                        _currentRound.RoundId,
+                        Globals.ValidatorAddress,
+                        myRandomness);
+                }
+                catch (Exception ex)
+                {
+                    // Handle connection error
+                }
+            }
+
+            return true;
+        }
+
+        private static byte[] GenerateRandomContribution()
+        {
+            byte[] randomness = new byte[32];
+            using (var rng = new System.Security.Cryptography.RNGCryptoServiceProvider())
+            {
+                rng.GetBytes(randomness);
+            }
+            return randomness;
+        }
+
 
         private static async Task StartConsensus()
         {

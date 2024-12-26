@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 
@@ -233,6 +234,67 @@ namespace ReserveBlockCore.P2P
         }
 
         #endregion
+
+        public async Task<NetworkValidator?> ContributeRandomness(string roundId, string casterAddress, byte[] randomness)
+        {
+            if (BlockcasterNode._currentRound == null || BlockcasterNode._currentRound.RoundId != roundId)
+                return null;
+
+            // Verify the contributor is a current active caster
+            if (!Globals.BlockCasterNodes.Values.Any(c => c.Address == casterAddress && c.IsConnected))
+                return null;
+
+            // Add their contribution
+            BlockcasterNode._currentRound.RandomnessContributions[casterAddress] = randomness;
+
+            // Check if we have all active casters' contributions
+            if (BlockcasterNode._currentRound.RandomnessContributions.Count >= Globals.BlockCasterNodes.Values.Count(c => c.IsConnected))
+            {
+                BlockcasterNode._currentRound.SharedRandomness = CombineRandomness(BlockcasterNode._currentRound.RandomnessContributions.Values.ToList());
+
+                var selectedValidator = DeterministicallySelectValidator(BlockcasterNode._currentRound.SharedRandomness);
+
+                // Clear the round
+                BlockcasterNode._currentRound = null;
+
+                return selectedValidator;
+            }
+
+            return null;
+        }
+
+        private NetworkValidator DeterministicallySelectValidator(byte[] sharedRandomness)
+        {
+            // Get available validators (not current or previous casters)
+            var unavailableAddresses = BlockcasterNode._allCasterAddresses.ToHashSet(); // Includes both active and missing casters
+
+            var availableValidators = Globals.NetworkValidators.Values
+                .Where(v => !unavailableAddresses.Contains(v.Address))
+                .OrderBy(v => v.Address) // Ensure deterministic ordering
+                .ToList();
+
+            if (!availableValidators.Any())
+                throw new InvalidOperationException("No available validators to select from");
+
+            // Use shared randomness to select a validator
+            var randomValue = BitConverter.ToInt32(sharedRandomness, 0);
+            var index = Math.Abs(randomValue) % availableValidators.Count;
+
+            return availableValidators[index];
+        }
+
+        private byte[] CombineRandomness(List<byte[]> contributions)
+        {
+            byte[] combined = new byte[32];
+            foreach (var contribution in contributions)
+            {
+                for (int i = 0; i < 32; i++)
+                {
+                    combined[i] ^= contribution[i];
+                }
+            }
+            return combined;
+        }
 
         #region Get IP
         private static string GetIP(HubCallerContext context)
