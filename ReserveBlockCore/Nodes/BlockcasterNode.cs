@@ -506,6 +506,10 @@ namespace ReserveBlockCore.Nodes
                         }
                     }
 
+                    ConsoleWriterService.OutputVal($"\r\nStarting over.");
+                    Globals.Proofs.Clear();
+                    Globals.Proofs = new ConcurrentBag<Proof>();
+                    await Task.Delay(50);
                 }
                 catch (Exception ex)
                 {
