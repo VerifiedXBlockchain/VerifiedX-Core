@@ -393,6 +393,27 @@ namespace ReserveBlockCore.Nodes
                                                                                 if (nextHeight < currentHeight)
                                                                                     await BlockDownloadService.GetAllBlocks();
                                                                             }
+
+                                                                            if (currentHeight == nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (block, IP)))
+                                                                            {
+                                                                                ConsoleWriterService.OutputVal($"Inside block service D");
+                                                                                blockFound = true;
+                                                                                //_ = AddConsensusHeaderQueue(consensusHeader);
+                                                                                if (Globals.LastBlock.Height < block.Height)
+                                                                                    await BlockValidatorService.ValidateBlocks();
+
+                                                                                if (nextHeight == currentHeight)
+                                                                                {
+                                                                                    ConsoleWriterService.OutputVal($"Inside block service E");
+                                                                                    _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                                                    //_ = P2PValidatorClient.BroadcastBlock(block);
+                                                                                }
+
+                                                                                if (nextHeight < currentHeight)
+                                                                                    await BlockDownloadService.GetAllBlocks();
+
+                                                                                break;
+                                                                            }
                                                                         }
                                                                     }
                                                                 }
