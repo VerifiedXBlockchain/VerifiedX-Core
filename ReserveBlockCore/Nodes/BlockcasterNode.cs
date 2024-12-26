@@ -130,13 +130,29 @@ namespace ReserveBlockCore.Nodes
                         {
                             if (winningProof != null)
                             {
-                                //TODO:turn this into getting a block!
                                 var nextblock = Globals.LastBlock.Height + 1;
+                                Stopwatch sw = Stopwatch.StartNew();
                                 var verificationResultTuple = await ProofUtility.VerifyWinnerAvailability(winningProof, nextblock);
+                                sw.Stop();
                                 verificationResult = verificationResultTuple.Item1;
+
+                                Globals.NetworkValidators.TryGetValue(winningProof.Address, out var validator);
 
                                 if (!verificationResult)
                                 {
+                                    if(validator != null)
+                                    {
+                                        validator.CheckFailCount++;
+                                        validator.Latency = sw.ElapsedMilliseconds;
+                                        if (validator.CheckFailCount <= 3)
+                                        {
+                                            Globals.NetworkValidators[winningProof.Address] = validator;
+                                        }
+                                        else
+                                        {
+                                            Globals.NetworkValidators.TryRemove(winningProof.Address, out _);
+                                        }
+                                    }
                                     ExcludeValList.Add(winningProof.Address);
                                     winningProof = await ProofUtility.SortProofs(
                                         proofs.Where(x => !ExcludeValList.Contains(x.Address)).ToList()
@@ -150,6 +166,13 @@ namespace ReserveBlockCore.Nodes
                                 }
                                 else
                                 {
+                                    if(validator != null)
+                                    {
+                                        validator.CheckFailCount = 0;
+                                        validator.Latency = sw.ElapsedMilliseconds;
+                                        Globals.NetworkValidators[winningProof.Address] = validator;
+                                    }
+                                    
                                     block = verificationResultTuple.Item2;
 
                                     ExcludeValList.Clear();
