@@ -248,6 +248,19 @@ namespace ReserveBlockCore.Nodes
                                             
                                             //_ = P2PValidatorClient.BroadcastBlock(block);
                                         }
+                                        else
+                                        {
+                                            block = await BlockchainData.CraftBlock_V5(
+                                                    Globals.ValidatorAddress,
+                                                    Globals.NetworkValidators.Count(),
+                                                    finalizedWinner.ProofHash, finalizedWinner.BlockHeight);
+
+                                            if(block != null)
+                                            {
+                                                ConsoleWriterService.OutputVal($"\r\nSending block.");
+                                                _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                            }
+                                        }
                                     }
                                 }
                                 else
