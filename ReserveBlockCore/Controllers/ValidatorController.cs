@@ -152,7 +152,7 @@ namespace ReserveBlockCore.Controllers
             var block = await BlockchainData.CraftBlock_V5(
                                                     Globals.ValidatorAddress,
                                                     Globals.NetworkValidators.Count(),
-                                                    proofHash, nextBlock);
+                                                    proofHash, nextBlock, false, true);
 
             if(block != null)
                 return Ok(JsonConvert.SerializeObject(block));
