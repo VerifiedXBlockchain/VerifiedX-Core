@@ -363,7 +363,7 @@ namespace ReserveBlockCore.Nodes
                                                                                 await BlockDownloadService.GetAllBlocks();
                                                                         }
 
-                                                                        if (currentHeight == nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (block, IP)))
+                                                                        if (currentHeight == nextHeight && BlockDownloadService.BlockDict.TryGetValue(currentHeight, out _))
                                                                         {
                                                                             blockFound = true;
                                                                             //_ = AddConsensusHeaderQueue(consensusHeader);
@@ -394,7 +394,7 @@ namespace ReserveBlockCore.Nodes
                                                                                     await BlockDownloadService.GetAllBlocks();
                                                                             }
 
-                                                                            if (currentHeight == nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (block, IP)))
+                                                                            if (currentHeight == nextHeight && BlockDownloadService.BlockDict.TryGetValue(currentHeight, out _))
                                                                             {
                                                                                 ConsoleWriterService.OutputVal($"Inside block service D");
                                                                                 blockFound = true;
