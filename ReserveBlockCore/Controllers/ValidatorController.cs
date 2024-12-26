@@ -117,7 +117,7 @@ namespace ReserveBlockCore.Controllers
 
             if (blockHeight >= Globals.LastBlock.Height)
             {
-                _ = ValidatorNode.GetApproval(peerIP, blockHeight, validatorAddress);
+                _ = BlockcasterNode.GetApproval(peerIP, blockHeight, validatorAddress);
             }
 
             return Ok("0");

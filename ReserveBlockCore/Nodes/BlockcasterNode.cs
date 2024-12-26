@@ -848,6 +848,25 @@ namespace ReserveBlockCore.Nodes
         }
         #endregion
 
+
+        #region Get Approval
+
+        public static async Task GetApproval(string? ip, long blockHeight, string validatorAddress)
+        {
+            if (ip == null)
+                return;
+
+            ip = ip.Replace("::ffff:", "");
+
+            var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip).ToList();
+            if (alreadyApproved.Any())
+                return;
+
+            ValidatorApprovalBag.Add((ip.Replace("::ffff:", ""), blockHeight, validatorAddress));
+        }
+
+        #endregion
+
         #region Stop/Dispose
         public Task StopAsync(CancellationToken cancellationToken)
         {

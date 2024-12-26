@@ -853,6 +853,8 @@ namespace ReserveBlockCore.Nodes
             if (ip == null)
                 return;
 
+            ip = ip.Replace("::ffff:", "");
+
             var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip).ToList();
             if (alreadyApproved.Any())
                 return;
