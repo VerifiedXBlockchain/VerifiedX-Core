@@ -197,7 +197,9 @@ namespace ReserveBlockCore.Services
 
                 var dbPeers = Peers.GetAll();
 
-                foreach(var peer in peerList)
+                Globals.BlockCasters.Clear();
+
+                foreach (var peer in peerList)
                 {
                     var peerExist = dbPeers.FindOne(x => x.PeerIP == peer.PeerIP);
                     if (peerExist == null)

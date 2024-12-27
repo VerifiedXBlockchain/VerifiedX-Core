@@ -44,6 +44,8 @@ namespace ReserveBlockCore.Nodes
         {
             _ = ActiveValidatorRequest();
 
+            await GetBlockcasters();
+
             _ = BlockCasterMonitor();
 
             _ = ValidatorHeartbeat();
