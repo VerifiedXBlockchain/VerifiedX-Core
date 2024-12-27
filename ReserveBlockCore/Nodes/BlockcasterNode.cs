@@ -79,7 +79,7 @@ namespace ReserveBlockCore.Nodes
                 {
                     //DO SOMETHING
                     await InitiateReplacement(Globals.LastBlock.Height);
-                    await Task.Delay(new TimeSpan(0, 2, 0));
+                    await Task.Delay(new TimeSpan(0, 1, 0));
                     _seedPiece = 0;
                 }
 
@@ -97,11 +97,11 @@ namespace ReserveBlockCore.Nodes
 
             HashSet<string> removeList = new HashSet<string>();
 
-            foreach(var caster in casterList)
+            int retryCount = 0;
+            foreach (var caster in casterList)
             {
                 try
                 {
-                    int retryCount = 0;
                     using (var client = Globals.HttpClientFactory.CreateClient())
                     {
                         do
@@ -129,7 +129,11 @@ namespace ReserveBlockCore.Nodes
                 }
                 catch (Exception ex)
                 {
-
+                    retryCount++;
+                    if (retryCount == 3)
+                    {
+                        removeList.Add(caster.PeerIP);
+                    }
                 }
             }
 
