@@ -9,6 +9,7 @@ using ReserveBlockCore.P2P;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Collections.Concurrent;
+using System.Data.SqlTypes;
 using System.Diagnostics;
 using System.Linq;
 using System.Net;
@@ -231,7 +232,7 @@ namespace ReserveBlockCore.Nodes
 
                         peerDB.UpdateSafe(singleVal);
 
-                        Globals.BlockCasters.Add(singleVal);
+                        await AddCaster(singleVal);
                     }
                     else
                     {
@@ -249,7 +250,7 @@ namespace ReserveBlockCore.Nodes
 
                         peerDB.InsertSafe(nPeer);
 
-                        Globals.BlockCasters.Add(nPeer);
+                        await AddCaster(nPeer);
 
                         result = true;
                     }
@@ -259,7 +260,21 @@ namespace ReserveBlockCore.Nodes
 
             return result;
         }
+        public static async Task AddCaster(Peers caster)
+        {
+            var casterExist = Globals.BlockCasters.Any(x => x.PeerIP == caster.PeerIP);
 
+            if(!casterExist)
+            {
+                Stopwatch sw = Stopwatch.StartNew();
+                while(sw.Elapsed.Seconds < 10)
+                {
+                    Globals.BlockCasters.Add(caster);
+                    if (Globals.BlockCasters.Any(x => x.PeerIP == caster.PeerIP))
+                        break;
+                }
+            }
+        }
         public static int GenerateDeterministicSeed(List<NetworkValidator> currentNodes, string seed)
         {
             // Concatenate the public keys and the block height for deterministic input
