@@ -197,22 +197,22 @@ namespace ReserveBlockCore.Services
 
                 var dbPeers = Peers.GetAll();
 
-                Globals.BlockCasters.Clear();
-
                 foreach (var peer in peerList)
                 {
                     var peerExist = dbPeers.FindOne(x => x.PeerIP == peer.PeerIP);
                     if (peerExist == null)
                     {
                         dbPeers.InsertSafe(peer);
-                        Globals.BlockCasters.Add(peer);
+                        if (!Globals.BlockCasters.Any())
+                            Globals.BlockCasters.Add(peer);
                     }
                     else
                     {
                         peerExist.FailCount = 0;
                         //peerExist.IsValidator = true;
                         dbPeers.UpdateSafe(peerExist);
-                        Globals.BlockCasters.Add(peerExist);
+                        if (!Globals.BlockCasters.Any())
+                            Globals.BlockCasters.Add(peerExist);
                     }
                 }
             }
