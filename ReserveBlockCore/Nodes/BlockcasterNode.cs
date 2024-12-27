@@ -170,10 +170,13 @@ namespace ReserveBlockCore.Nodes
                                     if (response.IsSuccessStatusCode)
                                     {
                                         var answer = await response.Content.ReadAsStringAsync();
-                                        if(answer != "0")
+                                        if(!string.IsNullOrEmpty(answer))
                                         {
-                                            var numAnswer = Convert.ToInt32(answer);
-                                            replacementRound.CasterSeeds[caster.PeerIP] = numAnswer;
+                                            if (answer != "0")
+                                            {
+                                                var numAnswer = Convert.ToInt32(answer);
+                                                replacementRound.CasterSeeds[caster.PeerIP] = numAnswer;
+                                            }
                                         }
                                     }
                                 }
@@ -186,7 +189,7 @@ namespace ReserveBlockCore.Nodes
                             return false;
                         }
                     }
-
+                    await Task.Delay(50);
                     continue;
                 }
                 else

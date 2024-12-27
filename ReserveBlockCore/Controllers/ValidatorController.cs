@@ -177,7 +177,7 @@ namespace ReserveBlockCore.Controllers
         {
             var casterList = Globals.BlockCasters.ToList();
             if (casterList.Any())
-                return Ok(JsonConvert.SerializeObject(casterList));
+                return Ok(JsonConvert.SerializeObject(casterList, Formatting.Indented));
 
             return Ok("0");
         }
