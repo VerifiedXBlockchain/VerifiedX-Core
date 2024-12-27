@@ -90,7 +90,7 @@ namespace ReserveBlockCore.Nodes
                 if (_currentRound != null && (DateTime.UtcNow - _currentRound.StartTime).TotalMinutes < 5)
                     return false;
 
-                bool isBootstrap = Globals.BlockCasters.Count < Globals.MaxBlockCasters;
+                bool isBootstrap = Globals.BlockCasters.Count < 5;
 
                 if (isBootstrap)
                 {
