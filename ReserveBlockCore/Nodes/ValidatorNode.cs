@@ -180,7 +180,7 @@ namespace ReserveBlockCore.Nodes
                     {
                         using (var client = Globals.HttpClientFactory.CreateClient())
                         {
-                            var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/Blockcasters/";
+                            var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/Blockcasters/";
 
                             var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                             await Task.Delay(75);
@@ -230,7 +230,7 @@ namespace ReserveBlockCore.Nodes
                     {
                         using (var client = Globals.HttpClientFactory.CreateClient())
                         {
-                            var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/Blockcasters/";
+                            var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/Blockcasters/";
 
                             var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                             await Task.Delay(75);
