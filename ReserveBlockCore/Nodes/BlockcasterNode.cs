@@ -144,6 +144,7 @@ namespace ReserveBlockCore.Nodes
         public static async Task<bool> InitiateReplacement(long blockHeight)
         {
             // Only start a new round if there isn't one in progress
+            bool result = false;
             var casterList = Globals.BlockCasters.ToList();
             var casterIPList = casterList.Select(x => x.PeerIP).ToHashSet();
             var currentBlockCasters = Globals.NetworkValidators.Values.Where(x => casterIPList.Contains(x.IPAddress)).ToList();
@@ -186,7 +187,7 @@ namespace ReserveBlockCore.Nodes
                         }
                         catch (Exception ex)
                         {
-                            return false;
+                            break;
                         }
                     }
                     await Task.Delay(50);
@@ -209,6 +210,7 @@ namespace ReserveBlockCore.Nodes
                     if (availableValidators.Count == 0)
                     {
                         ConsoleWriterService.OutputVal("No available validators to select from.");
+                        break;
                     }
 
                     int index = random.Next(availableValidators.Count);
@@ -248,14 +250,14 @@ namespace ReserveBlockCore.Nodes
                         peerDB.InsertSafe(nPeer);
 
                         Globals.BlockCasters.Add(nPeer);
+
+                        result = true;
                     }
                     break;
                 }
             }
-            
-            
 
-            return true;
+            return result;
         }
 
         public static int GenerateDeterministicSeed(List<NetworkValidator> currentNodes, string seed)
