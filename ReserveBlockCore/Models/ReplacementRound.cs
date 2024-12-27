@@ -1,12 +1,24 @@
-﻿namespace ReserveBlockCore.Models
+﻿using ReserveBlockCore.Utilities;
+
+namespace ReserveBlockCore.Models
 {
     public class ReplacementRound
     {
-        public string RoundId { get; set; }
-        public bool IsBootstrap { get; set; }  // Flag for bootstrap vs replacement
-        public NodeInfo? MissingCaster { get; set; }  // Will be null during bootstrap
-        public byte[] SharedRandomness { get; set; }
-        public Dictionary<string, byte[]> RandomnessContributions { get; set; } = new Dictionary<string, byte[]>();
-        public DateTime StartTime { get; set; }
+        public Dictionary<string, int> CasterSeeds { get; set; }
+        public string WinningAddress { get; set; }
+        public long StartTime { get; set; }
+        public long EndTime { get; set; }
+
+        public ReplacementRound()
+        {
+            CasterSeeds = new Dictionary<string, int>();
+            foreach(var caster in Globals.BlockCasters)
+            {
+                CasterSeeds.Add(caster.PeerIP, 0);
+            }
+
+            StartTime = TimeUtil.GetTime();
+            EndTime = TimeUtil.GetTime(0, 2);//adding two minutes for end.
+        }
     }
 }

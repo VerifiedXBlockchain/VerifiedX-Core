@@ -146,6 +146,14 @@ namespace ReserveBlockCore.Controllers
         }
 
         [HttpGet]
+        [Route("SendSeedPart")]
+        public ActionResult<string> SendSeedPart()
+        {
+            var seedPart = BlockcasterNode._seedPiece.ToString();
+            return Ok(seedPart);
+        }
+
+        [HttpGet]
         [Route("VerifyBlock/{nextBlock}/{**proofHash}")]
         public async Task<ActionResult<string>> VerifyBlock(long nextBlock, string proofHash)
         {

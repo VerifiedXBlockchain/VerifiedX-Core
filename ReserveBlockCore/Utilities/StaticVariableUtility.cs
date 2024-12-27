@@ -230,7 +230,21 @@ namespace ReserveBlockCore.Utilities
                 });
 
             }
-            if(seeds.Count() > 0)
+            if (Globals.BlockCasterNodes.Count() > 0)
+            {
+                strBld.AppendLine("--------------------------Caster Node Info------------------------");
+                Globals.BlockCasterNodes.Values.ToList().ForEach(x => {
+                    var ip = x.NodeIP;
+                    var lastcheck = x.NodeLastChecked != null ? x.NodeLastChecked.Value.ToLocalTime().ToLongTimeString() : "NA";
+                    var height = x.NodeHeight.ToString();
+                    var latency = x.NodeLatency.ToString();
+
+                    strBld.AppendLine("Node: " + ip + " - Last Checked: " + lastcheck + " - Height: " + height + " - Latency: " + latency);
+                    strBld.AppendLine("---------------------------------------------------------------------");
+                });
+
+            }
+            if (seeds.Count() > 0)
             {
                 foreach (var seed in seeds.ToList())
                 {

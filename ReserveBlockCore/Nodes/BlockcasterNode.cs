@@ -13,6 +13,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Reflection.Metadata;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks.Dataflow;
 
@@ -34,6 +35,7 @@ namespace ReserveBlockCore.Nodes
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         public static ReplacementRound _currentRound;
         public static List<string> _allCasterAddresses;
+        public static int _seedPiece = 0;
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -54,7 +56,7 @@ namespace ReserveBlockCore.Nodes
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
-                var casterList = Globals.BlockCasterNodes.ToList();
+                var casterList = Globals.BlockCasters.ToList();
 
                 if (!Globals.IsBlockCaster)
                 {
@@ -70,10 +72,14 @@ namespace ReserveBlockCore.Nodes
                     continue;
                 }
 
+                await PingCasters();
+
                 if (casterList.Count() != Globals.MaxBlockCasters)
                 {
                     //DO SOMETHING
                     await InitiateReplacement(Globals.LastBlock.Height);
+                    await Task.Delay(new TimeSpan(0, 2, 0));
+                    _seedPiece = 0;
                 }
 
                 await Task.Delay(10000);
@@ -81,91 +87,193 @@ namespace ReserveBlockCore.Nodes
             }
         }
 
+        public static async Task PingCasters()
+        {
+            var casterList = Globals.BlockCasters.ToList();
+
+            if (!casterList.Any())
+                return;
+
+            HashSet<string> removeList = new HashSet<string>();
+
+            foreach(var caster in casterList)
+            {
+                try
+                {
+                    int retryCount = 0;
+                    using (var client = Globals.HttpClientFactory.CreateClient())
+                    {
+                        do
+                        {
+                            var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
+
+                            var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
+                            await Task.Delay(100);
+
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                retryCount++;
+                                if (retryCount == 3)
+                                {
+                                    removeList.Add(caster.PeerIP);
+                                }
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        } while (retryCount < 4);
+                        
+                    }
+                }
+                catch (Exception ex)
+                {
+
+                }
+            }
+
+            if(removeList.Any())
+            {
+                var nCasterList = casterList.Where(x => !removeList.Contains(x.PeerIP)).ToList();
+                ConcurrentBag<Peers> nBag = new ConcurrentBag<Peers>();
+                nBag.AddRange(nCasterList);
+                Globals.BlockCasters = nBag;
+            }
+        }
+
         public static async Task<bool> InitiateReplacement(long blockHeight)
         {
             // Only start a new round if there isn't one in progress
-            try
+            var casterList = Globals.BlockCasters.ToList();
+            var casterIPList = casterList.Select(x => x.PeerIP).ToHashSet();
+            var currentBlockCasters = Globals.NetworkValidators.Values.Where(x => casterIPList.Contains(x.IPAddress)).ToList();
+            var replacementRound = new ReplacementRound();
+            _seedPiece = RandomNumberGenerator.GetInt32(99999999);
+
+            while (replacementRound.EndTime > TimeUtil.GetTime())
             {
-                NodeInfo? missingCaster = null;
-                if (_currentRound != null && (DateTime.UtcNow - _currentRound.StartTime).TotalMinutes < 1)
-                    return false;
-
-                if (Globals.BlockCasterNodes.Count() == 0)
-                    return false;
-
-                bool isBootstrap = Globals.BlockCasters.Count < 5;
-
-                if (isBootstrap)
+                if (replacementRound.CasterSeeds.Values.Any(x => x == 0))
                 {
-                    // Verify we have minimum bootstrap casters
-                    if (Globals.BlockCasters.Count < 2)
-                        return false;
+                    foreach (var caster in casterList)
+                    {
+                        try
+                        {
+                            replacementRound.CasterSeeds.TryGetValue(caster.PeerIP, out var seedPiece);
+                            if (seedPiece == 0)
+                            {
+                                using (var client = Globals.HttpClientFactory.CreateClient())
+                                {
+                                    var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/SendSeedPart";
+                                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
+                                    await Task.Delay(100);
+
+                                    if (response.IsSuccessStatusCode)
+                                    {
+                                        var answer = await response.Content.ReadAsStringAsync();
+                                        if(answer != "0")
+                                        {
+                                            var numAnswer = Convert.ToInt32(answer);
+                                            replacementRound.CasterSeeds[caster.PeerIP] = numAnswer;
+                                        }
+                                    }
+                                }
+                            }
+
+                            await Task.Delay(200);
+                        }
+                        catch (Exception ex)
+                        {
+                            return false;
+                        }
+                    }
+
+                    continue;
                 }
                 else
                 {
-                    // Check for missing caster in normal operation
-                    var activeCasterAddresses = Globals.BlockCasters.Where(c => c.ValidatorAddress != Globals.ValidatorAddress).Select(c => c.PeerIP).ToHashSet();
-                    missingCaster = Globals.BlockCasterNodes.Values
-                        .FirstOrDefault(addr => !activeCasterAddresses.Contains(addr.NodeIP));
-
-                    if (missingCaster == null)
-                        return false; // No missing caster found in normal operation
-                }
-
-                _currentRound = new ReplacementRound
-                {
-                    RoundId = $"round-{blockHeight}",
-                    IsBootstrap = isBootstrap,
-                    MissingCaster = isBootstrap ? null : missingCaster,
-                    StartTime = DateTime.UtcNow
-                };
-
-                var myRandomness = GenerateRandomContribution();
-                _currentRound.RandomnessContributions[Globals.ValidatorAddress] = myRandomness;
-
-                foreach (var caster in Globals.BlockCasterNodes.Values.Where(c => c.IsConnected))
-                {
-                    try
+                    var seedString = new StringBuilder();
+                    foreach(var castSeed in replacementRound.CasterSeeds)
                     {
-                        var selectedValidator = await caster.Connection.InvokeAsync<NetworkValidator?>(
-                            "ContributeRandomness",
-                            _currentRound.RoundId,
-                            Globals.ValidatorAddress,
-                            myRandomness
-                        );
+                        seedString.Append(castSeed.Value);
+                    }
+                    int seed = GenerateDeterministicSeed(currentBlockCasters, seedString.ToString());
+                    Random random = new Random(seed);
 
-                        if (selectedValidator != null)
+                    var availableValidators = Globals.NetworkValidators.Values
+                        .Except(currentBlockCasters)
+                        .ToList();
+
+                    if (availableValidators.Count == 0)
+                    {
+                        ConsoleWriterService.OutputVal("No available validators to select from.");
+                    }
+
+                    int index = random.Next(availableValidators.Count);
+                    var nCaster =  availableValidators[index];
+
+                    var peerDB = Peers.GetAll();
+
+                    var singleVal = peerDB.FindOne(x => x.PeerIP == nCaster.IPAddress);
+                    if (singleVal != null)
+                    {
+                        singleVal.IsValidator = true;
+
+                        if (singleVal.ValidatorAddress == null)
+                            singleVal.ValidatorAddress = nCaster.Address;
+
+                        if (singleVal.ValidatorPublicKey == null)
+                            singleVal.ValidatorPublicKey = nCaster.PublicKey;
+
+                        peerDB.UpdateSafe(singleVal);
+
+                        Globals.BlockCasters.Add(singleVal);
+                    }
+                    else
+                    {
+                        Peers nPeer = new Peers
                         {
-                            // Handle the selected validator - perhaps update the caster list
-                            // This would depend on your specific requirements for what to do
-                            // when a new validator is selected
-                        }
+                            IsIncoming = false,
+                            IsOutgoing = true,
+                            PeerIP = nCaster.IPAddress,
+                            FailCount = 0,
+                            IsValidator = true,
+                            ValidatorAddress = nCaster.Address,
+                            ValidatorPublicKey = nCaster.PublicKey,
+                            WalletVersion = Globals.CLIVersion,
+                        };
+
+                        peerDB.InsertSafe(nPeer);
+
+                        Globals.BlockCasters.Add(nPeer);
                     }
-                    catch (Exception ex)
-                    {
-                        // Handle connection error
-                    }
+                    break;
                 }
-
-                return true;
             }
-            catch (Exception ex)
-            {
-                return false;
-            }
+            
+            
 
+            return true;
         }
 
-        private static byte[] GenerateRandomContribution()
+        public static int GenerateDeterministicSeed(List<NetworkValidator> currentNodes, string seed)
         {
-            byte[] randomness = new byte[32];
-            using (var rng = new System.Security.Cryptography.RNGCryptoServiceProvider())
+            // Concatenate the public keys and the block height for deterministic input
+            var sb = new StringBuilder();
+            foreach (var node in currentNodes)
             {
-                rng.GetBytes(randomness);
+                sb.Append(node.PublicKey);
             }
-            return randomness;
-        }
+            sb.Append(seed);
 
+            // Generate a hash of the concatenated string
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+
+                // Convert the first 4 bytes of the hash into an integer seed
+                return BitConverter.ToInt32(hashBytes, 0);
+            }
+        }
 
         private static async Task StartConsensus()
         {
@@ -360,7 +468,7 @@ namespace ReserveBlockCore.Nodes
                                     while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                     {
                                         var approvalRate = (decimal)ValidatorApprovalBag
-                                            .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.MaxBlockCasters;
+                                            .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.BlockCasters.Count();
 
                                         if (approvalRate >= 0.51M)
                                             approved = true;
