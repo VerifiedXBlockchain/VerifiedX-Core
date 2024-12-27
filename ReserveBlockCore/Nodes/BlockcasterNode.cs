@@ -197,9 +197,10 @@ namespace ReserveBlockCore.Nodes
                 else
                 {
                     var seedString = new StringBuilder();
-                    foreach(var castSeed in replacementRound.CasterSeeds)
+                    var casterSeedsOrdered = replacementRound.CasterSeeds.Values.OrderBy(x => x);
+                    foreach (var castSeed in casterSeedsOrdered)
                     {
-                        seedString.Append(castSeed.Value);
+                        seedString.Append(castSeed);
                     }
                     int seed = GenerateDeterministicSeed(currentBlockCasters, seedString.ToString());
                     Random random = new Random(seed);
