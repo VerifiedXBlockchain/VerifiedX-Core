@@ -77,7 +77,7 @@ namespace ReserveBlockCore.Nodes
             var account = AccountData.GetLocalValidator();
             var validators = Validators.Validator.GetAll();
             var validator = validators.FindOne(x => x.Address == account.Address);
-            
+
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
@@ -102,9 +102,9 @@ namespace ReserveBlockCore.Nodes
                 {
                     //generate new block
                     //produce proof
-                    if(Globals.NextValidatorBlock != null)
+                    if (Globals.NextValidatorBlock != null)
                     {
-                        if(Globals.NextValidatorBlock.Height == nextHeight)
+                        if (Globals.NextValidatorBlock.Height == nextHeight)
                         {
                             await Task.Delay(1000);
                             continue;
@@ -190,10 +190,10 @@ namespace ReserveBlockCore.Nodes
                                     var responseBody = await response.Content.ReadAsStringAsync();
                                     if (!string.IsNullOrEmpty(responseBody))
                                     {
-                                        if(responseBody != "0")
+                                        if (responseBody != "0")
                                         {
                                             var blockCasters = JsonConvert.DeserializeObject<List<Peers>?>(responseBody);
-                                            if(blockCasters?.Count() > 0)
+                                            if (blockCasters?.Count() > 0)
                                             {
                                                 blockCasters.ForEach(x => {
                                                     CasterIPs.Add(x.PeerIP);
@@ -209,11 +209,11 @@ namespace ReserveBlockCore.Nodes
                                 }
                             }
                         }
-                        
+
                     }
                     catch (Exception ex)
                     {
-                        
+
                     }
                 }).ToList();
 
@@ -275,15 +275,20 @@ namespace ReserveBlockCore.Nodes
 
             var top5Casters = top5IPs
                 .Select(ip => new { IP = ip, Peer = CasterDict.TryGetValue(ip, out var peer) ? peer : null })
-                .Where(x => x.Peer != null) 
+                .Where(x => x.Peer != null)
                 .Select(x => x.Peer)
                 .ToList();
 
 
             foreach (var caster in top5Casters)
             {
-                if(caster != null)
-                    Globals.BlockCasters.Add(caster);
+                if (caster != null)
+                {
+                    var nCaster = Globals.BlockCasters.Where(x => x.ValidatorAddress == caster.ValidatorAddress).FirstOrDefault();
+                    if (nCaster == null)
+                        Globals.BlockCasters.Add(caster);
+                }
+
             }
         }
 
@@ -304,7 +309,7 @@ namespace ReserveBlockCore.Nodes
 
                 var peerList = Globals.BlockCasterNodes.Values.ToList();
 
-                if (!peerList.Any()) 
+                if (!peerList.Any())
                 {
                     await delay;
                     continue;
@@ -313,7 +318,7 @@ namespace ReserveBlockCore.Nodes
                 var peerDB = Peers.GetAll();
 
                 var coreCount = Environment.ProcessorCount;
-                if (coreCount >= 4 || Globals.RunUnsafeCode) 
+                if (coreCount >= 4 || Globals.RunUnsafeCode)
                 {
                     var tasks = peerList.Select(async peer =>
                     {
@@ -328,9 +333,9 @@ namespace ReserveBlockCore.Nodes
                                 sw.Stop();
                                 await Task.Delay(100);
 
-                                if(response.IsSuccessStatusCode)
+                                if (response.IsSuccessStatusCode)
                                 {
-                                    if(response.StatusCode == HttpStatusCode.Accepted)
+                                    if (response.StatusCode == HttpStatusCode.Accepted)
                                     {
                                         var account = AccountData.GetLocalValidator();
                                         var validators = Validators.Validator.GetAll();
@@ -363,7 +368,7 @@ namespace ReserveBlockCore.Nodes
                                             catch (Exception ex) { }
                                         }
 
-                                        
+
                                         //TODO
                                         //send peer details
                                     }
@@ -372,7 +377,7 @@ namespace ReserveBlockCore.Nodes
                         }
                         catch (Exception ex)
                         {
-                            
+
                         }
                     }).ToList();
 
@@ -381,7 +386,7 @@ namespace ReserveBlockCore.Nodes
                 }
                 else
                 {
-                    foreach (var peer in peerList) 
+                    foreach (var peer in peerList)
                     {
                         try
                         {
@@ -434,7 +439,7 @@ namespace ReserveBlockCore.Nodes
                         }
                         catch (Exception ex)
                         {
-                            
+
                         }
                     }
                 }
@@ -680,7 +685,7 @@ namespace ReserveBlockCore.Nodes
         {
             Globals.ConsensusHeaderQueue.Enqueue(cHeader);
 
-            if(Globals.ConsensusHeaderQueue.Count() > 3456)
+            if (Globals.ConsensusHeaderQueue.Count() > 3456)
                 Globals.ConsensusHeaderQueue.TryDequeue(out _);
         }
 
@@ -700,7 +705,7 @@ namespace ReserveBlockCore.Nodes
                         continue;
                     }
 
-                    if(!Globals.ValidatorNodes.Any())
+                    if (!Globals.ValidatorNodes.Any())
                     {
                         await delay;
                         continue;

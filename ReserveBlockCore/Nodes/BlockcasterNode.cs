@@ -54,7 +54,7 @@ namespace ReserveBlockCore.Nodes
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
-                var casterList = Globals.BlockCasters.ToList();
+                var casterList = Globals.BlockCasterNodes.ToList();
 
                 if (!Globals.IsBlockCaster)
                 {
@@ -70,7 +70,7 @@ namespace ReserveBlockCore.Nodes
                     continue;
                 }
 
-                if(casterList.Count() != Globals.MaxBlockCasters)
+                if (casterList.Count() != Globals.MaxBlockCasters)
                 {
                     //DO SOMETHING
                     await InitiateReplacement(Globals.LastBlock.Height);
@@ -84,42 +84,64 @@ namespace ReserveBlockCore.Nodes
         public static async Task<bool> InitiateReplacement(long blockHeight)
         {
             // Only start a new round if there isn't one in progress
-            if (_currentRound != null && (DateTime.UtcNow - _currentRound.StartTime).TotalMinutes < 5)
+            try
+            {
+                NodeInfo? missingCaster = null;
+                if (_currentRound != null && (DateTime.UtcNow - _currentRound.StartTime).TotalMinutes < 5)
+                    return false;
+
+                bool isBootstrap = Globals.BlockCasters.Count < Globals.MaxBlockCasters;
+
+                if (isBootstrap)
+                {
+                    // Verify we have minimum bootstrap casters
+                    if (Globals.BlockCasters.Count < 2)
+                        return false;
+                }
+                else
+                {
+                    // Check for missing caster in normal operation
+                    var activeCasterAddresses = Globals.BlockCasters.Select(c => c.PeerIP).ToHashSet();
+                    missingCaster = Globals.BlockCasterNodes.Values
+                        .FirstOrDefault(addr => !activeCasterAddresses.Contains(addr.NodeIP));
+
+                    if (missingCaster == null)
+                        return false; // No missing caster found in normal operation
+                }
+
+                _currentRound = new ReplacementRound
+                {
+                    RoundId = $"round-{blockHeight}",
+                    IsBootstrap = isBootstrap,
+                    MissingCaster = isBootstrap ? null : missingCaster,
+                    StartTime = DateTime.UtcNow
+                };
+
+                var myRandomness = GenerateRandomContribution();
+                _currentRound.RandomnessContributions[Globals.ValidatorAddress] = myRandomness;
+
+                foreach (var caster in Globals.BlockCasterNodes.Values.Where(c => c.IsConnected))
+                {
+                    try
+                    {
+                        await caster.Connection.InvokeAsync("ContributeRandomness",
+                            _currentRound.RoundId,
+                            Globals.ValidatorAddress,
+                            myRandomness);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Handle connection error
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
                 return false;
-
-            // Find the missing caster address
-            var activeCasterAddresses = Globals.BlockCasterNodes.Select(c => c.Value.Address).ToHashSet();
-            var missingCasterAddress = _allCasterAddresses.FirstOrDefault(addr => !activeCasterAddresses.Contains(addr));
-
-            if (missingCasterAddress == null)
-                return false; // No missing caster found
-
-            _currentRound = new ReplacementRound
-            {
-                RoundId = $"round-{blockHeight}",
-                MissingCasterAddress = missingCasterAddress,
-                StartTime = DateTime.UtcNow
-            };
-
-            var myRandomness = GenerateRandomContribution();
-            _currentRound.RandomnessContributions[Globals.ValidatorAddress] = myRandomness;
-
-            foreach (var caster in Globals.BlockCasterNodes.Values.Where(c => c.IsConnected))
-            {
-                try
-                {
-                    await caster.Connection.InvokeAsync("ContributeRandomness",
-                        _currentRound.RoundId,
-                        Globals.ValidatorAddress,
-                        myRandomness);
-                }
-                catch (Exception ex)
-                {
-                    // Handle connection error
-                }
             }
 
-            return true;
         }
 
         private static byte[] GenerateRandomContribution()
@@ -228,7 +250,7 @@ namespace ReserveBlockCore.Nodes
 
                                 if (!verificationResult)
                                 {
-                                    if(validator != null)
+                                    if (validator != null)
                                     {
                                         validator.CheckFailCount++;
                                         validator.Latency = sw.ElapsedMilliseconds;
@@ -254,13 +276,13 @@ namespace ReserveBlockCore.Nodes
                                 }
                                 else
                                 {
-                                    if(validator != null)
+                                    if (validator != null)
                                     {
                                         validator.CheckFailCount = 0;
                                         validator.Latency = sw.ElapsedMilliseconds;
                                         Globals.NetworkValidators[winningProof.Address] = validator;
                                     }
-                                    
+
                                     block = verificationResultTuple.Item2;
 
                                     ExcludeValList.Clear();
@@ -363,7 +385,7 @@ namespace ReserveBlockCore.Nodes
                                                 ConsoleWriterService.OutputVal($"\r\nBLOCK DID NOT VALIDATE!.");
                                             }
                                         }
-                                        
+
                                     }
                                 }
                                 else
@@ -410,7 +432,7 @@ namespace ReserveBlockCore.Nodes
                                         while (!blockFound && swb.ElapsedMilliseconds < BLOCK_REQUEST_WINDOW)
                                         {
                                             //This is done if non-caster wins the block
-                                            if(block != null)
+                                            if (block != null)
                                             {
                                                 ConsoleWriterService.OutputVal($"Already have block. Height: {block.Height}");
                                                 var IP = finalizedWinner.IPAddress;
