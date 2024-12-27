@@ -127,10 +127,19 @@ namespace ReserveBlockCore.Nodes
                 {
                     try
                     {
-                        var someVal = await caster.Connection.InvokeAsync("ContributeRandomness",
+                        var selectedValidator = await caster.Connection.InvokeAsync<NetworkValidator?>(
+                            "ContributeRandomness",
                             _currentRound.RoundId,
                             Globals.ValidatorAddress,
-                            myRandomness);
+                            myRandomness
+                        );
+
+                        if (selectedValidator != null)
+                        {
+                            // Handle the selected validator - perhaps update the caster list
+                            // This would depend on your specific requirements for what to do
+                            // when a new validator is selected
+                        }
                     }
                     catch (Exception ex)
                     {
