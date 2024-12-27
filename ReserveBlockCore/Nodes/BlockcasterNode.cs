@@ -90,6 +90,9 @@ namespace ReserveBlockCore.Nodes
                 if (_currentRound != null && (DateTime.UtcNow - _currentRound.StartTime).TotalMinutes < 5)
                     return false;
 
+                if (Globals.BlockCasterNodes.Count() == 0)
+                    return false;
+
                 bool isBootstrap = Globals.BlockCasters.Count < 5;
 
                 if (isBootstrap)
@@ -124,7 +127,7 @@ namespace ReserveBlockCore.Nodes
                 {
                     try
                     {
-                        await caster.Connection.InvokeAsync("ContributeRandomness",
+                        var someVal = await caster.Connection.InvokeAsync("ContributeRandomness",
                             _currentRound.RoundId,
                             Globals.ValidatorAddress,
                             myRandomness);
