@@ -100,12 +100,13 @@ namespace ReserveBlockCore.Nodes
             int retryCount = 0;
             foreach (var caster in casterList)
             {
-                try
+                do
                 {
-                    using (var client = Globals.HttpClientFactory.CreateClient())
+                    try
                     {
-                        do
+                        using (var client = Globals.HttpClientFactory.CreateClient())
                         {
+                            
                             var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
 
                             var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
@@ -123,18 +124,18 @@ namespace ReserveBlockCore.Nodes
                             {
                                 break;
                             }
-                        } while (retryCount < 4);
-                        
+                        }
                     }
-                }
-                catch (Exception ex)
-                {
-                    retryCount++;
-                    if (retryCount == 3)
+                    catch (Exception ex)
                     {
-                        removeList.Add(caster.PeerIP);
+                        retryCount++;
+                        if (retryCount == 3)
+                        {
+                            removeList.Add(caster.PeerIP);
+                        }
                     }
-                }
+                } while (retryCount < 4);
+                
             }
 
             if(removeList.Any())
