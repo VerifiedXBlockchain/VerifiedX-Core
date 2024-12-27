@@ -104,7 +104,7 @@ namespace ReserveBlockCore.Nodes
                 else
                 {
                     // Check for missing caster in normal operation
-                    var activeCasterAddresses = Globals.BlockCasters.Select(c => c.PeerIP).ToHashSet();
+                    var activeCasterAddresses = Globals.BlockCasters.Where(c => c.ValidatorAddress != Globals.ValidatorAddress).Select(c => c.PeerIP).ToHashSet();
                     missingCaster = Globals.BlockCasterNodes.Values
                         .FirstOrDefault(addr => !activeCasterAddresses.Contains(addr.NodeIP));
 

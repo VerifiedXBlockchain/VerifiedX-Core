@@ -237,36 +237,44 @@ namespace ReserveBlockCore.P2P
 
         public async Task<NetworkValidator?> ContributeRandomness(string roundId, string casterAddress, byte[] randomness)
         {
-            if (BlockcasterNode._currentRound == null || BlockcasterNode._currentRound.RoundId != roundId)
-                return null;
-
-            // Verify the contributor is a current active caster
-            if (!Globals.BlockCasterNodes.Values.Any(c => c.Address == casterAddress && c.IsConnected))
-                return null;
-
-            // Add their contribution
-            BlockcasterNode._currentRound.RandomnessContributions[casterAddress] = randomness;
-
-            // Check if we have all active casters' contributions
-            if (BlockcasterNode._currentRound.RandomnessContributions.Count >= Globals.BlockCasterNodes.Values.Count(c => c.IsConnected))
+            try
             {
-                BlockcasterNode._currentRound.SharedRandomness = CombineRandomness(BlockcasterNode._currentRound.RandomnessContributions.Values.ToList());
+                if (BlockcasterNode._currentRound == null || BlockcasterNode._currentRound.RoundId != roundId)
+                    return null;
 
-                var selectedValidator = DeterministicallySelectValidator(BlockcasterNode._currentRound.SharedRandomness);
+                // Verify the contributor is a current active caster
+                if (!Globals.BlockCasters.Any(c => c.ValidatorAddress == casterAddress))
+                    return null;
 
-                // Clear the round
-                BlockcasterNode._currentRound = null;
+                // Add their contribution
+                BlockcasterNode._currentRound.RandomnessContributions[casterAddress] = randomness;
 
-                return selectedValidator;
+                // Check if we have all active casters' contributions
+                if (BlockcasterNode._currentRound.RandomnessContributions.Count >= Globals.BlockCasterNodes.Values.Count(c => c.IsConnected))
+                {
+                    BlockcasterNode._currentRound.SharedRandomness = CombineRandomness(BlockcasterNode._currentRound.RandomnessContributions.Values.ToList());
+
+                    var selectedValidator = DeterministicallySelectValidator(BlockcasterNode._currentRound.SharedRandomness);
+
+                    // Clear the round
+                    BlockcasterNode._currentRound = null;
+
+                    return selectedValidator;
+                }
+
             }
-
+            catch (Exception ex)
+            {
+                return null;
+            }
+            
             return null;
         }
 
         private NetworkValidator DeterministicallySelectValidator(byte[] sharedRandomness)
         {
             // Get available validators (not current or previous casters)
-            var unavailableAddresses = BlockcasterNode._allCasterAddresses.ToHashSet(); // Includes both active and missing casters
+            var unavailableAddresses = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount < 1).Select(x => x.Address).ToHashSet(); // Includes both active and missing casters
 
             var availableValidators = Globals.NetworkValidators.Values
                 .Where(v => !unavailableAddresses.Contains(v.Address))
