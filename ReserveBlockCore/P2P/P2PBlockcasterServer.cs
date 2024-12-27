@@ -274,7 +274,11 @@ namespace ReserveBlockCore.P2P
         private NetworkValidator DeterministicallySelectValidator(byte[] sharedRandomness)
         {
             // Get available validators (not current or previous casters)
-            var unavailableAddresses = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount < 1).Select(x => x.Address).ToHashSet(); // Includes both active and missing casters
+            var currentCasters = Globals.BlockCasters.Select(x => x.PeerIP).ToHashSet();
+            var unavailableAddresses = Globals.NetworkValidators.Values
+                .Where(x => x.CheckFailCount < 1 &&
+                currentCasters.Contains(x.IPAddress)
+                ).Select(x => x.Address).ToHashSet(); 
 
             var availableValidators = Globals.NetworkValidators.Values
                 .Where(v => !unavailableAddresses.Contains(v.Address))
