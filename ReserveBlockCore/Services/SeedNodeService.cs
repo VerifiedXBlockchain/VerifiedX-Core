@@ -2,6 +2,7 @@
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Utilities;
 using Spectre.Console;
 using System;
@@ -203,16 +204,14 @@ namespace ReserveBlockCore.Services
                     if (peerExist == null)
                     {
                         dbPeers.InsertSafe(peer);
-                        if (!Globals.BlockCasters.Any())
-                            Globals.BlockCasters.Add(peer);
+                        await BlockcasterNode.AddCaster(peer);
                     }
                     else
                     {
                         peerExist.FailCount = 0;
                         //peerExist.IsValidator = true;
                         dbPeers.UpdateSafe(peerExist);
-                        if (!Globals.BlockCasters.Any())
-                            Globals.BlockCasters.Add(peerExist);
+                        await BlockcasterNode.AddCaster(peerExist);
                     }
                 }
             }
