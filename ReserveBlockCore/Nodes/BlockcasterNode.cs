@@ -87,7 +87,7 @@ namespace ReserveBlockCore.Nodes
             try
             {
                 NodeInfo? missingCaster = null;
-                if (_currentRound != null && (DateTime.UtcNow - _currentRound.StartTime).TotalMinutes < 5)
+                if (_currentRound != null && (DateTime.UtcNow - _currentRound.StartTime).TotalMinutes < 1)
                     return false;
 
                 if (Globals.BlockCasterNodes.Count() == 0)
