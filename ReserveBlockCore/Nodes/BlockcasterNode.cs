@@ -381,8 +381,6 @@ namespace ReserveBlockCore.Nodes
 
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
-                ConsoleWriterService.OutputVal("Top of consensus loop");
-
                 var casterList = Globals.BlockCasters.ToList();
                 if (casterList.Any())
                 {
@@ -396,6 +394,8 @@ namespace ReserveBlockCore.Nodes
                     await Task.Delay(new TimeSpan(0, 0, 30));
                     continue;
                 }
+
+                ConsoleWriterService.OutputVal("Top of consensus loop");
 
                 Block? block = null;
 

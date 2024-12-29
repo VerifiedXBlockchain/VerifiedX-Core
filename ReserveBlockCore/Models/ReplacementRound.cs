@@ -22,10 +22,7 @@ namespace ReserveBlockCore.Models
             foreach (var caster in Globals.BlockCasters)
             {
                 CasterSeeds.Add(caster.PeerIP, 0);
-                if (caster.ValidatorAddress == Globals.ValidatorAddress)
-                    NetworkValidators.Add("local", null);
-                else
-                    NetworkValidators.Add(caster.PeerIP, null);
+                NetworkValidators.Add(caster.PeerIP, null);
             }
 
             SeedPiece = RandomNumberGenerator.GetInt32(99999999);
