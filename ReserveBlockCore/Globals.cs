@@ -282,7 +282,7 @@ namespace ReserveBlockCore
 
         public const int MaxPeers = 10;
         public const int MaxValPeers = 30;
-        public const int MaxBlockCasterPeers = 3;
+        public const int MaxBlockCasterPeers = 4;
         public static int MaxBlockCasters = 5;
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();

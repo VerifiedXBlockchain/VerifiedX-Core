@@ -270,7 +270,7 @@ namespace ReserveBlockCore.Nodes
                                                 var networkVal = JsonConvert.DeserializeObject<NetworkValidator>(answer);
                                                 if(networkVal != null)
                                                 {
-                                                    _currentRound.NetworkValidators.TryAdd(caster.PeerIP, networkVal);
+                                                    _currentRound.NetworkValidators[caster.PeerIP] =  networkVal;
                                                 }
                                             }
                                         }
