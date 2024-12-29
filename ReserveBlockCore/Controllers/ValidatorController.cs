@@ -103,6 +103,9 @@ namespace ReserveBlockCore.Controllers
         {
             try
             {
+                if (BlockcasterNode._currentRound == null)
+                    return BadRequest();
+
                 if (BlockcasterNode._currentRound.IsFinalized)
                     return BadRequest();
 
@@ -166,11 +169,18 @@ namespace ReserveBlockCore.Controllers
         [Route("SendSeedPart")]
         public ActionResult<string> SendSeedPart()
         {
-            if (BlockcasterNode._currentRound.IsFinalized)
-                return BadRequest();
+            try
+            {
+                if (BlockcasterNode._currentRound == null)
+                    return BadRequest();
 
-            var seedPart = BlockcasterNode._currentRound.SeedPiece.ToString();
-            return Ok(seedPart);
+                if (BlockcasterNode._currentRound.IsFinalized)
+                    return BadRequest();
+
+                var seedPart = BlockcasterNode._currentRound.SeedPiece.ToString();
+                return Ok(seedPart);
+            }
+            catch { return BadRequest(); }
         }
 
         [HttpGet]
