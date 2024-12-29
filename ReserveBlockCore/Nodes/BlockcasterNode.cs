@@ -561,7 +561,12 @@ namespace ReserveBlockCore.Nodes
                                     var sw = Stopwatch.StartNew();
                                     while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                     {
-                                        var approvalRate = (decimal)ValidatorApprovalBag
+                                        var vBag = ValidatorApprovalBag
+                                            .GroupBy(x => (x.Item1))
+                                            .Select(g => g.First())
+                                            .ToList();
+
+                                        var approvalRate = (decimal)vBag
                                             .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.MaxBlockCasters;
 
                                         if (approvalRate >= 0.6M)
@@ -1250,7 +1255,7 @@ namespace ReserveBlockCore.Nodes
 
             ip = ip.Replace("::ffff:", "");
 
-            var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip).ToList();
+            var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip || x.Item3 == validatorAddress).ToList();
             if (alreadyApproved.Any())
                 return;
 

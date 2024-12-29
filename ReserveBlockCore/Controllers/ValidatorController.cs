@@ -135,6 +135,11 @@ namespace ReserveBlockCore.Controllers
             // Convert it to a string if it's not null
             string? peerIP = remoteIpAddress?.ToString();
 
+            if(peerIP != null)
+            {
+                peerIP = peerIP.Replace("::ffff:", "");
+            }
+
             if (blockHeight >= Globals.LastBlock.Height)
             {
                 _ = BlockcasterNode.GetApproval(peerIP, blockHeight, validatorAddress);
