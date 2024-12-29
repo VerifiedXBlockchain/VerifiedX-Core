@@ -98,6 +98,23 @@ namespace ReserveBlockCore.Controllers
         }
 
         [HttpGet]
+        [Route("GetCasterVote")]
+        public async Task<ActionResult<string>> GetCasterVote()
+        {
+            try
+            {
+                if (BlockcasterNode._currentRound.IsFinalized)
+                    return BadRequest();
+
+                if (BlockcasterNode._currentRound.MyChosenCaster == null)
+                    return BadRequest();
+
+                return Ok(JsonConvert.SerializeObject(BlockcasterNode._currentRound.MyChosenCaster));
+            }
+            catch { return BadRequest(); }
+        }
+
+        [HttpGet]
         [Route("GetBlock/{blockHeight}")]
         public ActionResult<string?> GetBlock(long blockHeight)
         {
@@ -149,7 +166,10 @@ namespace ReserveBlockCore.Controllers
         [Route("SendSeedPart")]
         public ActionResult<string> SendSeedPart()
         {
-            var seedPart = BlockcasterNode._seedPiece.ToString();
+            if (BlockcasterNode._currentRound.IsFinalized)
+                return BadRequest();
+
+            var seedPart = BlockcasterNode._currentRound.SeedPiece.ToString();
             return Ok(seedPart);
         }
 

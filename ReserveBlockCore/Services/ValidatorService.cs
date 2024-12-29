@@ -114,7 +114,7 @@ namespace ReserveBlockCore.Services
                     if(Globals.BlockCasters.Any())
                     {
                         var CasterConnectCount = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).Count();
-                        if (CasterConnectCount < 4)
+                        if (CasterConnectCount < Globals.MaxBlockCasters)
                             await P2PValidatorClient.ConnectToBlockcaster();
                     }
                 }

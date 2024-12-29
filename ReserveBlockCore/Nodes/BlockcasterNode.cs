@@ -26,17 +26,12 @@ namespace ReserveBlockCore.Nodes
         public static IHubContext<P2PBlockcasterServer> HubContext;
         private readonly IHubContext<P2PBlockcasterServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
-        private static SemaphoreSlim ConsensusLock = new SemaphoreSlim(1, 1);
-        private static bool ActiveValidatorRequestDone = false;
-        private static bool AlertValidatorsOfStatusDone = false;
-        static SemaphoreSlim NotifyExplorerLock = new SemaphoreSlim(1, 1);
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
         const int PROOF_COLLECTION_TIME = 7000; // 7 seconds
         const int APPROVAL_WINDOW = 12000;      // 12 seconds
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         public static ReplacementRound _currentRound;
         public static List<string> _allCasterAddresses;
-        public static int _seedPiece = 0;
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -75,12 +70,9 @@ namespace ReserveBlockCore.Nodes
 
                 await PingCasters();
 
-                if (casterList.Count() != Globals.MaxBlockCasters)
+                if (casterList.Count() < Globals.MaxBlockCasters)
                 {
-                    //DO SOMETHING
                     await InitiateReplacement(Globals.LastBlock.Height);
-                    await Task.Delay(new TimeSpan(0, 1, 0));
-                    _seedPiece = 0;
                 }
 
                 await Task.Delay(10000);
@@ -154,18 +146,17 @@ namespace ReserveBlockCore.Nodes
             var casterList = Globals.BlockCasters.ToList();
             var casterIPList = casterList.Select(x => x.PeerIP).ToHashSet();
             var currentBlockCasters = Globals.NetworkValidators.Values.Where(x => casterIPList.Contains(x.IPAddress)).ToList();
-            var replacementRound = new ReplacementRound();
-            _seedPiece = RandomNumberGenerator.GetInt32(99999999);
+            _currentRound = new ReplacementRound();
 
-            while (replacementRound.EndTime > TimeUtil.GetTime())
+            while (_currentRound.EndTime > TimeUtil.GetTime())
             {
-                if (replacementRound.CasterSeeds.Values.Any(x => x == 0))
+                if (_currentRound.CasterSeeds.Values.Any(x => x == 0))
                 {
                     foreach (var caster in casterList)
                     {
                         try
                         {
-                            replacementRound.CasterSeeds.TryGetValue(caster.PeerIP, out var seedPiece);
+                            _currentRound.CasterSeeds.TryGetValue(caster.PeerIP, out var seedPiece);
                             if (seedPiece == 0)
                             {
                                 using (var client = Globals.HttpClientFactory.CreateClient())
@@ -177,14 +168,18 @@ namespace ReserveBlockCore.Nodes
                                     if (response.IsSuccessStatusCode)
                                     {
                                         var answer = await response.Content.ReadAsStringAsync();
-                                        if(!string.IsNullOrEmpty(answer))
+                                        if (!string.IsNullOrEmpty(answer))
                                         {
                                             if (answer != "0")
                                             {
                                                 var numAnswer = Convert.ToInt32(answer);
-                                                replacementRound.CasterSeeds[caster.PeerIP] = numAnswer;
+                                                _currentRound.CasterSeeds[caster.PeerIP] = numAnswer;
                                             }
                                         }
+                                    }
+                                    else 
+                                    { 
+                                        //round most likely finalized. Will have to wait for new one.
                                     }
                                 }
                             }
@@ -193,7 +188,7 @@ namespace ReserveBlockCore.Nodes
                         }
                         catch (Exception ex)
                         {
-                            break;
+                            
                         }
                     }
                     await Task.Delay(50);
@@ -202,7 +197,7 @@ namespace ReserveBlockCore.Nodes
                 else
                 {
                     var seedString = new StringBuilder();
-                    var casterSeedsOrdered = replacementRound.CasterSeeds.Values.OrderBy(x => x);
+                    var casterSeedsOrdered = _currentRound.CasterSeeds.Values.OrderBy(x => x);
                     foreach (var castSeed in casterSeedsOrdered)
                     {
                         seedString.Append(castSeed);
@@ -223,44 +218,118 @@ namespace ReserveBlockCore.Nodes
                     int index = random.Next(availableValidators.Count);
                     var nCaster =  availableValidators[index];
 
-                    var peerDB = Peers.GetAll();
-
-                    var singleVal = peerDB.FindOne(x => x.PeerIP == nCaster.IPAddress);
-                    if (singleVal != null)
+                    if(nCaster == null)
                     {
-                        singleVal.IsValidator = true;
-
-                        if (singleVal.ValidatorAddress == null)
-                            singleVal.ValidatorAddress = nCaster.Address;
-
-                        if (singleVal.ValidatorPublicKey == null)
-                            singleVal.ValidatorPublicKey = nCaster.PublicKey;
-
-                        peerDB.UpdateSafe(singleVal);
-
-                        await AddCaster(singleVal);
+                        ConsoleWriterService.OutputVal("Peers available, but nCaster was null.");
+                        break;
                     }
-                    else
+
+                    bool casterConsensusReached = false;
+                    _currentRound.NetworkValidators["local"] = nCaster;
+                    _currentRound.MyChosenCaster = nCaster;
+
+                    while (_currentRound.EndTime > TimeUtil.GetTime())
                     {
-                        Peers nPeer = new Peers
+                        if(!_currentRound.NetworkValidators.Values.Any(x => x == null))
                         {
-                            IsIncoming = false,
-                            IsOutgoing = true,
-                            PeerIP = nCaster.IPAddress,
-                            FailCount = 0,
-                            IsValidator = true,
-                            ValidatorAddress = nCaster.Address,
-                            ValidatorPublicKey = nCaster.PublicKey,
-                            WalletVersion = Globals.CLIVersion,
-                        };
+                            var mostFrequentValidator = _currentRound.NetworkValidators
+                                .Where(kvp => kvp.Value != null) 
+                                .GroupBy(kvp => kvp.Value)       // Group by NetworkValidator
+                                .OrderByDescending(g => g.Count()) // Order by count in descending order
+                                .FirstOrDefault()?.Key;
 
-                        peerDB.InsertSafe(nPeer);
+                            if (mostFrequentValidator != null)
+                            {
+                                nCaster = mostFrequentValidator;
+                                casterConsensusReached = true;
+                                break;
+                            }
+                        }
 
-                        await AddCaster(nPeer);
+                        var postData = JsonConvert.SerializeObject(nCaster);
+                        var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
 
-                        result = true;
+                        foreach (var caster in casterList)
+                        {
+                            try
+                            {
+                                _currentRound.NetworkValidators.TryGetValue(caster.PeerIP, out var nValCheck);
+
+                                if (nValCheck == null)
+                                {
+                                    using (var client = Globals.HttpClientFactory.CreateClient())
+                                    {
+                                        var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/GetCasterVote";
+                                        var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
+                                        await Task.Delay(100);
+
+                                        if (response.IsSuccessStatusCode)
+                                        {
+                                            var answer = await response.Content.ReadAsStringAsync();
+                                            if (!string.IsNullOrEmpty(answer))
+                                            {
+                                                var networkVal = JsonConvert.DeserializeObject<NetworkValidator>(answer);
+                                                if(networkVal != null)
+                                                {
+                                                    _currentRound.NetworkValidators.TryAdd(caster.PeerIP, networkVal);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                await Task.Delay(200);
+                            }
+                            catch (Exception ex)
+                            {
+                                break;
+                            }
+                        }
+                        await Task.Delay(1000);
                     }
-                    break;
+
+
+                    if(casterConsensusReached)
+                    {
+                        var peerDB = Peers.GetAll();
+
+                        var singleVal = peerDB.FindOne(x => x.PeerIP == nCaster.IPAddress);
+                        if (singleVal != null)
+                        {
+                            singleVal.IsValidator = true;
+
+                            if (singleVal.ValidatorAddress == null)
+                                singleVal.ValidatorAddress = nCaster.Address;
+
+                            if (singleVal.ValidatorPublicKey == null)
+                                singleVal.ValidatorPublicKey = nCaster.PublicKey;
+
+                            peerDB.UpdateSafe(singleVal);
+
+                            await AddCaster(singleVal);
+                        }
+                        else
+                        {
+                            Peers nPeer = new Peers
+                            {
+                                IsIncoming = false,
+                                IsOutgoing = true,
+                                PeerIP = nCaster.IPAddress,
+                                FailCount = 0,
+                                IsValidator = true,
+                                ValidatorAddress = nCaster.Address,
+                                ValidatorPublicKey = nCaster.PublicKey,
+                                WalletVersion = Globals.CLIVersion,
+                            };
+
+                            peerDB.InsertSafe(nPeer);
+
+                            await AddCaster(nPeer);
+
+                            result = true;
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -494,9 +563,9 @@ namespace ReserveBlockCore.Nodes
                                     while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                     {
                                         var approvalRate = (decimal)ValidatorApprovalBag
-                                            .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.BlockCasters.Count();
+                                            .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.MaxBlockCasters;
 
-                                        if (approvalRate >= 0.51M)
+                                        if (approvalRate >= 0.6M)
                                             approved = true;
 
                                         await Task.Delay(100);
@@ -849,24 +918,6 @@ namespace ReserveBlockCore.Nodes
                 {
                 }
             }
-        }
-        public static async Task ActiveValidatorRequest()
-        {
-            bool waitForStartup = true;
-            while (waitForStartup)
-            {
-                var delay = Task.Delay(new TimeSpan(0, 0, 5));
-                if ((Globals.StopAllTimers || !Globals.IsChainSynced))
-                {
-                    await delay;
-                    continue;
-                }
-                waitForStartup = false;
-            }
-
-            await P2PValidatorClient.RequestActiveValidators();
-
-            ActiveValidatorRequestDone = true;
         }
 
         #region Process Data
