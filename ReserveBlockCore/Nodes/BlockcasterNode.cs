@@ -225,12 +225,11 @@ namespace ReserveBlockCore.Nodes
                     }
 
                     bool casterConsensusReached = false;
-                    _currentRound.NetworkValidators["local"] = nCaster;
                     _currentRound.MyChosenCaster = nCaster;
 
                     while (_currentRound.EndTime > TimeUtil.GetTime())
                     {
-                        if(!_currentRound.NetworkValidators.Values.Any(x => x == null))
+                        if(!_currentRound.NetworkValidators.Values.Any(x => x == null) && _currentRound.NetworkValidators.Count() > 1)
                         {
                             var mostFrequentValidator = _currentRound.NetworkValidators
                                 .Where(kvp => kvp.Value != null) 
