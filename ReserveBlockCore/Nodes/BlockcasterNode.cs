@@ -643,13 +643,13 @@ namespace ReserveBlockCore.Nodes
                                 //        }
                                 //    }
                                 //EXPERIMENTAL!!!!!
-                                //TODO:
-                                //Need to add block approval wait mechanism here. 
                                 var approved = false;
                                 consensusHeader.WinningAddress = finalizedWinner.Address;
 
                                 var sw = Stopwatch.StartNew();
                                 List<string> CasterApprovalList = new List<string>();
+
+                                //First Commit :)
                                 while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
                                     if(CasterApprovalList.Count() >= 3)
