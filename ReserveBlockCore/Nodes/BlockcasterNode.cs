@@ -1337,7 +1337,7 @@ namespace ReserveBlockCore.Nodes
             if (!Globals.BlockCasters.Any(x => x.PeerIP == ip))
                 return;
 
-            var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip || x.Item3 == validatorAddress).ToList();
+            var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip).ToList();
             if (alreadyApproved.Any())
                 return;
 
