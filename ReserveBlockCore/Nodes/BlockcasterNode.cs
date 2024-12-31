@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.SignalR;
+﻿using Elmah.ContentSyndication;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using Newtonsoft.Json;
 using ReserveBlockCore.Bitcoin.ElectrumX;
@@ -17,6 +18,7 @@ using System.Reflection.Metadata;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks.Dataflow;
+using System.Xml.Schema;
 
 
 namespace ReserveBlockCore.Nodes
@@ -648,15 +650,12 @@ namespace ReserveBlockCore.Nodes
 
                                 var sw = Stopwatch.StartNew();
                                 List<string> CasterApprovalList = new List<string>();
+                                Dictionary<string, string> CasterVoteList = new Dictionary<string, string>();
 
-                                //First Commit :)
+                                //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                                //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                                 while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
-                                    if(CasterApprovalList.Count() >= 3)
-                                    {
-                                        approved = true;
-                                        break;
-                                    }
                                     foreach (var caster in Globals.BlockCasters)
                                     {
                                         if (!CasterApprovalList.Contains(caster.PeerIP))
@@ -666,7 +665,7 @@ namespace ReserveBlockCore.Nodes
                                                 using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(APPROVAL_WINDOW));
                                                 try
                                                 {
-                                                    var valAddr = Globals.ValidatorAddress;
+                                                    var valAddr = finalizedWinner.Address;
                                                     var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}/{valAddr}";
                                                     var response = await client.GetAsync(uri, cts.Token);
                                                     if (response.IsSuccessStatusCode)
@@ -685,6 +684,35 @@ namespace ReserveBlockCore.Nodes
                                                     ConsoleWriterService.OutputVal($"\r\nError sending approval to address: {finalizedWinner.Address}.");
                                                     ConsoleWriterService.OutputVal($"ERROR: {ex}.");
                                                 }
+                                            }
+                                        }
+                                    }
+
+                                    var vBag = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).ToList();
+
+                                    if(vBag.Any())
+                                    {
+                                        foreach(var vote in vBag)
+                                        {
+                                            CasterVoteList[vote.Item1] = vote.Item3;
+                                        }
+
+                                        var result = CasterVoteList.GroupBy(x => x.Value)
+                                            .Where(x => x.Count() >= 3)
+                                            .Select(g => new { Value = g.Key, Count = g.Count() })
+                                            .OrderByDescending(g => g.Count)
+                                            .FirstOrDefault();
+
+                                        if(result != null)
+                                        {
+                                            if(result.Count >= 3)
+                                            {
+                                                //If our winner does not match the consensus get the one that does.
+                                                if (finalizedWinner.Address != result.Value)
+                                                    block = null;
+
+                                                approved = true;
+                                                break;
                                             }
                                         }
                                     }
@@ -1301,6 +1329,9 @@ namespace ReserveBlockCore.Nodes
                 return;
 
             ip = ip.Replace("::ffff:", "");
+
+            if (!Globals.BlockCasters.Any(x => x.PeerIP == ip))
+                return;
 
             var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip || x.Item3 == validatorAddress).ToList();
             if (alreadyApproved.Any())
