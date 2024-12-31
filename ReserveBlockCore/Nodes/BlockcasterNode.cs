@@ -657,6 +657,10 @@ namespace ReserveBlockCore.Nodes
                                 //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                                 while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
+
+                                    if (Globals.LastBlock.Height >= finalizedWinner.BlockHeight)
+                                        break;
+
                                     foreach (var caster in Globals.BlockCasters)
                                     {
                                         using (var client = Globals.HttpClientFactory.CreateClient())
@@ -900,7 +904,12 @@ namespace ReserveBlockCore.Nodes
                                                 {
                                                     var exist = Globals.FailedProducers.Where(x => x == finalizedWinner.Address).FirstOrDefault();
                                                     if (exist == null)
-                                                        Globals.FailedProducers.Add(finalizedWinner.Address);
+                                                    {
+                                                        if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" &&
+                                                                finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" &&
+                                                                finalizedWinner.Address != "xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr")
+                                                            Globals.FailedProducers.Add(finalizedWinner.Address);
+                                                    }
                                                 }
                                             }
 
@@ -928,7 +937,10 @@ namespace ReserveBlockCore.Nodes
                                         //have to add immediately if this happens.
                                         if (failedToReachConsensus)
                                         {
-                                            Globals.FailedProducers.Add(finalizedWinner.Address);
+                                            if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" &&
+                                            finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" &&
+                                            finalizedWinner.Address != "xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr")
+                                                Globals.FailedProducers.Add(finalizedWinner.Address);
                                             ConsoleWriterService.OutputVal($"\r\nAddress: {finalizedWinner.Address} added to failed producers. (Globals.FailedProducers)");
                                         }
 
@@ -961,7 +973,13 @@ namespace ReserveBlockCore.Nodes
                                                     {
                                                         var exist = Globals.FailedProducers.Where(x => x == finalizedWinner.Address).FirstOrDefault();
                                                         if (exist == null)
-                                                            Globals.FailedProducers.Add(finalizedWinner.Address);
+                                                        {
+                                                            if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" &&
+                                                                finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" &&
+                                                                finalizedWinner.Address != "xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr")
+                                                                    Globals.FailedProducers.Add(finalizedWinner.Address);
+                                                        }
+                                                            
                                                     }
                                                 }
 
