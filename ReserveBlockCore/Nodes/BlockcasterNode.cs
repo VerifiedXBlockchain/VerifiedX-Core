@@ -439,6 +439,7 @@ namespace ReserveBlockCore.Nodes
                     consensusHeader.Timestamp = TimeUtil.GetTime();
                     consensusHeader.NetworkValidatorCount = Globals.NetworkValidators.Count;
 
+                    ValidatorApprovalBag.Clear();
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
                     //Generate Proofs for ALL vals
                     ConsoleWriterService.OutputVal($"\r\nGenerating Proofs for height: {Height}.");
@@ -658,39 +659,40 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     foreach (var caster in Globals.BlockCasters)
                                     {
-                                        if (!CasterApprovalList.Contains(caster.PeerIP))
+                                        using (var client = Globals.HttpClientFactory.CreateClient())
                                         {
-                                            using (var client = Globals.HttpClientFactory.CreateClient())
+                                            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(APPROVAL_WINDOW));
+                                            try
                                             {
-                                                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(APPROVAL_WINDOW));
-                                                try
+                                                var valAddr = finalizedWinner.Address;
+                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}/{valAddr}";
+                                                var response = await client.GetAsync(uri, cts.Token);
+                                                if (response.IsSuccessStatusCode)
                                                 {
-                                                    var valAddr = finalizedWinner.Address;
-                                                    var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}/{valAddr}";
-                                                    var response = await client.GetAsync(uri, cts.Token);
-                                                    if (response.IsSuccessStatusCode)
-                                                    {
-                                                        CasterApprovalList.Add(caster.PeerIP);
-                                                        ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {finalizedWinner.Address}.");
-                                                        ConsoleWriterService.OutputVal($"IP Address: {finalizedWinner.IPAddress}.");
-                                                    }
-                                                    else
-                                                    {
-                                                        await Task.Delay(100);
-                                                    }
+                                                    CasterApprovalList.Add(caster.PeerIP);
+                                                    ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {caster.ValidatorAddress}.");
+                                                    ConsoleWriterService.OutputVal($"IP Address: {caster.PeerIP}.");
                                                 }
-                                                catch (Exception ex)
+                                                else
                                                 {
-                                                    ConsoleWriterService.OutputVal($"\r\nError sending approval to address: {finalizedWinner.Address}.");
-                                                    ConsoleWriterService.OutputVal($"ERROR: {ex}.");
+                                                    await Task.Delay(100);
                                                 }
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                ConsoleWriterService.OutputVal($"\r\nError sending approval to address: {finalizedWinner.Address}.");
+                                                ConsoleWriterService.OutputVal($"ERROR: {ex}.");
                                             }
                                         }
                                     }
 
+                                    await Task.Delay(200);
+
                                     var vBag = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).ToList();
 
-                                    if(vBag.Any())
+                                    ConsoleWriterService.OutputVal($"\r\nValidator Bag Count: {vBag.Count()}.");
+
+                                    if (vBag.Any())
                                     {
                                         foreach(var vote in vBag)
                                         {
