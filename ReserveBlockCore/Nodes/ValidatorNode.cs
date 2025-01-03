@@ -166,6 +166,11 @@ namespace ReserveBlockCore.Nodes
                 return;
             }
 
+            if (Globals.IsBlockCaster)
+            {
+                return;
+            } 
+
             ConcurrentBag<string> CasterIPs = new ConcurrentBag<string>();
             ConcurrentDictionary<string, Peers> CasterDict = new ConcurrentDictionary<string, Peers>();
 

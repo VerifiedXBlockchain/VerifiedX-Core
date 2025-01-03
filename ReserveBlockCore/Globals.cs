@@ -281,7 +281,7 @@ namespace ReserveBlockCore
         #region P2P Client Variables
 
         public const int MaxPeers = 10;
-        public const int MaxValPeers = 30;
+        public const int MaxValPeers = 20;
         public const int MaxBlockCasterPeers = 4;
         public static int MaxBlockCasters = 5;
         public static long LastProofBlockheight = 0;

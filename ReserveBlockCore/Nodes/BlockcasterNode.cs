@@ -54,8 +54,7 @@ namespace ReserveBlockCore.Nodes
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
-                var casterList = Globals.BlockCasters.ToList();
-
+                
                 if (!Globals.IsBlockCaster)
                 {
                     await Task.Delay(new TimeSpan(0, 0, 30));
@@ -71,6 +70,8 @@ namespace ReserveBlockCore.Nodes
                 }
 
                 await PingCasters();
+
+                var casterList = Globals.BlockCasters.ToList();
 
                 if (casterList.Count() < Globals.MaxBlockCasters)
                 {
@@ -133,10 +134,11 @@ namespace ReserveBlockCore.Nodes
             }
 
             if(removeList.Any())
-            {
+            { 
                 var nCasterList = casterList.Where(x => !removeList.Contains(x.PeerIP)).ToList();
                 ConcurrentBag<Peers> nBag = new ConcurrentBag<Peers>();
-                nBag.AddRange(nCasterList);
+                nCasterList.ForEach(x => { nBag.Add(x); });
+                Globals.BlockCasters.Clear();
                 Globals.BlockCasters = nBag;
             }
         }
@@ -547,105 +549,6 @@ namespace ReserveBlockCore.Nodes
                                 if (finalizedWinner.Address != winningProof.Address)
                                     block = null;
 
-                                //EXPERIMENTAL!!!!!
-                                //if (finalizedWinner.Address == Globals.ValidatorAddress)
-                                //{
-                                //    consensusHeader.WinningAddress = finalizedWinner.Address;
-                                //    ConsoleWriterService.OutputVal($"\r\nYou Won! Awaiting Approval To Craft Block");
-                                //    bool approved = false;
-                                //    ValidatorApprovalBag.Add(("local", finalizedWinner.BlockHeight, Globals.ValidatorAddress));
-
-                                //    var producers = ValidatorApprovalBag.Select(x => x.Item3).ToList();
-                                //    consensusHeader.ValidatorAddressReceiveList = producers;
-                                //    var failedProducersList = Globals.NetworkValidators.Values.Where(x => !producers.Contains(x.Address)).Select(x => x.Address).ToList();
-                                //    consensusHeader.ValidatorAddressFailList = failedProducersList;
-
-                                //    ProofUtility.PruneFailedProducers();
-
-                                //    var sw = Stopwatch.StartNew();
-                                //    while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
-                                //    {
-                                //        var vBag = ValidatorApprovalBag
-                                //            .GroupBy(x => (x.Item1))
-                                //            .Select(g => g.First())
-                                //            .ToList();
-
-                                //        var approvalRate = (decimal)vBag
-                                //            .Count(x => x.Item2 == finalizedWinner.BlockHeight) / Globals.MaxBlockCasters;
-
-                                //        if (approvalRate >= 0.6M)
-                                //            approved = true;
-
-                                //        await Task.Delay(100);
-                                //    }
-
-                                //    if (approved)
-                                //    {
-                                //        var winnerFound = Globals.ProducerDict.TryGetValue(finalizedWinner.Address, out var winningCount);
-                                //        if (winnerFound)
-                                //        {
-                                //            Globals.ProducerDict[finalizedWinner.Address] = winningCount + 1;
-                                //        }
-                                //        else
-                                //        {
-                                //            Globals.ProducerDict.TryAdd(finalizedWinner.Address, 1);
-                                //        }
-                                //        var nextblock = Globals.LastBlock.Height + 1;
-
-                                //        block = Globals.NextValidatorBlock;
-
-                                //        if (block != null)
-                                //        {
-                                //            var addBlock = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
-
-                                //            if (addBlock == true)
-                                //            {
-                                //                ConsoleWriterService.OutputVal($"\r\nSending block.");
-                                //                _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
-                                //            }
-                                //            else
-                                //            {
-                                //                ConsoleWriterService.OutputVal($"\r\nBLOCK DID NOT VALIDATE!.");
-                                //            }
-                                //        }
-
-                                //    }
-                                //}
-                                //else
-                                //{
-                                //    var approvalSent = false;
-                                //    consensusHeader.WinningAddress = finalizedWinner.Address;
-
-                                //    var sw = Stopwatch.StartNew();
-                                //    while (!approvalSent && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
-                                //    {
-                                //        using (var client = Globals.HttpClientFactory.CreateClient())
-                                //        {
-                                //            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(APPROVAL_WINDOW));
-                                //            try
-                                //            {
-                                //                var valAddr = Globals.ValidatorAddress;
-                                //                var uri = $"http://{finalizedWinner.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}/{valAddr}";
-                                //                var response = await client.GetAsync(uri, cts.Token);
-                                //                if (response.IsSuccessStatusCode)
-                                //                {
-                                //                    approvalSent = true;
-                                //                    ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {finalizedWinner.Address}.");
-                                //                    ConsoleWriterService.OutputVal($"IP Address: {finalizedWinner.IPAddress}.");
-                                //                }
-                                //                else
-                                //                {
-                                //                    await Task.Delay(100);
-                                //                }
-                                //            }
-                                //            catch (Exception ex)
-                                //            {
-                                //                ConsoleWriterService.OutputVal($"\r\nError sending approval to address: {finalizedWinner.Address}.");
-                                //                ConsoleWriterService.OutputVal($"ERROR: {ex}.");
-                                //            }
-                                //        }
-                                //    }
-                                //EXPERIMENTAL!!!!!
                                 var approved = false;
                                 consensusHeader.WinningAddress = finalizedWinner.Address;
 
@@ -676,6 +579,8 @@ namespace ReserveBlockCore.Nodes
                                                     CasterApprovalList.Add(caster.PeerIP);
                                                     ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {caster.ValidatorAddress}.");
                                                     ConsoleWriterService.OutputVal($"IP Address: {caster.PeerIP}.");
+                                                    await Task.Delay(200);
+                                                    continue;
                                                 }
                                                 else
                                                 {
@@ -696,6 +601,8 @@ namespace ReserveBlockCore.Nodes
 
                                     ConsoleWriterService.OutputVal($"\r\nValidator Bag Count: {vBag.Count()}.");
 
+                                    var approvalCount = casterList.Count() <= 5 ? 3 : 4;
+
                                     if (vBag.Any())
                                     {
                                         foreach(var vote in vBag)
@@ -704,7 +611,7 @@ namespace ReserveBlockCore.Nodes
                                         }
 
                                         var result = CasterVoteList.GroupBy(x => x.Value)
-                                            .Where(x => x.Count() >= 3)
+                                            .Where(x => x.Count() >= approvalCount)
                                             .Select(g => new { Value = g.Key, Count = g.Count() })
                                             .OrderByDescending(g => g.Count)
                                             .FirstOrDefault();
