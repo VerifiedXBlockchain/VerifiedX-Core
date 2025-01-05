@@ -714,6 +714,12 @@ namespace ReserveBlockCore.Nodes
 
                                                 if (nextHeight == currentHeight)
                                                 {
+                                                    var round = Globals.CasterRoundDict[block.Height];
+                                                    if(round != null)
+                                                    {
+                                                        round.Block = block;
+                                                        Globals.CasterRoundDict[block.Height] = round;
+                                                    }
                                                     ConsoleWriterService.OutputVal($"Inside block service B");
                                                     ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
                                                     _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
@@ -776,6 +782,13 @@ namespace ReserveBlockCore.Nodes
                                                                     failedToReachConsensus = false;
 
                                                                     Globals.CasterApprovedBlockHashDict[block.Height] = block.Hash;
+
+                                                                    var round = Globals.CasterRoundDict[block.Height];
+                                                                    if (round != null)
+                                                                    {
+                                                                        round.Block = block;
+                                                                        Globals.CasterRoundDict[block.Height] = round;
+                                                                    }
 
                                                                     ConsoleWriterService.OutputVal($"Block deserialized. Height: {block.Height}");
                                                                     var IP = finalizedWinner.IPAddress;

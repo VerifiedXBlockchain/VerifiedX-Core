@@ -121,9 +121,17 @@ namespace ReserveBlockCore.Controllers
         [Route("GetBlock/{blockHeight}")]
         public ActionResult<string?> GetBlock(long blockHeight)
         {
-            if(Globals.LastBlock.Height == blockHeight)
-                return Ok(JsonConvert.SerializeObject(Globals.LastBlock));
+            if(Globals.CasterRoundDict.ContainsKey(blockHeight))
+            {
+                var round = Globals.CasterRoundDict[blockHeight];
+                if(round == null)
+                    return Ok("0");
+                if(round.Block == null)
+                    return Ok("0");
 
+                return Ok(JsonConvert.SerializeObject(round.Block));
+            }
+                
             return Ok("0");
         }
 

@@ -5,6 +5,7 @@
         public long BlockHeight { get; set; }
         public string Validator { get; set; }
         public int RoundAttempts { get; set; }
+        public Block? Block { get; set; }
 
         public CasterRound()
         {
