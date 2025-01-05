@@ -306,6 +306,7 @@ namespace ReserveBlockCore
         public static ConcurrentBag<string> FailedProducers = new ConcurrentBag<string>();
         public static ConcurrentBag<Peers> BlockCasters = new ConcurrentBag<Peers>();
         public static ConcurrentDictionary<long, string> CasterApprovedBlockHashDict = new ConcurrentDictionary<long, string>();
+        public static ConcurrentDictionary<long, CasterRound> CasterRoundDict = new ConcurrentDictionary<long, CasterRound>();
 
         #endregion
 

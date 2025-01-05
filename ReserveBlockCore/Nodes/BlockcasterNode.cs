@@ -30,7 +30,7 @@ namespace ReserveBlockCore.Nodes
         private readonly IHostApplicationLifetime _appLifetime;
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
         const int PROOF_COLLECTION_TIME = 6000; // 7 seconds
-        const int APPROVAL_WINDOW = 6000;      // 12 seconds
+        const int APPROVAL_WINDOW = 12000;      // 12 seconds
         const int CASTER_VOTE_WINDOW = 3000;
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         public static ReplacementRound _currentRound;
@@ -561,11 +561,22 @@ namespace ReserveBlockCore.Nodes
                                 //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                                 string? terminalWinner = null;
 
-                                while (sw.ElapsedMilliseconds < APPROVAL_WINDOW)
+                                while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
 
                                     if (Globals.LastBlock.Height >= finalizedWinner.BlockHeight)
                                         break;
+
+                                    if(!Globals.CasterRoundDict.ContainsKey(finalizedWinner.BlockHeight))
+                                    {
+                                        var casterRound = new CasterRound
+                                        {
+                                            BlockHeight = finalizedWinner.BlockHeight,
+                                            Validator = finalizedWinner.Address
+                                        };
+
+                                        Globals.CasterRoundDict[finalizedWinner.BlockHeight] = casterRound;
+                                    }
 
                                     foreach (var caster in Globals.BlockCasters)
                                     {
@@ -575,15 +586,28 @@ namespace ReserveBlockCore.Nodes
                                             try
                                             {
                                                 var valAddr = finalizedWinner.Address;
-                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/sendapproval/{finalizedWinner.BlockHeight}/{valAddr}";
+                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
                                                 var response = await client.GetAsync(uri, cts.Token);
                                                 if (response.IsSuccessStatusCode)
                                                 {
-                                                    CasterApprovalList.Add(caster.PeerIP);
-                                                    ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {caster.ValidatorAddress}.");
-                                                    ConsoleWriterService.OutputVal($"IP Address: {caster.PeerIP}.");
-                                                    await Task.Delay(200);
-                                                    continue;
+                                                    var responseJson = await response.Content.ReadAsStringAsync();
+                                                    if (responseJson != null)
+                                                    {
+                                                        if(responseJson != "0")
+                                                        {
+                                                            var remoteCasterRound = JsonConvert.DeserializeObject<CasterRound>(responseJson);
+                                                            if(remoteCasterRound != null)
+                                                            {
+                                                                await GetApproval(caster.PeerIP, finalizedWinner.BlockHeight, remoteCasterRound.Validator);
+                                                                CasterApprovalList.Add(caster.PeerIP);
+                                                                ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {caster.ValidatorAddress}.");
+                                                                ConsoleWriterService.OutputVal($"IP Address: {caster.PeerIP}.");
+                                                                await Task.Delay(200);
+                                                                continue;
+                                                            }
+                                                        }
+                                                    }
+                                                    
                                                 }
                                                 else
                                                 {
@@ -633,7 +657,7 @@ namespace ReserveBlockCore.Nodes
                                                     Globals.CasterApprovedBlockHashDict[finalizedWinner.BlockHeight] = block.Hash;
 
                                                 approved = true;
-                                                //break;
+                                                break;
                                             }
                                         }
                                     }
@@ -1300,6 +1324,12 @@ namespace ReserveBlockCore.Nodes
             foreach (var block in blocksToRemove)
             {
                 while (!Globals.CasterApprovedBlockHashDict.TryRemove(block.Key, out var _)) ;
+            }
+
+            var roundsToRemove = Globals.CasterRoundDict.Where(x => x.Key <= blockPoint).ToList();
+            foreach (var round in roundsToRemove)
+            {
+                while (!Globals.CasterRoundDict.TryRemove(round.Key, out var _)) ;
             }
         }
 

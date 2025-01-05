@@ -128,6 +128,28 @@ namespace ReserveBlockCore.Controllers
         }
 
         [HttpGet]
+        [Route("GetApproval/{blockHeight}")]
+        public ActionResult<string?> GetApproval(long blockHeight)
+        {
+            var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
+            // Convert it to a string if it's not null
+            string? peerIP = remoteIpAddress?.ToString();
+
+            if (peerIP != null)
+            {
+                peerIP = peerIP.Replace("::ffff:", "");
+            }
+
+            if (Globals.CasterRoundDict.ContainsKey(blockHeight))
+            {
+                var casterRound = Globals.CasterRoundDict[blockHeight];
+                return Ok(JsonConvert.SerializeObject(casterRound));
+            }
+
+            return Ok("0");
+        }
+
+        [HttpGet]
         [Route("SendApproval/{blockHeight}/{validatorAddress}")]
         public ActionResult<string?> SendApproval(long blockHeight, string validatorAddress)
         {
