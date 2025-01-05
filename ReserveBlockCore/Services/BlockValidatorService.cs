@@ -259,7 +259,7 @@ namespace ReserveBlockCore.Services
                     }
                 }
 
-                if (Globals.IsBlockCaster)
+                if (Globals.IsBlockCaster && !validateOnly)
                 {
                     if (!Globals.CasterApprovedBlockHashDict.ContainsKey(block.Height))
                         return result;
