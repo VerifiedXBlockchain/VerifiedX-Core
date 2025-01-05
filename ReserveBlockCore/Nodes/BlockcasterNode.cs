@@ -435,7 +435,7 @@ namespace ReserveBlockCore.Nodes
                         ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
                     }
 
-
+                    _ = BlockchainData.CleanupApprovedCasterBlocks();
 
                     var consensusHeader = new ConsensusHeader();
                     consensusHeader.Height = Height;
@@ -655,15 +655,15 @@ namespace ReserveBlockCore.Nodes
                                             var nextHeight = Globals.LastBlock.Height + 1;
                                             var currentHeight = block.Height;
 
-                                            //if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                            //{
-                                            //    ConsoleWriterService.OutputVal($"Processing Block");
-                                            //    BlockDownloadService.BlockDict[currentHeight] = (block, IP);
-                                            //    if (nextHeight == currentHeight)
-                                            //        await BlockValidatorService.ValidateBlocks();
-                                            //    if (nextHeight < currentHeight)
-                                            //        await BlockDownloadService.GetAllBlocks();
-                                            //}
+                                            if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                            {
+                                                ConsoleWriterService.OutputVal($"Processing Block");
+                                                BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                if (nextHeight == currentHeight)
+                                                    await BlockValidatorService.ValidateBlocks();
+                                                if (nextHeight < currentHeight)
+                                                    await BlockDownloadService.GetAllBlocks();
+                                            }
 
                                             if (currentHeight < nextHeight)
                                             {
