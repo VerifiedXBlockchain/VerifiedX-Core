@@ -616,8 +616,8 @@ namespace ReserveBlockCore.Nodes
                                                             {
                                                                 await GetApproval(caster.PeerIP, finalizedWinner.BlockHeight, remoteCasterRound.Validator);
                                                                 CasterApprovalList.Add(caster.PeerIP);
-                                                                ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {caster.ValidatorAddress}.");
-                                                                ConsoleWriterService.OutputVal($"IP Address: {caster.PeerIP}.");
+                                                                //ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {caster.ValidatorAddress}.");
+                                                                //ConsoleWriterService.OutputVal($"IP Address: {caster.PeerIP}.");
                                                                 await Task.Delay(200);
                                                                 continue;
                                                             }
@@ -672,9 +672,15 @@ namespace ReserveBlockCore.Nodes
                                                 if(block != null)
                                                     Globals.CasterApprovedBlockHashDict[finalizedWinner.BlockHeight] = block.Hash;
 
+                                                ConsoleWriterService.OutputVal($"\r\nBag was approved. Moving to next block.");
+
                                                 approved = true;
                                                 break;
                                             }
+                                        }
+                                        else
+                                        {
+                                            ConsoleWriterService.OutputVal($"\r\n Bag failed. No Result was found.");
                                         }
                                     }
                                 }
