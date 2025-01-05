@@ -670,7 +670,18 @@ namespace ReserveBlockCore.Nodes
                                                     block = null;
 
                                                 if(block != null)
+                                                {
+                                                    var round = Globals.CasterRoundDict[block.Height];
+                                                    if (round != null)
+                                                    {
+                                                        var compareRound = round;
+                                                        round.Block = block;
+                                                        while(!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound));
+                                                    }
+
                                                     Globals.CasterApprovedBlockHashDict[finalizedWinner.BlockHeight] = block.Hash;
+                                                }
+                                                    
 
                                                 ConsoleWriterService.OutputVal($"\r\nBag was approved. Moving to next block.");
 
@@ -720,12 +731,6 @@ namespace ReserveBlockCore.Nodes
 
                                                 if (nextHeight == currentHeight)
                                                 {
-                                                    var round = Globals.CasterRoundDict[block.Height];
-                                                    if(round != null)
-                                                    {
-                                                        round.Block = block;
-                                                        Globals.CasterRoundDict[block.Height] = round;
-                                                    }
                                                     ConsoleWriterService.OutputVal($"Inside block service B");
                                                     ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
                                                     _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
@@ -792,8 +797,9 @@ namespace ReserveBlockCore.Nodes
                                                                     var round = Globals.CasterRoundDict[block.Height];
                                                                     if (round != null)
                                                                     {
+                                                                        var compareRound = round;
                                                                         round.Block = block;
-                                                                        Globals.CasterRoundDict[block.Height] = round;
+                                                                        while (!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound));
                                                                     }
 
                                                                     ConsoleWriterService.OutputVal($"Block deserialized. Height: {block.Height}");

@@ -454,6 +454,19 @@ namespace ReserveBlockCore.Controllers
             return JsonConvert.SerializeObject(new { Success = true, Message = $"", NetworkVals = networkVals, ValidatorNodes = valVals }, Formatting.Indented);
         }
 
+        /// <summary>
+        /// Get caster round List
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet]
+        [Route("GetCasterRounds")]
+        public async Task<string> GetCasterRounds()
+        {
+            var rounds = Globals.CasterRoundDict.Values.ToList();
+
+            return JsonConvert.SerializeObject(new { Success = true, Message = $"", CasterRounds = rounds }, Formatting.Indented);
+        }
+
 
         /// <summary>
         /// Takes compressed base 64 image and decompresses it and returns byte array.
