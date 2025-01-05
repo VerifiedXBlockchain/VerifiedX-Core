@@ -633,7 +633,7 @@ namespace ReserveBlockCore.Nodes
                                                     Globals.CasterApprovedBlockHashDict[finalizedWinner.BlockHeight] = block.Hash;
 
                                                 approved = true;
-                                                break;
+                                                //break;
                                             }
                                         }
                                     }
@@ -1295,7 +1295,7 @@ namespace ReserveBlockCore.Nodes
         #region CleanupApprovedCasterBlocks
         public static async Task CleanupApprovedCasterBlocks()
         {
-            var blockPoint = Globals.LastBlock.Height - 10;
+            var blockPoint = Globals.LastBlock.Height - 50;
             var blocksToRemove = Globals.CasterApprovedBlockHashDict.Where(x => x.Key <= blockPoint).ToList();
             foreach (var block in blocksToRemove)
             {
