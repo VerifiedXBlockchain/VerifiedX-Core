@@ -535,7 +535,7 @@ namespace ReserveBlockCore.Data
                     block.BCraftTime = buildTime.Milliseconds;
 
 
-                    blockCrafted = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
+                    blockCrafted = await BlockValidatorService.ValidateBlock(block, true, false, true, true);
                     if (blockCrafted == true)
                     {
                         break;
@@ -560,16 +560,6 @@ namespace ReserveBlockCore.Data
         }
 
         #endregion
-
-        public static async Task CleanupApprovedCasterBlocks()
-        {
-            var blockPoint = Globals.LastBlock.Height - 10;
-            var blocksToRemove = Globals.CasterApprovedBlockHashDict.Where(x => x.Key <= blockPoint).ToList();
-            foreach(var block in blocksToRemove)
-            {
-                while(!Globals.CasterApprovedBlockHashDict.TryRemove(block.Key, out var _));
-            }
-        }
 
         public static decimal GetBlockReward()
         {

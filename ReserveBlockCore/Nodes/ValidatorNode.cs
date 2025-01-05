@@ -813,57 +813,6 @@ namespace ReserveBlockCore.Nodes
 
         #endregion
 
-        #region Send Winning Proof Backup Method
-        public static async Task SendWinningProof(Proof proof)
-        {
-            // Create a CancellationTokenSource with a timeout of 5 seconds
-            var validators = Globals.NetworkValidators.Values.ToList();
-
-            try
-            {
-                var rnd = new Random();
-                var randomizedValidators = validators
-                    .OrderBy(x => rnd.Next())
-                    .ToList();
-
-                var postData = JsonConvert.SerializeObject(proof);
-                var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
-
-                if (!randomizedValidators.Any())
-                    return;
-
-                var sw = Stopwatch.StartNew();
-                randomizedValidators.ParallelLoop(async validator =>
-                {
-                    if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
-                    {
-                        // Stop processing if cancellation is requested
-                        sw.Stop();
-                        return;
-                    }
-
-                    using (var client = Globals.HttpClientFactory.CreateClient())
-                    {
-                        try
-                        {
-                            // Create a request-specific CancellationTokenSource with a 1-second timeout
-                            var uri = $"http://{validator.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
-                            await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 2));
-                            await Task.Delay(75);
-                        }
-                        catch (Exception ex)
-                        {
-                            // Log or handle the exception if needed
-                        }
-                    }
-                });
-            }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Error in proof distribution: {ex.Message}", "ValidatorNode.SendWinningProof()");
-            }
-        }
-        #endregion
 
         #region Get Val List
         public static async Task<Peers[]?> GetValList(bool skipConnectedNodes = false)
@@ -911,41 +860,6 @@ namespace ReserveBlockCore.Nodes
 
             return peerList;
         }
-        #endregion
-
-        #region Get Approval
-
-        public static async Task GetApproval(string? ip, long blockHeight, string validatorAddress)
-        {
-            if (ip == null)
-                return;
-
-            ip = ip.Replace("::ffff:", "");
-
-            var alreadyApproved = ValidatorApprovalBag.Where(x => x.Item1 == ip).ToList();
-            if (alreadyApproved.Any())
-                return;
-
-            ValidatorApprovalBag.Add((ip.Replace("::ffff:", ""), blockHeight, validatorAddress));
-        }
-
-        #endregion
-
-        #region Wait For Next Consensus Round
-        private static async Task WaitForNextConsensusRound()
-        {
-            var CurrentTime = TimeUtil.GetMillisecondTime();
-            var LastBlockTime = Globals.LastBlock.Timestamp;
-            var TimeSinceLastBlock = CurrentTime - LastBlockTime;
-
-            // If we're in the middle of a consensus round, wait for the next one
-            if (TimeSinceLastBlock < Globals.BlockTime)
-            {
-                var waitTime = Globals.BlockTime - TimeSinceLastBlock + 1000; // Add 1 second buffer
-                await Task.Delay((int)waitTime);
-            }
-        }
-
         #endregion
 
         #region Stop/Dispose

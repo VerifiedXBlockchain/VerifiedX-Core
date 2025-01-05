@@ -29,8 +29,8 @@ namespace ReserveBlockCore.Nodes
         private readonly IHubContext<P2PBlockcasterServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
-        const int PROOF_COLLECTION_TIME = 7000; // 7 seconds
-        const int APPROVAL_WINDOW = 12000;      // 12 seconds
+        const int PROOF_COLLECTION_TIME = 6000; // 7 seconds
+        const int APPROVAL_WINDOW = 6000;      // 12 seconds
         const int CASTER_VOTE_WINDOW = 3000;
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         public static ReplacementRound _currentRound;
@@ -435,7 +435,7 @@ namespace ReserveBlockCore.Nodes
                         ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
                     }
 
-                    _ = BlockchainData.CleanupApprovedCasterBlocks();
+                    _ = CleanupApprovedCasterBlocks();
 
                     var consensusHeader = new ConsensusHeader();
                     consensusHeader.Height = Height;
@@ -561,7 +561,7 @@ namespace ReserveBlockCore.Nodes
                                 //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                                 string? terminalWinner = null;
 
-                                while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
+                                while (sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
 
                                     if (Globals.LastBlock.Height >= finalizedWinner.BlockHeight)
@@ -606,7 +606,7 @@ namespace ReserveBlockCore.Nodes
 
                                     var approvalCount = casterList.Count() <= 5 ? 3 : 4;
 
-                                    if (vBag.Any())
+                                    if (vBag.Any() && !approved)
                                     {
                                         foreach(var vote in vBag)
                                         {
@@ -1222,7 +1222,7 @@ namespace ReserveBlockCore.Nodes
         public static async Task SendWinningProof(Proof proof)
         {
             // Create a CancellationTokenSource with a timeout of 5 seconds
-            var validators = Globals.BlockCasterNodes.Values.ToList();
+            var validators = Globals.BlockCasters.ToList();
 
             try
             {
@@ -1252,9 +1252,9 @@ namespace ReserveBlockCore.Nodes
                         try
                         {
                             // Create a request-specific CancellationTokenSource with a 1-second timeout
-                            var uri = $"http://{validator.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
+                            var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
                             await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 2));
-                            await Task.Delay(75);
+                            await Task.Delay(200);
                         }
                         catch (Exception ex)
                         {
@@ -1288,6 +1288,19 @@ namespace ReserveBlockCore.Nodes
                 return;
 
             ValidatorApprovalBag.Add((ip.Replace("::ffff:", ""), blockHeight, validatorAddress));
+        }
+
+        #endregion
+
+        #region CleanupApprovedCasterBlocks
+        public static async Task CleanupApprovedCasterBlocks()
+        {
+            var blockPoint = Globals.LastBlock.Height - 10;
+            var blocksToRemove = Globals.CasterApprovedBlockHashDict.Where(x => x.Key <= blockPoint).ToList();
+            foreach (var block in blocksToRemove)
+            {
+                while (!Globals.CasterApprovedBlockHashDict.TryRemove(block.Key, out var _)) ;
+            }
         }
 
         #endregion
