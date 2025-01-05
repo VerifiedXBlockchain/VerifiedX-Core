@@ -305,6 +305,7 @@ namespace ReserveBlockCore
         public static ConcurrentQueue<ConsensusHeader> ConsensusHeaderQueue = new ConcurrentQueue<ConsensusHeader>();
         public static ConcurrentBag<string> FailedProducers = new ConcurrentBag<string>();
         public static ConcurrentBag<Peers> BlockCasters = new ConcurrentBag<Peers>();
+        public static ConcurrentDictionary<long, string> CasterApprovedBlockHashDict = new ConcurrentDictionary<long, string>();
 
         #endregion
 

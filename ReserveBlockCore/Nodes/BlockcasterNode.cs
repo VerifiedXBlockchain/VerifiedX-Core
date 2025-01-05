@@ -31,6 +31,7 @@ namespace ReserveBlockCore.Nodes
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
         const int PROOF_COLLECTION_TIME = 7000; // 7 seconds
         const int APPROVAL_WINDOW = 12000;      // 12 seconds
+        const int CASTER_VOTE_WINDOW = 3000;
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         public static ReplacementRound _currentRound;
         public static List<string> _allCasterAddresses;
@@ -558,6 +559,8 @@ namespace ReserveBlockCore.Nodes
 
                                 //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                                 //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                                string? terminalWinner = null;
+
                                 while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
                                 {
 
@@ -568,7 +571,7 @@ namespace ReserveBlockCore.Nodes
                                     {
                                         using (var client = Globals.HttpClientFactory.CreateClient())
                                         {
-                                            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(APPROVAL_WINDOW));
+                                            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
                                             try
                                             {
                                                 var valAddr = finalizedWinner.Address;
@@ -584,7 +587,7 @@ namespace ReserveBlockCore.Nodes
                                                 }
                                                 else
                                                 {
-                                                    await Task.Delay(100);
+                                                    await Task.Delay(200);
                                                 }
                                             }
                                             catch (Exception ex)
@@ -607,7 +610,8 @@ namespace ReserveBlockCore.Nodes
                                     {
                                         foreach(var vote in vBag)
                                         {
-                                            CasterVoteList[vote.Item1] = vote.Item3;
+                                            if(!CasterVoteList.ContainsKey(vote.Item1))
+                                                CasterVoteList[vote.Item1] = vote.Item3;
                                         }
 
                                         var result = CasterVoteList.GroupBy(x => x.Value)
@@ -616,13 +620,17 @@ namespace ReserveBlockCore.Nodes
                                             .OrderByDescending(g => g.Count)
                                             .FirstOrDefault();
 
-                                        if(result != null)
+                                        if (result != null)
                                         {
-                                            if(result.Count >= 3)
+                                            if (result.Count >= approvalCount)
                                             {
+                                                terminalWinner = result.Value;
                                                 //If our winner does not match the consensus get the one that does.
                                                 if (finalizedWinner.Address != result.Value)
                                                     block = null;
+
+                                                if(block != null)
+                                                    Globals.CasterApprovedBlockHashDict[finalizedWinner.BlockHeight] = block.Hash;
 
                                                 approved = true;
                                                 break;
@@ -647,15 +655,15 @@ namespace ReserveBlockCore.Nodes
                                             var nextHeight = Globals.LastBlock.Height + 1;
                                             var currentHeight = block.Height;
 
-                                            if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                            {
-                                                ConsoleWriterService.OutputVal($"Processing Block");
-                                                BlockDownloadService.BlockDict[currentHeight] = (block, IP);
-                                                if (nextHeight == currentHeight)
-                                                    await BlockValidatorService.ValidateBlocks();
-                                                if (nextHeight < currentHeight)
-                                                    await BlockDownloadService.GetAllBlocks();
-                                            }
+                                            //if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                            //{
+                                            //    ConsoleWriterService.OutputVal($"Processing Block");
+                                            //    BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                            //    if (nextHeight == currentHeight)
+                                            //        await BlockValidatorService.ValidateBlocks();
+                                            //    if (nextHeight < currentHeight)
+                                            //        await BlockDownloadService.GetAllBlocks();
+                                            //}
 
                                             if (currentHeight < nextHeight)
                                             {
@@ -667,6 +675,7 @@ namespace ReserveBlockCore.Nodes
                                                 if (nextHeight == currentHeight)
                                                 {
                                                     ConsoleWriterService.OutputVal($"Inside block service B");
+                                                    ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
                                                     _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                                     //_ = P2PValidatorClient.BroadcastBlock(block);
                                                 }
@@ -677,14 +686,15 @@ namespace ReserveBlockCore.Nodes
                                                 break;
                                             }
                                         }
-                                        if (Globals.LastBlock.Height == finalizedWinner.BlockHeight)
-                                        {
-                                            ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
-                                            _ = Broadcast("7", JsonConvert.SerializeObject(Globals.LastBlock), "");
-                                            //_ = P2PValidatorClient.BroadcastBlock(Globals.LastBlock);
-                                            blockFound = true;
-                                            break;
-                                        }
+
+                                        //if (Globals.LastBlock.Height == finalizedWinner.BlockHeight)
+                                        //{
+                                        //    ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
+                                        //    _ = Broadcast("7", JsonConvert.SerializeObject(Globals.LastBlock), "");
+                                        //    //_ = P2PValidatorClient.BroadcastBlock(Globals.LastBlock);
+                                        //    blockFound = true;
+                                        //    break;
+                                        //}
 
                                         //This is done if non-caster wins, and block IS NULL. We must request from other casters as at least 2/3 should have it.
                                         try
@@ -711,11 +721,22 @@ namespace ReserveBlockCore.Nodes
                                                                     continue;
                                                                 }
 
-                                                                failedToReachConsensus = false;
                                                                 ConsoleWriterService.OutputVal($"Response had non-zero data");
                                                                 block = JsonConvert.DeserializeObject<Block>(responseBody);
                                                                 if (block != null)
                                                                 {
+
+                                                                    if(block.Validator != terminalWinner)
+                                                                    {
+                                                                        failedToReachConsensus = true;
+                                                                        await Task.Delay(75);
+                                                                        continue;
+                                                                    }
+
+                                                                    failedToReachConsensus = false;
+
+                                                                    Globals.CasterApprovedBlockHashDict[block.Height] = block.Hash;
+
                                                                     ConsoleWriterService.OutputVal($"Block deserialized. Height: {block.Height}");
                                                                     var IP = finalizedWinner.IPAddress;
                                                                     var nextHeight = Globals.LastBlock.Height + 1;

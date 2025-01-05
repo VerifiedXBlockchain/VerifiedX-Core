@@ -88,11 +88,13 @@ namespace ReserveBlockCore.Services
                         {
                             if (Globals.AdjudicateAccount != null)
                                 continue;
-                            BanService.BanPeer(ipAddress, ipAddress + " at height " + height, "BlockValidatorService.ValidateBlocks()");
-                            ErrorLogUtility.LogError("Banned IP address: " + ipAddress + " at height " + height, "ValidateBlocks");
-                            if (Globals.Nodes.TryRemove(ipAddress, out var node) && node.Connection != null)
-                                await node.Connection.DisposeAsync();
+                            //TESTING! Removing ban logic for now.
+                            //BanService.BanPeer(ipAddress, ipAddress + " at height " + height, "BlockValidatorService.ValidateBlocks()");
+                            //ErrorLogUtility.LogError("Banned IP address: " + ipAddress + " at height " + height, "ValidateBlocks");
+                            //if (Globals.Nodes.TryRemove(ipAddress, out var node) && node.Connection != null)
+                            //    await node.Connection.DisposeAsync();
                             ConsoleWriterService.Output($"Block: {block.Height} was rejected from: {block.Validator}");
+                            ErrorLogUtility.LogError($"Block: {block.Height} was rejected from: {block.Validator}", "ValidateBlocks");
                         }
                         else
                         {
@@ -136,6 +138,8 @@ namespace ReserveBlockCore.Services
                 {
                     await DbContext.CheckPoint();
                 }
+
+
 
                 //DbContext.BeginTrans();
 
@@ -253,6 +257,19 @@ namespace ReserveBlockCore.Services
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-9");
                         return result;
                     }
+                }
+
+                if (Globals.IsBlockCaster)
+                {
+                    if (!Globals.CasterApprovedBlockHashDict.ContainsKey(block.Height))
+                        return result;
+
+                    var hash = Globals.CasterApprovedBlockHashDict[block.Height];
+                    if (hash == null)
+                        return result;
+
+                    if (hash != block.Hash)
+                        return result;
                 }
 
                 var newBlock = new Block
