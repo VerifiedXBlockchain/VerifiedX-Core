@@ -575,7 +575,23 @@ namespace ReserveBlockCore.Nodes
                                             Validator = finalizedWinner.Address
                                         };
 
+                                        casterRound.ProgressRound();
+
                                         Globals.CasterRoundDict[finalizedWinner.BlockHeight] = casterRound;
+                                    }
+                                    else
+                                    {
+                                        var round = Globals.CasterRoundDict[finalizedWinner.BlockHeight];
+                                        round.ProgressRound();
+                                        if(round.RoundStale())
+                                        {
+                                            var casterRound = new CasterRound
+                                            {
+                                                BlockHeight = finalizedWinner.BlockHeight,
+                                                Validator = finalizedWinner.Address
+                                            };
+                                            Globals.CasterRoundDict[finalizedWinner.BlockHeight] = casterRound;
+                                        }
                                     }
 
                                     foreach (var caster in Globals.BlockCasters)
