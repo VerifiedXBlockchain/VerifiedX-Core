@@ -599,7 +599,7 @@ namespace ReserveBlockCore.Nodes
                                     }
                                     else
                                     {
-                                        var round = Globals.CasterRoundDict[finalizedWinner.BlockHeight];
+                                        round = Globals.CasterRoundDict[finalizedWinner.BlockHeight];
                                         round.ProgressRound();
                                         if(round.RoundStale())
                                         {
@@ -688,7 +688,7 @@ namespace ReserveBlockCore.Nodes
 
                                                 if(block != null)
                                                 {
-                                                    var round = Globals.CasterRoundDict[block.Height];
+                                                    round = Globals.CasterRoundDict[block.Height];
                                                     if (round != null)
                                                     {
                                                         var compareRound = round;
@@ -819,7 +819,7 @@ namespace ReserveBlockCore.Nodes
                                                                     else
                                                                         while (!Globals.CasterApprovedBlockHashDict.TryAdd(block.Height, block.Hash));
 
-                                                                    var round = Globals.CasterRoundDict[block.Height];
+                                                                    round = Globals.CasterRoundDict[block.Height];
                                                                     if (round != null)
                                                                     {
                                                                         var compareRound = round;
