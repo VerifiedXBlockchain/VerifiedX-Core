@@ -94,7 +94,7 @@ namespace ReserveBlockCore.Services
                             //if (Globals.Nodes.TryRemove(ipAddress, out var node) && node.Connection != null)
                             //    await node.Connection.DisposeAsync();
                             ConsoleWriterService.Output($"Block: {block.Height} was rejected from: {block.Validator}");
-                            ErrorLogUtility.LogError($"Block: {block.Height} was rejected from: {block.Validator}", "ValidateBlocks");
+                            //ErrorLogUtility.LogError($"Block: {block.Height} was rejected from: {block.Validator}", "ValidateBlocks");
                         }
                         else
                         {
