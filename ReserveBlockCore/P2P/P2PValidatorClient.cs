@@ -160,6 +160,9 @@ namespace ReserveBlockCore.P2P
                 if (!ConnectLock.TryAdd(url, true))
                     return;
 
+                if (peer.PeerIP.Replace("::ffff:", "") != "66.94.124.2")
+                    return;
+
                 var account = AccountData.GetLocalValidator();
                 var validators = Validators.Validator.GetAll();
                 var validator = validators.FindOne(x => x.Address == account.Address);
@@ -178,11 +181,18 @@ namespace ReserveBlockCore.P2P
                         options.Headers.Add("signature", signature);
                         options.Headers.Add("walver", Globals.CLIVersion);
                         options.Headers.Add("publicKey", account.PublicKey);
+                        // Try both WebSockets and LongPolling
                         options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
                         options.SkipNegotiation = false;
+                        // Increase timeouts
+                        options.CloseTimeout = TimeSpan.FromSeconds(15);
                         options.WebSocketConfiguration = conf => {
                             conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
                         };
+                    })
+                    .ConfigureLogging(logging =>
+                    {
+                        logging.SetMinimumLevel(LogLevel.Debug);
                     })
                     .Build();
 
