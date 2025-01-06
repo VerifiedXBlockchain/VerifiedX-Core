@@ -79,23 +79,28 @@ namespace ReserveBlockCore
             {
                 var path = context.Request.Path.Value?.ToLower();
 
-                // Log incoming requests for debugging
-                //Console.WriteLine($"Request path: {path}");
-                //Console.WriteLine($"Request protocol: {context.Request.Protocol}");
-                //Console.WriteLine($"Is WebSocket? {context.WebSockets.IsWebSocketRequest}");
+                // Special handling for SignalR paths
+                if (path?.StartsWith("/consensus") == true || path?.StartsWith("/blockcaster") == true)
+                {
+                    // If it's a WebSocket request, let it through immediately
+                    if (context.WebSockets.IsWebSocketRequest)
+                    {
+                        await next();
+                        return;
+                    }
 
-                // Allow SignalR negotiation and WebSocket upgrade requests
-                if (path?.StartsWith("/consensus") == true)
-                {
-                    await next();
+                    // For non-WebSocket SignalR requests (negotiation, etc.)
+                    if (context.Request.Query.ContainsKey("negotiateVersion"))
+                    {
+                        await next();
+                        return;
+                    }
                 }
-                else if (path?.StartsWith("/blockcaster") == true)
-                {
-                    await next();
-                }
+                // Handle regular API requests
                 else if (path?.StartsWith("/valapi") == true)
                 {
                     await next();
+                    return;
                 }
                 else
                 {

@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.SignalR;
 using System.Xml.Linq;
 using System.Net;
 using System.Reflection.Metadata.Ecma335;
+using Microsoft.AspNetCore.Http.Connections;
 
 namespace ReserveBlockCore.P2P
 {
@@ -169,21 +170,21 @@ namespace ReserveBlockCore.P2P
                 var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
 
                 var hubConnection = new HubConnectionBuilder()
-                       .WithUrl(url, options =>
-                       {
-                           options.Headers.Add("address", validator.Address);
-                           options.Headers.Add("time", time);
-                           options.Headers.Add("uName", validator.UniqueName);
-                           options.Headers.Add("signature", signature);
-                           options.Headers.Add("walver", Globals.CLIVersion);
-                           options.Headers.Add("publicKey", account.PublicKey);
-                           options.Transports = Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets;
-                           options.SkipNegotiation = false; // Important: Allow negotiation
-                           options.WebSocketConfiguration = conf => {
-                               conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
-                           };
-                       })                       
-                       .Build();
+                    .WithUrl(url, options =>
+                    {
+                        options.Headers.Add("address", validator.Address);
+                        options.Headers.Add("time", time);
+                        options.Headers.Add("uName", validator.UniqueName);
+                        options.Headers.Add("signature", signature);
+                        options.Headers.Add("walver", Globals.CLIVersion);
+                        options.Headers.Add("publicKey", account.PublicKey);
+                        options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
+                        options.SkipNegotiation = false;
+                        options.WebSocketConfiguration = conf => {
+                            conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
+                        };
+                    })
+                    .Build();
 
                 var IPAddress = GetPathUtility.IPFromURL(url);
                 hubConnection.On<string, string>("GetValMessage", async (message, data) =>
