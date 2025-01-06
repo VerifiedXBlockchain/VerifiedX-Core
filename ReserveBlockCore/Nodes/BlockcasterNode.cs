@@ -679,7 +679,11 @@ namespace ReserveBlockCore.Nodes
                                                         while(!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound));
                                                     }
 
-                                                    Globals.CasterApprovedBlockHashDict[finalizedWinner.BlockHeight] = block.Hash;
+                                                    Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var currentVal);
+                                                    if (currentVal != null)
+                                                        while (!Globals.CasterApprovedBlockHashDict.TryUpdate(block.Height, block.Hash, currentVal));
+                                                    else
+                                                        while (!Globals.CasterApprovedBlockHashDict.TryAdd(block.Height, block.Hash));
                                                 }
                                                     
 
@@ -792,7 +796,11 @@ namespace ReserveBlockCore.Nodes
 
                                                                     failedToReachConsensus = false;
 
-                                                                    Globals.CasterApprovedBlockHashDict[block.Height] = block.Hash;
+                                                                    Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var currentVal);
+                                                                    if(currentVal != null)
+                                                                        while(!Globals.CasterApprovedBlockHashDict.TryUpdate(block.Height, block.Hash, currentVal));
+                                                                    else
+                                                                        while (!Globals.CasterApprovedBlockHashDict.TryAdd(block.Height, block.Hash));
 
                                                                     var round = Globals.CasterRoundDict[block.Height];
                                                                     if (round != null)
@@ -1364,13 +1372,20 @@ namespace ReserveBlockCore.Nodes
             var blocksToRemove = Globals.CasterApprovedBlockHashDict.Where(x => x.Key <= blockPoint).ToList();
             foreach (var block in blocksToRemove)
             {
-                while (!Globals.CasterApprovedBlockHashDict.TryRemove(block.Key, out var _)) ;
+                while (!Globals.CasterApprovedBlockHashDict.TryRemove(block.Key, out var _))
+                {
+                    await Task.Delay(75);
+                }
+
             }
 
             var roundsToRemove = Globals.CasterRoundDict.Where(x => x.Key <= blockPoint).ToList();
             foreach (var round in roundsToRemove)
             {
-                while (!Globals.CasterRoundDict.TryRemove(round.Key, out var _)) ;
+                while (!Globals.CasterRoundDict.TryRemove(round.Key, out var _))
+                {
+                    await Task.Delay(75);
+                }
             }
         }
 
