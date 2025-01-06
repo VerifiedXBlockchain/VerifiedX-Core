@@ -1329,15 +1329,8 @@ namespace ReserveBlockCore.Nodes
                 {
                     try
                     {
-                        randomizedValidators.ParallelLoop(async validator =>
+                        foreach(var validator in randomizedValidators)
                         {
-                            if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
-                            {
-                                // Stop processing if cancellation is requested
-                                sw.Stop();
-                                return;
-                            }
-
                             using (var client = Globals.HttpClientFactory.CreateClient())
                             {
                                 using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
@@ -1374,7 +1367,7 @@ namespace ReserveBlockCore.Nodes
                                     ConsoleWriterService.OutputVal($"ERROR: {ex}.");
                                 }
                             }
-                        });
+                        }
                     }
                     catch (Exception ex) { }
                 }
