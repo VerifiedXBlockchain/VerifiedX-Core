@@ -160,9 +160,6 @@ namespace ReserveBlockCore.P2P
                 if (!ConnectLock.TryAdd(url, true))
                     return;
 
-                if (peer.PeerIP.Replace("::ffff:", "") != "66.94.124.2")
-                    return;
-
                 var account = AccountData.GetLocalValidator();
                 var validators = Validators.Validator.GetAll();
                 var validator = validators.FindOne(x => x.Address == account.Address);
@@ -189,10 +186,6 @@ namespace ReserveBlockCore.P2P
                         options.WebSocketConfiguration = conf => {
                             conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
                         };
-                    })
-                    .ConfigureLogging(logging =>
-                    {
-                        logging.SetMinimumLevel(LogLevel.Debug);
                     })
                     .Build();
 
