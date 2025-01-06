@@ -1325,52 +1325,60 @@ namespace ReserveBlockCore.Nodes
                     return;
 
                 var sw = Stopwatch.StartNew();
-                randomizedValidators.ParallelLoop(async validator =>
+                while (sw.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                 {
-                    if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
+                    try
                     {
-                        // Stop processing if cancellation is requested
-                        sw.Stop();
-                        return;
-                    }
-
-                    using (var client = Globals.HttpClientFactory.CreateClient())
-                    {
-                        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
-                        try
+                        randomizedValidators.ParallelLoop(async validator =>
                         {
-                            var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof/{proof.BlockHeight}";
-                            var response = await client.GetAsync(uri, cts.Token);
-                            if (response.IsSuccessStatusCode)
+                            if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
                             {
-                                var responseJson = await response.Content.ReadAsStringAsync();
-                                if (responseJson != null)
-                                {
-                                    if (responseJson != "0")
-                                    {
-                                        var remoteCasterProof = JsonConvert.DeserializeObject<Proof>(responseJson);
-                                        if (remoteCasterProof != null)
-                                        {
-                                            if (remoteCasterProof.VerifyProof())
-                                                Globals.Proofs.Add(remoteCasterProof);
+                                // Stop processing if cancellation is requested
+                                sw.Stop();
+                                return;
+                            }
 
-                                            await Task.Delay(200);
+                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            {
+                                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
+                                try
+                                {
+                                    var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof/{proof.BlockHeight}";
+                                    var response = await client.GetAsync(uri, cts.Token);
+                                    if (response.IsSuccessStatusCode)
+                                    {
+                                        var responseJson = await response.Content.ReadAsStringAsync();
+                                        if (responseJson != null)
+                                        {
+                                            if (responseJson != "0")
+                                            {
+                                                var remoteCasterProof = JsonConvert.DeserializeObject<Proof>(responseJson);
+                                                if (remoteCasterProof != null)
+                                                {
+                                                    if (remoteCasterProof.VerifyProof())
+                                                        Globals.Proofs.Add(remoteCasterProof);
+
+                                                    await Task.Delay(200);
+                                                }
+                                            }
                                         }
                                     }
+                                    else
+                                    {
+                                        await Task.Delay(200);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    ConsoleWriterService.OutputVal($"\r\nError getting proof from address: {validator.PeerIP}.");
+                                    ConsoleWriterService.OutputVal($"ERROR: {ex}.");
                                 }
                             }
-                            else
-                            {
-                                await Task.Delay(200);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            ConsoleWriterService.OutputVal($"\r\nError getting proof from address: {validator.PeerIP}.");
-                            ConsoleWriterService.OutputVal($"ERROR: {ex}.");
-                        }
+                        });
                     }
-                });
+                    catch (Exception ex) { }
+                }
+                
             }
             catch (Exception ex)
             {
