@@ -1378,7 +1378,8 @@ namespace ReserveBlockCore.Nodes
                     }
                     catch (Exception ex) { }
                 }
-                
+
+                sw.Stop();
             }
             catch (Exception ex)
             {
