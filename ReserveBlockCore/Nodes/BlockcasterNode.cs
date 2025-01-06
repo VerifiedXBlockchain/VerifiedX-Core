@@ -451,6 +451,16 @@ namespace ReserveBlockCore.Nodes
                     var winningProof = await ProofUtility.SortProofs(proofs);
                     ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
 
+                    if (!Globals.CasterRoundDict.ContainsKey(Height))
+                    {
+                        var casterRound = new CasterRound
+                        {
+                            BlockHeight = Height,
+                        };
+
+                        Globals.CasterRoundDict[Height] = casterRound;
+                    }
+
                     if (winningProof != null && proofs.Count() > 1)
                     {
                         ConsoleWriterService.OutputVal($"\r\nAttempting Proof on Address: {winningProof.Address}");
@@ -525,13 +535,21 @@ namespace ReserveBlockCore.Nodes
                         }
 
                         ConsoleWriterService.OutputVal($"\r\nPotential Winner Found! Address: {winningProof.Address}");
-                        Globals.Proofs.Add(winningProof);
+                        //Globals.Proofs.Add(winningProof);
+
+                        var round = Globals.CasterRoundDict[Height];
+                        if (round != null)
+                        {
+                            var compareRound = round;
+                            round.Proof = winningProof;
+                            while (!Globals.CasterRoundDict.TryUpdate(Height, round, compareRound)) ;
+                        }
 
                         _ = SendWinningProof(winningProof);
 
                         await Task.Delay(PROOF_COLLECTION_TIME);
 
-                        var proofSnapshot = Globals.Proofs.ToList();
+                        var proofSnapshot = Globals.Proofs.Where(x => x.BlockHeight == Height).ToList();
 
                         var finalizedWinnerGroup = proofSnapshot
                             .OrderBy(x => Math.Abs(x.VRFNumber))
@@ -623,7 +641,6 @@ namespace ReserveBlockCore.Nodes
                                                             }
                                                         }
                                                     }
-                                                    
                                                 }
                                                 else
                                                 {
@@ -1304,9 +1321,6 @@ namespace ReserveBlockCore.Nodes
                     .OrderBy(x => rnd.Next())
                     .ToList();
 
-                var postData = JsonConvert.SerializeObject(proof);
-                var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
-
                 if (!randomizedValidators.Any())
                     return;
 
@@ -1322,16 +1336,38 @@ namespace ReserveBlockCore.Nodes
 
                     using (var client = Globals.HttpClientFactory.CreateClient())
                     {
+                        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
                         try
                         {
-                            // Create a request-specific CancellationTokenSource with a 1-second timeout
-                            var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
-                            await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 2));
-                            await Task.Delay(200);
+                            var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof/{proof.BlockHeight}";
+                            var response = await client.GetAsync(uri, cts.Token);
+                            if (response.IsSuccessStatusCode)
+                            {
+                                var responseJson = await response.Content.ReadAsStringAsync();
+                                if (responseJson != null)
+                                {
+                                    if (responseJson != "0")
+                                    {
+                                        var remoteCasterProof = JsonConvert.DeserializeObject<Proof>(responseJson);
+                                        if (remoteCasterProof != null)
+                                        {
+                                            if (remoteCasterProof.VerifyProof())
+                                                Globals.Proofs.Add(remoteCasterProof);
+
+                                            await Task.Delay(200);
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                await Task.Delay(200);
+                            }
                         }
                         catch (Exception ex)
                         {
-                            // Log or handle the exception if needed
+                            ConsoleWriterService.OutputVal($"\r\nError getting proof from address: {validator.PeerIP}.");
+                            ConsoleWriterService.OutputVal($"ERROR: {ex}.");
                         }
                     }
                 });

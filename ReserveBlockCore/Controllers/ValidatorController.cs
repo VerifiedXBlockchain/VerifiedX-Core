@@ -66,9 +66,9 @@ namespace ReserveBlockCore.Controllers
             return Ok();
         }
 
-        [HttpPost]
-        [Route("ReceiveWinningProof")]
-        public async Task<ActionResult<string>> ReceiveWinningProof([FromBody] Proof proof)
+        [HttpGet]
+        [Route("ReceiveWinningProof/{blockHeight}")]
+        public async Task<ActionResult<string>> ReceiveWinningProof(long blockHeight)
         {
             try
             {
@@ -77,19 +77,23 @@ namespace ReserveBlockCore.Controllers
                 // Convert it to a string if it's not null
                 string peerIP = remoteIpAddress?.ToString();
 
-                if (proof == null)
-                    return BadRequest("Could not deserialize network val request");
-
                 if (Globals.BannedIPs.ContainsKey(peerIP))
                 {
                     return Unauthorized();
                 }
 
-                // Verify the proof and add it if valid
-                if (proof.VerifyProof())
-                    Globals.Proofs.Add(proof);
+                if (Globals.CasterRoundDict.ContainsKey(blockHeight))
+                {
+                    var round = Globals.CasterRoundDict[blockHeight];
+                    if (round == null)
+                        return Ok("0");
+                    if (round.Proof == null)
+                        return Ok("0");
 
-                return Ok();
+                    return Ok(JsonConvert.SerializeObject(round.Proof));
+                }
+
+                return Ok("0");
             }
             catch (Exception ex)
             {
