@@ -49,7 +49,19 @@ namespace ReserveBlockCore
             {
                 options.EnableDetailedErrors = true;
                 options.MaximumReceiveMessageSize = 8388608;
-            }); ;
+            });
+
+            services.AddCors(options =>
+            {
+                options.AddPolicy("SignalRPolicy", builder =>
+                {
+                    builder
+                        .AllowAnyHeader()
+                        .AllowAnyMethod()
+                        .SetIsOriginAllowed(_ => true)
+                        .AllowCredentials();
+                });
+            });
 
             //Create hosted service for just consensus measures
             services.AddHostedService<ValidatorNode>();
@@ -75,39 +87,7 @@ namespace ReserveBlockCore
 
             app.UseRouting();
 
-            app.Use(async (context, next) =>
-            {
-                var path = context.Request.Path.Value?.ToLower();
-
-                // Special handling for SignalR paths
-                if (path?.StartsWith("/consensus") == true || path?.StartsWith("/blockcaster") == true)
-                {
-                    // If it's a WebSocket request, let it through immediately
-                    if (context.WebSockets.IsWebSocketRequest)
-                    {
-                        await next();
-                        return;
-                    }
-
-                    // For non-WebSocket SignalR requests (negotiation, etc.)
-                    if (context.Request.Query.ContainsKey("negotiateVersion"))
-                    {
-                        await next();
-                        return;
-                    }
-                }
-                // Handle regular API requests
-                else if (path?.StartsWith("/valapi") == true)
-                {
-                    await next();
-                    return;
-                }
-                else
-                {
-                    context.Response.StatusCode = 404;
-                    return;
-                }
-            });
+            app.UseCors("SignalRPolicy");
 
             //app.UseAuthorization();
 
