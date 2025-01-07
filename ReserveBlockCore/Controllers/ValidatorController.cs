@@ -66,16 +66,62 @@ namespace ReserveBlockCore.Controllers
             return Ok();
         }
 
-        [HttpGet]
-        [Route("ReceiveWinningProof/{blockHeight}")]
-        public async Task<ActionResult<string>> ReceiveWinningProof(long blockHeight)
+        [HttpPost]
+        [Route("ReceiveWinningProof")]
+        public async Task<ActionResult<string>> ReceiveWinningProof([FromBody] Proof proof)
         {
             try
             {
                 var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
 
                 // Convert it to a string if it's not null
-                string peerIP = remoteIpAddress?.ToString();
+                string? peerIP = remoteIpAddress?.ToString();
+
+                if (peerIP != null)
+                {
+                    peerIP = peerIP.Replace("::ffff:", "");
+                }
+
+                if (proof == null)
+                    return BadRequest("Could not deserialize network val request");
+
+                if (Globals.BannedIPs.ContainsKey(peerIP))
+                {
+                    return Unauthorized();
+                }
+
+                // Verify the proof and add it if valid
+                if (proof.VerifyProof())
+                {
+                    if (!Globals.CasterProofDict.ContainsKey(peerIP))
+                    {
+                        while (!Globals.CasterProofDict.TryAdd(peerIP, proof))
+                        {
+                            await Task.Delay(75);
+                        }
+                    }
+                }
+                    Globals.Proofs.Add(proof);
+
+                return Ok();
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+
+        [HttpGet]
+        [Route("SendWinningProof/{blockHeight}")]
+        public async Task<ActionResult<string>> SendWinningProof(long blockHeight)
+        {
+            try
+            {
+                var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
+
+                // Convert it to a string if it's not null
+                string? peerIP = remoteIpAddress?.ToString();
 
                 if (Globals.BannedIPs.ContainsKey(peerIP))
                 {

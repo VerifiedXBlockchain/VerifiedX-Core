@@ -25,6 +25,7 @@ namespace ReserveBlockCore.Nodes
 {
     public class BlockcasterNode : IHostedService, IDisposable
     {
+        #region Variables and Instance Class
         public static IHubContext<P2PBlockcasterServer> HubContext;
         private readonly IHubContext<P2PBlockcasterServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
@@ -35,6 +36,7 @@ namespace ReserveBlockCore.Nodes
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         public static ReplacementRound _currentRound;
         public static List<string> _allCasterAddresses;
+        public static CasterRoundAudit? CasterRoundAudit = null;
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -43,6 +45,10 @@ namespace ReserveBlockCore.Nodes
             _appLifetime = appLifetime;
         }
 
+        #endregion
+
+        #region Start Async Methods
+
         public async Task StartAsync(CancellationToken stoppingToken)
         {
             _ = StartConsensus();
@@ -50,6 +56,9 @@ namespace ReserveBlockCore.Nodes
             _ = MonitorCasters();
         }
 
+        #endregion
+
+        #region Monitor Casters
         private static async Task MonitorCasters()
         {
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
@@ -84,6 +93,9 @@ namespace ReserveBlockCore.Nodes
             }
         }
 
+        #endregion
+
+        #region Ping Casters
         public static async Task PingCasters()
         {
             var casterList = Globals.BlockCasters.ToList();
@@ -144,6 +156,9 @@ namespace ReserveBlockCore.Nodes
             }
         }
 
+        #endregion
+
+        #region Initiate Replacement Casters
         public static async Task<bool> InitiateReplacement(long blockHeight)
         {
             // Only start a new round if there isn't one in progress
@@ -339,6 +354,10 @@ namespace ReserveBlockCore.Nodes
 
             return result;
         }
+
+        #endregion
+
+        #region Add Casters
         public static async Task AddCaster(Peers caster)
         {
             var casterExist = Globals.BlockCasters.Any(x => x.PeerIP == caster.PeerIP);
@@ -354,6 +373,10 @@ namespace ReserveBlockCore.Nodes
                 }
             }
         }
+
+        #endregion
+
+        #region Generated Deterministic Seed
         public static int GenerateDeterministicSeed(List<NetworkValidator> currentNodes, string seed)
         {
             // Concatenate the public keys and the block height for deterministic input
@@ -373,6 +396,8 @@ namespace ReserveBlockCore.Nodes
                 return BitConverter.ToInt32(hashBytes, 0);
             }
         }
+
+        #endregion
 
         private static async Task StartConsensus()
         {
@@ -424,6 +449,22 @@ namespace ReserveBlockCore.Nodes
                         await WaitForNextConsensusRound();
                     }
 
+                    if(CasterRoundAudit == null)
+                    {
+                        CasterRoundAudit = new CasterRoundAudit(Height);
+                    }
+                    else
+                    {
+                        if(CasterRoundAudit.BlockHeight < Height)
+                        {
+                            CasterRoundAudit = new CasterRoundAudit(Height);
+                        }
+                        else
+                        {
+                            CasterRoundAudit.AddCycle();//bad we don't want this.
+                        }
+                    }
+
                     if (PreviousHeight != Height)
                     {
                         PreviousHeight = Height;
@@ -432,7 +473,9 @@ namespace ReserveBlockCore.Nodes
                         var DelayTimeCorrection = Globals.BlockTime * (Height - BeginBlock) - (CurrentTime - EpochTime);
                         var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
                         BlockDelay = Task.Delay((int)DelayTime);
-                        ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
+
+                        CasterRoundAudit.AddStep("Next Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")", true);
+                        //ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
                     }
 
                     _ = CleanupApprovedCasterBlocks();
@@ -445,11 +488,14 @@ namespace ReserveBlockCore.Nodes
                     ValidatorApprovalBag.Clear();
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
                     //Generate Proofs for ALL vals
-                    ConsoleWriterService.OutputVal($"\r\nGenerating Proofs for height: {Height}.");
+                    CasterRoundAudit.AddStep($"Generating Proofs for height: {Height}.", true);
+                    //ConsoleWriterService.OutputVal($"\r\nGenerating Proofs for height: {Height}.");
                     var proofs = await ProofUtility.GenerateProofs();
-                    ConsoleWriterService.OutputVal($"\r\n{proofs.Count()} Proofs Generated");
+                    CasterRoundAudit.AddStep($"{proofs.Count()} Proofs Generated", true);
+                    //ConsoleWriterService.OutputVal($"\r\n{proofs.Count()} Proofs Generated");
                     var winningProof = await ProofUtility.SortProofs(proofs);
-                    ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
+                    CasterRoundAudit.AddStep($"Sorting Proofs", true);
+                    //ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
 
                     if (!Globals.CasterRoundDict.ContainsKey(Height))
                     {
@@ -463,7 +509,8 @@ namespace ReserveBlockCore.Nodes
 
                     if (winningProof != null && proofs.Count() > 1)
                     {
-                        ConsoleWriterService.OutputVal($"\r\nAttempting Proof on Address: {winningProof.Address}");
+                        CasterRoundAudit.AddStep($"Attempting Proof on Address: {winningProof.Address}", true);
+                        //ConsoleWriterService.OutputVal($"\r\nAttempting Proof on Address: {winningProof.Address}");
                         var verificationResult = false;
                         List<string> ExcludeValList = new List<string>();
                         while (!verificationResult)
@@ -534,7 +581,8 @@ namespace ReserveBlockCore.Nodes
                             continue;
                         }
 
-                        ConsoleWriterService.OutputVal($"\r\nPotential Winner Found! Address: {winningProof.Address}");
+                        CasterRoundAudit.AddStep($"Potential Winner Found! Address: {winningProof.Address}", true);
+                        //ConsoleWriterService.OutputVal($"\r\nPotential Winner Found! Address: {winningProof.Address}");
                         //Globals.Proofs.Add(winningProof);
 
                         var round = Globals.CasterRoundDict[Height];
@@ -545,11 +593,35 @@ namespace ReserveBlockCore.Nodes
                             while (!Globals.CasterRoundDict.TryUpdate(Height, round, compareRound)) ;
                         }
 
-                        _ = SendWinningProof(winningProof);
+                        //_ = GetWinningProof(winningProof);
+                        Globals.CasterProofDict.Clear();
+                        Globals.CasterProofDict = new ConcurrentDictionary<string, Proof>();
 
-                        await Task.Delay(PROOF_COLLECTION_TIME);
+                        var swProofCollectionTime = Stopwatch.StartNew();
+                        while(swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
+                        {
+                            _ = GetWinningProof(winningProof);
+                            _ = SendWinningProof(winningProof);
+
+                            await Task.Delay(1000);
+                        }
+
+                        swProofCollectionTime.Stop();
+                        //await Task.Delay(PROOF_COLLECTION_TIME);
+
+                        if (Globals.CasterProofDict.Count() < casterList.Count())
+                        {
+                            continue;
+                        }
+
+                        foreach (var proofItem in Globals.CasterProofDict)
+                        {
+                            Globals.Proofs.Add(proofItem.Value);
+                        }
 
                         var proofSnapshot = Globals.Proofs.Where(x => x.BlockHeight == Height).ToList();
+
+                        CasterRoundAudit.AddStep($"Total Proofs Collection: {proofSnapshot.Count()}", true);
 
                         var finalizedWinnerGroup = proofSnapshot
                             .OrderBy(x => Math.Abs(x.VRFNumber))
@@ -563,7 +635,8 @@ namespace ReserveBlockCore.Nodes
                             var finalizedWinner = finalizedWinnerGroup.FirstOrDefault();
                             if (finalizedWinner != null)
                             {
-                                ConsoleWriterService.OutputVal($"\r\nFinalized winner : {finalizedWinner.Address}");
+                                CasterRoundAudit.AddStep($"Finalized winner : {finalizedWinner.Address}", true);
+                                //ConsoleWriterService.OutputVal($"\r\nFinalized winner : {finalizedWinner.Address}");
 
                                 if (finalizedWinner.Address != winningProof.Address)
                                     block = null;
@@ -659,7 +732,8 @@ namespace ReserveBlockCore.Nodes
 
                                     var vBag = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).ToList();
 
-                                    ConsoleWriterService.OutputVal($"\r\nValidator Bag Count: {vBag.Count()}.");
+                                    CasterRoundAudit.AddStep($"Validator Bag Count: {vBag.Count()}.", true);
+                                    //ConsoleWriterService.OutputVal($"\r\nValidator Bag Count: {vBag.Count()}.");
 
                                     var approvalCount = casterList.Count() <= 5 ? 3 : 4;
 
@@ -702,9 +776,9 @@ namespace ReserveBlockCore.Nodes
                                                     else
                                                         while (!Globals.CasterApprovedBlockHashDict.TryAdd(block.Height, block.Hash));
                                                 }
-                                                    
 
-                                                ConsoleWriterService.OutputVal($"\r\nBag was approved. Moving to next block.");
+                                                CasterRoundAudit.AddStep($"Bag was approved. Moving to next block.", true);
+                                                //ConsoleWriterService.OutputVal($"\r\nBag was approved. Moving to next block.");
 
                                                 approved = true;
                                                 break;
@@ -717,7 +791,8 @@ namespace ReserveBlockCore.Nodes
                                     }
                                 }
 
-                                ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
+                                CasterRoundAudit.AddStep($"You did not win. Looking for block.", true);
+                                //ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight && approved)
                                 {
                                     bool blockFound = false;
@@ -728,14 +803,16 @@ namespace ReserveBlockCore.Nodes
                                         //This is done if non-caster wins the block
                                         if (block != null)
                                         {
-                                            ConsoleWriterService.OutputVal($"Already have block. Height: {block.Height}");
+                                            CasterRoundAudit.AddStep($"Already have block. Height: {block.Height}", true);
+                                            //ConsoleWriterService.OutputVal($"Already have block. Height: {block.Height}");
                                             var IP = finalizedWinner.IPAddress;
                                             var nextHeight = Globals.LastBlock.Height + 1;
                                             var currentHeight = block.Height;
 
                                             if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
                                             {
-                                                ConsoleWriterService.OutputVal($"Processing Block");
+                                                CasterRoundAudit.AddStep($"Processing Block.", true);
+                                                //ConsoleWriterService.OutputVal($"Processing Block");
                                                 BlockDownloadService.BlockDict[currentHeight] = (block, IP);
                                                 if (nextHeight == currentHeight)
                                                     await BlockValidatorService.ValidateBlocks();
@@ -752,8 +829,9 @@ namespace ReserveBlockCore.Nodes
 
                                                 if (nextHeight == currentHeight)
                                                 {
-                                                    ConsoleWriterService.OutputVal($"Inside block service B");
-                                                    ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
+                                                    CasterRoundAudit.AddStep($"Block found. Broadcasting.", true);
+                                                    //ConsoleWriterService.OutputVal($"Inside block service B");
+                                                    //ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
                                                     _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                                     //_ = P2PValidatorClient.BroadcastBlock(block);
                                                 }
@@ -777,11 +855,12 @@ namespace ReserveBlockCore.Nodes
                                         //This is done if non-caster wins, and block IS NULL. We must request from other casters as at least 2/3 should have it.
                                         try
                                         {
+                                            CasterRoundAudit.AddStep($"Requesting block from Casters.", true);
                                             using (var client = Globals.HttpClientFactory.CreateClient())
                                             {
                                                 foreach (var casters in Globals.BlockCasters)
                                                 {
-                                                    ConsoleWriterService.OutputVal($"Requesting block from Caster: {casters.ValidatorAddress}");
+                                                    //ConsoleWriterService.OutputVal($"Requesting block from Caster: {casters.ValidatorAddress}");
                                                     var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
                                                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 0, 0, BLOCK_REQUEST_WINDOW));
                                                     if (response != null)
@@ -793,13 +872,13 @@ namespace ReserveBlockCore.Nodes
                                                             {
                                                                 if (responseBody == "0")
                                                                 {
-                                                                    ConsoleWriterService.OutputVal($"Response was 0 (zero)");
+                                                                    //ConsoleWriterService.OutputVal($"Response was 0 (zero)");
                                                                     failedToReachConsensus = true;
                                                                     await Task.Delay(75);
                                                                     continue;
                                                                 }
 
-                                                                ConsoleWriterService.OutputVal($"Response had non-zero data");
+                                                                //ConsoleWriterService.OutputVal($"Response had non-zero data");
                                                                 block = JsonConvert.DeserializeObject<Block>(responseBody);
                                                                 if (block != null)
                                                                 {
@@ -827,14 +906,15 @@ namespace ReserveBlockCore.Nodes
                                                                         while (!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound));
                                                                     }
 
-                                                                    ConsoleWriterService.OutputVal($"Block deserialized. Height: {block.Height}");
+                                                                    CasterRoundAudit.AddStep($"Block deserialized. Height: {block.Height}", true);
+                                                                    //ConsoleWriterService.OutputVal($"Block deserialized. Height: {block.Height}");
                                                                     var IP = finalizedWinner.IPAddress;
                                                                     var nextHeight = Globals.LastBlock.Height + 1;
                                                                     var currentHeight = block.Height;
 
                                                                     if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
                                                                     {
-                                                                        ConsoleWriterService.OutputVal($"Inside block service A");
+                                                                        //ConsoleWriterService.OutputVal($"Inside block service A");
                                                                         BlockDownloadService.BlockDict[currentHeight] = (block, IP);
                                                                         if (nextHeight == currentHeight)
                                                                             await BlockValidatorService.ValidateBlocks();
@@ -851,7 +931,7 @@ namespace ReserveBlockCore.Nodes
 
                                                                         if (nextHeight == currentHeight)
                                                                         {
-                                                                            ConsoleWriterService.OutputVal($"Inside block service B");
+                                                                            //ConsoleWriterService.OutputVal($"Inside block service B");
                                                                             _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                                                             //_ = P2PValidatorClient.BroadcastBlock(block);
                                                                         }
@@ -863,7 +943,7 @@ namespace ReserveBlockCore.Nodes
                                                                     }
                                                                     else
                                                                     {
-                                                                        ConsoleWriterService.OutputVal($"Inside block service C");
+                                                                        //ConsoleWriterService.OutputVal($"Inside block service C");
                                                                         if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
                                                                         {
                                                                             BlockDownloadService.BlockDict[currentHeight] = (block, IP);
@@ -875,7 +955,7 @@ namespace ReserveBlockCore.Nodes
 
                                                                         if (currentHeight < nextHeight)
                                                                         {
-                                                                            ConsoleWriterService.OutputVal($"Inside block service D");
+                                                                            //ConsoleWriterService.OutputVal($"Inside block service D");
                                                                             blockFound = true;
                                                                             //_ = AddConsensusHeaderQueue(consensusHeader);
                                                                             if (Globals.LastBlock.Height < block.Height)
@@ -883,7 +963,7 @@ namespace ReserveBlockCore.Nodes
 
                                                                             if (nextHeight == currentHeight)
                                                                             {
-                                                                                ConsoleWriterService.OutputVal($"Inside block service E");
+                                                                                //ConsoleWriterService.OutputVal($"Inside block service E");
                                                                                 _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
                                                                                 //_ = P2PValidatorClient.BroadcastBlock(block);
                                                                             }
@@ -946,7 +1026,8 @@ namespace ReserveBlockCore.Nodes
                                         {
                                             Globals.FailedProducerDict.TryAdd(finalizedWinner.Address, (TimeUtil.GetTime(), 1));
                                         }
-                                        ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
+                                        CasterRoundAudit.AddStep($"Validator failed to produce block: {finalizedWinner.Address}", true);
+                                        //ConsoleWriterService.OutputVal($"\r\nValidator failed to produce block: {finalizedWinner.Address}");
                                         if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" &&
                                             finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" && 
                                             finalizedWinner.Address != "xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr")
@@ -959,7 +1040,9 @@ namespace ReserveBlockCore.Nodes
                                             finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" &&
                                             finalizedWinner.Address != "xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr")
                                                 Globals.FailedProducers.Add(finalizedWinner.Address);
-                                            ConsoleWriterService.OutputVal($"\r\nAddress: {finalizedWinner.Address} added to failed producers. (Globals.FailedProducers)");
+
+                                            CasterRoundAudit.AddStep($"Address: {finalizedWinner.Address} added to failed producers. (Globals.FailedProducers)", true);
+                                            //ConsoleWriterService.OutputVal($"\r\nAddress: {finalizedWinner.Address} added to failed producers. (Globals.FailedProducers)");
                                         }
 
                                     }
@@ -1016,7 +1099,9 @@ namespace ReserveBlockCore.Nodes
                                             {
                                                 Globals.FailedProducerDict.TryAdd(finalizedWinner.Address, (TimeUtil.GetTime(), 1));
                                             }
-                                            ConsoleWriterService.OutputVal($"\r\n2-Validator failed to produce block: {finalizedWinner.Address}");
+
+                                            CasterRoundAudit.AddStep($"2-Validator failed to produce block: {finalizedWinner.Address}", true);
+                                            //ConsoleWriterService.OutputVal($"\r\n2-Validator failed to produce block: {finalizedWinner.Address}");
                                             if (finalizedWinner.Address != "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" &&
                                             finalizedWinner.Address != "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" &&
                                             finalizedWinner.Address != "xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr")
@@ -1308,8 +1393,8 @@ namespace ReserveBlockCore.Nodes
 
         #endregion
 
-        #region Send Winning Proof Backup Method
-        public static async Task SendWinningProof(Proof proof)
+        #region Get Winning Proof Backup Method
+        public static async Task GetWinningProof(Proof proof)
         {
             // Create a CancellationTokenSource with a timeout of 5 seconds
             var validators = Globals.BlockCasters.ToList();
@@ -1336,7 +1421,7 @@ namespace ReserveBlockCore.Nodes
                                 using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
                                 try
                                 {
-                                    var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof/{proof.BlockHeight}";
+                                    var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/SendWinningProof/{proof.BlockHeight}";
                                     var response = await client.GetAsync(uri, cts.Token);
                                     if (response.IsSuccessStatusCode)
                                     {
@@ -1349,8 +1434,16 @@ namespace ReserveBlockCore.Nodes
                                                 if (remoteCasterProof != null)
                                                 {
                                                     if (remoteCasterProof.VerifyProof())
-                                                        Globals.Proofs.Add(remoteCasterProof);
+                                                    {
+                                                        if (!Globals.CasterProofDict.ContainsKey(validator.PeerIP))
+                                                        {
+                                                            while (!Globals.CasterProofDict.TryAdd(validator.PeerIP, remoteCasterProof))
+                                                            {
+                                                                await Task.Delay(75);
+                                                            }
+                                                        }
 
+                                                    }
                                                     await Task.Delay(200);
                                                 }
                                             }
@@ -1381,6 +1474,58 @@ namespace ReserveBlockCore.Nodes
         }
         #endregion
 
+        #region Send Winning Proof 
+        public static async Task SendWinningProof(Proof proof)
+        {
+            // Create a CancellationTokenSource with a timeout of 5 seconds
+            var validators = Globals.BlockCasterNodes.Values.ToList();
+
+            try
+            {
+                var rnd = new Random();
+                var randomizedValidators = validators
+                    .OrderBy(x => rnd.Next())
+                    .ToList();
+
+                var postData = JsonConvert.SerializeObject(proof);
+                var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
+
+                if (!randomizedValidators.Any())
+                    return;
+
+                var sw = Stopwatch.StartNew();
+                randomizedValidators.ParallelLoop(async validator =>
+                {
+                    if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
+                    {
+                        // Stop processing if cancellation is requested
+                        sw.Stop();
+                        return;
+                    }
+
+                    using (var client = Globals.HttpClientFactory.CreateClient())
+                    {
+                        try
+                        {
+                            // Create a request-specific CancellationTokenSource with a 1-second timeout
+                            var uri = $"http://{validator.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
+                            await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 2));
+                            await Task.Delay(75);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Log or handle the exception if needed
+                        }
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error in proof distribution: {ex.Message}", "ValidatorNode.SendWinningProof()");
+            }
+        }
+
+        #endregion
 
         #region Get Approval
 

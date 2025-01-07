@@ -202,8 +202,10 @@ namespace ReserveBlockCore.P2P
         {
             try
             {
-                //return await SignalRQueue(Context, (int)nextBlock.Size, async () =>
-                //{
+                //Casters get blocks from elsewhere.
+                if (Globals.IsBlockCaster)
+                    return true;
+
                 if (nextBlock.ChainRefId == BlockchainData.ChainRef)
                 {
                     var IP = GetIP(Context);
