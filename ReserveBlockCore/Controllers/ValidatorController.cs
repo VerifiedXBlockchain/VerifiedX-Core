@@ -101,7 +101,6 @@ namespace ReserveBlockCore.Controllers
                         }
                     }
                 }
-                    Globals.Proofs.Add(proof);
 
                 return Ok();
             }
