@@ -49,7 +49,7 @@ namespace ReserveBlockCore.Services
                 await Task.Delay(4);
         }
 
-        public static async Task ValidateBlocks()
+        public static async Task ValidateBlocks(bool skipCasterCheck = false)
         {
             try
             {
@@ -82,7 +82,7 @@ namespace ReserveBlockCore.Services
                         var startupDownload = Globals.BlocksDownloadSlim.CurrentCount == 0 ? true : false;
                         var stopwatch1 = new Stopwatch();
                         stopwatch1.Start();
-                        var result = await ValidateBlock(block, false, startupDownload);
+                        var result = await ValidateBlock(block, false, startupDownload, false, false, skipCasterCheck);
                         stopwatch1.Stop();
                         if (!result && block.Height == Globals.LastBlock.Height + 1)
                         {
@@ -125,7 +125,7 @@ namespace ReserveBlockCore.Services
                 try { ValidateBlocksSemaphore.Release(); } catch { }
             }
         }
-        public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false)
+        public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false)
         {
             await ValidateBlockSemaphore.WaitAsync();
 
@@ -259,7 +259,7 @@ namespace ReserveBlockCore.Services
                     }
                 }
 
-                if (Globals.IsBlockCaster && !validateOnly)
+                if (Globals.IsBlockCaster && !validateOnly && !skipCasterCheck)
                 {
                     if (!Globals.CasterApprovedBlockHashDict.ContainsKey(block.Height))
                         return result;
