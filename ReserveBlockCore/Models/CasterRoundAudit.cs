@@ -43,7 +43,7 @@ namespace ReserveBlockCore.Models
             StepMessages.Add(stepMessage);
 
             if(outputToConsole)
-                Output();
+                ThrottledOutput();
         }
         public TimeSpan GetElapsedTime()
         {
@@ -69,11 +69,22 @@ namespace ReserveBlockCore.Models
                     
             }
         }
+        private DateTime lastUpdate = DateTime.MinValue;
+
+        private void ThrottledOutput(int milliseconds = 500)
+        {
+            // Only update if the last update was more than the specified time ago
+            if ((DateTime.Now - lastUpdate).TotalMilliseconds >= milliseconds)
+            {
+                Output();
+                lastUpdate = DateTime.Now;
+            }
+        }
 
         private void Output()
         {
             // Clear the console to make it look like the output is updating
-            Console.Clear();
+            Console.SetCursorPosition(0, 0);
 
 
             // Print the basic info of the current audit
