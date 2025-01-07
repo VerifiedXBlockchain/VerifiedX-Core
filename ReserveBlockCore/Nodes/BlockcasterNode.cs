@@ -693,7 +693,7 @@ namespace ReserveBlockCore.Nodes
                                             }
                                         }
                                     }
-
+                                    //Caster dict null value here potentially due to it being to fast.
                                     foreach (var caster in Globals.BlockCasters)
                                     {
                                         using (var client = Globals.HttpClientFactory.CreateClient())
@@ -709,7 +709,27 @@ namespace ReserveBlockCore.Nodes
                                                     var responseJson = await response.Content.ReadAsStringAsync();
                                                     if (responseJson != null)
                                                     {
-                                                        if(responseJson != "0")
+                                                        if(responseJson == "1")
+                                                        {
+                                                            await Task.Delay(500);
+                                                            int count = 0;
+                                                            while(count < 3)
+                                                            {
+                                                                response = await client.GetAsync(uri, cts.Token);
+                                                                responseJson = await response.Content.ReadAsStringAsync();
+                                                                if (responseJson == "0" || responseJson != "1")
+                                                                {
+                                                                    await Task.Delay(500);
+                                                                    count++;
+                                                                    continue;
+                                                                }
+                                                                else
+                                                                {
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                        if(responseJson != "0" && responseJson != "1")
                                                         {
                                                             var remoteCasterRound = JsonConvert.DeserializeObject<CasterRound>(responseJson);
                                                             if(remoteCasterRound != null)
@@ -753,7 +773,9 @@ namespace ReserveBlockCore.Nodes
                                             if(!CasterVoteList.ContainsKey(vote.Item1))
                                                 CasterVoteList[vote.Item1] = vote.Item3;
                                         }
-
+                                        
+                                        //Issue is here one of them is still null... Figure out WHY!
+                                        //Look above. Could be its asking the first one and it hasn't populated its dictionary yet. 
                                         var result = CasterVoteList.GroupBy(x => x.Value)
                                             .Where(x => x.Count() >= approvalCount)
                                             .Select(g => new { Value = g.Key, Count = g.Count() })

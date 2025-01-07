@@ -200,6 +200,10 @@ namespace ReserveBlockCore.Controllers
             if (Globals.CasterRoundDict.ContainsKey(blockHeight))
             {
                 var casterRound = Globals.CasterRoundDict[blockHeight];
+
+                if(string.IsNullOrEmpty(casterRound.Validator))
+                    return Ok("1");
+
                 return Ok(JsonConvert.SerializeObject(casterRound));
             }
 
