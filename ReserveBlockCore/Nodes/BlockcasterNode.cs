@@ -452,10 +452,12 @@ namespace ReserveBlockCore.Nodes
                     if(CasterRoundAudit == null)
                     {
                         CasterRoundAudit = new CasterRoundAudit(Height);
+                        Console.Clear();
                     }
                     else
                     {
-                        if(CasterRoundAudit.BlockHeight < Height)
+                        Console.Clear();
+                        if (CasterRoundAudit.BlockHeight < Height)
                         {
                             CasterRoundAudit = new CasterRoundAudit(Height);
                         }
@@ -595,7 +597,9 @@ namespace ReserveBlockCore.Nodes
 
                         //_ = GetWinningProof(winningProof);
                         Globals.CasterProofDict.Clear();
+                        Globals.Proofs.Clear();
                         Globals.CasterProofDict = new ConcurrentDictionary<string, Proof>();
+                        Globals.Proofs = new ConcurrentBag<Proof>();
 
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while(swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
