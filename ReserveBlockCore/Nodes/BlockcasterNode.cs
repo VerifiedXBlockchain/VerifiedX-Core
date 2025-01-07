@@ -482,11 +482,6 @@ namespace ReserveBlockCore.Nodes
 
                     _ = CleanupApprovedCasterBlocks();
 
-                    var consensusHeader = new ConsensusHeader();
-                    consensusHeader.Height = Height;
-                    consensusHeader.Timestamp = TimeUtil.GetTime();
-                    consensusHeader.NetworkValidatorCount = Globals.NetworkValidators.Count;
-
                     ValidatorApprovalBag.Clear();
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
                     //Generate Proofs for ALL vals
@@ -642,11 +637,11 @@ namespace ReserveBlockCore.Nodes
                                 CasterRoundAudit.AddStep($"Finalized winner : {finalizedWinner.Address}", true);
                                 //ConsoleWriterService.OutputVal($"\r\nFinalized winner : {finalizedWinner.Address}");
 
+
                                 if (finalizedWinner.Address != winningProof.Address)
                                     block = null;
 
                                 var approved = false;
-                                consensusHeader.WinningAddress = finalizedWinner.Address;
 
                                 var sw = Stopwatch.StartNew();
                                 List<string> CasterApprovalList = new List<string>();
@@ -686,6 +681,16 @@ namespace ReserveBlockCore.Nodes
                                                 Validator = finalizedWinner.Address
                                             };
                                             Globals.CasterRoundDict[finalizedWinner.BlockHeight] = casterRound;
+                                        }
+                                        else
+                                        {
+                                            var compareRound = round;
+                                            round.Validator = finalizedWinner.Address;
+                                            round.BlockHeight = finalizedWinner.BlockHeight;
+                                            while(!Globals.CasterRoundDict.TryUpdate(round.BlockHeight, round, compareRound))
+                                            {
+                                                await Task.Delay(75);
+                                            }
                                         }
                                     }
 
