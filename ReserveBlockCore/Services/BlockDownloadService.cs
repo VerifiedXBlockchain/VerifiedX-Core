@@ -233,7 +233,7 @@ namespace ReserveBlockCore.Services
                                 var (_, ipAddress) = taskDict[resultHeight];
                                 BlockDict[resultHeight] = (result, ipAddress);
                                 taskDict.TryRemove(resultHeight, out _);
-                                _ = BlockValidatorService.ValidateBlocks();
+                                _ = BlockValidatorService.ValidateBlocks(true);
                             }
 
                             _ = P2PClient.DropLowBandwidthPeers();
