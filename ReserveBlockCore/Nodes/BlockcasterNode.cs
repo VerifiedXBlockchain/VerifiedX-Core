@@ -1112,6 +1112,10 @@ namespace ReserveBlockCore.Nodes
                             }
                         }
                     }
+                    else
+                    {
+                        CasterRoundAudit = null;//round was starting. 
+                    }
                     
                     ConsoleWriterService.OutputVal($"\r\nStarting over.");
                     Globals.Proofs.Clear();
