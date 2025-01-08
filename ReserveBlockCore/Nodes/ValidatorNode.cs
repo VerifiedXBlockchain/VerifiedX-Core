@@ -311,16 +311,16 @@ namespace ReserveBlockCore.Nodes
                     ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
                 },
 
-                //Peers n3Peer = new Peers
-                //{
-                //    IsIncoming = false,
-                //    IsOutgoing = true,
-                //    PeerIP = "66.94.124.3",
-                //    FailCount = 0,
-                //    IsValidator = true,
-                //    ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
-                //    ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
-                //};
+                new Peers
+                {
+                    IsIncoming = false,
+                    IsOutgoing = true,
+                    PeerIP = "66.94.124.3",
+                    FailCount = 0,
+                    IsValidator = true,
+                    ValidatorAddress = "xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi",
+                    ValidatorPublicKey = "0474f0a933dc0241d5fc6059eeb3a14350c4ba890e8e504ae144f33a41c0f5eb9aed9b98e33265507c55e2af1b0c61c5c2a87fa55d86acad0592c0f4774c97e62b"
+                },
 
                 new Peers
                 {
