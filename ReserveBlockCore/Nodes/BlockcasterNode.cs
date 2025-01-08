@@ -595,7 +595,7 @@ namespace ReserveBlockCore.Nodes
                         if (round != null)
                         {
                             var compareRound = round;
-                            round.Proof = winningProof;
+                            round.Proof = winningCasterProof;
                             while (!Globals.CasterRoundDict.TryUpdate(Height, round, compareRound)) ;
                         }
 
@@ -2180,8 +2180,8 @@ namespace ReserveBlockCore.Nodes
                                 }
                                 catch (Exception ex)
                                 {
-                                    ConsoleWriterService.OutputVal($"\r\nError getting proof from address: {validator.PeerIP}.");
-                                    ConsoleWriterService.OutputVal($"ERROR: {ex}.");
+                                    //ConsoleWriterService.OutputVal($"\r\nError getting proof from address: {validator.PeerIP}.");
+                                    //ConsoleWriterService.OutputVal($"ERROR: {ex}.");
                                 }
                             }
                         }
