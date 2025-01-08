@@ -159,135 +159,182 @@ namespace ReserveBlockCore.Nodes
                 return;
             }
 
-            var peerList = Globals.BlockCasterNodes.Values.ToList();
+            //var peerList = Globals.BlockCasterNodes.Values.ToList();
 
-            if (!peerList.Any())
+            //if (!peerList.Any())
+            //{
+            //    return;
+            //}
+
+            //if (Globals.IsBlockCaster)
+            //{
+            //    return;
+            //} 
+
+            //ConcurrentBag<string> CasterIPs = new ConcurrentBag<string>();
+            //ConcurrentDictionary<string, Peers> CasterDict = new ConcurrentDictionary<string, Peers>();
+
+            //var peerDB = Peers.GetAll();
+
+            //var coreCount = Environment.ProcessorCount;
+            //if (coreCount >= 4 || Globals.RunUnsafeCode)
+            //{
+            //    var tasks = peerList.Select(async peer =>
+            //    {
+            //        try
+            //        {
+            //            using (var client = Globals.HttpClientFactory.CreateClient())
+            //            {
+            //                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/Blockcasters/";
+
+            //                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
+            //                await Task.Delay(75);
+
+            //                if (response != null)
+            //                {
+            //                    if (response.IsSuccessStatusCode)
+            //                    {
+            //                        var responseBody = await response.Content.ReadAsStringAsync();
+            //                        if (!string.IsNullOrEmpty(responseBody))
+            //                        {
+            //                            if (responseBody != "0")
+            //                            {
+            //                                var blockCasters = JsonConvert.DeserializeObject<List<Peers>?>(responseBody);
+            //                                if (blockCasters?.Count() > 0)
+            //                                {
+            //                                    blockCasters.ForEach(x => {
+            //                                        CasterIPs.Add(x.PeerIP);
+            //                                        CasterDict.TryAdd(x.PeerIP, x);
+            //                                    });
+            //                                }
+            //                            }
+            //                        }
+            //                        else
+            //                        {
+            //                            //bad response body.
+            //                        }
+            //                    }
+            //                }
+            //            }
+
+            //        }
+            //        catch (Exception ex)
+            //        {
+
+            //        }
+            //    }).ToList();
+
+            //    // Wait for all tasks to complete
+            //    await Task.WhenAll(tasks);
+            //}
+            //else
+            //{
+            //    foreach (var peer in peerList)
+            //    {
+            //        try
+            //        {
+            //            using (var client = Globals.HttpClientFactory.CreateClient())
+            //            {
+            //                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/Blockcasters/";
+
+            //                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
+            //                await Task.Delay(75);
+
+            //                if (response != null)
+            //                {
+            //                    if (response.IsSuccessStatusCode)
+            //                    {
+            //                        var responseBody = await response.Content.ReadAsStringAsync();
+            //                        if (!string.IsNullOrEmpty(responseBody))
+            //                        {
+            //                            if (responseBody != "0")
+            //                            {
+            //                                var blockCasters = JsonConvert.DeserializeObject<List<Peers>?>(responseBody);
+            //                                if (blockCasters?.Count() > 0)
+            //                                {
+            //                                    blockCasters.ForEach(x => {
+            //                                        CasterIPs.Add(x.PeerIP);
+            //                                        CasterDict.TryAdd(x.PeerIP, x);
+            //                                    });
+            //                                }
+            //                            }
+            //                        }
+            //                        else
+            //                        {
+            //                            //bad response body.
+            //                        }
+            //                    }
+            //                }
+            //            }
+            //        }
+            //        catch (Exception ex)
+            //        {
+            //        }
+            //    }
+            //}
+
+            //var top5IPs = CasterIPs
+            //    .GroupBy(ip => ip)
+            //    .OrderByDescending(g => g.Count())
+            //    .Take(5)
+            //    .Select(g => g.Key)
+            //    .ToList();
+
+            //var top5Casters = top5IPs
+            //    .Select(ip => new { IP = ip, Peer = CasterDict.TryGetValue(ip, out var peer) ? peer : null })
+            //    .Where(x => x.Peer != null)
+            //    .Select(x => x.Peer)
+            //    .ToList();
+
+            List<Peers> peerList = new List<Peers>()
             {
-                return;
-            }
 
-            if (Globals.IsBlockCaster)
-            {
-                return;
-            } 
-
-            ConcurrentBag<string> CasterIPs = new ConcurrentBag<string>();
-            ConcurrentDictionary<string, Peers> CasterDict = new ConcurrentDictionary<string, Peers>();
-
-            var peerDB = Peers.GetAll();
-
-            var coreCount = Environment.ProcessorCount;
-            if (coreCount >= 4 || Globals.RunUnsafeCode)
-            {
-                var tasks = peerList.Select(async peer =>
+                new Peers
                 {
-                    try
-                    {
-                        using (var client = Globals.HttpClientFactory.CreateClient())
-                        {
-                            var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/Blockcasters/";
+                    IsIncoming = false,
+                    IsOutgoing = true,
+                    PeerIP = "144.126.156.102",
+                    FailCount = 0,
+                    IsValidator = true,
+                    ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
+                    ValidatorPublicKey = "0498ea84777552a3609143275b0e083086071a6b1453bd46b87a05461d24e0ee99e7de2870a018240026ad6ba892a087df39447f91c5a8f8e50a53b6643c9e713c"
+                },
 
-                            var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
-                            await Task.Delay(75);
-
-                            if (response != null)
-                            {
-                                if (response.IsSuccessStatusCode)
-                                {
-                                    var responseBody = await response.Content.ReadAsStringAsync();
-                                    if (!string.IsNullOrEmpty(responseBody))
-                                    {
-                                        if (responseBody != "0")
-                                        {
-                                            var blockCasters = JsonConvert.DeserializeObject<List<Peers>?>(responseBody);
-                                            if (blockCasters?.Count() > 0)
-                                            {
-                                                blockCasters.ForEach(x => {
-                                                    CasterIPs.Add(x.PeerIP);
-                                                    CasterDict.TryAdd(x.PeerIP, x);
-                                                });
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        //bad response body.
-                                    }
-                                }
-                            }
-                        }
-
-                    }
-                    catch (Exception ex)
-                    {
-
-                    }
-                }).ToList();
-
-                // Wait for all tasks to complete
-                await Task.WhenAll(tasks);
-            }
-            else
-            {
-                foreach (var peer in peerList)
+                new Peers
                 {
-                    try
-                    {
-                        using (var client = Globals.HttpClientFactory.CreateClient())
-                        {
-                            var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/Blockcasters/";
+                    IsIncoming = false,
+                    IsOutgoing = true,
+                    PeerIP = "66.94.124.2",
+                    FailCount = 0,
+                    IsValidator = true,
+                    ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+                    ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
+                },
 
-                            var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
-                            await Task.Delay(75);
+                //Peers n3Peer = new Peers
+                //{
+                //    IsIncoming = false,
+                //    IsOutgoing = true,
+                //    PeerIP = "66.94.124.3",
+                //    FailCount = 0,
+                //    IsValidator = true,
+                //    ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+                //    ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
+                //};
 
-                            if (response != null)
-                            {
-                                if (response.IsSuccessStatusCode)
-                                {
-                                    var responseBody = await response.Content.ReadAsStringAsync();
-                                    if (!string.IsNullOrEmpty(responseBody))
-                                    {
-                                        if (responseBody != "0")
-                                        {
-                                            var blockCasters = JsonConvert.DeserializeObject<List<Peers>?>(responseBody);
-                                            if (blockCasters?.Count() > 0)
-                                            {
-                                                blockCasters.ForEach(x => {
-                                                    CasterIPs.Add(x.PeerIP);
-                                                    CasterDict.TryAdd(x.PeerIP, x);
-                                                });
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        //bad response body.
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                    }
+                new Peers
+                {
+                    IsIncoming = false,
+                    IsOutgoing = true,
+                    PeerIP = "162.248.14.123",
+                    FailCount = 0,
+                    IsValidator = true,
+                    ValidatorAddress = "xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr",
+                    ValidatorPublicKey = "0469e03e195f923584ea55c334bf34cb43bc1c4baae8d38cb8c1895a7a383f7b171b476ff63123a7e58fe13241433f22fb84b185e65554c382ae486bd20a62fa6a"
                 }
-            }
+            };
 
-            var top5IPs = CasterIPs
-                .GroupBy(ip => ip)
-                .OrderByDescending(g => g.Count())
-                .Take(5)
-                .Select(g => g.Key)
-                .ToList();
-
-            var top5Casters = top5IPs
-                .Select(ip => new { IP = ip, Peer = CasterDict.TryGetValue(ip, out var peer) ? peer : null })
-                .Where(x => x.Peer != null)
-                .Select(x => x.Peer)
-                .ToList();
-
-
-            foreach (var caster in top5Casters)
+            foreach (var caster in peerList)
             {
                 if (caster != null)
                 {
@@ -295,7 +342,6 @@ namespace ReserveBlockCore.Nodes
                     if (nCaster == null)
                         Globals.BlockCasters.Add(caster);
                 }
-
             }
         }
 
@@ -707,12 +753,6 @@ namespace ReserveBlockCore.Nodes
                 try
                 {
                     if (Globals.StopAllTimers && !Globals.IsChainSynced)
-                    {
-                        await delay;
-                        continue;
-                    }
-
-                    if (!Globals.ValidatorNodes.Any())
                     {
                         await delay;
                         continue;

@@ -91,7 +91,63 @@ namespace ReserveBlockCore.Utilities
 
             return proofs;
         }
+        public static async Task<List<Proof>> GenerateCasterProofs()
+        {
+            List<Proof> proofs = new List<Proof>();
 
+            var blockHeight = Globals.LastBlock.Height + 1;
+            var prevHash = Globals.LastBlock.Hash;
+
+            var peerDB = Peers.GetAll();
+            //Force unban quicker
+            await BanService.RunUnban();
+
+            var badList = Globals.FailedProducers.ToList();
+
+            var newPeers = Globals.BlockCasters.Where(x => !badList.Contains(x.PeerIP)).ToList();
+
+            List<NetworkValidator> peersMissingDataList = new List<NetworkValidator>();
+            List<string> CompletedIPs = new List<string>();
+            List<string> CompletedAddresses = new List<string>();
+
+            foreach (var val in newPeers)
+            {
+                if (val.ValidatorAddress != null && val.ValidatorPublicKey != null)
+                {
+                    var proof = await CreateProof(val.ValidatorAddress, val.ValidatorPublicKey, blockHeight, prevHash);
+                    if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
+                    {
+                        Proof _proof = new Proof
+                        {
+                            Address = val.ValidatorAddress,
+                            BlockHeight = blockHeight,
+                            PreviousBlockHash = prevHash,
+                            ProofHash = proof.Item2,
+                            PublicKey = val.ValidatorPublicKey,
+                            VRFNumber = proof.Item1,
+                            IPAddress = val.PeerIP.Replace("::ffff:", "")
+                        };
+
+                        proofs.Add(_proof);
+                    }
+                }
+                else
+                {
+                    //TODO: Try to get info or remove them.
+                    //peersMissingDataList.Add(val);
+                }
+            }
+
+            CompletedIPs.Clear();
+            CompletedAddresses.Clear();
+
+            CompletedIPs = new List<string>();
+            CompletedAddresses = new List<string>();
+
+            Globals.LastProofBlockheight = blockHeight;
+
+            return proofs;
+        }
         public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight, string prevBlockHash)
         {
 
@@ -209,6 +265,45 @@ namespace ReserveBlockCore.Utilities
                     }
                     var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 7));
+
+                    if (response != null)
+                    {
+                        if (response.IsSuccessStatusCode)
+                        {
+                            //var blockJson = await response.Content.ReadAsStringAsync();
+                            //if (blockJson == null)
+                            //    return (false, null);
+
+                            //var block = JsonConvert.DeserializeObject<Block>(blockJson);
+
+                            //if (block == null)
+                            //    return (false, null);
+
+                            return (true, null);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                }
+            }
+
+            return (false, null);
+        }
+
+        public static async Task<(bool, Block?)> VerifyValAvailability(string ip, string winningAddress, long nextBlock)
+        {
+            using (var client = Globals.HttpClientFactory.CreateClient())
+            {
+                try
+                {
+                    //skip call because current winner is our node.
+                    if (winningAddress == Globals.ValidatorAddress)
+                    {
+                        return (true, Globals.NextValidatorBlock);
+                    }
+                    var uri = $"http://{ip.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
+                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                     if (response != null)
                     {

@@ -259,18 +259,18 @@ namespace ReserveBlockCore.Services
                     }
                 }
 
-                if (Globals.IsBlockCaster && !validateOnly && !skipCasterCheck)
-                {
-                    if (!Globals.CasterApprovedBlockHashDict.ContainsKey(block.Height))
-                        return result;
+                //if (Globals.IsBlockCaster && !validateOnly && !skipCasterCheck)
+                //{
+                //    if (!Globals.CasterApprovedBlockHashDict.ContainsKey(block.Height))
+                //        return result;
 
-                    var hash = Globals.CasterApprovedBlockHashDict[block.Height];
-                    if (hash == null)
-                        return result;
+                //    var hash = Globals.CasterApprovedBlockHashDict[block.Height];
+                //    if (hash == null)
+                //        return result;
 
-                    if (hash != block.Hash)
-                        return result;
-                }
+                //    if (hash != block.Hash)
+                //        return result;
+                //}
 
                 var newBlock = new Block
                 {
