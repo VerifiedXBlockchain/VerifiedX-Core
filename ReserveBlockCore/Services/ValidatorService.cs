@@ -128,7 +128,7 @@ namespace ReserveBlockCore.Services
                     await Task.Delay(1000);
                 }
                 _ = StartCasterAPIServer();
-                _ = StartValidatorServer();s
+                _ = StartValidatorServer();
                 //_ = ValidatorService.StartValidatorServer();
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
