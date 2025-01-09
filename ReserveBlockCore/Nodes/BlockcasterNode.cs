@@ -32,7 +32,7 @@ namespace ReserveBlockCore.Nodes
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
         const int PROOF_COLLECTION_TIME = 6000; // 7 seconds
         const int APPROVAL_WINDOW = 12000;      // 12 seconds
-        const int CASTER_VOTE_WINDOW = 3000;
+        const int CASTER_VOTE_WINDOW = 6000;
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         public static ReplacementRound _currentRound;
         public static List<string> _allCasterAddresses;
@@ -712,7 +712,7 @@ namespace ReserveBlockCore.Nodes
                                             {
                                                 var valAddr = finalizedWinner.Address;
                                                 var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
-                                                var response = await client.GetAsync(uri, cts.Token);
+                                                var response = await client.GetAsync(uri);
                                                 if (response.IsSuccessStatusCode)
                                                 {
                                                     var responseJson = await response.Content.ReadAsStringAsync();
