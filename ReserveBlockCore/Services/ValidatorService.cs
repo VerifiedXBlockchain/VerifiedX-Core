@@ -79,6 +79,46 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        public static async Task StartCasterAPIServer()
+        {
+            try
+            {
+                string url = "http://*:" + Globals.ValAPIPort;
+
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    var builder = Host.CreateDefaultBuilder()
+                    .ConfigureWebHostDefaults(webBuilder =>
+                    {
+                        webBuilder.UseKestrel(options =>
+                        {
+                            // Listen settings
+                            options.ListenAnyIP(Globals.ValAPIPort);
+                            options.ListenLocalhost(Globals.ValAPIPort);
+                        })
+                        .UseStartup<StartupP2PCaster>()
+                        .UseUrls(url)
+                        .ConfigureLogging(loggingBuilder =>
+                        {
+                            loggingBuilder.AddSimpleConsole();
+                        });
+
+                    });
+
+                    _ = builder.RunConsoleAsync();
+
+                    //var app = builder.Build();
+                    //_ = app.RunAsync();
+
+                    //await Task.Delay(-1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+            }
+        }
+
         public static async Task StartupValidatorProcess()
         {
             if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
@@ -87,7 +127,8 @@ namespace ReserveBlockCore.Services
                 {
                     await Task.Delay(1000);
                 }
-                _ = Task.Run(() => { StartValidatorServer(); });
+                _ = StartCasterAPIServer();
+                _ = StartValidatorServer();s
                 //_ = ValidatorService.StartValidatorServer();
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
@@ -312,6 +353,7 @@ namespace ReserveBlockCore.Services
 
                         if (!argsPassed)
                         {
+                            _ = StartCasterAPIServer();
                             _ = StartValidatorServer();
                             _ = StartupValidators();
                         }
@@ -926,6 +968,7 @@ namespace ReserveBlockCore.Services
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 
+                        _ = StartCasterAPIServer();
                         _ = StartValidatorServer();
                         _ = StartupValidators();
 

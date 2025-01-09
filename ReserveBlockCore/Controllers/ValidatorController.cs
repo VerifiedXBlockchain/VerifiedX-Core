@@ -39,7 +39,7 @@ namespace ReserveBlockCore.Controllers
                     return Unauthorized();
                 }
 
-                var portCheck = PortUtility.IsPortOpen(peerIP.Replace("::ffff:", ""), Globals.ValPort);
+                var portCheck = PortUtility.IsPortOpen(peerIP.Replace("::ffff:", ""), Globals.ValAPIPort);
                 if (!portCheck)
                 {
                     return Unauthorized();

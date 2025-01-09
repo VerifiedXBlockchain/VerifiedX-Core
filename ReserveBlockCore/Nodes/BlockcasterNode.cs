@@ -119,7 +119,7 @@ namespace ReserveBlockCore.Nodes
                         using (var client = Globals.HttpClientFactory.CreateClient())
                         {
                             
-                            var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat";
+                            var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat";
 
                             var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                             await Task.Delay(100);
@@ -185,7 +185,7 @@ namespace ReserveBlockCore.Nodes
                             {
                                 using (var client = Globals.HttpClientFactory.CreateClient())
                                 {
-                                    var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/SendSeedPart";
+                                    var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/SendSeedPart";
                                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                                     await Task.Delay(100);
 
@@ -282,7 +282,7 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     using (var client = Globals.HttpClientFactory.CreateClient())
                                     {
-                                        var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/GetCasterVote";
+                                        var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetCasterVote";
                                         var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                                         await Task.Delay(100);
 
@@ -711,7 +711,7 @@ namespace ReserveBlockCore.Nodes
                                             try
                                             {
                                                 var valAddr = finalizedWinner.Address;
-                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
+                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
                                                 var response = await client.GetAsync(uri, cts.Token);
                                                 if (response.IsSuccessStatusCode)
                                                 {
@@ -945,7 +945,7 @@ namespace ReserveBlockCore.Nodes
                                                         if (casters == null)
                                                             break;
                                                         //ConsoleWriterService.OutputVal($"Requesting block from Caster: {casters.ValidatorAddress}");
-                                                        var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
+                                                        var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
                                                         var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 5));
                                                         if (response != null)
                                                         {
@@ -1393,7 +1393,7 @@ namespace ReserveBlockCore.Nodes
                                             try
                                             {
                                                 var valAddr = finalizedWinner.Address;
-                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
+                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
                                                 var response = await client.GetAsync(uri, cts.Token);
                                                 if (response.IsSuccessStatusCode)
                                                 {
@@ -1583,7 +1583,7 @@ namespace ReserveBlockCore.Nodes
                                                 foreach (var casters in Globals.BlockCasters)
                                                 {
                                                     //ConsoleWriterService.OutputVal($"Requesting block from Caster: {casters.ValidatorAddress}");
-                                                    var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
+                                                    var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
                                                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 0, 0, BLOCK_REQUEST_WINDOW));
                                                     if (response != null)
                                                     {
@@ -2149,7 +2149,7 @@ namespace ReserveBlockCore.Nodes
                                 using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
                                 try
                                 {
-                                    var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/SendWinningProof/{proof.BlockHeight}";
+                                    var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/SendWinningProof/{proof.BlockHeight}";
                                     var response = await client.GetAsync(uri, cts.Token);
                                     await Task.Delay(200);
                                     if (response.IsSuccessStatusCode)
@@ -2238,7 +2238,7 @@ namespace ReserveBlockCore.Nodes
                         using (var client = Globals.HttpClientFactory.CreateClient())
                         {
                             // Create a request-specific CancellationTokenSource with a 1-second timeout
-                            var uri = $"http://{validator.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
+                            var uri = $"http://{validator.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/ReceiveWinningProof";
                             await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 3));
                             await Task.Delay(100);
                         }

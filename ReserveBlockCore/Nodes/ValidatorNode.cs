@@ -185,7 +185,7 @@ namespace ReserveBlockCore.Nodes
             //        {
             //            using (var client = Globals.HttpClientFactory.CreateClient())
             //            {
-            //                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/Blockcasters/";
+            //                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/Blockcasters/";
 
             //                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
             //                await Task.Delay(75);
@@ -235,7 +235,7 @@ namespace ReserveBlockCore.Nodes
             //        {
             //            using (var client = Globals.HttpClientFactory.CreateClient())
             //            {
-            //                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/Blockcasters/";
+            //                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/Blockcasters/";
 
             //                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
             //                await Task.Delay(75);
@@ -379,7 +379,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             using (var client = Globals.HttpClientFactory.CreateClient())
                             {
-                                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
+                                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
 
                                 var sw = Stopwatch.StartNew();
                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
@@ -414,7 +414,7 @@ namespace ReserveBlockCore.Nodes
 
                                             try
                                             {
-                                                uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status";
+                                                uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/status";
                                                 await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 4));
                                                 await Task.Delay(100);
                                             }
@@ -445,7 +445,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             using (var client = Globals.HttpClientFactory.CreateClient())
                             {
-                                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
+                                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
 
                                 var sw = Stopwatch.StartNew();
                                 var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
@@ -480,7 +480,7 @@ namespace ReserveBlockCore.Nodes
 
                                             try
                                             {
-                                                uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/status";
+                                                uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/status";
                                                 await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 4));
                                                 await Task.Delay(100);
                                             }
