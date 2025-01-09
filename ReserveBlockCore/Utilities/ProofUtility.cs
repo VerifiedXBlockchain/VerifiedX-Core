@@ -302,7 +302,7 @@ namespace ReserveBlockCore.Utilities
                     {
                         return (true, Globals.NextValidatorBlock);
                     }
-                    var uri = $"http://{ip.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
+                    var uri = $"http://{ip.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                     if (response != null)
