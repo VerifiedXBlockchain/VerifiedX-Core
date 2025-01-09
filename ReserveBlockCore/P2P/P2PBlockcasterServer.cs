@@ -179,7 +179,7 @@ namespace ReserveBlockCore.P2P
 
         private async Task EndOnConnect(string ipAddress, string adjMessage, string logMessage)
         {
-            await SendCasterMessageSingle("9999", adjMessage);
+            //await SendCasterMessageSingle("9999", adjMessage);
             if (Globals.OptionalLogging == true)
             {
                 LogUtility.Log(logMessage, "Validator Connection");
