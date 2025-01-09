@@ -818,13 +818,10 @@ namespace ReserveBlockCore.Nodes
                                     }
                                 }
 
-                                if(CasterRoundAudit.Cycles > 0)
-                                {
-                                    terminalWinner = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj";
-                                    CasterRoundAudit.AddStep($"default caster chosen. Moving on.", true);
-                                    approved = true;
-                                }
-
+                                terminalWinner = Height % 2 == 0 ? "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" : "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC";
+                                CasterRoundAudit.AddStep($"Stabilization Code. Moving on.", true);
+                                approved = true;
+                                
                                 //ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight && approved)
                                 {
