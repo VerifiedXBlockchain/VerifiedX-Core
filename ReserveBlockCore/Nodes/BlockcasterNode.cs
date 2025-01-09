@@ -621,7 +621,7 @@ namespace ReserveBlockCore.Nodes
                         swProofCollectionTime.Stop();
                         //await Task.Delay(PROOF_COLLECTION_TIME);
 
-                        if (Globals.CasterProofDict.Count() < casterList.Count())
+                        if (Globals.CasterProofDict.Count() < 3)
                         {
                             continue;
                         }
