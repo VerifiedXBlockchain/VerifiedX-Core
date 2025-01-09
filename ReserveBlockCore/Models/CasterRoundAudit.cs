@@ -101,10 +101,7 @@ namespace ReserveBlockCore.Models
             ConsoleWriterService.Output("Step History:");
             if(StepMessages.Any())
             {
-                foreach (var stepMsg in StepMessages)
-                {
-                    ConsoleWriterService.Output(stepMsg);
-                }
+                ConsoleWriterService.Output($"Total Step Messages: {StepMessages.Count()}");
             }
             else
             {

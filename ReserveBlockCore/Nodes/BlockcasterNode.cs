@@ -510,7 +510,7 @@ namespace ReserveBlockCore.Nodes
                         Globals.CasterRoundDict[Height] = casterRound;
                     }
 
-                    if (winningCasterProof != null && proofs.Count() > 1)
+                    if (winningCasterProof != null && casterProofs.Count() > 2)
                     {
                         CasterRoundAudit.AddStep($"Attempting Proof on Address: {winningCasterProof.Address}", true);
                         //ConsoleWriterService.OutputVal($"\r\nAttempting Proof on Address: {winningProof.Address}");
@@ -524,6 +524,7 @@ namespace ReserveBlockCore.Nodes
                                 Stopwatch sw = Stopwatch.StartNew();
                                 var verificationResultTuple = await ProofUtility.VerifyWinnerAvailability(winningCasterProof, nextblock);
                                 sw.Stop();
+                                await Task.Delay(100);
                                 verificationResult = verificationResultTuple.Item1;
 
                                 Globals.NetworkValidators.TryGetValue(winningCasterProof.Address, out var validator);
@@ -554,6 +555,7 @@ namespace ReserveBlockCore.Nodes
                                     {
                                         ExcludeValList.Clear();
                                         ExcludeValList = new List<string>();
+                                        break;
                                     }
                                 }
                                 else
@@ -609,9 +611,11 @@ namespace ReserveBlockCore.Nodes
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                         {
                             _ = GetWinningProof(winningCasterProof);
-                            _ = SendWinningProof(winningCasterProof);
-
                             await Task.Delay(1000);
+                            _ = SendWinningProof(winningCasterProof);
+                            await Task.Delay(500);
+
+
                         }
 
                         swProofCollectionTime.Stop();
@@ -2147,6 +2151,7 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/SendWinningProof/{proof.BlockHeight}";
                                     var response = await client.GetAsync(uri, cts.Token);
+                                    await Task.Delay(200);
                                     if (response.IsSuccessStatusCode)
                                     {
                                         var responseJson = await response.Content.ReadAsStringAsync();
@@ -2218,7 +2223,8 @@ namespace ReserveBlockCore.Nodes
                     return;
 
                 var sw = Stopwatch.StartNew();
-                randomizedValidators.ParallelLoop(async validator =>
+
+                foreach (var validator in randomizedValidators)
                 {
                     if (sw.ElapsedMilliseconds >= PROOF_COLLECTION_TIME)
                     {
@@ -2227,20 +2233,26 @@ namespace ReserveBlockCore.Nodes
                         return;
                     }
 
-                    using (var client = Globals.HttpClientFactory.CreateClient())
+                    try
                     {
-                        try
+                        using (var client = Globals.HttpClientFactory.CreateClient())
                         {
                             // Create a request-specific CancellationTokenSource with a 1-second timeout
                             var uri = $"http://{validator.NodeIP.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/ReceiveWinningProof";
-                            await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 2));
-                            await Task.Delay(75);
+                            await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 3));
+                            await Task.Delay(100);
                         }
-                        catch (Exception ex)
-                        {
-                            // Log or handle the exception if needed
-                        }
+
                     }
+                    catch (Exception ex)
+                    {
+                        // Log or handle the exception if needed
+                    }
+                }
+
+                randomizedValidators.ParallelLoop(async validator =>
+                {
+                    
                 });
             }
             catch (Exception ex)
