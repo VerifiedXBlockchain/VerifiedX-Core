@@ -712,7 +712,7 @@ namespace ReserveBlockCore.Nodes
                                             {
                                                 var valAddr = finalizedWinner.Address;
                                                 var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
-                                                var response = await client.GetAsync(uri);
+                                                var response = await client.GetAsync(uri, cts.Token);
                                                 if (response.IsSuccessStatusCode)
                                                 {
                                                     var responseJson = await response.Content.ReadAsStringAsync();
