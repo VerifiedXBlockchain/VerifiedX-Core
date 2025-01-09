@@ -46,9 +46,9 @@ namespace ReserveBlockCore.Nodes
 
             await GetBlockcasters();
 
-            _ = BlockCasterMonitor();
+            //_ = BlockCasterMonitor();
 
-            _ = ValidatorHeartbeat();
+            //_ = ValidatorHeartbeat();
 
             _ = NotifyExplorer();
 
