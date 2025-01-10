@@ -58,7 +58,7 @@ namespace ReserveBlockCore.Utilities
                 if (writeLog)
                 {
                     await File.AppendAllTextAsync(path + "errorlog.txt", Environment.NewLine + text);
-                    VFXLogging.LogInfo(message, location);
+                    //VFXLogging.LogInfo(message, location);
                 }
                     
 
