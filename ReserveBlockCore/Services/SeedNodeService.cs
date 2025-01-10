@@ -91,6 +91,66 @@ namespace ReserveBlockCore.Services
                 
             return url;
         }
+        public static async Task GetSeedNodePeers()
+        {
+            List<Peers> peerList = new List<Peers>();
+
+            Peers n1Peer = new Peers
+            {
+                IsIncoming = false,
+                IsOutgoing = true,
+                PeerIP = "15.204.9.193",
+                FailCount = 0,
+                IsValidator = true,
+                ValidatorAddress = "RK28ywrBfEXV5EuARn3etyVXMtcmywNxnM",
+                ValidatorPublicKey = "04b906f0da02bbc25f0d65f30a9f07bb9a93bc78aee1d894fd4492ff0b8c97e05e0fb0d698f13a852578b3cb6bd9c97440820b24c859ac43f35ccb7eb03e9eccc6"
+            };
+
+            Peers n2Peer = new Peers
+            {
+                IsIncoming = false,
+                IsOutgoing = true,
+                PeerIP = "15.204.9.117",
+                FailCount = 0,
+                IsValidator = true,
+                ValidatorAddress = "RFoKrASMr19mg8S71Lf1F2suzxahG5Yj4N",
+                ValidatorPublicKey = "04aa4c95e0754b87a26f3c853f71a01e1ad5ed2d269d2f12b09dcb3b86637eb88550abe954c3bd99eb64b68dfcf8174bb0fb159b0a83bb2610e272f16094f37d9e"
+            };
+
+            Peers n3Peer = new Peers
+            {
+                IsIncoming = false,
+                IsOutgoing = true,
+                PeerIP = "66.175.236.113",
+                FailCount = 0,
+                IsValidator = true,
+                ValidatorAddress = "RH9XAP3omXvk7P6Xe9fQ1C6nZQ1adJw2ZG",
+                ValidatorPublicKey = "0433c204046d55d09c62cf5ae83dcdb81a843eb45a1bff8ce93986bee8149812d639ce003a8714dada8efa270b7ba61c2b45c9a8840c40e03d3375dc86f68bab6e"
+            };
+
+            peerList.Add(n1Peer);
+            peerList.Add(n2Peer);
+            peerList.Add(n3Peer);
+
+            var dbPeers = Peers.GetAll();
+
+            foreach (var peer in peerList)
+            {
+                var peerExist = dbPeers.FindOne(x => x.PeerIP == peer.PeerIP);
+                if (peerExist == null)
+                {
+                    dbPeers.InsertSafe(peer);
+                    await BlockcasterNode.AddCaster(peer);
+                }
+                else
+                {
+                    peerExist.FailCount = 0;
+                    //peerExist.IsValidator = true;
+                    dbPeers.UpdateSafe(peerExist);
+                    await BlockcasterNode.AddCaster(peerExist);
+                }
+            }
+        }
 
         public static async Task GetSeedNodePeers(string url)
         {

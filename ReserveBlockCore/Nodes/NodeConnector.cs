@@ -28,6 +28,9 @@ namespace ReserveBlockCore.Nodes
             if(Globals.IsTestNet)
                 await SeedNodeService.GetSeedNodePeersTestnet();
 
+            if(!Globals.IsTestNet)
+                await SeedNodeService.GetSeedNodePeers();
+
             peers = Peers.GetAll().FindAll().ToList();
             if(peers.Count <= 8 && !Globals.IsTestNet)
             {
