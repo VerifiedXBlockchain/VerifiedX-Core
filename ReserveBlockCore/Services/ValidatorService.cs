@@ -83,7 +83,7 @@ namespace ReserveBlockCore.Services
         {
             try
             {
-                string url = "http://*:" + Globals.ValAPIPort;
+                string url = "http://0.0.0.0:" + Globals.ValAPIPort;
 
                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                 {
