@@ -94,7 +94,7 @@ namespace ReserveBlockCore.Services
                         {
                             // Listen settings
                             options.ListenAnyIP(Globals.ValAPIPort);
-                            options.ListenLocalhost(Globals.ValAPIPort);
+                            //options.ListenLocalhost(Globals.ValAPIPort);
                         })
                         .UseStartup<StartupP2PCaster>()
                         .UseUrls(url)
