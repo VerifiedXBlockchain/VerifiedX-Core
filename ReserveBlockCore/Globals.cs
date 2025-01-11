@@ -138,7 +138,7 @@ namespace ReserveBlockCore
         public static int DSTClientPort = 3341;
         public static int ArbiterPort = 3342;
         public static int APIPort = 7292;
-        public static int ValAPIPort = 17294;
+        public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
         public static int MinorVer = 0;
