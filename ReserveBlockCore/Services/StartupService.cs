@@ -464,7 +464,26 @@ namespace ReserveBlockCore.Services
             {
                 //TODO: Call to SEED/Peers
                 //TODO.2: Create initial seeding protocol.
-                
+                Globals.Arbiters = new List<Models.Arbiter>
+                {
+                    new Models.Arbiter {
+                        Address = "RK28ywrBfEXV5EuARn3etyVXMtcmywNxnM",
+                        SigningAddress = "",
+                        Generation = 0,
+                        IPAddress = "15.204.9.193",
+                        StartOfService = 3074180,
+                        Title = "Arbiter1"
+                    },
+                    new Models.Arbiter {
+                        Address = "RFoKrASMr19mg8S71Lf1F2suzxahG5Yj4N",
+                        SigningAddress = "",
+                        Generation = 0,
+                        IPAddress = "15.204.9.117",
+                        StartOfService = 3074180,
+                        Title = "Arbiter2"
+                    }
+                };
+
             }
         }
 
