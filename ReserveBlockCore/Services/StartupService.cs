@@ -1098,7 +1098,7 @@ namespace ReserveBlockCore.Services
                     if ((lastBlock.Height - 5) > highestReportedBlock?.NodeHeight)
                         continue;
 
-                    if((lastBlock.Timestamp >= currentTimestamp || Globals.IsTestNet) && (lastBlock.Height + 2 >= highestReportedBlock?.NodeHeight) || lastBlock.Height == 3074180)
+                    if((lastBlock.Timestamp >= currentTimestamp || Globals.IsTestNet || Globals.IsBlockCaster) && (lastBlock.Height + 2 >= highestReportedBlock?.NodeHeight))
                     {
                         DateTime endTime = DateTime.UtcNow;
                         ConsoleWriterService.Output($"Block downloads finished on: {endTime.ToLocalTime()}");
