@@ -128,6 +128,9 @@ namespace ReserveBlockCore.Services
                     await Task.Delay(1000);
                 }
                 _ = StartCasterAPIServer();
+
+                await Task.Delay(-1);
+
                 _ = StartValidatorServer();
                 //_ = ValidatorService.StartValidatorServer();
                 _ = StartupValidators();

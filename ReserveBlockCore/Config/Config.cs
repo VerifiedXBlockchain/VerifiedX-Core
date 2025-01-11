@@ -313,7 +313,7 @@ namespace ReserveBlockCore.Config
 				Globals.GenesisAddress = "xAfPR4w2cBsvmB7Ju5mToBLtJYuv1AZSyo";
 				Globals.Port = 13338;
 				Globals.APIPort = 17292;
-                Globals.ValAPIPort = 17295;
+                Globals.ValAPIPort = 17294;
 				Globals.APIPortSSL = 17777;
 				Globals.AddressPrefix = 0x89; //address prefix 'x'
 				Globals.V1ValHeight = 200;
