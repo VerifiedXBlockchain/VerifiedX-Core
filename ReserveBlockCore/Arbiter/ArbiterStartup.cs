@@ -134,7 +134,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var timeCheck = TimeUtil.GetTime(-45);
 
-                                if(timeCheck > result.Timestamp)
+                                if (timeCheck > result.Timestamp)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -145,7 +145,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var sigCheck = Services.SignatureService.VerifySignature(result.VFXAddress, $"{result.VFXAddress}.{result.Timestamp}.{result.UniqueId}", postData.Signature);
 
-                                if(!sigCheck)
+                                if (!sigCheck)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -154,9 +154,9 @@ namespace ReserveBlockCore.Arbiter
                                     return;
                                 }
 
-                                var coinsToSpend = result.ScriptCoinList;
+                                var coinsToSpend = result.ScriptCoinList.OrderBy(x => x.ScriptPubKey.ToString()).ToArray();
 
-                                if (coinsToSpend == null && coinsToSpend?.Count() > 0)
+                                if (coinsToSpend == null || coinsToSpend?.Count() < 1)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -172,7 +172,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 List<ScriptCoin> coinList = new List<ScriptCoin>();
 
-                                foreach(var input in result.ScriptCoinList)
+                                foreach(var input in coinsToSpend)
                                 {
                                     Script redeemScript = Script.FromHex(input.RedeemScript);
                                     Script scriptPubKey = Script.FromHex(input.ScriptPubKey);
@@ -183,7 +183,7 @@ namespace ReserveBlockCore.Arbiter
                                     coinList.Add(coinToSpend);
                                 }
 
-                                NBitcoin.Transaction keySigned = builder.AddCoins(coinList).AddKeys(privateKey) .SignTransaction(unsignedTransaction);
+                                NBitcoin.Transaction keySigned = builder.AddCoins(coinList).AddKeys(privateKey).SignTransaction(unsignedTransaction);
 
                                 var scState = SmartContractStateTrei.GetSmartContractState(result.SCUID);
 

@@ -15,6 +15,8 @@ using ReserveBlockCore.Services;
 using ReserveBlockCore.Models.SmartContracts;
 using System.Net.NetworkInformation;
 using System.Net;
+using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Bitcoin.Services;
 
 namespace ReserveBlockCore.Data
 {
@@ -145,6 +147,15 @@ namespace ReserveBlockCore.Data
                                 }
 
                                 SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
+
+								if(scMain.Features != null)
+								{
+                                    var tokenizedBitcoinFeature = scMain.Features.Where(x => x.FeatureName == FeatureName.Tokenization).FirstOrDefault();
+									if(tokenizedBitcoinFeature != null)
+									{
+                                        await TokenizedBitcoin.SaveSmartContract(scMain, null, account.Address);
+                                    }
+                                }
                             }
                             catch (Exception ex)
                             {

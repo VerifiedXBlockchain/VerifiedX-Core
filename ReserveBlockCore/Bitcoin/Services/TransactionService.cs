@@ -498,6 +498,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             try
             {
                 Script scriptPubKey = PayToMultiSigTemplate.Instance.GenerateScriptPubKey(Globals.TotalArbiterThreshold, pubKeys.OrderBy(x => x.ScriptPubKey.ToString()).ToArray());
+
                 Script redeemScript = scriptPubKey.PaymentScript;
 
                 BitcoinAddress multiSigAddress = scriptPubKey.Hash.GetAddress(Globals.BTCNetwork);
@@ -661,7 +662,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                             var responseData = JsonConvert.DeserializeObject<ResponseData.MultiSigSigningResponse>(responseString);
                             if (responseData == null)
-                                return await SCLogUtility.LogAndReturn($"Failed to get a deserialize response from Arbiters - Point B.", "TransactionService.SendMultiSigTransactions()", false); ;
+                                return await SCLogUtility.LogAndReturn($"Failed to get a deserialize response from Arbiters - Point B.", "TransactionService.SendMultiSigTransactions()", false);
 
                             if (!responseData.Success)
                                 return await SCLogUtility.LogAndReturn($"Received response, but it was not a success - Point C.", "TransactionService.SendMultiSigTransactions()", false);
@@ -686,12 +687,11 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 var txVerified = ValidateTransaction(fullySigned, txBuilder);//txBuilder.Verify(fullySigned);
 
-                if (!txVerified.Item1)
-                    return await SCLogUtility.LogAndReturn($"Transaction Failed to verify. Reason(s): {txVerified.Item2}", "TransactionService.SendMultiSigTransactions()", false);
-
-
                 var hexTx = fullySigned.ToHex();
                 var hashTx = fullySigned.GetHash();
+
+                if (!txVerified.Item1)
+                    return await SCLogUtility.LogAndReturn($"Transaction Failed to verify. Reason(s): {txVerified.Item2}", "TransactionService.SendMultiSigTransactions()", false);
 
                 var tx = new BitcoinTransaction
                 {
