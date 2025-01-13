@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Configuration;
 using NBitcoin;
+using NBitcoin.Policy;
 using NBitcoin.Protocol;
 using Newtonsoft.Json;
 using ReserveBlockCore.Bitcoin.Models;
@@ -196,12 +197,66 @@ namespace ReserveBlockCore.Arbiter
                                     coinList.Add(coinToSpend);
                                 }
 
+                                SCLogUtility.Log($"=== DEBUG INFORMATION START ===", "ArbiterStartup");
+
+                                foreach (var input in coinsToSpend)
+                                {
+                                    SCLogUtility.Log($"Input Script Details:", "ArbiterStartup");
+                                    SCLogUtility.Log($"ScriptPubKey (hex): {input.ScriptPubKey}", "ArbiterStartup");
+                                    SCLogUtility.Log($"RedeemScript (hex): {input.RedeemScript}", "ArbiterStartup");
+                                }
+
+                                // In ArbiterStartup.cs, around where we do the signing, add these debug logs:
+                                SCLogUtility.Log($"Debug: Number of coins to sign: {coinList.Count}", "ArbiterStartup");
+
+                                // Log coin details
+                                foreach (var coin in coinList)
+                                {
+                                    SCLogUtility.Log($"Debug: Coin Amount: {coin.Amount}", "ArbiterStartup");
+                                    SCLogUtility.Log($"Debug: ScriptPubKey: {coin.ScriptPubKey}", "ArbiterStartup");
+                                }
+
+                                // Log transaction details before signing
+                                SCLogUtility.Log($"Debug: Unsigned transaction details:", "ArbiterStartup");
+                                SCLogUtility.Log($"Debug: Input count: {unsignedTransaction.Inputs.Count}", "ArbiterStartup");
+                                SCLogUtility.Log($"Debug: Output count: {unsignedTransaction.Outputs.Count}", "ArbiterStartup");
+                                foreach (var output in unsignedTransaction.Outputs)
+                                {
+                                    SCLogUtility.Log($"Debug: Output amount: {output.Value}, ScriptPubKey: {output.ScriptPubKey}", "ArbiterStartup");
+                                }
+
+                                // Log private key details (safely)
+                                SCLogUtility.Log($"Debug: Private key valid: {privateKey != null}", "ArbiterStartup");
+
+                                // Attempt signing
                                 NBitcoin.Transaction keySigned = builder
                                     .AddCoins(coinList.ToArray())
                                     .AddKeys(privateKey)
                                     .SignTransaction(unsignedTransaction);
 
+                                // Log signing result
+                                SCLogUtility.Log($"Debug: Transaction signed, verifying...", "ArbiterStartup");
+
                                 var verificationResult = builder.Verify(keySigned);
+                                SCLogUtility.Log($"Debug: Verification result: {verificationResult}", "ArbiterStartup");
+
+                                // If verification fails, try to get more details
+                                if (!verificationResult)
+                                {
+                                    try
+                                    {
+                                        builder.Verify(keySigned, out TransactionPolicyError[] errors);
+                                        SCLogUtility.Log("Debug: Verification errors:", "ArbiterStartup");
+                                        foreach (var error in errors)
+                                        {
+                                            SCLogUtility.Log($"Debug: Policy Error: {error}", "ArbiterStartup");
+                                        }
+                                    }
+                                    catch (Exception verifyEx)
+                                    {
+                                        SCLogUtility.Log($"Debug: Error during detailed verification: {verifyEx.Message}", "ArbiterStartup");
+                                    }
+                                }
 
                                 if (!verificationResult)
                                 {
