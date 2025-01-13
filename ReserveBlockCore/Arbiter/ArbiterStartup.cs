@@ -167,6 +167,7 @@ namespace ReserveBlockCore.Arbiter
                                 }
 
                                 TransactionBuilder builder = Globals.BTCNetwork.CreateTransactionBuilder();
+
                                 var privateKey = BitcoinAccount.CreatePrivateKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, result.SCUID);
 
                                 var unsignedTransaction = NBitcoin.Transaction.Parse(result.Transaction, Globals.BTCNetwork);
@@ -229,40 +230,57 @@ namespace ReserveBlockCore.Arbiter
                                 SCLogUtility.Log($"Debug: Private key valid: {privateKey != null}", "ArbiterStartup");
 
                                 // Attempt signing
-                                NBitcoin.Transaction keySigned = builder
-                                    .AddCoins(coinList.ToArray())
-                                    .AddKeys(privateKey)
-                                    .SignTransaction(unsignedTransaction);
+                                //NBitcoin.Transaction keySigned = builder
+                                //    .AddCoins(coinList.ToArray())
+                                //    .AddKeys(privateKey)
+                                //    .SignTransaction(unsignedTransaction);
+                                builder.AddCoins(coinList.ToArray());
+
+                                // Add the key
+                                builder.AddKeys(privateKey);
+
+                                var keySigned = builder
+                                    .SignTransactionInPlace(unsignedTransaction);
 
                                 // Log signing result
                                 SCLogUtility.Log($"Debug: Transaction signed, verifying...", "ArbiterStartup");
 
-                                var verificationResult = builder.Verify(keySigned);
-                                SCLogUtility.Log($"Debug: Verification result: {verificationResult}", "ArbiterStartup");
-
-                                // If verification fails, try to get more details
-                                if (!verificationResult)
+                                // Add verification with more details
+                                SCLogUtility.Log("Detailed Verification:", "ArbiterStartup");
+                                foreach (var input in keySigned.Inputs)
                                 {
-                                    try
+                                    SCLogUtility.Log($"Input Script: {input.ScriptSig}", "ArbiterStartup");
+                                    SCLogUtility.Log($"Input Witness: {input.WitScript}", "ArbiterStartup");
+                                }
+
+                                // Try to verify each input separately
+                                for (int i = 0; i < keySigned.Inputs.Count; i++)
+                                {
+                                    var coin = coinList[i];
+                                    SCLogUtility.Log($"Verifying Input {i}:", "ArbiterStartup");
+                                    SCLogUtility.Log($"Previous Output: {coin.Outpoint}", "ArbiterStartup");
+                                    SCLogUtility.Log($"Amount: {coin.Amount}", "ArbiterStartup");
+                                    SCLogUtility.Log($"ScriptPubKey: {coin.ScriptPubKey}", "ArbiterStartup");
+                                    if (coin is ScriptCoin scriptCoin)
                                     {
-                                        builder.Verify(keySigned, out TransactionPolicyError[] errors);
-                                        SCLogUtility.Log("Debug: Verification errors:", "ArbiterStartup");
-                                        foreach (var error in errors)
-                                        {
-                                            SCLogUtility.Log($"Debug: Policy Error: {error}", "ArbiterStartup");
-                                        }
-                                    }
-                                    catch (Exception verifyEx)
-                                    {
-                                        SCLogUtility.Log($"Debug: Error during detailed verification: {verifyEx.Message}", "ArbiterStartup");
+                                        SCLogUtility.Log($"Redeem Script: {scriptCoin.Redeem}", "ArbiterStartup");
                                     }
                                 }
 
-                                if (!verificationResult)
+                                TransactionPolicyError[] errors;
+                                bool verified = builder.Verify(keySigned, out errors);
+
+                                if (!verified)
                                 {
+                                    SCLogUtility.Log("Verification Errors:", "ArbiterStartup");
+                                    foreach (var error in errors)
+                                    {
+                                        SCLogUtility.Log($"Error Details: {error}", "ArbiterStartup");
+                                    }
+
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
-                                    var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction signing failed verification" }, Formatting.Indented);
+                                    var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction signing failed verification: {string.Join(", ", errors.Select(x => x.ToString()))}" }, Formatting.Indented);
                                     await context.Response.WriteAsync(response);
                                     return;
                                 }
