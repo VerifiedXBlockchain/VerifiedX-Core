@@ -185,18 +185,50 @@ namespace ReserveBlockCore.Arbiter
 
 
                                 // Make sure we're using one of the expected keys
-                                if (pubKey != "023954d7077ac6d6644f1dd70f37868501bce3eb96a51fd5518d695bdb630247b8" &&
-                                    pubKey != "0358c5aba497f4f556048a59fec118050ccccd12bb1cc821745881d35f262e9dbd")
+                                //if (pubKey != "02f3346721a4af10e87a703e74504f4b422adbf72e9597261a27594bf9c1fa5d4a" &&
+                                //    pubKey != "039463ae25ebebdf19be147f95b47702abd5bbf2bf87d4f849f84ccc4ad2002a23")
+                                //{
+                                //    context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                //    context.Response.ContentType = "application/json";
+                                //    var response = JsonConvert.SerializeObject(new
+                                //    {
+                                //        Success = false,
+                                //        Message = $"Generated pubkey {pubKey} does not match either of the expected pubkeys in redeem script.\nSigningKey: {Globals.ArbiterSigningAddress.GetKey}\nSCUID: {result.SCUID}"
+                                //    }, Formatting.Indented);
+                                //    await context.Response.WriteAsync(response);
+                                //    return;
+                                //}
+
+                                SCLogUtility.Log($"Key Comparison:", "ArbiterStartup");
+                                SCLogUtility.Log($"Generated pubkey: {privateKey.PubKey}", "ArbiterStartup");
+
+                                // Extract public keys from the ScriptCoinListData
+                                var firstInput = coinsToSpend.FirstOrDefault();
+                                if (firstInput != null)
                                 {
-                                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                    context.Response.ContentType = "application/json";
-                                    var response = JsonConvert.SerializeObject(new
+                                    var redeemScript = Script.FromHex(firstInput.RedeemScript);
+                                    var pubKeysFromScript = redeemScript.GetAllPubKeys();
+
+                                    foreach (var key in pubKeysFromScript)
                                     {
-                                        Success = false,
-                                        Message = $"Generated pubkey {pubKey} does not match either of the expected pubkeys in redeem script.\nSigningKey: {Globals.ArbiterSigningAddress.GetKey}\nSCUID: {result.SCUID}"
-                                    }, Formatting.Indented);
-                                    await context.Response.WriteAsync(response);
-                                    return;
+                                        SCLogUtility.Log($"Comparing with: {key}", "ArbiterStartup");
+                                    }
+
+                                    bool keyMatches = pubKeysFromScript.Any(x => x.ToString() == privateKey.PubKey.ToString());
+                                    SCLogUtility.Log($"Key matches: {keyMatches}", "ArbiterStartup");
+
+                                    if (!keyMatches)
+                                    {
+                                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                        context.Response.ContentType = "application/json";
+                                        var response = JsonConvert.SerializeObject(new
+                                        {
+                                            Success = false,
+                                            Message = $"Generated pubkey {privateKey.PubKey} does not match any of the expected pubkeys.\nSigningKey: {Globals.ArbiterSigningAddress.GetKey}\nSCUID: {result.SCUID}"
+                                        }, Formatting.Indented);
+                                        await context.Response.WriteAsync(response);
+                                        return;
+                                    }
                                 }
 
                                 var unsignedTransaction = NBitcoin.Transaction.Parse(result.Transaction, Globals.BTCNetwork);
