@@ -172,13 +172,26 @@ namespace ReserveBlockCore.Arbiter
 
                                 List<ScriptCoin> coinList = new List<ScriptCoin>();
 
-                                foreach(var input in coinsToSpend)
+                                //foreach(var input in coinsToSpend)
+                                //{
+                                //    Script redeemScript = Script.FromHex(input.RedeemScript);
+                                //    Script scriptPubKey = Script.FromHex(input.ScriptPubKey);
+                                //    OutPoint outPoint = new OutPoint(uint256.Parse(input.TxHash), input.Vout);
+                                //    Coin coin = new Coin(outPoint, new TxOut(Money.Coins(input.Money), redeemScript));
+                                //    ScriptCoin coinToSpend = new ScriptCoin(coin, scriptPubKey);
+
+                                //    coinList.Add(coinToSpend);
+                                //}
+
+                                //Added
+                                //Original Above
+                                foreach (var input in coinsToSpend)
                                 {
                                     Script redeemScript = Script.FromHex(input.RedeemScript);
                                     Script scriptPubKey = Script.FromHex(input.ScriptPubKey);
                                     OutPoint outPoint = new OutPoint(uint256.Parse(input.TxHash), input.Vout);
-                                    Coin coin = new Coin(outPoint, new TxOut(Money.Coins(input.Money), redeemScript));
-                                    ScriptCoin coinToSpend = new ScriptCoin(coin, scriptPubKey);
+                                    Coin coin = new Coin(outPoint, new TxOut(Money.Coins(input.Money), scriptPubKey)); // Changed from redeemScript to scriptPubKey
+                                    ScriptCoin coinToSpend = new ScriptCoin(coin, redeemScript);  // Changed from scriptPubKey to redeemScript
 
                                     coinList.Add(coinToSpend);
                                 }

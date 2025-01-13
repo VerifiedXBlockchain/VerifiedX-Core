@@ -578,11 +578,13 @@ namespace ReserveBlockCore.Bitcoin.Services
                 foreach (var input in coinInputs)
                 {
                     input.ScriptPubKey = scriptPubKey.ToHex();
+                    //Added
+                    input.RedeemScript = redeemScript.ToHex();
                 }
 
                 var txBuilder = Globals.BTCNetwork.CreateTransactionBuilder();
 
-                txBuilder.AddCoins(coinsToSpend.ToArray());
+                txBuilder.AddCoins(coinsToSpend.OrderBy(x => x.ScriptPubKey.ToString()).ToArray());
 
                 // Get the count of inputs and outputs
                 int finalInputCount = unspentCoins.Count();
@@ -682,7 +684,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 NBitcoin.Transaction fullySigned =
                 txBuilder
-                .AddCoins(coinsToSpend.ToArray())
+                .AddCoins(coinsToSpend.OrderBy(x => x.ScriptPubKey.ToString()).ToArray())
                 .CombineSignatures(signedTransactionList.ToArray());
 
                 var txVerified = ValidateTransaction(fullySigned, txBuilder);//txBuilder.Verify(fullySigned);
