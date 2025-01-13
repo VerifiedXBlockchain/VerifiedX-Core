@@ -234,23 +234,36 @@ namespace ReserveBlockCore.Arbiter
                                 //    .AddCoins(coinList.ToArray())
                                 //    .AddKeys(privateKey)
                                 //    .SignTransaction(unsignedTransaction);
-                                builder.AddCoins(coinList.ToArray());
 
-                                // Add the key
-                                builder.AddKeys(privateKey);
+
+                                SCLogUtility.Log($"Private Key WIF: {privateKey.GetWif(Globals.BTCNetwork)}", "ArbiterStartup");
+                                SCLogUtility.Log($"Private Key PubKey: {privateKey.PubKey}", "ArbiterStartup");
+
+                                // Add coins first with explicit script
+                                foreach (var coin in coinList)
+                                {
+                                    if (coin is ScriptCoin scriptCoin)
+                                    {
+                                        SCLogUtility.Log($"Adding coin:", "ArbiterStartup");
+                                        SCLogUtility.Log($"Script Coin Redeem: {scriptCoin.Redeem}", "ArbiterStartup");
+                                        SCLogUtility.Log($"Script Coin RedeemScript Hash: {scriptCoin.Redeem.Hash}", "ArbiterStartup");
+                                        SCLogUtility.Log($"Script Coin ScriptPubKey: {scriptCoin.ScriptPubKey}", "ArbiterStartup");
+                                    }
+                                }
 
                                 var keySigned = builder
-                                    .SignTransactionInPlace(unsignedTransaction);
+                                    .SetSigningOptions(new SigningOptions
+                                    {
+                                        EnforceLowR = true,
+                                        SigHash = SigHash.All
+                                    })
+                                    .SignTransaction(unsignedTransaction);
 
-                                // Log signing result
-                                SCLogUtility.Log($"Debug: Transaction signed, verifying...", "ArbiterStartup");
-
-                                // Add verification with more details
-                                SCLogUtility.Log("Detailed Verification:", "ArbiterStartup");
+                                SCLogUtility.Log("Signed Transaction Details:", "ArbiterStartup");
                                 foreach (var input in keySigned.Inputs)
                                 {
-                                    SCLogUtility.Log($"Input Script: {input.ScriptSig}", "ArbiterStartup");
-                                    SCLogUtility.Log($"Input Witness: {input.WitScript}", "ArbiterStartup");
+                                    SCLogUtility.Log($"Input ScriptSig: {input.ScriptSig}", "ArbiterStartup");
+                                    SCLogUtility.Log($"Witness Script: {input.WitScript}", "ArbiterStartup");
                                 }
 
                                 // Try to verify each input separately
@@ -280,7 +293,12 @@ namespace ReserveBlockCore.Arbiter
 
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
-                                    var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction signing failed verification: {string.Join(", ", errors.Select(x => x.ToString()))}" }, Formatting.Indented);
+                                    var response = JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = $"Transaction signing failed verification: {string.Join(", ", errors.Select(x => x.ToString()))}",
+                                        SignedTx = keySigned.ToHex()
+                                    }, Formatting.Indented);
                                     await context.Response.WriteAsync(response);
                                     return;
                                 }
