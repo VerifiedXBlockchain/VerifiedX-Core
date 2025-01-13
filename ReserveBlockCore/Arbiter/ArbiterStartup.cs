@@ -336,34 +336,47 @@ namespace ReserveBlockCore.Arbiter
                                     })
                                     .SignTransaction(unsignedTransaction);
 
+                                SCLogUtility.Log($"Transaction after signing: {keySigned.ToHex()}", "ArbiterStartup");
+                                SCLogUtility.Log($"Number of inputs: {keySigned.Inputs.Count}", "ArbiterStartup");
+                                foreach (var input in keySigned.Inputs)
+                                {
+                                    SCLogUtility.Log($"Input ScriptSig before modification: {input.ScriptSig}", "ArbiterStartup");
+                                }
+
 
                                 foreach (var input in keySigned.Inputs)
                                 {
-                                    var ops = input.ScriptSig.ToOps().ToList();
-                                    if (ops.Count >= 2)  // We should have at least signature and redeem script
+                                    // Log raw script before modification
+                                    SCLogUtility.Log($"Original ScriptSig: {input.ScriptSig}", "ArbiterStartup");
+
+                                    // Get our coin to access the redeem script
+                                    if (coinList[0] is ScriptCoin scriptCoin)
                                     {
-                                        var signature = ops[0];  // First op should be the signature
-                                        var redeemScript = ops[1];  // Second op should be redeem script
+                                        var ops = new List<Op>();
+                                        ops.Add(Op.GetPushOp(new byte[0]));  // OP_0 for checkmultisig bug
 
-                                        // Reconstruct script with proper order
-                                        var newScript = new Script(
-                                            Op.GetPushOp(new byte[0]),    // OP_0 for checkmultisig bug
-                                            signature,                     // Our signature
-                                            Op.GetPushOp(new byte[0]),    // Placeholder for second signature
-                                            redeemScript                  // The redeem script
-                                        );
+                                        // Get the signature from the original script
+                                        var originalOps = input.ScriptSig.ToOps().ToList();
+                                        SCLogUtility.Log($"Number of ops in original script: {originalOps.Count}", "ArbiterStartup");
+                                        foreach (var op in originalOps)
+                                        {
+                                            SCLogUtility.Log($"Op: {op}", "ArbiterStartup");
+                                        }
 
-                                        input.ScriptSig = newScript;
+                                        if (originalOps.Count > 0)
+                                        {
+                                            ops.Add(originalOps[0]);  // Add our signature
+                                        }
 
-                                        SCLogUtility.Log($"Script components:", "ArbiterStartup");
-                                        SCLogUtility.Log($"Initial OP_0", "ArbiterStartup");
-                                        SCLogUtility.Log($"Our Signature: {signature}", "ArbiterStartup");
-                                        SCLogUtility.Log($"Placeholder: OP_0", "ArbiterStartup");
-                                        SCLogUtility.Log($"RedeemScript: {redeemScript}", "ArbiterStartup");
-                                        SCLogUtility.Log($"Final Script: {newScript}", "ArbiterStartup");
+                                        ops.Add(Op.GetPushOp(new byte[0]));  // Placeholder for second signature
+                                        ops.AddRange(scriptCoin.Redeem.ToOps());  // Add redeem script
+
+                                        input.ScriptSig = new Script(ops.ToArray());
+
+                                        SCLogUtility.Log("\nFinal Script Components:", "ArbiterStartup");
+                                        SCLogUtility.Log($"Final ScriptSig: {input.ScriptSig}", "ArbiterStartup");
                                     }
                                 }
-
 
                                 // Try to verify each input separately
                                 SCLogUtility.Log("Signed Transaction Details:", "ArbiterStartup");
