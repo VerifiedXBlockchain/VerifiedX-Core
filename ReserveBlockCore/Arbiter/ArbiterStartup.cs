@@ -87,9 +87,14 @@ namespace ReserveBlockCore.Arbiter
                          return;
                      }
 
-                     var publicKey = BitcoinAccount.CreatePublicKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, scUID);
+                    // Before calling CreatePublicKeyForArbiter
+                    SCLogUtility.Log($"Creating PubKey with inputs:", "ArbiterStartup");
+                    SCLogUtility.Log($"SigningKey: {Globals.ArbiterSigningAddress.GetKey}", "ArbiterStartup");
+                    SCLogUtility.Log($"SCUID: {scUID}", "ArbiterStartup");
+                    var publicKey = BitcoinAccount.CreatePublicKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, scUID);
+                    SCLogUtility.Log($"Generated PubKey: {publicKey}", "ArbiterStartup");
 
-                     var message = publicKey + scUID;
+                    var message = publicKey + scUID;
                     
                      var signature = Services.SignatureService.CreateSignature(message, Globals.ArbiterSigningAddress.GetPrivKey, Globals.ArbiterSigningAddress.PublicKey);
 

@@ -166,9 +166,23 @@ namespace ReserveBlockCore.Bitcoin.Models
         #region Create Bitcoin Address For Arbiter
         public static Key CreatePrivateKeyForArbiter(string signingPrivateKey, string scUID)
         {
-            byte[] hash = SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(signingPrivateKey + scUID));
-            // Generate a random private key
+            //byte[] hash = SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(signingPrivateKey + scUID));
+            //// Generate a random private key
+            //Key privateKey = new Key(hash);
+
+            //return privateKey;
+
+            // Log the exact input string
+            var inputString = signingPrivateKey + scUID;
+            SCLogUtility.Log($"Input string for private key derivation: {inputString}", "BitcoinAccount");
+            SCLogUtility.Log($"Input string length: {inputString.Length}", "BitcoinAccount");
+            SCLogUtility.Log($"Input string bytes: {BitConverter.ToString(Encoding.UTF8.GetBytes(inputString))}", "BitcoinAccount");
+
+            byte[] hash = SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(inputString));
             Key privateKey = new Key(hash);
+
+            // Log the generated public key
+            SCLogUtility.Log($"Generated PubKey: {privateKey.PubKey}", "BitcoinAccount");
 
             return privateKey;
         }
