@@ -175,7 +175,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                         FeeRate = chosenFeeRate,
                         Hash = signedTransaction.GetHash().ToString(),
                         Signature = hexTx,
-                        Timestamp = TimeUtil.GetTime(0,0,0,999),
+                        Timestamp = TimeUtil.GetTime(0, 0, 0, 999),
                         TransactionType = !overrideInternalSend ? BTCTransactionType.Send : BTCTransactionType.SameWalletTransaction,
                         BitcoinUTXOs = coinListBtcUTXOs,
                     };
@@ -195,17 +195,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Console.WriteLine($"Tx FAILED to verify.");
                     ErrorLogUtility.LogError($"Tx FAILED to verify.", "TransactionService.SendTransaction()");
                     return (false, txVerified.Item2);
-                    
+
                 }
 
                 return (false, $"Unknown Error");
             }
-            catch(Exception ex) 
+            catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"ERROR: {ex}", "TransactionService.SendTransaction()");
                 return (false, $"Error: {ex}");
             }
-            
+
         }
 
         public static async Task<(bool, string)> CalcuateFee(string sender, string receiver, decimal sendAmount, long chosenFeeRate)
@@ -312,7 +312,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
 
             }
-            catch(Exception ex )
+            catch (Exception ex)
             {
                 return (false, $"Error: {ex}");
             }
@@ -490,7 +490,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 return JsonConvert.SerializeObject(new { Success = true, Message = $"TX not verified. ERROR: {ex}" });
             }
-            
+
         }
 
         public static async Task<string> SendMultiSigTransactions(List<PubKey> pubKeys, decimal sendAmount, Account vfxAccount, string toAddress, string changeAddress, long chosenFeeRate, string scUID)
@@ -498,7 +498,6 @@ namespace ReserveBlockCore.Bitcoin.Services
             try
             {
                 Script scriptPubKey = PayToMultiSigTemplate.Instance.GenerateScriptPubKey(Globals.TotalArbiterThreshold, pubKeys.OrderBy(x => x.ScriptPubKey.ToString()).ToArray());
-
                 Script redeemScript = scriptPubKey.PaymentScript;
 
                 BitcoinAddress multiSigAddress = scriptPubKey.Hash.GetAddress(Globals.BTCNetwork);
@@ -575,24 +574,14 @@ namespace ReserveBlockCore.Bitcoin.Services
                     coinsToSpend.Add(coinToSpend);
                 }
 
-                //foreach (var input in coinInputs)
-                //{
-                //    input.ScriptPubKey = scriptPubKey.ToHex();
-                //    //Added
-                //    input.RedeemScript = redeemScript.ToHex();
-                //}
-
                 foreach (var input in coinInputs)
                 {
-                    // The scriptPubKey should be the P2SH of the redeemScript
-                    Script redeemScripts = PayToMultiSigTemplate.Instance.GenerateScriptPubKey(Globals.TotalArbiterThreshold, pubKeys.OrderBy(x => x.ScriptPubKey.ToString()).ToArray());
-                    input.RedeemScript = redeemScripts.ToHex();
-                    input.ScriptPubKey = redeemScripts.Hash.ScriptPubKey.ToHex();
+                    input.ScriptPubKey = scriptPubKey.ToHex();
                 }
 
                 var txBuilder = Globals.BTCNetwork.CreateTransactionBuilder();
 
-                txBuilder.AddCoins(coinsToSpend.OrderBy(x => x.ScriptPubKey.ToString()).ToArray());
+                txBuilder.AddCoins(coinsToSpend.ToArray());
 
                 // Get the count of inputs and outputs
                 int finalInputCount = unspentCoins.Count();
@@ -605,7 +594,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 ulong totalAmountSpent = (amountToSend - finalFee);
 
-                if(amountToSend <= finalFee)
+                if (amountToSend <= finalFee)
                 {
                     return await SCLogUtility.LogAndReturn($"Not enough in amount to cover fee. Amount {amountToSend} - Fee: {finalFee}", "TransactionService.SendMultiSigTransactions()", false);
                 }
@@ -634,7 +623,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 List<NBitcoin.Transaction> signedTransactionList = new List<NBitcoin.Transaction>();
 
                 var timestamp = TimeUtil.GetTime();
-                
+
 
                 var sigData = new PostData.MultiSigSigningPostData
                 {
@@ -672,7 +661,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                             var responseData = JsonConvert.DeserializeObject<ResponseData.MultiSigSigningResponse>(responseString);
                             if (responseData == null)
-                                return await SCLogUtility.LogAndReturn($"Failed to get a deserialize response from Arbiters - Point B.", "TransactionService.SendMultiSigTransactions()", false);
+                                return await SCLogUtility.LogAndReturn($"Failed to get a deserialize response from Arbiters - Point B.", "TransactionService.SendMultiSigTransactions()", false); ;
 
                             if (!responseData.Success)
                                 return await SCLogUtility.LogAndReturn($"Received response, but it was not a success - Point C.", "TransactionService.SendMultiSigTransactions()", false);
@@ -690,36 +679,19 @@ namespace ReserveBlockCore.Bitcoin.Services
                     }
                 }
 
-                //NBitcoin.Transaction fullySigned =
-                //txBuilder
-                //.AddCoins(coinsToSpend.OrderBy(x => x.ScriptPubKey.ToString()).ToArray())
-                //.CombineSignatures(signedTransactionList.ToArray());
-
-                var orderedSignedTransactions = signedTransactionList.OrderBy(x => x.GetHash().ToString()).ToArray();
-                txBuilder.AddCoins(coinsToSpend.ToArray());
-
-                NBitcoin.Transaction fullySigned = null;
-
-                foreach (var signedTx in orderedSignedTransactions)
-                {
-                    if (fullySigned == null)
-                        fullySigned = signedTx;
-                    else
-                        fullySigned = txBuilder.CombineSignatures(fullySigned, signedTx);
-                }
-
-                if (fullySigned == null)
-                {
-                    return await SCLogUtility.LogAndReturn($"Fully signed transaction was null.", "TransactionService.SendMultiSigTransactions()", false);
-                }
+                NBitcoin.Transaction fullySigned =
+                txBuilder
+                .AddCoins(coinsToSpend.ToArray())
+                .CombineSignatures(signedTransactionList.ToArray());
 
                 var txVerified = ValidateTransaction(fullySigned, txBuilder);//txBuilder.Verify(fullySigned);
 
-                var hexTx = fullySigned.ToHex();
-                var hashTx = fullySigned.GetHash();
-
                 if (!txVerified.Item1)
                     return await SCLogUtility.LogAndReturn($"Transaction Failed to verify. Reason(s): {txVerified.Item2}", "TransactionService.SendMultiSigTransactions()", false);
+
+
+                var hexTx = fullySigned.ToHex();
+                var hashTx = fullySigned.GetHash();
 
                 var tx = new BitcoinTransaction
                 {
@@ -981,7 +953,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 Console.WriteLine($"Broadcast started @ {DateTime.Now}");
 
-                if(!isTest)
+                if (!isTest)
                     _ = BroadcastService.BroadcastTx(fullySigned);
 
                 Console.WriteLine($"Broadcast completed @ {DateTime.Now}");
@@ -990,7 +962,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 return JsonConvert.SerializeObject(new { Success = true, Message = $"Transaction Success. Hash: {hashTx}", Hash = hashTx.ToString(), UniqueId = uniqueId, SmartContractUID = scUID });
 
-                
+
             }
             catch (Exception ex)
             {
@@ -1042,13 +1014,13 @@ namespace ReserveBlockCore.Bitcoin.Services
                 bool first = true;
                 foreach (var error in errors)
                 {
-                    if(first)
+                    if (first)
                         errorResponses += error.ToString();
 
                     errorResponses = errorResponses + ", " + error.ToString();
                 }
 
-                return (false,  errorResponses);
+                return (false, errorResponses);
             }
             else
             {
@@ -1110,7 +1082,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                         spentList.Add(x);
 
-                        
+
                     }
 
                 }

@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Configuration;
 using NBitcoin;
-using NBitcoin.Policy;
 using NBitcoin.Protocol;
 using Newtonsoft.Json;
 using ReserveBlockCore.Bitcoin.Models;
@@ -76,46 +75,41 @@ namespace ReserveBlockCore.Arbiter
                 endpoints.MapGet("/depositaddress/{address}/{**scUID}", async context =>
                 {
 
-                     var address = context.Request.RouteValues["address"] as string;
-                     var scUID = context.Request.RouteValues["scUID"] as string;
+                    var address = context.Request.RouteValues["address"] as string;
+                    var scUID = context.Request.RouteValues["scUID"] as string;
 
-                     if (string.IsNullOrEmpty(address))
-                     {
-                         context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                         var response = JsonConvert.SerializeObject(new { Success = false, Message = $"No Address" }, Formatting.Indented);
-                         await context.Response.WriteAsync(response);
-                         return;
-                     }
+                    if (string.IsNullOrEmpty(address))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"No Address" }, Formatting.Indented);
+                        await context.Response.WriteAsync(response);
+                        return;
+                    }
 
-                    // Before calling CreatePublicKeyForArbiter
-                    SCLogUtility.Log($"Creating PubKey with inputs:", "ArbiterStartup");
-                    SCLogUtility.Log($"SigningKey: {Globals.ArbiterSigningAddress.GetKey}", "ArbiterStartup");
-                    SCLogUtility.Log($"SCUID: {scUID}", "ArbiterStartup");
                     var publicKey = BitcoinAccount.CreatePublicKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, scUID);
-                    SCLogUtility.Log($"Generated PubKey: {publicKey}", "ArbiterStartup");
 
                     var message = publicKey + scUID;
-                    
-                     var signature = Services.SignatureService.CreateSignature(message, Globals.ArbiterSigningAddress.GetPrivKey, Globals.ArbiterSigningAddress.PublicKey);
 
-                     if(signature == "F")
-                    
-                     {
+                    var signature = Services.SignatureService.CreateSignature(message, Globals.ArbiterSigningAddress.GetPrivKey, Globals.ArbiterSigningAddress.PublicKey);
+
+                    if (signature == "F")
+
+                    {
                         context.Response.StatusCode = StatusCodes.Status400BadRequest;
                         var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Signature Failed." }, Formatting.Indented);
                         await context.Response.WriteAsync(response);
                         return;
-                    
-                     }
 
-                     context.Response.StatusCode = StatusCodes.Status200OK;
-                     var requestorResponseJson = JsonConvert.SerializeObject(new { Success = true, Message = $"PubKey created", PublicKey = publicKey, Signature = signature }, Formatting.Indented);
-                     await context.Response.WriteAsync(requestorResponseJson);
-                     return;
-                    
+                    }
+
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    var requestorResponseJson = JsonConvert.SerializeObject(new { Success = true, Message = $"PubKey created", PublicKey = publicKey, Signature = signature }, Formatting.Indented);
+                    await context.Response.WriteAsync(requestorResponseJson);
+                    return;
+
                 });
 
-                endpoints.MapPost("/getsignedmultisig",  async context =>
+                endpoints.MapPost("/getsignedmultisig", async context =>
                 {
                     // Handle the GET request
                     try
@@ -160,9 +154,9 @@ namespace ReserveBlockCore.Arbiter
                                     return;
                                 }
 
-                                var coinsToSpend = result.ScriptCoinList.OrderBy(x => x.ScriptPubKey.ToString()).ToArray();
+                                var coinsToSpend = result.ScriptCoinList;
 
-                                if (coinsToSpend == null || coinsToSpend?.Count() < 1)
+                                if (coinsToSpend == null && coinsToSpend?.Count() > 0)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -172,202 +166,28 @@ namespace ReserveBlockCore.Arbiter
                                 }
 
                                 TransactionBuilder builder = Globals.BTCNetwork.CreateTransactionBuilder();
-
                                 var privateKey = BitcoinAccount.CreatePrivateKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, result.SCUID);
-                                var pubKey = privateKey.PubKey.ToString();
-
-                                SCLogUtility.Log($"Inputs to key derivation:", "ArbiterStartup");
-                                SCLogUtility.Log($"SigningKey: {Globals.ArbiterSigningAddress.GetKey}", "ArbiterStartup");
-                                SCLogUtility.Log($"SCUID: {result.SCUID}", "ArbiterStartup");
-                                SCLogUtility.Log($"Signing Details:", "ArbiterStartup");
-                                SCLogUtility.Log($"Private Key WIF: {privateKey.GetWif(Globals.BTCNetwork)}", "ArbiterStartup");
-                                SCLogUtility.Log($"Private Key PubKey: {privateKey.PubKey}", "ArbiterStartup");
-
-
-                                // Make sure we're using one of the expected keys
-                                //if (pubKey != "02f3346721a4af10e87a703e74504f4b422adbf72e9597261a27594bf9c1fa5d4a" &&
-                                //    pubKey != "039463ae25ebebdf19be147f95b47702abd5bbf2bf87d4f849f84ccc4ad2002a23")
-                                //{
-                                //    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                //    context.Response.ContentType = "application/json";
-                                //    var response = JsonConvert.SerializeObject(new
-                                //    {
-                                //        Success = false,
-                                //        Message = $"Generated pubkey {pubKey} does not match either of the expected pubkeys in redeem script.\nSigningKey: {Globals.ArbiterSigningAddress.GetKey}\nSCUID: {result.SCUID}"
-                                //    }, Formatting.Indented);
-                                //    await context.Response.WriteAsync(response);
-                                //    return;
-                                //}
-
-                                SCLogUtility.Log($"Key Comparison:", "ArbiterStartup");
-                                SCLogUtility.Log($"Generated pubkey: {privateKey.PubKey}", "ArbiterStartup");
-
-                                // Extract public keys from the ScriptCoinListData
-                                var firstInput = coinsToSpend.FirstOrDefault();
-                                if (firstInput != null)
-                                {
-                                    var redeemScript = Script.FromHex(firstInput.RedeemScript);
-                                    var pubKeysFromScript = redeemScript.GetAllPubKeys();
-
-                                    foreach (var key in pubKeysFromScript)
-                                    {
-                                        SCLogUtility.Log($"Comparing with: {key}", "ArbiterStartup");
-                                    }
-
-                                    bool keyMatches = pubKeysFromScript.Any(x => x.ToString() == privateKey.PubKey.ToString());
-                                    SCLogUtility.Log($"Key matches: {keyMatches}", "ArbiterStartup");
-
-                                    if (!keyMatches)
-                                    {
-                                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                        context.Response.ContentType = "application/json";
-                                        var response = JsonConvert.SerializeObject(new
-                                        {
-                                            Success = false,
-                                            Message = $"Generated pubkey {privateKey.PubKey} does not match any of the expected pubkeys.\nSigningKey: {Globals.ArbiterSigningAddress.GetKey}\nSCUID: {result.SCUID}"
-                                        }, Formatting.Indented);
-                                        await context.Response.WriteAsync(response);
-                                        return;
-                                    }
-                                }
 
                                 var unsignedTransaction = NBitcoin.Transaction.Parse(result.Transaction, Globals.BTCNetwork);
 
                                 List<ScriptCoin> coinList = new List<ScriptCoin>();
 
-                                //foreach(var input in coinsToSpend)
-                                //{
-                                //    Script redeemScript = Script.FromHex(input.RedeemScript);
-                                //    Script scriptPubKey = Script.FromHex(input.ScriptPubKey);
-                                //    OutPoint outPoint = new OutPoint(uint256.Parse(input.TxHash), input.Vout);
-                                //    Coin coin = new Coin(outPoint, new TxOut(Money.Coins(input.Money), redeemScript));
-                                //    ScriptCoin coinToSpend = new ScriptCoin(coin, scriptPubKey);
-
-                                //    coinList.Add(coinToSpend);
-                                //}
-
-                                //Added
-                                //Original Above
-                                foreach (var input in coinsToSpend)
+                                foreach (var input in result.ScriptCoinList)
                                 {
                                     Script redeemScript = Script.FromHex(input.RedeemScript);
                                     Script scriptPubKey = Script.FromHex(input.ScriptPubKey);
                                     OutPoint outPoint = new OutPoint(uint256.Parse(input.TxHash), input.Vout);
-                                    Coin coin = new Coin(outPoint, new TxOut(Money.Coins(input.Money), scriptPubKey)); // Changed from redeemScript to scriptPubKey
-                                    ScriptCoin coinToSpend = new ScriptCoin(coin, redeemScript);  // Changed from scriptPubKey to redeemScript
+                                    Coin coin = new Coin(outPoint, new TxOut(Money.Coins(input.Money), redeemScript));
+                                    ScriptCoin coinToSpend = new ScriptCoin(coin, scriptPubKey);
 
                                     coinList.Add(coinToSpend);
                                 }
 
-                                SCLogUtility.Log($"=== DEBUG INFORMATION START ===", "ArbiterStartup");
-
-                                foreach (var input in coinsToSpend)
-                                {
-                                    SCLogUtility.Log($"Input Script Details:", "ArbiterStartup");
-                                    SCLogUtility.Log($"ScriptPubKey (hex): {input.ScriptPubKey}", "ArbiterStartup");
-                                    SCLogUtility.Log($"RedeemScript (hex): {input.RedeemScript}", "ArbiterStartup");
-                                }
-
-                                // In ArbiterStartup.cs, around where we do the signing, add these debug logs:
-                                SCLogUtility.Log($"Debug: Number of coins to sign: {coinList.Count}", "ArbiterStartup");
-
-                                // Log coin details
-                                SCLogUtility.Log("Script Details:", "ArbiterStartup");
-                                foreach (var coin in coinList)
-                                {
-                                    if (coin is ScriptCoin scriptCoin)
-                                    {
-                                        SCLogUtility.Log($"ScriptPubKey: {scriptCoin.ScriptPubKey}", "ArbiterStartup");
-                                        SCLogUtility.Log($"RedeemScript: {scriptCoin.Redeem}", "ArbiterStartup");
-                                    }
-                                }
-
-                                // Log transaction details before signing
-                                SCLogUtility.Log($"Debug: Unsigned transaction details:", "ArbiterStartup");
-                                SCLogUtility.Log($"Debug: Input count: {unsignedTransaction.Inputs.Count}", "ArbiterStartup");
-                                SCLogUtility.Log($"Debug: Output count: {unsignedTransaction.Outputs.Count}", "ArbiterStartup");
-                                foreach (var output in unsignedTransaction.Outputs)
-                                {
-                                    SCLogUtility.Log($"Debug: Output amount: {output.Value}, ScriptPubKey: {output.ScriptPubKey}", "ArbiterStartup");
-                                }
-
-                                // Log private key details (safely)
-                                SCLogUtility.Log($"Debug: Private key valid: {privateKey != null}", "ArbiterStartup");
-
-                                // Attempt signing
-                                //NBitcoin.Transaction keySigned = builder
-                                //    .AddCoins(coinList.ToArray())
-                                //    .AddKeys(privateKey)
-                                //    .SignTransaction(unsignedTransaction);
-
-
-                                SCLogUtility.Log($"Private Key WIF: {privateKey.GetWif(Globals.BTCNetwork)}", "ArbiterStartup");
-                                SCLogUtility.Log($"Private Key PubKey: {privateKey.PubKey}", "ArbiterStartup");
-
-                                // Add coins first with explicit script
-                                foreach (var coin in coinList)
-                                {
-                                    if (coin is ScriptCoin scriptCoin)
-                                    {
-                                        SCLogUtility.Log($"Adding coin:", "ArbiterStartup");
-                                        SCLogUtility.Log($"Script Coin Redeem: {scriptCoin.Redeem}", "ArbiterStartup");
-                                        SCLogUtility.Log($"Script Coin RedeemScript Hash: {scriptCoin.Redeem.Hash}", "ArbiterStartup");
-                                        SCLogUtility.Log($"Script Coin ScriptPubKey: {scriptCoin.ScriptPubKey}", "ArbiterStartup");
-                                    }
-                                }
-
-                                // Add coins and key first
-                                builder.AddCoins(coinList.ToArray());
-                                builder.AddKeys(privateKey);
-
-                                SCLogUtility.Log("Transaction Details:", "ArbiterStartup");
-                                SCLogUtility.Log($"Input Count: {unsignedTransaction.Inputs.Count}", "ArbiterStartup");
-
-                                foreach (var input in unsignedTransaction.Inputs)
-                                {
-                                    SCLogUtility.Log($"Input Script: {input.ScriptSig}", "ArbiterStartup");
-                                }
-
-                                var keySigned = builder
-                                    .SetSigningOptions(new SigningOptions
-                                    {
-                                        EnforceLowR = true,
-                                        SigHash = SigHash.All
-                                    })
-                                    .SignTransaction(unsignedTransaction);
-
-                                // Just log what NBitcoin produced
-                                foreach (var input in keySigned.Inputs)
-                                {
-                                    SCLogUtility.Log($"ScriptSig after signing: {input.ScriptSig}", "ArbiterStartup");
-                                }
-
-                                TransactionPolicyError[] errors;
-                                bool verified = builder.Verify(keySigned, out errors);
-
-                                if (!verified)
-                                {
-                                    SCLogUtility.Log("Verification Errors:", "ArbiterStartup");
-                                    foreach (var error in errors)
-                                    {
-                                        SCLogUtility.Log($"Error Details: {error}", "ArbiterStartup");
-                                    }
-
-                                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                    context.Response.ContentType = "application/json";
-                                    var response = JsonConvert.SerializeObject(new
-                                    {
-                                        Success = false,
-                                        Message = $"Transaction signing failed verification: {string.Join(", ", errors.Select(x => x.ToString()))}",
-                                        SignedTx = keySigned.ToHex()
-                                    }, Formatting.Indented);
-                                    await context.Response.WriteAsync(response);
-                                    return;
-                                }
+                                NBitcoin.Transaction keySigned = builder.AddCoins(coinList).AddKeys(privateKey).SignTransaction(unsignedTransaction);
 
                                 var scState = SmartContractStateTrei.GetSmartContractState(result.SCUID);
 
-                                if(scState == null)
+                                if (scState == null)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -378,16 +198,16 @@ namespace ReserveBlockCore.Arbiter
 
                                 var totalOwned = 0.0M;
 
-                                if(scState.OwnerAddress != result.VFXAddress)
+                                if (scState.OwnerAddress != result.VFXAddress)
                                 {
-                                    if(scState.SCStateTreiTokenizationTXes != null)
+                                    if (scState.SCStateTreiTokenizationTXes != null)
                                     {
                                         var vBTCList = scState.SCStateTreiTokenizationTXes.Where(x => x.ToAddress == result.VFXAddress && x.FromAddress == result.VFXAddress).ToList();
-                                        if(vBTCList.Count() > 0)
+                                        if (vBTCList.Count() > 0)
                                         {
                                             //Also get the state level stuff we are saving now.
                                             totalOwned = vBTCList.Sum(x => x.Amount);
-                                            if(totalOwned < postData.Amount)
+                                            if (totalOwned < postData.Amount)
                                             {
                                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                                 context.Response.ContentType = "application/json";
@@ -421,7 +241,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
 
-                                if(scMain == null )
+                                if (scMain == null)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -452,7 +272,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var tknz = (TokenizationFeature)tknzFeature;
 
-                                if(tknz == null)
+                                if (tknz == null)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -467,14 +287,14 @@ namespace ReserveBlockCore.Arbiter
                                 foreach (var output in keySigned.Outputs)
                                 {
                                     var addr = output.ScriptPubKey.GetDestinationAddress(Globals.BTCNetwork);
-                                    if(addr != null)
+                                    if (addr != null)
                                     {
                                         if (addr.ToString() == depositAddress)
                                             changeAddressCorrect = true;
                                     }
                                 }
 
-                                if(!changeAddressCorrect)
+                                if (!changeAddressCorrect)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -500,7 +320,8 @@ namespace ReserveBlockCore.Arbiter
                                     ArbiterUniqueId = RandomStringUtility.GetRandomStringOnlyLetters(16)
                                 };
 
-                                var responseData = new ResponseData.MultiSigSigningResponse {
+                                var responseData = new ResponseData.MultiSigSigningResponse
+                                {
                                     Success = true,
                                     Message = "Transaction Signed",
                                     SignedTransaction = keySignedHex,
@@ -509,7 +330,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
 
-                                if(account == null )
+                                if (account == null)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -568,7 +389,7 @@ namespace ReserveBlockCore.Arbiter
                             }
                         }
                     }
-                    catch(Exception ex)
+                    catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status400BadRequest;
                         context.Response.ContentType = "application/json";
@@ -576,10 +397,10 @@ namespace ReserveBlockCore.Arbiter
                         await context.Response.WriteAsync(response);
                         return;
                     }
-                    
 
 
-                    
+
+
 
                 });
 
