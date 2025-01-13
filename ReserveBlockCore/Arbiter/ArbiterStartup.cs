@@ -169,6 +169,30 @@ namespace ReserveBlockCore.Arbiter
                                 TransactionBuilder builder = Globals.BTCNetwork.CreateTransactionBuilder();
 
                                 var privateKey = BitcoinAccount.CreatePrivateKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, result.SCUID);
+                                var pubKey = privateKey.PubKey.ToString();
+
+                                SCLogUtility.Log($"Inputs to key derivation:", "ArbiterStartup");
+                                SCLogUtility.Log($"SigningKey: {Globals.ArbiterSigningAddress.GetKey}", "ArbiterStartup");
+                                SCLogUtility.Log($"SCUID: {result.SCUID}", "ArbiterStartup");
+                                SCLogUtility.Log($"Generated pubkey for signing: {pubKey}", "ArbiterStartup");
+                                SCLogUtility.Log($"Expected pubkeys from redeem script:", "ArbiterStartup");
+                                SCLogUtility.Log($"PubKey1: 023954d7077ac6d6644f1dd70f37868501bce3eb96a51fd5518d695bdb630247b8", "ArbiterStartup");
+                                SCLogUtility.Log($"PubKey2: 0358c5aba497f4f556048a59fec118050ccccd12bb1cc821745881d35f262e9dbd", "ArbiterStartup");
+
+                                // Make sure we're using one of the expected keys
+                                if (pubKey != "023954d7077ac6d6644f1dd70f37868501bce3eb96a51fd5518d695bdb630247b8" &&
+                                    pubKey != "0358c5aba497f4f556048a59fec118050ccccd12bb1cc821745881d35f262e9dbd")
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                    context.Response.ContentType = "application/json";
+                                    var response = JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = $"Generated pubkey {pubKey} does not match either of the expected pubkeys in redeem script.\nSigningKey: {Globals.ArbiterSigningAddress.GetKey}\nSCUID: {result.SCUID}"
+                                    }, Formatting.Indented);
+                                    await context.Response.WriteAsync(response);
+                                    return;
+                                }
 
                                 var unsignedTransaction = NBitcoin.Transaction.Parse(result.Transaction, Globals.BTCNetwork);
 
@@ -250,6 +274,10 @@ namespace ReserveBlockCore.Arbiter
                                         SCLogUtility.Log($"Script Coin ScriptPubKey: {scriptCoin.ScriptPubKey}", "ArbiterStartup");
                                     }
                                 }
+
+                                // Add coins and key first
+                                builder.AddCoins(coinList.ToArray());
+                                builder.AddKeys(privateKey);
 
                                 var keySigned = builder
                                     .SetSigningOptions(new SigningOptions
