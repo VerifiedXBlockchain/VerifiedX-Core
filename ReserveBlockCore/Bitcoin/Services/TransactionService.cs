@@ -575,11 +575,19 @@ namespace ReserveBlockCore.Bitcoin.Services
                     coinsToSpend.Add(coinToSpend);
                 }
 
+                //foreach (var input in coinInputs)
+                //{
+                //    input.ScriptPubKey = scriptPubKey.ToHex();
+                //    //Added
+                //    input.RedeemScript = redeemScript.ToHex();
+                //}
+
                 foreach (var input in coinInputs)
                 {
-                    input.ScriptPubKey = scriptPubKey.ToHex();
-                    //Added
-                    input.RedeemScript = redeemScript.ToHex();
+                    // The scriptPubKey should be the P2SH of the redeemScript
+                    Script redeemScripts = PayToMultiSigTemplate.Instance.GenerateScriptPubKey(Globals.TotalArbiterThreshold, pubKeys.OrderBy(x => x.ScriptPubKey.ToString()).ToArray());
+                    input.RedeemScript = redeemScripts.ToHex();
+                    input.ScriptPubKey = redeemScripts.Hash.ScriptPubKey.ToHex();
                 }
 
                 var txBuilder = Globals.BTCNetwork.CreateTransactionBuilder();
@@ -682,10 +690,28 @@ namespace ReserveBlockCore.Bitcoin.Services
                     }
                 }
 
-                NBitcoin.Transaction fullySigned =
-                txBuilder
-                .AddCoins(coinsToSpend.OrderBy(x => x.ScriptPubKey.ToString()).ToArray())
-                .CombineSignatures(signedTransactionList.ToArray());
+                //NBitcoin.Transaction fullySigned =
+                //txBuilder
+                //.AddCoins(coinsToSpend.OrderBy(x => x.ScriptPubKey.ToString()).ToArray())
+                //.CombineSignatures(signedTransactionList.ToArray());
+
+                var orderedSignedTransactions = signedTransactionList.OrderBy(x => x.GetHash().ToString()).ToArray();
+                txBuilder.AddCoins(coinsToSpend.ToArray());
+
+                NBitcoin.Transaction fullySigned = null;
+
+                foreach (var signedTx in orderedSignedTransactions)
+                {
+                    if (fullySigned == null)
+                        fullySigned = signedTx;
+                    else
+                        fullySigned = txBuilder.CombineSignatures(fullySigned, signedTx);
+                }
+
+                if (fullySigned == null)
+                {
+                    return await SCLogUtility.LogAndReturn($"Fully signed transaction was null.", "TransactionService.SendMultiSigTransactions()", false);
+                }
 
                 var txVerified = ValidateTransaction(fullySigned, txBuilder);//txBuilder.Verify(fullySigned);
 

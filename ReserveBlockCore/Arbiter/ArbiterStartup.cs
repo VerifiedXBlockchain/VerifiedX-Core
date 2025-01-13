@@ -196,7 +196,21 @@ namespace ReserveBlockCore.Arbiter
                                     coinList.Add(coinToSpend);
                                 }
 
-                                NBitcoin.Transaction keySigned = builder.AddCoins(coinList).AddKeys(privateKey).SignTransaction(unsignedTransaction);
+                                NBitcoin.Transaction keySigned = builder
+                                    .AddCoins(coinList.ToArray())
+                                    .AddKeys(privateKey)
+                                    .SignTransaction(unsignedTransaction);
+
+                                var verificationResult = builder.Verify(keySigned);
+
+                                if (!verificationResult)
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                    context.Response.ContentType = "application/json";
+                                    var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction signing failed verification" }, Formatting.Indented);
+                                    await context.Response.WriteAsync(response);
+                                    return;
+                                }
 
                                 var scState = SmartContractStateTrei.GetSmartContractState(result.SCUID);
 
