@@ -179,10 +179,10 @@ namespace ReserveBlockCore.Arbiter
                                 SCLogUtility.Log($"Inputs to key derivation:", "ArbiterStartup");
                                 SCLogUtility.Log($"SigningKey: {Globals.ArbiterSigningAddress.GetKey}", "ArbiterStartup");
                                 SCLogUtility.Log($"SCUID: {result.SCUID}", "ArbiterStartup");
-                                SCLogUtility.Log($"Generated pubkey for signing: {pubKey}", "ArbiterStartup");
-                                SCLogUtility.Log($"Expected pubkeys from redeem script:", "ArbiterStartup");
-                                SCLogUtility.Log($"PubKey1: 023954d7077ac6d6644f1dd70f37868501bce3eb96a51fd5518d695bdb630247b8", "ArbiterStartup");
-                                SCLogUtility.Log($"PubKey2: 0358c5aba497f4f556048a59fec118050ccccd12bb1cc821745881d35f262e9dbd", "ArbiterStartup");
+                                SCLogUtility.Log($"Signing Details:", "ArbiterStartup");
+                                SCLogUtility.Log($"Private Key WIF: {privateKey.GetWif(Globals.BTCNetwork)}", "ArbiterStartup");
+                                SCLogUtility.Log($"Private Key PubKey: {privateKey.PubKey}", "ArbiterStartup");
+
 
                                 // Make sure we're using one of the expected keys
                                 if (pubKey != "023954d7077ac6d6644f1dd70f37868501bce3eb96a51fd5518d695bdb630247b8" &&
@@ -240,10 +240,14 @@ namespace ReserveBlockCore.Arbiter
                                 SCLogUtility.Log($"Debug: Number of coins to sign: {coinList.Count}", "ArbiterStartup");
 
                                 // Log coin details
+                                SCLogUtility.Log("Script Details:", "ArbiterStartup");
                                 foreach (var coin in coinList)
                                 {
-                                    SCLogUtility.Log($"Debug: Coin Amount: {coin.Amount}", "ArbiterStartup");
-                                    SCLogUtility.Log($"Debug: ScriptPubKey: {coin.ScriptPubKey}", "ArbiterStartup");
+                                    if (coin is ScriptCoin scriptCoin)
+                                    {
+                                        SCLogUtility.Log($"ScriptPubKey: {scriptCoin.ScriptPubKey}", "ArbiterStartup");
+                                        SCLogUtility.Log($"RedeemScript: {scriptCoin.Redeem}", "ArbiterStartup");
+                                    }
                                 }
 
                                 // Log transaction details before signing
@@ -284,6 +288,13 @@ namespace ReserveBlockCore.Arbiter
                                 builder.AddCoins(coinList.ToArray());
                                 builder.AddKeys(privateKey);
 
+                                SCLogUtility.Log("Transaction Details:", "ArbiterStartup");
+                                SCLogUtility.Log($"Input Count: {unsignedTransaction.Inputs.Count}", "ArbiterStartup");
+                                foreach (var input in unsignedTransaction.Inputs)
+                                {
+                                    SCLogUtility.Log($"Input Script: {input.ScriptSig}", "ArbiterStartup");
+                                }
+
                                 var keySigned = builder
                                     .SetSigningOptions(new SigningOptions
                                     {
@@ -292,25 +303,13 @@ namespace ReserveBlockCore.Arbiter
                                     })
                                     .SignTransaction(unsignedTransaction);
 
+
+
+                                // Try to verify each input separately
                                 SCLogUtility.Log("Signed Transaction Details:", "ArbiterStartup");
                                 foreach (var input in keySigned.Inputs)
                                 {
-                                    SCLogUtility.Log($"Input ScriptSig: {input.ScriptSig}", "ArbiterStartup");
-                                    SCLogUtility.Log($"Witness Script: {input.WitScript}", "ArbiterStartup");
-                                }
-
-                                // Try to verify each input separately
-                                for (int i = 0; i < keySigned.Inputs.Count; i++)
-                                {
-                                    var coin = coinList[i];
-                                    SCLogUtility.Log($"Verifying Input {i}:", "ArbiterStartup");
-                                    SCLogUtility.Log($"Previous Output: {coin.Outpoint}", "ArbiterStartup");
-                                    SCLogUtility.Log($"Amount: {coin.Amount}", "ArbiterStartup");
-                                    SCLogUtility.Log($"ScriptPubKey: {coin.ScriptPubKey}", "ArbiterStartup");
-                                    if (coin is ScriptCoin scriptCoin)
-                                    {
-                                        SCLogUtility.Log($"Redeem Script: {scriptCoin.Redeem}", "ArbiterStartup");
-                                    }
+                                    SCLogUtility.Log($"Signed Input Script: {input.ScriptSig}", "ArbiterStartup");
                                 }
 
                                 TransactionPolicyError[] errors;

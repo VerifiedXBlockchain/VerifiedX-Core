@@ -633,6 +633,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                             PubKey pubKey = new PubKey(proof.PublicKey);
                             pubKeys.Add(pubKey);
                         }
+                        //return await TransactionService.TestMultiSigScriptCreation(pubKeys, scUID);
                         return await TransactionService.SendMultiSigTransactions(pubKeys, amount, account, btcToAddress, btcTkn.DepositAddress, chosenFeeRate, scUID);
                     }
                 }
@@ -648,6 +649,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                         PubKey pubKey = new PubKey(proof.PublicKey);
                         pubKeys.Add(pubKey);
                     }
+                    //return await TransactionService.TestMultiSigScriptCreation(pubKeys, scUID);
                     return await TransactionService.SendMultiSigTransactions(pubKeys, amount, account, btcToAddress, btcTkn.DepositAddress, chosenFeeRate, scUID);
                 }
                 else
