@@ -336,12 +336,27 @@ namespace ReserveBlockCore.Arbiter
                                     .SignTransaction(unsignedTransaction);
 
 
+                                foreach (var input in keySigned.Inputs)
+                                {
+                                    var currentScript = input.ScriptSig;
+                                    if (currentScript != null)
+                                    {
+                                        // Add OP_0 as placeholder for second signature
+                                        var ops = currentScript.ToOps().ToList();
+                                        if (ops.Count > 0)
+                                        {
+                                            ops.Insert(0, Op.GetPushOp(new byte[0]));  // Add empty placeholder
+                                            input.ScriptSig = new Script(ops.ToArray());
+                                        }
+                                    }
+                                }
+
 
                                 // Try to verify each input separately
                                 SCLogUtility.Log("Signed Transaction Details:", "ArbiterStartup");
                                 foreach (var input in keySigned.Inputs)
                                 {
-                                    SCLogUtility.Log($"Signed Input Script: {input.ScriptSig}", "ArbiterStartup");
+                                    SCLogUtility.Log($"Modified Input Script: {input.ScriptSig}", "ArbiterStartup");
                                 }
 
                                 TransactionPolicyError[] errors;
