@@ -661,7 +661,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                             var responseData = JsonConvert.DeserializeObject<ResponseData.MultiSigSigningResponse>(responseString);
                             if (responseData == null)
-                                return await SCLogUtility.LogAndReturn($"Failed to get a deserialize response from Arbiters - Point B.", "TransactionService.SendMultiSigTransactions()", false); ;
+                                return await SCLogUtility.LogAndReturn($"Failed to get a deserialize response from Arbiters - Point B.", "TransactionService.SendMultiSigTransactions()", false);
 
                             if (!responseData.Success)
                                 return await SCLogUtility.LogAndReturn($"Received response, but it was not a success - Point C.", "TransactionService.SendMultiSigTransactions()", false);
@@ -903,7 +903,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                             var responseData = JsonConvert.DeserializeObject<ResponseData.MultiSigSigningResponse>(responseString);
                             if (responseData == null)
-                                return await SCLogUtility.LogAndReturn($"Failed to get a deserialize response from Arbiters - Point B.", "TransactionService.SendMultiSigTransactions()", false); ;
+                                return await SCLogUtility.LogAndReturn($"Failed to get a deserialize response from Arbiters - Point B.", "TransactionService.SendMultiSigTransactions()", false);
 
                             if (!responseData.Success)
                                 return await SCLogUtility.LogAndReturn($"Received response, but it was not a success - Point C.", "TransactionService.SendMultiSigTransactions()", false);
