@@ -111,6 +111,53 @@ namespace ReserveBlockCore.Bitcoin
             return result;
         }
 
+        public static async Task<Client?> ElectrumXClient()
+        {
+            bool electrumServerFound = false;
+            Client client = null;
+            while (!electrumServerFound)
+            {
+                var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 5).OrderBy(x => x.Count).FirstOrDefault();
+                if (electrumServer != null)
+                {
+                    try
+                    {
+                        var clientConnection = new Client(electrumServer.Host, electrumServer.Port, true);
+                        var serverVersion = await clientConnection.GetServerVersion();
+
+                        client = clientConnection;
+
+                        if (serverVersion == null)
+                            throw new Exception("Bad server response or no connection.");
+
+                        if (serverVersion.ProtocolVersion.Major != 1 && serverVersion.ProtocolVersion.Minor < 4)
+                            throw new Exception("Bad version.");
+
+                        electrumServerFound = true;
+                        electrumServer.Count++;
+                    }
+                    catch (Exception ex)
+                    {
+                        //TODO: ADD LOGS
+                        electrumServer.FailCount++;
+                        electrumServer.Count++;
+                        await Task.Delay(1000);
+                    }
+
+                }
+                else
+                {
+                    //no servers found
+                    client = null;
+                    break;
+                }
+                //TODO: ADD LOGS
+                await Task.Delay(1000);
+            }
+
+            return client;
+        }
+
         public static async Task ElectrumXRun()
         {
             //Stopwatch sw = Stopwatch.StartNew();

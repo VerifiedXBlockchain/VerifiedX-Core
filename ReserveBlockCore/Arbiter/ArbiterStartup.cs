@@ -75,41 +75,41 @@ namespace ReserveBlockCore.Arbiter
                 endpoints.MapGet("/depositaddress/{address}/{**scUID}", async context =>
                 {
 
-                     var address = context.Request.RouteValues["address"] as string;
-                     var scUID = context.Request.RouteValues["scUID"] as string;
+                    var address = context.Request.RouteValues["address"] as string;
+                    var scUID = context.Request.RouteValues["scUID"] as string;
 
-                     if (string.IsNullOrEmpty(address))
-                     {
-                         context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                         var response = JsonConvert.SerializeObject(new { Success = false, Message = $"No Address" }, Formatting.Indented);
-                         await context.Response.WriteAsync(response);
-                         return;
-                     }
+                    if (string.IsNullOrEmpty(address))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"No Address" }, Formatting.Indented);
+                        await context.Response.WriteAsync(response);
+                        return;
+                    }
 
-                     var publicKey = BitcoinAccount.CreatePublicKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, scUID);
+                    var publicKey = BitcoinAccount.CreatePublicKeyForArbiter(Globals.ArbiterSigningAddress.GetKey, scUID);
 
-                     var message = publicKey + scUID;
-                    
-                     var signature = Services.SignatureService.CreateSignature(message, Globals.ArbiterSigningAddress.GetPrivKey, Globals.ArbiterSigningAddress.PublicKey);
+                    var message = publicKey + scUID;
 
-                     if(signature == "F")
-                    
-                     {
+                    var signature = Services.SignatureService.CreateSignature(message, Globals.ArbiterSigningAddress.GetPrivKey, Globals.ArbiterSigningAddress.PublicKey);
+
+                    if (signature == "F")
+
+                    {
                         context.Response.StatusCode = StatusCodes.Status400BadRequest;
                         var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Signature Failed." }, Formatting.Indented);
                         await context.Response.WriteAsync(response);
                         return;
-                    
-                     }
 
-                     context.Response.StatusCode = StatusCodes.Status200OK;
-                     var requestorResponseJson = JsonConvert.SerializeObject(new { Success = true, Message = $"PubKey created", PublicKey = publicKey, Signature = signature }, Formatting.Indented);
-                     await context.Response.WriteAsync(requestorResponseJson);
-                     return;
-                    
+                    }
+
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    var requestorResponseJson = JsonConvert.SerializeObject(new { Success = true, Message = $"PubKey created", PublicKey = publicKey, Signature = signature }, Formatting.Indented);
+                    await context.Response.WriteAsync(requestorResponseJson);
+                    return;
+
                 });
 
-                endpoints.MapPost("/getsignedmultisig",  async context =>
+                endpoints.MapPost("/getsignedmultisig", async context =>
                 {
                     // Handle the GET request
                     try
@@ -134,7 +134,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var timeCheck = TimeUtil.GetTime(-45);
 
-                                if(timeCheck > result.Timestamp)
+                                if (timeCheck > result.Timestamp)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -145,7 +145,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var sigCheck = Services.SignatureService.VerifySignature(result.VFXAddress, $"{result.VFXAddress}.{result.Timestamp}.{result.UniqueId}", postData.Signature);
 
-                                if(!sigCheck)
+                                if (!sigCheck)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -172,7 +172,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 List<ScriptCoin> coinList = new List<ScriptCoin>();
 
-                                foreach(var input in result.ScriptCoinList)
+                                foreach (var input in result.ScriptCoinList)
                                 {
                                     Script redeemScript = Script.FromHex(input.RedeemScript);
                                     Script scriptPubKey = Script.FromHex(input.ScriptPubKey);
@@ -183,11 +183,11 @@ namespace ReserveBlockCore.Arbiter
                                     coinList.Add(coinToSpend);
                                 }
 
-                                NBitcoin.Transaction keySigned = builder.AddCoins(coinList).AddKeys(privateKey) .SignTransaction(unsignedTransaction);
+                                NBitcoin.Transaction keySigned = builder.AddCoins(coinList).AddKeys(privateKey).SignTransaction(unsignedTransaction);
 
                                 var scState = SmartContractStateTrei.GetSmartContractState(result.SCUID);
 
-                                if(scState == null)
+                                if (scState == null)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -198,16 +198,16 @@ namespace ReserveBlockCore.Arbiter
 
                                 var totalOwned = 0.0M;
 
-                                if(scState.OwnerAddress != result.VFXAddress)
+                                if (scState.OwnerAddress != result.VFXAddress)
                                 {
-                                    if(scState.SCStateTreiTokenizationTXes != null)
+                                    if (scState.SCStateTreiTokenizationTXes != null)
                                     {
                                         var vBTCList = scState.SCStateTreiTokenizationTXes.Where(x => x.ToAddress == result.VFXAddress && x.FromAddress == result.VFXAddress).ToList();
-                                        if(vBTCList.Count() > 0)
+                                        if (vBTCList.Count() > 0)
                                         {
                                             //Also get the state level stuff we are saving now.
                                             totalOwned = vBTCList.Sum(x => x.Amount);
-                                            if(totalOwned < postData.Amount)
+                                            if (totalOwned < postData.Amount)
                                             {
                                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                                 context.Response.ContentType = "application/json";
@@ -241,7 +241,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
 
-                                if(scMain == null )
+                                if (scMain == null)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -272,7 +272,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var tknz = (TokenizationFeature)tknzFeature;
 
-                                if(tknz == null)
+                                if (tknz == null)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -287,14 +287,14 @@ namespace ReserveBlockCore.Arbiter
                                 foreach (var output in keySigned.Outputs)
                                 {
                                     var addr = output.ScriptPubKey.GetDestinationAddress(Globals.BTCNetwork);
-                                    if(addr != null)
+                                    if (addr != null)
                                     {
                                         if (addr.ToString() == depositAddress)
                                             changeAddressCorrect = true;
                                     }
                                 }
 
-                                if(!changeAddressCorrect)
+                                if (!changeAddressCorrect)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -320,7 +320,8 @@ namespace ReserveBlockCore.Arbiter
                                     ArbiterUniqueId = RandomStringUtility.GetRandomStringOnlyLetters(16)
                                 };
 
-                                var responseData = new ResponseData.MultiSigSigningResponse {
+                                var responseData = new ResponseData.MultiSigSigningResponse
+                                {
                                     Success = true,
                                     Message = "Transaction Signed",
                                     SignedTransaction = keySignedHex,
@@ -329,7 +330,7 @@ namespace ReserveBlockCore.Arbiter
 
                                 var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
 
-                                if(account == null )
+                                if (account == null)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                     context.Response.ContentType = "application/json";
@@ -388,7 +389,7 @@ namespace ReserveBlockCore.Arbiter
                             }
                         }
                     }
-                    catch(Exception ex)
+                    catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status400BadRequest;
                         context.Response.ContentType = "application/json";
@@ -396,10 +397,10 @@ namespace ReserveBlockCore.Arbiter
                         await context.Response.WriteAsync(response);
                         return;
                     }
-                    
 
 
-                    
+
+
 
                 });
 

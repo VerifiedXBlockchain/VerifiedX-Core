@@ -142,7 +142,7 @@ namespace ReserveBlockCore
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
         public static int MinorVer = 0;
-        public static int RevisionVer = 0;
+        public static int RevisionVer = 1;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
@@ -166,9 +166,9 @@ namespace ReserveBlockCore
         public static decimal CurrentMemory = 0;
         public static decimal ProjectedMemory = 0;
         public static long SystemMemory = 1;
-        public static int TotalArbiterParties = 5;
-        public static int TotalArbiterThreshold = 3;
-        
+        public static int TotalArbiterParties = 2; //change back to 5 after val fix
+        public static int TotalArbiterThreshold = 2; //change back to 3 after val fix
+
 
         public static string Platform = "";
         public static string ValidatorAddress = "";

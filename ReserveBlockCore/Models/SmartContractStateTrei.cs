@@ -60,6 +60,33 @@ namespace ReserveBlockCore.Models
             return null;
         }
 
+        public static IEnumerable<SmartContractStateTrei>? GetvBTCSmartContracts(string address)
+        {
+            var scs = GetSCST();
+            if (scs == null)
+                return null;
+
+            // First, get contracts where user is direct owner - this part works fine with LiteDB
+            var ownerContracts = scs.Query()
+                .Where(contract => contract.OwnerAddress == address)
+                .ToEnumerable();
+
+            // Then, load all contracts and filter in memory for transaction matches
+            // This is less efficient but works around LiteDB limitations
+            var allContracts = scs.Query().ToEnumerable();
+            var txContracts = allContracts.Where(contract =>
+                contract.SCStateTreiTokenizationTXes != null &&
+                contract.SCStateTreiTokenizationTXes.Any(tx =>
+                    tx.ToAddress == address || tx.FromAddress == address));
+
+            // Combine and return results
+            var result = ownerContracts.Union(txContracts).Distinct();
+            if (result.Any())
+                return result;
+
+            return null;
+        }
+
         public static void SaveSmartContract(SmartContractStateTrei scMain)
         {
             var scs = GetSCST();

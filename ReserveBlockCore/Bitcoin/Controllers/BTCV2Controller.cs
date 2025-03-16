@@ -1,7 +1,9 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using NBitcoin;
+using NBitcoin.Protocol;
 using Newtonsoft.Json;
+using ReserveBlockCore.Bitcoin.ElectrumX;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Bitcoin.Services;
 using ReserveBlockCore.Controllers;
@@ -759,6 +761,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             }
         }
 
+
+
         /// <summary>
         /// Withdrawal to BTC address
         /// </summary>
@@ -791,6 +795,219 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             {
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
             }
+        }
+
+        /// <summary>
+        /// Get vbtc balance
+        /// </summary>
+        /// <param name="address"></param>
+        /// <param name="scUID"></param>
+        /// <returns></returns>
+        [HttpGet("GetvBTCBalance/{address}/{scUID}")]
+        [ProducesResponseType(typeof(SwaggerResponse), StatusCodes.Status200OK)]
+        public async Task<string> GetvBTCBalance(string address, string scUID)
+        {
+            try
+            {
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+
+                if (scState == null)
+                    JsonConvert.SerializeObject(new { Success = false, Message = $"SC State Missing: {scUID}" });
+
+                bool isOwner = false;
+                if (address == scState.OwnerAddress)
+                {
+                    isOwner = true;
+                }
+
+                if (!isOwner)
+                {
+                    if (scState.SCStateTreiTokenizationTXes != null)
+                    {
+                        var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == address || x.ToAddress == address).ToList();
+
+                        if (balances.Any() && !isOwner)
+                        {
+                            var balance = balances.Sum(x => x.Amount);
+                            return JsonConvert.SerializeObject(new { Success = true, Message = "", Balance = balance });
+                        }
+                    }
+                    return JsonConvert.SerializeObject(new { Success = true, Message = "", Balance = 0.0M });
+                }
+                else
+                {
+                    var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
+
+                    if (sc == null)
+                    {
+                        var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+
+                        if (scMain == null)
+                            return JsonConvert.SerializeObject(new { Success = false, Message = $"Failed to generate Smart Contract Data: {scUID}" });
+
+                        sc = scMain;
+                    }
+
+                    if (sc == null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Failed to find Smart Contract Data: {scUID}" });
+
+                    if (sc.Features == null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Contract has no features: {scUID}" });
+
+                    var tknzFeature = sc.Features.Where(x => x.FeatureName == FeatureName.Tokenization).Select(x => x.FeatureFeatures).FirstOrDefault();
+
+                    if (tknzFeature == null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Contract missing a tokenization feature: {scUID}" });
+
+                    var tknz = (TokenizationFeature)tknzFeature;
+
+                    if (tknz == null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Token feature error: {scUID}" });
+
+                    var client = await Bitcoin.ElectrumXClient();
+
+                    if(client == null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Could not connect to bitcoin network. Please ensure you are not blocking connections to the BTC Network." });
+
+                    var btcChainBalance = await client.GetBalance(tknz.DepositAddress, false);
+
+                    if(btcChainBalance == null)
+                        return JsonConvert.SerializeObject(new { Success = true, Message = "", Balance = 0.0M });
+
+                    var btcConfirmedBalance = btcChainBalance.Confirmed / 100_000_000M;
+
+                    if (scState.SCStateTreiTokenizationTXes != null)
+                    {
+                        var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == address || x.ToAddress == address).ToList();
+
+                        if (balances.Any())
+                        {
+                            var balance = btcConfirmedBalance + (balances.Sum(x => x.Amount));
+                            return JsonConvert.SerializeObject(new { Success = true, Message = "", Balance = balance });
+                        }
+                        else
+                        {
+                            return JsonConvert.SerializeObject(new { Success = true, Message = "", Balance = btcConfirmedBalance });
+                        }
+                    }
+                    else
+                    {
+                        return JsonConvert.SerializeObject(new { Success = true, Message = "", Balance = btcConfirmedBalance });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+            }
+        }
+
+        /// <summary>
+        /// Get ALL vbtc balances and Contract IDs
+        /// </summary>
+        /// <param name="address"></param>
+        /// <returns></returns>
+        [HttpGet("GetAllvBTCBalances/{address}")]
+        [ProducesResponseType(typeof(SwaggerResponse), StatusCodes.Status200OK)]
+        public async Task<string> GetvBTCBalance(string address)
+        {
+            var scs = SmartContractStateTrei.GetvBTCSmartContracts(address);
+            if(scs == null)
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"", TotalBalance = 0.0M, SmartContractList = new List<object>() });
+
+            decimal totalBalance = 0.0M;
+            var contractBalanceList = new List<object>();
+            var processedContractUIDs = new HashSet<string>(); // Track processed contracts
+
+            var client = await Bitcoin.ElectrumXClient();
+
+            if(client == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Could not connect to bitcoin network. Please ensure you are not blocking connections to the BTC Network.", TotalBalance = 0.0M, SmartContractList = new List<object>() });
+
+            foreach (var scState in scs)
+            {
+                try
+                {
+                    string scUID = scState.SmartContractUID;
+
+                    if (processedContractUIDs.Contains(scUID))
+                        continue;
+
+                    // Mark as processed
+                    processedContractUIDs.Add(scUID);
+
+                    bool isOwner = address == scState.OwnerAddress;
+                    decimal balance = 0.0M;
+
+                    // Calculate balance from transactions
+                    if (scState.SCStateTreiTokenizationTXes != null)
+                    {
+                        var transactions = scState.SCStateTreiTokenizationTXes
+                            .Where(x => x.FromAddress == address || x.ToAddress == address)
+                            .ToList();
+
+                        if (transactions.Any())
+                        {
+                            // Sum transactions (positive for receiving, negative for sending)
+                            balance = transactions.Sum(x => x.Amount);
+                        }
+
+                        if (isOwner)
+                        {
+                            var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
+                            if (sc == null)
+                            {
+                                sc = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                            }
+
+                            if (sc != null && sc.Features != null)
+                            {
+                                var tknzFeature = sc.Features
+                                    .Where(x => x.FeatureName == FeatureName.Tokenization)
+                                    .Select(x => x.FeatureFeatures)
+                                    .FirstOrDefault();
+
+                                if (tknzFeature != null && tknzFeature is TokenizationFeature tknz)
+                                {
+                                    if (client != null)
+                                    {
+                                        var btcChainBalance = await client.GetBalance(tknz.DepositAddress, false);
+                                        if (btcChainBalance != null)
+                                        {
+                                            balance += btcChainBalance.Confirmed / 100_000_000M;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        totalBalance += balance;
+                        contractBalanceList.Add(new
+                        {
+                            SmartContractUID = scUID,
+                            Balance = balance,
+                            IsOwner = isOwner
+                        });
+                    }
+                }
+                catch(Exception ex)
+                {
+                    contractBalanceList.Add(new
+                    {
+                        SmartContractUID = scState.SmartContractUID,
+                        Balance = 0.0M,
+                        Error = ex.Message
+                    });
+                }
+            }
+
+            return JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                Message = "",
+                TotalBalance = totalBalance,
+                SmartContractList = contractBalanceList
+            });
         }
 
         /// <summary>

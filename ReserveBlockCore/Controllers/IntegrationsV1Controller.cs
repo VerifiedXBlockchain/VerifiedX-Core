@@ -24,7 +24,7 @@ namespace ReserveBlockCore.Controllers
             DateTime originDate = new DateTime(2022, 1, 1);
             DateTime currentDate = DateTime.Now;
             var dateDiff = (int)Math.Round((currentDate - originDate).TotalDays);
-            var totalSupply = 372000000;
+            var totalSupply = 200_000_000;
 
             Integrations.Network network = new Integrations.Network { 
                 BlockVersion= blockVersion,
