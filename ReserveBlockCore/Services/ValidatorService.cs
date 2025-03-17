@@ -83,7 +83,7 @@ namespace ReserveBlockCore.Services
         {
             try
             {
-                string url = "http://0.0.0.0:" + Globals.ValAPIPort;
+                string url = "http://*:" + Globals.ValAPIPort; //if have issues on linux use 0.0.0.0 and not *
 
                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                 {
@@ -555,20 +555,9 @@ namespace ReserveBlockCore.Services
             ValidatorLogUtility.Log($"Validating has stopped.", "ValidatorService.StopValidating()");
         }
 
-        public static int ValidatorRequiredAmount()
+        public static decimal ValidatorRequiredAmount()
         {
-            if(Globals.LastBlock.Height < Globals.V1ValHeight)
-            {
-                return 1000;
-            }
-            else if(Globals.LastBlock.Height < Globals.V2ValHeight)
-            {
-                return 12_000;
-            }
-            else
-            {
-                return 50_000;
-            }
+            return 5_000M;
         }
 
         public static async void ClearOldValidator()
