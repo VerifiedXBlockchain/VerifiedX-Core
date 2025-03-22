@@ -712,6 +712,27 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// Transfer amount to VFX
+        /// </summary>
+        /// <returns></returns>
+        [HttpPost("TransferCoinMulti")]
+        [ProducesResponseType(typeof(SwaggerResponse), StatusCodes.Status200OK)]
+        public async Task<string> TransferCoinMulti([FromBody] BTCTokenizeTransactionMulti jsonData)
+        {
+            try
+            {
+                //TODO:
+                var result = await TokenizationService.TransferCoinMulti(jsonData);
+                return "result";
+
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+            }
+        }
+
+        /// <summary>
         /// Transfers ownership of the vBTC token
         /// </summary>
         /// <param name="scUID"></param>

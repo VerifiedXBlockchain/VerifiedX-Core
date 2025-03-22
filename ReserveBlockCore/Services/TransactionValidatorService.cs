@@ -803,6 +803,95 @@ namespace ReserveBlockCore.Services
                                             break;
                                         }
 
+                                    case "TransferCoinMulti()":
+                                        {
+                                            var jobj = JObject.Parse(txData);
+                                            var signatureInput = jobj["SignatureInput"]?.ToObject<string?>();
+                                            var amount = jobj["Amount"]?.ToObject<decimal?>();
+                                            var inputs = jobj["Inputs"]?.ToObject<List<VBTCTransferInput>?>();
+
+                                            if (string.IsNullOrEmpty(signatureInput))
+                                                return (txResult, "No signature Input specified.");
+
+                                            if (!amount.HasValue)
+                                                return (txResult, "Amount has no value.");
+
+                                            if (inputs == null)
+                                                return (txResult, "No vBTC inputs specified.");
+
+                                            if (!inputs.Any())
+                                                return (txResult, "No vBTC inputs specified.");
+
+                                            if(inputs.Exists(x => x.Signature == null))
+                                                return (txResult, "One or more inputs missing signature.");
+
+                                            if(inputs.Exists(x => x.FromAddress == null))
+                                                return (txResult, "One or more inputs missing from address.");
+
+                                            foreach (var input in  inputs)
+                                            {
+                                                if(input.FromAddress == null || input.Signature == null)
+                                                    return (txResult, "Missing signature/from address in inputs.");
+
+                                                var signatureCheck = SignatureService.VerifySignature(input.FromAddress, signatureInput, input.Signature);
+                                                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(input.SCUID);
+                                                if (scStateTreiRec != null)
+                                                {
+                                                    bool isOwner = false;
+                                                    if (input.FromAddress == scStateTreiRec.OwnerAddress)
+                                                    {
+                                                        isOwner = true;
+                                                        if (scStateTreiRec.IsLocked)
+                                                            return (txResult, "You cannot perform any actions on a Smart contract that is locked.");
+
+                                                    }
+
+                                                    var sc = SmartContractMain.SmartContractData.GetSmartContract(input.SCUID);
+
+                                                    if (sc == null)
+                                                    {
+                                                        var scMain = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+
+                                                        if (scMain == null)
+                                                            return (txResult, $"Failed to generate Smart Contract Data: {input.SCUID}");
+
+                                                        sc = scMain;
+                                                    }
+
+                                                    if (sc == null)
+                                                        return (txResult, $"Failed to find Smart Contract Data: {input.SCUID}");
+
+                                                    if (sc.Features == null)
+                                                        return (txResult, $"Contract has no features: {input.SCUID}");
+
+                                                    var tknzFeature = sc.Features.Where(x => x.FeatureName == FeatureName.Tokenization).Select(x => x.FeatureFeatures).FirstOrDefault();
+
+                                                    if (tknzFeature == null)
+                                                        return (txResult, $"Contract missing a tokenization feature: {input.SCUID}");
+
+                                                    var tknz = (TokenizationFeature)tknzFeature;
+
+                                                    if (tknz == null)
+                                                        return (txResult, $"Token feature error: {input.SCUID}");
+
+                                                    if (scStateTreiRec.SCStateTreiTokenizationTXes != null)
+                                                    {
+                                                        var balances = scStateTreiRec.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == input.FromAddress || x.ToAddress == input.FromAddress).ToList();
+
+                                                        if (balances.Any() && !isOwner)
+                                                        {
+                                                            var balance = balances.Sum(x => x.Amount);
+
+                                                            if (balance < amount)
+                                                                return (txResult, $"Insufficient Balance. Current Balance: {balance}");
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            break;
+                                        }
+
                                     case "TokenizedWithdrawalRequest()" :
                                         {
                                             var jobj = JObject.Parse(txData);

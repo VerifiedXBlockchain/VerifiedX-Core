@@ -21,6 +21,7 @@ using NBitcoin.Protocol;
 using ReserveBlockCore.P2P;
 using static ReserveBlockCore.Services.ArbiterService;
 using System.Security.Cryptography.X509Certificates;
+using System.Xml;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
@@ -552,6 +553,170 @@ namespace ReserveBlockCore.Bitcoin.Services
             return await SCLogUtility.LogAndReturn($"EOM ERROR", "TokenizationService.TransferCoin()", false);
         }
 
+        public static async Task<string> TransferCoinMulti(BTCTokenizeTransactionMulti? jsonData)
+        {
+            try
+            {
+                if (jsonData == null)
+                    return await SCLogUtility.LogAndReturn($"Payload body was null", "TokenizationService.TransferCoinMulti()", false);
+
+                var payload = jsonData;
+
+                if (payload == null)
+                    return await SCLogUtility.LogAndReturn($"Failed to deserialize payload", "TokenizationService.TransferCoinMulti()", false);
+
+                if (payload.FromAddress == null)
+                    return await SCLogUtility.LogAndReturn($"From address cannot be null.", "TokenizationService.TransferCoinMulti()", false);
+
+                var account = AccountData.GetSingleAccount(payload.FromAddress);
+
+                if (account == null)
+                    return await SCLogUtility.LogAndReturn($"Could not find account.", "TokenizationService.TransferCoinMulti()", false);
+
+                var vBTCInputs = payload.vBTCInputs;
+
+                if (!payload.vBTCInputs.Any())
+                    return await SCLogUtility.LogAndReturn($"No vBTC inputs found.", "TokenizationService.TransferCoinMulti()", false);
+
+                var signatureInput = RandomStringUtility.GetRandomStringOnlyLetters(12, true);
+
+                foreach(var input in  vBTCInputs)
+                {
+                    if (input == null)
+                        return await SCLogUtility.LogAndReturn($"Could not find input.", "TokenizationService.TransferCoinMulti()", false);
+
+                    if (input.FromAddress == null)
+                        return await SCLogUtility.LogAndReturn($"From address cannot be null. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+
+                    var inputAccount = AccountData.GetSingleAccount(input.FromAddress);
+
+                    if (inputAccount == null)
+                        return await SCLogUtility.LogAndReturn($"Could not find account: {input.FromAddress}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+
+                    var btcTkn = await TokenizedBitcoin.GetTokenizedBitcoin(input.SCUID);
+
+                    if (btcTkn == null)
+                        return await SCLogUtility.LogAndReturn($"Failed to find BTC Token: {input.SCUID}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+
+                    var sc = SmartContractMain.SmartContractData.GetSmartContract(btcTkn.SmartContractUID);
+
+                    if (sc == null)
+                        return await SCLogUtility.LogAndReturn($"Failed to find Smart Contract Data: {input.SCUID}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+
+                    if (sc.Features == null)
+                        return await SCLogUtility.LogAndReturn($"Contract has no features: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+
+                    var tknzFeature = sc.Features.Where(x => x.FeatureName == FeatureName.Tokenization).Select(x => x.FeatureFeatures).FirstOrDefault();
+
+                    if (tknzFeature == null)
+                        return await SCLogUtility.LogAndReturn($"Contract missing a tokenization feature: {input.SCUID}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+
+                    var tknz = (TokenizationFeature)tknzFeature;
+
+                    if (tknz == null)
+                        return await SCLogUtility.LogAndReturn($"Token feature error: {input.SCUID}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+
+                    var scState = SmartContractStateTrei.GetSmartContractState(sc.SmartContractUID);
+
+                    if (scState == null)
+                        return await SCLogUtility.LogAndReturn($"SC State Missing: {input.SCUID}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+
+                    bool isOwner = false;
+                    if (scState.OwnerAddress == account.Address)
+                        isOwner = true;
+
+                    if (scState.SCStateTreiTokenizationTXes != null)
+                    {
+                        var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
+                        if (balances.Any() || isOwner)
+                        {
+                            var balance = balances.Sum(x => x.Amount);
+                            bool good = false;
+                            if (isOwner)
+                            {
+                                var finalBalance = btcTkn.Balance + balance;
+                                if (finalBalance < input.Amount)
+                                    return await SCLogUtility.LogAndReturn($"Insufficient Balance. Current Balance: {finalBalance}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+                                good = true;
+                            }
+                            else
+                            {
+                                var finalBalance = balance;
+                                if (finalBalance < input.Amount)
+                                    return await SCLogUtility.LogAndReturn($"Insufficient Balance. Current Balance: {finalBalance}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+                                good = true;
+                            }
+
+                            if (good)
+                            {
+                                //generate signature and move on
+                                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(signatureInput, inputAccount.GetPrivKey, inputAccount.PublicKey);
+                                input.Signature = signature;
+                                continue;
+                            }
+                            else
+                            {
+                                return await SCLogUtility.LogAndReturn($"Balance Error with input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (btcTkn.MyBalance < input.Amount)
+                            return await SCLogUtility.LogAndReturn($"Insufficient Balance. Current Balance: {btcTkn.MyBalance}. On input: {input.SCUID}", "TokenizationService.TransferCoin()", false);
+
+
+                        //generate signature and move on
+                        var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(signatureInput, inputAccount.GetPrivKey, inputAccount.PublicKey);
+                        input.Signature = signature;
+                        continue;
+                    }
+                }
+
+                if(payload.vBTCInputs.Exists(x => x.Signature == null))
+                    return await SCLogUtility.LogAndReturn($"Failed to create signature for some inputs.", "TokenizationService.TransferCoinMulti()", false);
+
+                //Generate TX here
+                //Have to avoid someone using signed inputs again. 
+                var scTxResult = await CreateVFXTokenizedTransactionMulti(payload, account, signatureInput);
+
+                if (scTxResult.Item1 == null)
+                    return await SCLogUtility.LogAndReturn(scTxResult.Item2, "TokenizationService.TransferCoin()", false);
+
+                var scTx = scTxResult.Item1;
+
+                var result = await TransactionValidatorService.VerifyTX(scTx);
+
+                if (result.Item1 == true)
+                {
+                    scTx.TransactionStatus = TransactionStatus.Pending;
+
+                    if (account != null)
+                    {
+                        await WalletService.SendTransaction(scTx, account);
+                    }
+                    //if (rAccount != null)
+                    //{
+                    //    await WalletService.SendReserveTransaction(scTx, rAccount, true);
+                    //}
+
+                    SCLogUtility.Log($"TX Success. Hash: {scTx.Hash}", "TokenizationService.TransferCoin()");
+                    return JsonConvert.SerializeObject(new { Success = true, Message = "Transaction Success!", Hash = scTx.Hash });
+                }
+                else
+                {
+                    var output = "Fail! Transaction Verify has failed.";
+                    scTx.TransactionStatus = TransactionStatus.Failed;
+                    TransactionData.AddTxToWallet(scTx, true);
+                    return await SCLogUtility.LogAndReturn($"Error Transfer Failed TX Verify: {scTx.Hash}. Result: {result.Item2}", "TokenizationService.TransferCoin()", false);
+                }
+            }
+            catch (Exception ex)
+            {
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TokenizationService.TransferCoin()", false);
+            }
+        }
+
         public static async Task<string> WithdrawalCoin(string vfxAddress, string btcToAddress, string scUID, decimal amount, long chosenFeeRate = 10)
         {
             try
@@ -656,7 +821,6 @@ namespace ReserveBlockCore.Bitcoin.Services
                 {
                     return await SCLogUtility.LogAndReturn($"No balances and you are not the owner.", "TokenizationService.WithdrawalCoin()", false);
                 }
-
 
             }
             catch (Exception ex)
@@ -838,8 +1002,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             var scTx = new ReserveBlockCore.Models.Transaction();
             var newSCInfo = new[]
             {
-                                new { Function = "TransferCoin()", ContractUID = scUID, Amount = amount,  }
-                            };
+                new { Function = "TransferCoin()", ContractUID = scUID, Amount = amount,  }
+            };
 
             var txData = JsonConvert.SerializeObject(newSCInfo);
 
@@ -881,6 +1045,70 @@ namespace ReserveBlockCore.Bitcoin.Services
                 scTx.TransactionStatus = TransactionStatus.Failed;
                 TransactionData.AddTxToWallet(scTx, true);
                 return (null, $"TX Signature Failed. SCUID: {scUID}");
+            }
+
+            scTx.Signature = signature; //sigScript  = signature + '.' (this is a split char) + pubKey in Base58 format
+
+
+            if (scTx.TransactionRating == null)
+            {
+                var rating = await TransactionRatingService.GetTransactionRating(scTx);
+                scTx.TransactionRating = rating;
+            }
+
+            return (scTx, "");
+        }
+
+        private static async Task<(ReserveBlockCore.Models.Transaction?, string)> CreateVFXTokenizedTransactionMulti(BTCTokenizeTransactionMulti vbtcMulti, Account account, string signatureInput)
+        {
+            var scTx = new ReserveBlockCore.Models.Transaction();
+
+            var txData = JsonConvert.SerializeObject(new { 
+                Function = "TransferCoinMulti()", 
+                Inputs = vbtcMulti.vBTCInputs, 
+                Amount = vbtcMulti.vBTCInputAmount, 
+                SignatureInput = signatureInput 
+            });
+
+            scTx = new ReserveBlockCore.Models.Transaction
+            {
+                Timestamp = TimeUtil.GetTime(),
+                FromAddress = vbtcMulti.FromAddress,
+                ToAddress = vbtcMulti.ToAddress,
+                Amount = 0.0M,
+                Fee = 0,
+                Nonce = AccountStateTrei.GetNextNonce(vbtcMulti.FromAddress),
+                TransactionType = TransactionType.TKNZ_TX,
+                Data = txData,
+                UnlockTime = null //TODO: need to make compatible with reserve.
+            };
+
+            scTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(scTx);
+
+            scTx.Build();
+
+            var currentTime = TimeUtil.GetTime();
+            var senderBalance = AccountStateTrei.GetAccountBalance(vbtcMulti.FromAddress);
+            if ((scTx.Amount + scTx.Fee) > senderBalance)
+            {
+                scTx.TransactionStatus = TransactionStatus.Failed;
+                TransactionData.AddTxToWallet(scTx, true);
+                return (null, $"Balance insufficient for vBTC Mulit TX At: {currentTime}");
+            }
+
+            if (account.GetPrivKey == null)
+            {
+                scTx.TransactionStatus = TransactionStatus.Failed;
+                TransactionData.AddTxToWallet(scTx, true);
+                return (null, $"Private key was null for account for vBTC Mulit TX At: {currentTime}");
+            }
+            var txHash = scTx.Hash;
+            var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, account.GetPrivKey, account.PublicKey);
+            if (signature == "ERROR")
+            {
+                scTx.TransactionStatus = TransactionStatus.Failed;
+                TransactionData.AddTxToWallet(scTx, true);
+                return (null, $"TX Signature Failed for vBTC Mulit TX At: {currentTime}");
             }
 
             scTx.Signature = signature; //sigScript  = signature + '.' (this is a split char) + pubKey in Base58 format
