@@ -729,12 +729,12 @@ namespace ReserveBlockCore.Data
                     Globals.LastBlockAddedTimestamp = currentTime;
 
                     Blockchain.AddBlockHeader(block);
+
                     if (Globals.ValidatorAddress == block.Validator)
                         Globals.LastWonBlock = block;
 
                     _ = BlockDiffService.UpdateQueue(Globals.BlockTimeDiff);
                     _ = ValidatorService.UpdateActiveValidators(block);
-
 
                     //insert block to db
                     blocks.InsertSafe(block);

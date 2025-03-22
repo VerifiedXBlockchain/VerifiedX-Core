@@ -828,12 +828,15 @@ namespace ReserveBlockCore.Services
                                             if(inputs.Exists(x => x.FromAddress == null))
                                                 return (txResult, "One or more inputs missing from address.");
 
+                                            if(Globals.MemMutliTransfers.ContainsKey(signatureInput))
+                                                return (txResult, "This signature input has already been used.");
+
                                             foreach (var input in  inputs)
                                             {
                                                 if(input.FromAddress == null || input.Signature == null)
                                                     return (txResult, "Missing signature/from address in inputs.");
 
-                                                var signatureCheck = SignatureService.VerifySignature(input.FromAddress, signatureInput, input.Signature);
+                                                var signatureCheck = SignatureService.VerifySignature(input.FromAddress, signatureInput + txRequest.ToAddress + txRequest.FromAddress, input.Signature);
                                                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(input.SCUID);
                                                 if (scStateTreiRec != null)
                                                 {

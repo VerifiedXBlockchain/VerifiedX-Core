@@ -29,6 +29,7 @@ using ReserveBlockCore.Models.DST;
 using ReserveBlockCore.Arbiter;
 using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.Bitcoin.Models;
+using Newtonsoft.Json.Linq;
 
 namespace ReserveBlockCore.Services
 {
@@ -828,6 +829,81 @@ namespace ReserveBlockCore.Services
             var blockChain = BlockchainData.GetBlocks();
             Globals.MemBlocks = new ConcurrentDictionary<string, long>(blockChain.Find(LiteDB.Query.All(LiteDB.Query.Descending)).Take(400)
                 .Select(x => x.Transactions.Select(y => new { y.Hash, x.Height})).SelectMany(x => x).ToDictionary(x => x.Hash, x => x.Height));
+        }
+
+        internal static void StartupMemMultiTransfer()
+        {
+            var startHeight = Globals.LastBlock.Height;
+            if (startHeight < 7500)
+                return;
+
+            int count = 0;
+            while(count < 7500)
+            {
+                count++;
+                try
+                {
+                    var blocks = BlockchainData.GetBlocks();
+                    var height = Convert.ToInt32(Globals.LastBlock.Height) - count;
+                    bool resultFound = false;
+
+                    var block = blocks.Query().Where(x => x.Height == height).FirstOrDefault();
+                    if (block != null)
+                    {
+                        var txs = block.Transactions.ToList();
+                        if (txs.Count == 1)
+                            continue;
+
+                        var tknzTxs = txs.Where(x => x.TransactionType == TransactionType.TKNZ_TX).ToList();
+
+                        if (!tknzTxs.Any())
+                            continue;
+
+                        foreach (var tx in tknzTxs)
+                        {
+                            var txData = tx.Data;
+
+                            string scUID = "";
+                            string function = "";
+                            bool skip = false;
+                            JToken? scData = null;
+                            try
+                            {
+                                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                                scData = scDataArray[0];
+
+                                function = (string?)scData["Function"];
+                                scUID = (string?)scData["ContractUID"];
+                                skip = true;
+                            }
+                            catch { }
+
+                            try
+                            {
+                                if (!skip)
+                                {
+                                    var jobj = JObject.Parse(txData);
+                                    scUID = jobj["ContractUID"]?.ToObject<string?>();
+                                    function = jobj["Function"]?.ToObject<string?>();
+                                }
+                            }
+                            catch { }
+
+                            if (!string.IsNullOrWhiteSpace(function))
+                            {
+                                if (function == "TransferCoinMulti()")
+                                {
+                                    var jobj = JObject.Parse(txData);
+                                    var signatureInput = jobj["SignatureInput"]?.ToObject<string?>();
+                                    if (signatureInput != null)
+                                        Globals.MemMutliTransfers.TryAdd(signatureInput, block.Timestamp);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
         }
 
         internal static void StartupBlockHashes()

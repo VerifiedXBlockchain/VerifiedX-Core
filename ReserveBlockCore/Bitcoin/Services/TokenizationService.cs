@@ -650,7 +650,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                             if (good)
                             {
                                 //generate signature and move on
-                                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(signatureInput, inputAccount.GetPrivKey, inputAccount.PublicKey);
+                                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(signatureInput + payload.ToAddress + payload.FromAddress, inputAccount.GetPrivKey, inputAccount.PublicKey);
                                 input.Signature = signature;
                                 continue;
                             }
@@ -667,7 +667,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
 
                         //generate signature and move on
-                        var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(signatureInput, inputAccount.GetPrivKey, inputAccount.PublicKey);
+                        var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(signatureInput + payload.ToAddress + payload.FromAddress, inputAccount.GetPrivKey, inputAccount.PublicKey);
                         input.Signature = signature;
                         continue;
                     }

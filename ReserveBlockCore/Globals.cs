@@ -244,6 +244,7 @@ namespace ReserveBlockCore
         public static CancellationToken CancelledToken;
 
         public static ConcurrentDictionary<string, long> MemBlocks = new ConcurrentDictionary<string, long>();
+        public static ConcurrentDictionary<string, long> MemMutliTransfers = new ConcurrentDictionary<string, long>();
         public static ConcurrentDictionary<long, string> BlockHashes = new ConcurrentDictionary<long, string>();
         public static ConcurrentDictionary<string, NodeInfo> Nodes = new ConcurrentDictionary<string, NodeInfo>(); // IP Address
         public static ConcurrentDictionary<string, AdjBench> AdjBench = new ConcurrentDictionary<string, AdjBench>(); // IP Address:Key

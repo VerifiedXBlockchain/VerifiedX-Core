@@ -9,6 +9,7 @@ using ReserveBlockCore.P2P;
 using ReserveBlockCore.Utilities;
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Security.Principal;
 using System.Text;
 
@@ -29,6 +30,65 @@ namespace ReserveBlockCore.Services
             {
                 Globals.MemBlocks.TryRemove(pair.Key, out _);
             }            
+        }
+
+        public static void UpdateMemMultiTransfers(Block block)
+        {
+            if (block.Transactions.Count == 1)
+                return;
+
+            var tknzTxs = block.Transactions.Where(x => x.TransactionType == TransactionType.TKNZ_TX).ToList();
+            if (!tknzTxs.Any())
+                return;
+
+            foreach (var tx in tknzTxs)
+            {
+                var txData = tx.Data;
+
+                string scUID = "";
+                string function = "";
+                bool skip = false;
+                JToken? scData = null;
+                try
+                {
+                    var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                    scData = scDataArray[0];
+
+                    function = (string?)scData["Function"];
+                    scUID = (string?)scData["ContractUID"];
+                    skip = true;
+                }
+                catch { }
+
+                try
+                {
+                    if (!skip)
+                    {
+                        var jobj = JObject.Parse(txData);
+                        scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        function = jobj["Function"]?.ToObject<string?>();
+                    }
+                }
+                catch { }
+
+                if (!string.IsNullOrWhiteSpace(function))
+                {
+                    if(function == "TransferCoinMulti()")
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var signatureInput = jobj["SignatureInput"]?.ToObject<string?>();
+                        if(signatureInput != null)
+                            Globals.MemMutliTransfers.TryAdd(signatureInput, block.Timestamp);
+                    }
+                }
+            }
+            //7,500
+            var timeToRemove = TimeUtil.GetTime(0, 0, 24);
+
+            foreach (var pair in Globals.MemMutliTransfers.Where(x => x.Value <= timeToRemove))
+            {
+                Globals.MemMutliTransfers.TryRemove(pair.Key, out _);
+            }
         }
 
         public static void UpdateMemBlocksHashes(Block block)
