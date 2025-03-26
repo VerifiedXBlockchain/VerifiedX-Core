@@ -17,7 +17,22 @@
         /// <summary>
         /// List of vBTC inputs
         /// </summary>
-        /// <example>toVFX</example>
+        /// <example>
+        /// [
+        ///   {
+        ///     ""scuid"": ""somescguid:1234"",
+        ///     ""fromAddress"": ""fromVFX1"",
+        ///     ""amount"": 1.23,
+        ///     ""signature"": ""sampleSignature1""
+        ///   },
+        ///   {
+        ///     ""scuid"": ""somescguid:5678"",
+        ///     ""fromAddress"": ""fromVFX2"",
+        ///     ""amount"": 2.34,
+        ///     ""signature"": ""sampleSignature2""
+        ///   }
+        /// ]
+        /// </example>
         public List<VBTCTransferInput> vBTCInputs { get; set; }
 
         /// <summary>

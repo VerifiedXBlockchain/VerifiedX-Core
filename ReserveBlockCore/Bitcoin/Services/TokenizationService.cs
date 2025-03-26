@@ -622,7 +622,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                         return await SCLogUtility.LogAndReturn($"SC State Missing: {input.SCUID}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
 
                     bool isOwner = false;
-                    if (scState.OwnerAddress == account.Address)
+                    if (scState.OwnerAddress == input.FromAddress)
                         isOwner = true;
 
                     if (scState.SCStateTreiTokenizationTXes != null)
