@@ -663,7 +663,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     else
                     {
                         if (btcTkn.MyBalance < input.Amount)
-                            return await SCLogUtility.LogAndReturn($"Insufficient Balance. Current Balance: {btcTkn.MyBalance}. On input: {input.SCUID}", "TokenizationService.TransferCoin()", false);
+                            return await SCLogUtility.LogAndReturn($"Insufficient Balance. Current Balance: {btcTkn.MyBalance}. On input: {input.SCUID}", "TokenizationService.TransferCoinMulti()", false);
 
 
                         //generate signature and move on
@@ -681,11 +681,13 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var scTxResult = await CreateVFXTokenizedTransactionMulti(payload, account, signatureInput);
 
                 if (scTxResult.Item1 == null)
-                    return await SCLogUtility.LogAndReturn(scTxResult.Item2, "TokenizationService.TransferCoin()", false);
+                    return await SCLogUtility.LogAndReturn(scTxResult.Item2, "TokenizationService.TransferCoinMulti()", false);
 
                 var scTx = scTxResult.Item1;
 
                 var result = await TransactionValidatorService.VerifyTX(scTx);
+
+                //var checkTxData = TransactionUtility.GetSCTXFunctionAndUID(scTx);  
 
                 if (result.Item1 == true)
                 {
@@ -700,7 +702,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     //    await WalletService.SendReserveTransaction(scTx, rAccount, true);
                     //}
 
-                    SCLogUtility.Log($"TX Success. Hash: {scTx.Hash}", "TokenizationService.TransferCoin()");
+                    SCLogUtility.Log($"TX Success. Hash: {scTx.Hash}", "TokenizationService.TransferCoinMulti()");
                     return JsonConvert.SerializeObject(new { Success = true, Message = "Transaction Success!", Hash = scTx.Hash });
                 }
                 else
@@ -708,12 +710,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     var output = "Fail! Transaction Verify has failed.";
                     scTx.TransactionStatus = TransactionStatus.Failed;
                     TransactionData.AddTxToWallet(scTx, true);
-                    return await SCLogUtility.LogAndReturn($"Error Transfer Failed TX Verify: {scTx.Hash}. Result: {result.Item2}", "TokenizationService.TransferCoin()", false);
+                    return await SCLogUtility.LogAndReturn($"Error Transfer Failed TX Verify: {scTx.Hash}. Result: {result.Item2}", "TokenizationService.TransferCoinMulti()", false);
                 }
             }
             catch (Exception ex)
             {
-                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TokenizationService.TransferCoin()", false);
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TokenizationService.TransferCoinMulti()", false);
             }
         }
 

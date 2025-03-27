@@ -319,7 +319,7 @@ namespace ReserveBlockCore.Data
         }
         #endregion
 
-        #region Craft Block V5 - WIP
+        #region Craft Block V5
         public static async Task<Block?> CraftBlock_V5(string validator, int totalVals, string valAnswer, long height, bool skipTXs = false, bool validateOnly = false)
         {
             try

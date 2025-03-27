@@ -723,7 +723,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             {
                 //TODO:
                 var result = await TokenizationService.TransferCoinMulti(jsonData);
-                return "result";
+                return result;
 
             }
             catch (Exception ex)

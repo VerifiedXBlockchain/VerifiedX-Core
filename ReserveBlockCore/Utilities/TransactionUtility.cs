@@ -31,6 +31,8 @@ namespace ReserveBlockCore.Utilities
                     var jobj = JObject.Parse(tx.Data);
                     scUID = jobj["ContractUID"]?.ToObject<string?>();
                     function = jobj["Function"]?.ToObject<string?>();
+                    if (function == "TransferCoinMulti()")
+                        scUID = "NA"; // this is so the process tx mempool doesn't fail.
                 }
             }
             catch { }
