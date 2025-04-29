@@ -11,6 +11,7 @@ using ReserveBlockCore.Services;
 using Newtonsoft.Json.Linq;
 using Newtonsoft.Json;
 using System.Xml.Linq;
+using ReserveBlockCore.Bitcoin.Models;
 
 namespace ReserveBlockCore.Data
 {
@@ -742,49 +743,65 @@ namespace ReserveBlockCore.Data
                     if (!scInfo.Item1)
                         return false;
 
-                    string scUID = scInfo.Item3;
-                    string function = scInfo.Item4;
-                    JArray? scDataArray = scInfo.Item5;
-                    bool skip = scInfo.Item2;
+                    var txData = tx.Data;
 
-                    if (scDataArray != null && skip)
+                    string scUID = "";
+                    string function = "";
+                    bool skip = false;
+                    JToken? scData = null;
+                    try
                     {
-                        var scData = scDataArray[0];
+                        var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                        scData = scDataArray[0];
 
                         function = (string?)scData["Function"];
                         scUID = (string?)scData["ContractUID"];
-                        if (!string.IsNullOrWhiteSpace(function))
+                        skip = true;
+                    }
+                    catch { }
+
+                    try
+                    {
+                        if (!skip)
                         {
-                            switch (function)
-                            {
-                                case "Transfer()":
-                                    //do something
-                                    var otherTransferTxs = mempool.Find(x => x.FromAddress == tx.FromAddress && x.Hash != tx.Hash).ToList();
-                                    if(otherTransferTxs.Count() > 0)
-                                    {
-                                        foreach(var ottx in otherTransferTxs)
-                                        {
-                                            if(ottx.TransactionType == TransactionType.NFT_TX || ottx.TransactionType == TransactionType.NFT_BURN)
-                                            {
-                                                if(ottx.Data != null)
-                                                {
-                                                    var memscInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
-                                                    if(memscInfo.Item1 && memscInfo.Item2)
-                                                    {
-                                                        var ottxDataArray = JsonConvert.DeserializeObject<JArray>(ottx.Data);
-                                                        if (ottxDataArray != null)
-                                                        {
-                                                            var ottxData = ottxDataArray[0];
+                            var jobj = JObject.Parse(txData);
+                            scUID = jobj["ContractUID"]?.ToObject<string?>();
+                            function = jobj["Function"]?.ToObject<string?>();
+                        }
+                    }
+                    catch { }
 
-                                                            var ottxFunction = (string?)ottxData["Function"];
-                                                            var ottxscUID = (string?)ottxData["ContractUID"];
-                                                            if (!string.IsNullOrWhiteSpace(ottxFunction))
+                    if (!string.IsNullOrWhiteSpace(function))
+                    {
+                        switch (function)
+                        {
+                            case "Transfer()":
+                                //do something
+                                var otherTransferTxs = mempool.Find(x => x.FromAddress == tx.FromAddress && x.Hash != tx.Hash).ToList();
+                                if(otherTransferTxs.Count() > 0)
+                                {
+                                    foreach(var ottx in otherTransferTxs)
+                                    {
+                                        if(ottx.TransactionType == TransactionType.NFT_TX || ottx.TransactionType == TransactionType.NFT_BURN)
+                                        {
+                                            if(ottx.Data != null)
+                                            {
+                                                var memscInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
+                                                if(memscInfo.Item1 && memscInfo.Item2)
+                                                {
+                                                    var ottxDataArray = JsonConvert.DeserializeObject<JArray>(ottx.Data);
+                                                    if (ottxDataArray != null)
+                                                    {
+                                                        var ottxData = ottxDataArray[0];
+
+                                                        var ottxFunction = (string?)ottxData["Function"];
+                                                        var ottxscUID = (string?)ottxData["ContractUID"];
+                                                        if (!string.IsNullOrWhiteSpace(ottxFunction))
+                                                        {
+                                                            if (ottxscUID == scUID)
                                                             {
-                                                                if (ottxscUID == scUID)
-                                                                {
-                                                                    //FAIL
-                                                                    return false;
-                                                                }
+                                                                //FAIL
+                                                                return false;
                                                             }
                                                         }
                                                     }
@@ -792,35 +809,35 @@ namespace ReserveBlockCore.Data
                                             }
                                         }
                                     }
+                                }
 
-                                    break;
-                                case "Burn()":
-                                    var otherBurnTxs = mempool.Find(x => x.FromAddress == tx.FromAddress && x.Hash != tx.Hash).ToList();
-                                    if (otherBurnTxs.Count() > 0)
+                                break;
+                            case "Burn()":
+                                var otherBurnTxs = mempool.Find(x => x.FromAddress == tx.FromAddress && x.Hash != tx.Hash).ToList();
+                                if (otherBurnTxs.Count() > 0)
+                                {
+                                    foreach (var obtx in otherBurnTxs)
                                     {
-                                        foreach (var obtx in otherBurnTxs)
+                                        if (obtx.TransactionType == TransactionType.NFT_TX || obtx.TransactionType == TransactionType.NFT_BURN)
                                         {
-                                            if (obtx.TransactionType == TransactionType.NFT_TX || obtx.TransactionType == TransactionType.NFT_BURN)
+                                            if (obtx.Data != null)
                                             {
-                                                if (obtx.Data != null)
+                                                var memscInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
+                                                if(memscInfo.Item1 && memscInfo.Item2)
                                                 {
-                                                    var memscInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
-                                                    if(memscInfo.Item1 && memscInfo.Item2)
+                                                    var ottxDataArray = JsonConvert.DeserializeObject<JArray>(obtx.Data);
+                                                    if (ottxDataArray != null)
                                                     {
-                                                        var ottxDataArray = JsonConvert.DeserializeObject<JArray>(obtx.Data);
-                                                        if (ottxDataArray != null)
-                                                        {
-                                                            var ottxData = ottxDataArray[0];
+                                                        var ottxData = ottxDataArray[0];
 
-                                                            var ottxFunction = (string?)ottxData["Function"];
-                                                            var ottxscUID = (string?)ottxData["ContractUID"];
-                                                            if (!string.IsNullOrWhiteSpace(ottxFunction))
+                                                        var ottxFunction = (string?)ottxData["Function"];
+                                                        var ottxscUID = (string?)ottxData["ContractUID"];
+                                                        if (!string.IsNullOrWhiteSpace(ottxFunction))
+                                                        {
+                                                            if (ottxscUID == scUID)
                                                             {
-                                                                if (ottxscUID == scUID)
-                                                                {
-                                                                    //FAIL
-                                                                    return false;
-                                                                }
+                                                                //FAIL
+                                                                return false;
                                                             }
                                                         }
                                                     }
@@ -828,56 +845,56 @@ namespace ReserveBlockCore.Data
                                             }
                                         }
                                     }
-                                    break;
-                                case string i when i == "TokenTransfer()" || i == "TokenBurn()":
+                                }
+                                break;
+                            case string i when i == "TokenTransfer()" || i == "TokenBurn()":
+                                {
+                                    var otherTxs = mempool.Find(x => x.FromAddress == tx.FromAddress && x.Hash != tx.Hash).ToList();
+                                    if(otherTxs.Count() > 0)
                                     {
-                                        var otherTxs = mempool.Find(x => x.FromAddress == tx.FromAddress && x.Hash != tx.Hash).ToList();
-                                        if(otherTxs.Count() > 0)
+                                        decimal xferBurnAmount = 0.0M;
+                                        var originaljobj = JObject.Parse(tx.Data);
+                                        var tokenTicker = originaljobj["TokenTicker"]?.ToObject<string?>();
+                                        var amount = originaljobj["Amount"]?.ToObject<decimal?>();
+
+                                        if (amount == null)
+                                            return false;
+
+                                        var tokenAccount = stateTreiAcct.TokenAccounts?.Where(x => x.TokenTicker == tokenTicker).FirstOrDefault();
+
+                                        if (tokenAccount == null)
+                                            return false;
+
+                                        xferBurnAmount += amount.Value;
+
+                                        foreach (var otx in otherTxs)
                                         {
-                                            decimal xferBurnAmount = 0.0M;
-                                            var originaljobj = JObject.Parse(tx.Data);
-                                            var tokenTicker = originaljobj["TokenTicker"]?.ToObject<string?>();
-                                            var amount = originaljobj["Amount"]?.ToObject<decimal?>();
-
-                                            if (amount == null)
-                                                return false;
-
-                                            var tokenAccount = stateTreiAcct.TokenAccounts?.Where(x => x.TokenTicker == tokenTicker).FirstOrDefault();
-
-                                            if (tokenAccount == null)
-                                                return false;
-
-                                            xferBurnAmount += amount.Value;
-
-                                            foreach (var otx in otherTxs)
+                                            if (otx.TransactionType == TransactionType.NFT_TX)
                                             {
-                                                if (otx.TransactionType == TransactionType.NFT_TX)
+                                                if (otx.Data != null)
                                                 {
-                                                    if (otx.Data != null)
+                                                    var memscInfo = TransactionUtility.GetSCTXFunctionAndUID(otx);
+                                                    if(!memscInfo.Item2 && memscInfo.Item1)
                                                     {
-                                                        var memscInfo = TransactionUtility.GetSCTXFunctionAndUID(otx);
-                                                        if(!memscInfo.Item2 && memscInfo.Item1)
-                                                        {
-                                                            var jobj = JObject.Parse(otx.Data);
-                                                            var otscUID = jobj["ContractUID"]?.ToObject<string?>();
-                                                            var otFunction = jobj["Function"]?.ToObject<string?>();
+                                                        var jobj = JObject.Parse(otx.Data);
+                                                        var otscUID = jobj["ContractUID"]?.ToObject<string?>();
+                                                        var otFunction = jobj["Function"]?.ToObject<string?>();
 
-                                                            if (otscUID == scUID)
+                                                        if (otscUID == scUID)
+                                                        {
+                                                            var otTokenTicker = jobj["TokenTicker"]?.ToObject<string?>();
+                                                            var otAmount = jobj["Amount"]?.ToObject<decimal?>();
+                                                            if (otFunction != null)
                                                             {
-                                                                var otTokenTicker = jobj["TokenTicker"]?.ToObject<string?>();
-                                                                var otAmount = jobj["Amount"]?.ToObject<decimal?>();
-                                                                if (otFunction != null)
+                                                                if (otFunction == "TokenTransfer()" || otFunction == "TokenBurn()")
                                                                 {
-                                                                    if (otFunction == "TokenTransfer()" || otFunction == "TokenBurn()")
+                                                                    if (otAmount != null)
                                                                     {
-                                                                        if (otAmount != null)
+                                                                        if (otTokenTicker == tokenTicker)
                                                                         {
-                                                                            if (otTokenTicker == tokenTicker)
-                                                                            {
-                                                                                xferBurnAmount += otAmount.Value;
-                                                                            }
-
+                                                                            xferBurnAmount += otAmount.Value;
                                                                         }
+
                                                                     }
                                                                 }
                                                             }
@@ -885,14 +902,26 @@ namespace ReserveBlockCore.Data
                                                     }
                                                 }
                                             }
-
-                                            if(xferBurnAmount > tokenAccount.Balance) return false; //failed due to overspend/overburn
                                         }
+
+                                        if(xferBurnAmount > tokenAccount.Balance) return false; //failed due to overspend/overburn
                                     }
-                                    break;
-                                default:
-                                    break;
-                            }
+                                }
+                                break;
+                            case "TransferCoinMulti()":
+                                {
+                                    var jobj = JObject.Parse(txData);
+                                    var signatureInput = jobj["SignatureInput"]?.ToObject<string?>();
+
+                                    if (signatureInput == null)
+                                        return false;
+
+                                    if (Globals.MemMutliTransfers.ContainsKey(signatureInput))
+                                        return false;
+                                }
+                                break;
+                            default:
+                                break;
                         }
                     }
                     

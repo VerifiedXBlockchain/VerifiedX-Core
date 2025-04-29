@@ -142,7 +142,7 @@ namespace ReserveBlockCore
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
         public static int MinorVer = 0;
-        public static int RevisionVer = 1;
+        public static int RevisionVer = 3;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
@@ -244,6 +244,7 @@ namespace ReserveBlockCore
         public static CancellationToken CancelledToken;
 
         public static ConcurrentDictionary<string, long> MemBlocks = new ConcurrentDictionary<string, long>();
+        public static ConcurrentDictionary<string, long> MemMutliTransfers = new ConcurrentDictionary<string, long>();
         public static ConcurrentDictionary<long, string> BlockHashes = new ConcurrentDictionary<long, string>();
         public static ConcurrentDictionary<string, NodeInfo> Nodes = new ConcurrentDictionary<string, NodeInfo>(); // IP Address
         public static ConcurrentDictionary<string, AdjBench> AdjBench = new ConcurrentDictionary<string, AdjBench>(); // IP Address:Key

@@ -474,6 +474,74 @@ namespace ReserveBlockCore.Services
                                         
                                         break;
                                     }
+                                case "TransferCoinMulti()":
+                                    {
+                                        var jobj = JObject.Parse(tx.Data);
+                                        var signatureInput = jobj["SignatureInput"]?.ToObject<string?>();
+                                        var amount = jobj["Amount"]?.ToObject<decimal?>();
+                                        var inputs = jobj["Inputs"]?.ToObject<List<VBTCTransferInput>?>();
+
+                                        if (inputs == null)
+                                            return;
+
+                                        if(inputs.Any())
+                                        {
+                                            foreach(var input in inputs)
+                                            {
+                                                var scState = SmartContractStateTrei.GetSmartContractState(input.SCUID);
+
+                                                if(scState != null)
+                                                {
+                                                    var transferTask = Task.Run(() => { SmartContractMain.SmartContractData.CreateSmartContract(scState.ContractData); });
+                                                    bool isCompletedSuccessfully = transferTask.Wait(TimeSpan.FromMilliseconds(Globals.NFTTimeout * 1000));
+                                                    //testing
+                                                    //bool isCompletedSuccessfully = true;
+                                                    //transferTask.Wait();
+                                                    if (!isCompletedSuccessfully)
+                                                    {
+                                                        SCLogUtility.Log("Failed to decompile smart contract for transfer in time.", "BlockValidatorService.ValidateBlock()");
+                                                    }
+                                                    else
+                                                    {
+                                                        var sc = SmartContractMain.SmartContractData.GetSmartContract(input.SCUID);
+                                                        if (sc?.Features != null)
+                                                        {
+                                                            if (sc.Features.Exists(x => x.FeatureName == FeatureName.Tokenization))
+                                                            {
+                                                                await TokenizedBitcoin.SaveSmartContractCoinTransfer(sc, tx.ToAddress);
+
+                                                                await Bitcoin.Bitcoin.TransferCoinAudit(input.SCUID);
+
+                                                                var postAuditTknz = await TokenizedBitcoin.GetTokenizedBitcoin(input.SCUID);
+
+                                                                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                                                                {
+                                                                    var balanceList = scState.SCStateTreiTokenizationTXes.ToList();
+                                                                    if (balanceList.Any())
+                                                                    {
+                                                                        var stateBalance = balanceList.Sum(x => x.Amount);
+                                                                        var totalBalance = postAuditTknz.Balance;
+                                                                        if (stateBalance > totalBalance)
+                                                                        {
+                                                                            var txdata = TransactionData.GetAll();
+                                                                            tx.TransactionStatus = TransactionStatus.Invalid;
+                                                                            txdata.UpdateSafe(tx);
+
+                                                                            //Delete because its invalid.
+                                                                            TokenizedBitcoin.DeleteSmartContract(input.SCUID);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                    }
+                                    break;
+
                                 default:
                                     break;
                             }

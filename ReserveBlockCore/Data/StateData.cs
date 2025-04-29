@@ -13,6 +13,7 @@ using System.Security.Principal;
 using ReserveBlockCore.Bitcoin.Models;
 using NBitcoin.JsonConverters;
 using ReserveBlockCore.Models.DST;
+using System;
 
 namespace ReserveBlockCore.Data
 {
@@ -271,6 +272,9 @@ namespace ReserveBlockCore.Data
                                         break;
                                     case "TransferCoin()":
                                         TransferCoin(tx);
+                                        break;
+                                    case "TransferCoinMulti()":
+                                        TransferCoinMulti(tx);
                                         break;
                                     case "TokenizedWithdrawalRequest()":
                                         TokenizedWithdrawalRequest(tx);
@@ -2161,6 +2165,56 @@ namespace ReserveBlockCore.Data
                     }
 
                     SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                }
+            }
+        }
+
+        private static void TransferCoinMulti(Transaction tx)
+        {
+            var txData = tx.Data;
+            var jobj = JObject.Parse(txData);
+
+            var function = (string?)jobj["Function"];
+
+            var signatureInput = jobj["SignatureInput"]?.ToObject<string?>();
+            var amount = jobj["Amount"]?.ToObject<decimal?>();
+            var inputs = jobj["Inputs"]?.ToObject<List<VBTCTransferInput>?>();
+
+            if(inputs != null)
+            {
+                foreach(var input in inputs)
+                {
+                    var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(input.SCUID);
+
+                    if (scStateTreiRec != null)
+                    {
+                        List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                    {
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = input.Amount,
+                            FromAddress = "+",
+                            ToAddress = tx.ToAddress
+                        },
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = input.Amount * -1.0M,
+                            FromAddress = input.FromAddress,
+                            ToAddress = "-"
+                        }
+                    };
+
+                        if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                        {
+                            scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                        }
+                        else
+                        {
+                            scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                        }
+
+                        SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                    }
                 }
             }
         }

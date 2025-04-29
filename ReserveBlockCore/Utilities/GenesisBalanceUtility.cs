@@ -16,7 +16,8 @@
                     {"xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC", 25_000_000M},
                     {"xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj", 10_000_000M },
                     {"xBRNST9oL8oW6JctcyumcafsnWCVXbzZnr", 25_000_000M },
-                    {"x9hjkeNB6t2qJzbZaayMMxmfVGZh5XpmW7",  20_000_000M}
+                    {"x9hjkeNB6t2qJzbZaayMMxmfVGZh5XpmW7",  20_000_000M},
+                    {"xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi", 5_500M }
                 }; // Address, Amount in Decimal
             }
 

@@ -807,7 +807,9 @@ namespace ReserveBlockCore.Nodes
                                         }
                                         else
                                         {
-                                            terminalWinner = "RH9XAP3omXvk7P6Xe9fQ1C6nZQ1adJw2ZG";
+                                            terminalWinner = "RH9XAP3omXvk7P6Xe9fQ1C6nZQ1adJw2ZG"; //Mainnet
+                                            if(Globals.IsTestNet)
+                                                terminalWinner = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj";
                                             ConsoleWriterService.OutputVal($"\r\n Bag failed. No Result was found.");
                                             CasterRoundAudit.AddStep($"Bag was approved. Moving to next block.", true);
                                             //ConsoleWriterService.OutputVal($"\r\nBag was approved. Moving to next block.");
@@ -819,6 +821,10 @@ namespace ReserveBlockCore.Nodes
                                 }
 
                                 terminalWinner = Height % 2 == 0 ? "RFoKrASMr19mg8S71Lf1F2suzxahG5Yj4N" : "RH9XAP3omXvk7P6Xe9fQ1C6nZQ1adJw2ZG";
+
+                                if (Globals.IsTestNet)
+                                    terminalWinner = Height % 2 == 0 ? "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" : "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC";
+
                                 CasterRoundAudit.AddStep($"Stabilization Code. Moving on.", true);
                                 approved = true;
                                 

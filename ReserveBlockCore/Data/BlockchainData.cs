@@ -319,7 +319,7 @@ namespace ReserveBlockCore.Data
         }
         #endregion
 
-        #region Craft Block V5 - WIP
+        #region Craft Block V5
         public static async Task<Block?> CraftBlock_V5(string validator, int totalVals, string valAnswer, long height, bool skipTXs = false, bool validateOnly = false)
         {
             try
@@ -729,12 +729,12 @@ namespace ReserveBlockCore.Data
                     Globals.LastBlockAddedTimestamp = currentTime;
 
                     Blockchain.AddBlockHeader(block);
+
                     if (Globals.ValidatorAddress == block.Validator)
                         Globals.LastWonBlock = block;
 
                     _ = BlockDiffService.UpdateQueue(Globals.BlockTimeDiff);
                     _ = ValidatorService.UpdateActiveValidators(block);
-
 
                     //insert block to db
                     blocks.InsertSafe(block);
