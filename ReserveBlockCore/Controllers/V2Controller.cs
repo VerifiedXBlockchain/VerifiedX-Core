@@ -147,7 +147,8 @@ namespace ReserveBlockCore.Controllers
                                                     var nAccBalList = accountBalanceList.Where(x => x.Address == scState.OwnerAddress).FirstOrDefault();
                                                     if (nAccBalList != null)
                                                     {
-                                                        nAccBalList.TokenAccounts.Add(tknAcc);
+                                                        if(!nAccBalList.TokenAccounts.Exists(x => x.SmartContractUID == tknAcc.SmartContractUID))
+                                                            nAccBalList.TokenAccounts.Add(tknAcc);
                                                     }
                                                 }
                                                 else
@@ -170,7 +171,8 @@ namespace ReserveBlockCore.Controllers
                                                         var nAccBalList = accountBalanceList.Where(x => x.Address == scState.OwnerAddress).FirstOrDefault();
                                                         if (nAccBalList != null)
                                                         {
-                                                            nAccBalList.TokenAccounts.Add(tknAcc);
+                                                            if (!nAccBalList.TokenAccounts.Exists(x => x.SmartContractUID == tknAcc.SmartContractUID))
+                                                                nAccBalList.TokenAccounts.Add(tknAcc);
                                                         }
                                                     }
                                                 }
