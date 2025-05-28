@@ -885,7 +885,7 @@ namespace ReserveBlockCore.Services
                                                         {
                                                             var balance = balances.Sum(x => x.Amount);
 
-                                                            if (balance < amount)
+                                                            if (balance < input.Amount)
                                                                 return (txResult, $"Insufficient Balance. Current Balance: {balance}");
                                                         }
                                                     }

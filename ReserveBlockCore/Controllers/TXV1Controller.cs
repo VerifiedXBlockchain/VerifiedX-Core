@@ -1041,6 +1041,15 @@ namespace ReserveBlockCore.Controllers
             return output;
         }
 
+        [HttpGet("TestMempool")]
+        public async Task<string> TestMempool()
+        {
+            var processedTxPool = await TransactionData.ProcessTxPool();
+            var txPool = TransactionData.GetPool();
+
+            return JsonConvert.SerializeObject(new { Success = true, Message = $"", Pool = txPool });
+        }
+
         /// <summary>
         /// Test raw transaction is received and return the input
         /// </summary>
