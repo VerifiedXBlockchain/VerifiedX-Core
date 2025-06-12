@@ -130,6 +130,8 @@ namespace ReserveBlockCore.Controllers
                 Region = 0
             };
 
+            beacon.BeaconLocator = Beacons.CreateBeaconLocator(beacon);
+
             var result = Beacons.SaveBeacon(beacon);
 
             if (!result)
