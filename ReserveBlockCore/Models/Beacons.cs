@@ -35,6 +35,96 @@ namespace ReserveBlockCore.Models
             }
         }
 
+        public static void CreateDefaultBeaconFile()
+        {
+            var path = GetPathUtility.GetConfigPath();
+            var fileExist = File.Exists(path + "beacons.txt");
+
+            if (!fileExist)
+            {
+                List<Beacons> beaconList = new List<Beacons>
+                {
+                    new Beacons { IPAddress = "144.126.156.180", Name = "Lily Beacon V2", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                    new Beacons { IPAddress = "144.126.156.176", Name = "Wisteria Beacon V2", Port = Globals.Port + 1 + 20000, BeaconUID = "WisteriaBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                    new Beacons { IPAddress = "144.126.141.210", Name = "Tulip Beacon V2", Port = Globals.Port + 1 + 20000, BeaconUID = "TulipBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                    new Beacons { IPAddress = "144.126.141.56", Name = "Sunflower Beacon V2", Port = Globals.Port + 1 + 20000, BeaconUID = "SunflowerBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                    new Beacons { IPAddress = "135.148.121.99", Name = "Lavender Beacon V2", Port = Globals.Port + 1 + 20000, BeaconUID = "LavenderBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1}
+                };
+
+                var lines = new List<string>();
+
+                foreach (var b in beaconList)
+                {
+                    var line = string.Join(",",
+                        b.IPAddress,
+                        b.Name.Replace(",", " "),
+                        b.Port,
+                        b.BeaconUID,
+                        b.DefaultBeacon,
+                        b.AutoDeleteAfterDownload,
+                        b.FileCachePeriodDays,
+                        b.IsPrivateBeacon,
+                        b.SelfBeacon,
+                        b.SelfBeaconActive,
+                        b.BeaconLocator.Replace(",", " "),
+                        b.Region
+                    );
+
+                    lines.Add(line);
+                }
+
+                File.WriteAllLines(path + "beacons.txt", lines);
+            }
+        }
+
+        public static List<Beacons> ReadBeaconFile()
+        {
+            var path = GetPathUtility.GetConfigPath();
+            var filePath = Path.Combine(path, "beacons.txt");
+
+            var beacons = new List<Beacons>();
+
+            if (!File.Exists(filePath))
+                return beacons;
+
+            var lines = File.ReadAllLines(filePath);
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var parts = lines[i].Split(',');
+
+                if (parts.Length < 12)
+                    continue; // skip malformed lines
+
+                try
+                {
+                    var beacon = new Beacons
+                    {
+                        IPAddress = parts[0],
+                        Name = parts[1],
+                        Port = int.Parse(parts[2]),
+                        BeaconUID = parts[3],
+                        DefaultBeacon = bool.Parse(parts[4]),
+                        AutoDeleteAfterDownload = bool.Parse(parts[5]),
+                        FileCachePeriodDays = int.Parse(parts[6]),
+                        IsPrivateBeacon = bool.Parse(parts[7]),
+                        SelfBeacon = bool.Parse(parts[8]),
+                        SelfBeaconActive = bool.Parse(parts[9]),
+                        BeaconLocator = parts[10],
+                        Region = int.Parse(parts[11])
+                    };
+
+                    beacons.Add(beacon);
+                }
+                catch
+                {
+                    ErrorLogUtility.LogError($"Failed to read line in beacon file at line:  {i + 1}", "BeaconInfo.ReadBeaconFile()");
+                }
+            }
+
+            return beacons;
+        }
+
         public static bool SaveBeacon(Beacons beacon)
         {
             try

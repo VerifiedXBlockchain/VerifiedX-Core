@@ -571,7 +571,7 @@ namespace ReserveBlockCore.Services
                     }
                     else
                     {
-                        ErrorLogUtility.LogError("Failed to see Beacons. NFT Transfers will not work.", "StartupService.LoadBeacons()");
+                        ErrorLogUtility.LogError("Failed to seed Beacons. NFT Transfers will not work.", "StartupService.LoadBeacons()");
                     }
                 }
                 else
@@ -592,6 +592,8 @@ namespace ReserveBlockCore.Services
             {
                 if (!Globals.IsTestNet)
                 {
+                    //Delete old beacons from alpha.
+                    //remove this code after new versions
                     List<Beacons> beaconList = new List<Beacons>
                     {
                         new Beacons { IPAddress = "162.248.14.123", Name = "Lily Beacon V2", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
@@ -609,9 +611,22 @@ namespace ReserveBlockCore.Services
                     foreach (var beacon in beaconList)
                     {
                         beacon.BeaconLocator = Beacons.CreateBeaconLocator(beacon);
+                        Beacons.DeleteBeacon(beacon);
                     }
 
-                    Beacons.SaveBeaconList(beaconList);
+                    Beacons.CreateDefaultBeaconFile();
+                    var nBeaconList = Beacons.ReadBeaconFile();
+
+                    if(nBeaconList.Any())
+                    {
+                        foreach (var beacon in nBeaconList)
+                        {
+                            beacon.BeaconLocator = Beacons.CreateBeaconLocator(beacon);
+                        }
+                    }
+                    Beacons.SaveBeaconList(nBeaconList);
+
+
                 }
                 else
                 {
