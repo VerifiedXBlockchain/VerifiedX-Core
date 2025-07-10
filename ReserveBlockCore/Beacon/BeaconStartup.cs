@@ -69,7 +69,7 @@ namespace ReserveBlockCore.Beacon
                             if (fileExist)
                             {
                                 context.Response.StatusCode = StatusCodes.Status202Accepted;
-                                await context.Response.WriteAsync("No file was uploaded. The file already exist");
+                                //await context.Response.WriteAsync("No file was uploaded. The file already exist");
                                 return;
                             }
 
@@ -114,8 +114,8 @@ namespace ReserveBlockCore.Beacon
                             }
                             else
                             {
-                                context.Response.StatusCode = StatusCodes.Status204NoContent; // Bad Request
-                                await context.Response.WriteAsync("No file was uploaded. Extension was found in auto reject list.");
+                                Console.WriteLine("Warning: Beacon Data was Null!");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 return;
                             }
 
@@ -136,53 +136,82 @@ namespace ReserveBlockCore.Beacon
 
                 endpoints.MapGet("/download/{scUID}/{fileName}", async context =>
                 {
-                    var scUID = context.Request.RouteValues["scUID"] as string;
-                    var fileName = context.Request.RouteValues["fileName"] as string;
-                    var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
-
-                    if (string.IsNullOrEmpty(fileName))
+                    try
                     {
-                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                        await context.Response.WriteAsync("Invalid file name.");
-                        return;
-                    }
+                        if (Globals.OptionalLogging)
+                            Console.WriteLine("Optional Logging Enabled.");
 
-                    var scuidFolder = scUID.Replace(":", "");
+                        var scUID = context.Request.RouteValues["scUID"] as string;
+                        var fileName = context.Request.RouteValues["fileName"] as string;
+                        var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
 
-                    var filePath = $@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}{fileName}";
-                    bool fileExist = File.Exists(filePath);
-                    if (!fileExist)
-                    {
-                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                        await context.Response.WriteAsync("Invalid file name.");
-                        return;
-                    }
-
-                    var beaconDataDb = BeaconData.GetBeacon();
-                    if (beaconDataDb != null)
-                    {
-                        var bdd = beaconDataDb.FindOne(x => x.AssetName.ToLower() == fileName.ToLower() && x.DownloadIPAddress == ipAddress && x.SmartContractUID == scUID);
-                        if (bdd != null)
+                        if (Globals.OptionalLogging)
                         {
-                            context.Response.ContentType = "application/octet-stream";
-                            context.Response.Headers.Add("Content-Disposition", $"attachment; filename=\"{fileName}\"");
+                            Console.WriteLine($"Starting download for NFT: {scUID}");
+                            Console.WriteLine($"Filename: {fileName}");
+                            Console.WriteLine($"IpAddress: {ipAddress}");
+                        }
 
-                            await using var stream = new FileStream(filePath, FileMode.Open);
-                            await stream.CopyToAsync(context.Response.Body);
+                        if (string.IsNullOrEmpty(fileName))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            if (Globals.OptionalLogging)
+                                Console.WriteLine("Filename was missing.");
+                            await context.Response.WriteAsync("Filename was missing.");
+                            return;
+                        }
+
+                        var scuidFolder = scUID.Replace(":", "");
+
+                        var filePath = $@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}{fileName}";
+                        bool fileExist = File.Exists(filePath);
+                        if (!fileExist)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            if (Globals.OptionalLogging)
+                                Console.WriteLine("File was not found.");
+                            await context.Response.WriteAsync("File was not found.");
+                            return;
+                        }
+
+                        var beaconDataDb = BeaconData.GetBeacon();
+                        if (beaconDataDb != null)
+                        {
+                            var bdd = beaconDataDb.FindOne(x => x.AssetName.ToLower() == fileName.ToLower() && x.DownloadIPAddress == ipAddress && x.SmartContractUID == scUID);
+                            if (bdd != null)
+                            {
+                                context.Response.ContentType = "application/octet-stream";
+                                context.Response.Headers.Add("Content-Disposition", $"attachment; filename=\"{fileName}\"");
+
+                                await using var stream = new FileStream(filePath, FileMode.Open);
+                                await stream.CopyToAsync(context.Response.Body);
+                            }
+                            else
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                if (Globals.OptionalLogging)
+                                    Console.WriteLine("bdd was null!");
+                                await context.Response.WriteAsync("bdd was null!");
+                                return;
+                            }
                         }
                         else
                         {
                             context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                            await context.Response.WriteAsync("Invalid file name.");
+                            if (Globals.OptionalLogging)
+                                Console.WriteLine("Beacon data was null. Insure beacon is synced.");
+                            await context.Response.WriteAsync("Beacon data was null.");
                             return;
                         }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                        await context.Response.WriteAsync("Invalid file name.");
+                        if (Globals.OptionalLogging)
+                            Console.WriteLine($"Error: {ex}");
+                        context.Response.StatusCode = StatusCodes.Status417ExpectationFailed;
                         return;
                     }
+                    
                 });
             });
         }
