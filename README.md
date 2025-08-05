@@ -38,8 +38,7 @@ This repo is currently a work in progress. New commits pushing more of the VFX w
 During January we will be committing multiples stages of the code. Please follow to get latest updates!
 
 # What is VerifiedX?
-VerifiedX is an smart contract centric blockchain aiming to focus on SCs and deliver a blockchain built around them. 
-VerifiedX Foundation (verifiedx.io), is the first open-source platform allowing for the creation of a decentralized NFT Centric Blockchain, which is independently governed and democratizes NFTs for everyone.
+VerifiedX (VFX) is an open-source decentralized network that is both a universal layer 1 and a Bitcoin sidechain for the purpose of tokenized self-custody, on-chain storage, and peer-to-peer commerce of both digital & physical assets.
 
 For more information please read the VerifiedX whitepaper or litepaper.
 
