@@ -374,6 +374,9 @@ namespace ReserveBlockCore.Nodes
                     Globals.BlockCasters.Add(caster);
                     if (Globals.BlockCasters.Any(x => x.PeerIP == caster.PeerIP))
                         break;
+
+                    //Adding delay to prevent infinite loop and cpu throttling
+                    await Task.Delay(10);
                 }
             }
         }
@@ -567,18 +570,16 @@ namespace ReserveBlockCore.Nodes
                                         Globals.NetworkValidators[winningCasterProof.Address] = validator;
                                     }
 
-                                    //No longer getting block at this time. Deprecate this block process later!
-                                    //block = verificationResultTuple.Item2;
-
                                     ExcludeValList.Clear();
                                     ExcludeValList = new List<string>();
                                 }
-
+                                await Task.Delay(100);
                             }
                             else
                             {
                                 ExcludeValList.Clear();
                                 ExcludeValList = new List<string>();
+                                await Task.Delay(100);
                                 break;
                             }
                         }
