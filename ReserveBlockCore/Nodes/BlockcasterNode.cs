@@ -30,13 +30,14 @@ namespace ReserveBlockCore.Nodes
         private readonly IHubContext<P2PBlockcasterServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
-        const int PROOF_COLLECTION_TIME = 6000; // 7 seconds
+        const int PROOF_COLLECTION_TIME = 6000; // 6 seconds
         const int APPROVAL_WINDOW = 12000;      // 12 seconds
-        const int CASTER_VOTE_WINDOW = 6000;
+        const int CASTER_VOTE_WINDOW = 6000;    // 6 seconds
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         public static ReplacementRound _currentRound;
         public static List<string> _allCasterAddresses;
         public static CasterRoundAudit? CasterRoundAudit = null;
+
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -657,8 +658,6 @@ namespace ReserveBlockCore.Nodes
                                 List<string> CasterApprovalList = new List<string>();
                                 Dictionary<string, string> CasterVoteList = new Dictionary<string, string>();
 
-                                //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-                                //INPROGRESS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                                 string? terminalWinner = null;
 
                                 while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
@@ -2308,19 +2307,34 @@ namespace ReserveBlockCore.Nodes
             var blocksToRemove = Globals.CasterApprovedBlockHashDict.Where(x => x.Key <= blockPoint).ToList();
             foreach (var block in blocksToRemove)
             {
-                while (!Globals.CasterApprovedBlockHashDict.TryRemove(block.Key, out var _))
+                int retryCount = 0;
+                while (!Globals.CasterApprovedBlockHashDict.TryRemove(block.Key, out var _) && retryCount < 5)
                 {
-                    await Task.Delay(75);
+                    retryCount++;
+                    await Task.Delay(50);
                 }
 
+                // Log if removal consistently fails
+                if (retryCount >= 5)
+                {
+                    ConsoleWriterService.OutputVal($"Warning: Could not remove block {block.Key} from CasterApprovedBlockHashDict");
+                }
             }
 
             var roundsToRemove = Globals.CasterRoundDict.Where(x => x.Key <= blockPoint).ToList();
             foreach (var round in roundsToRemove)
             {
-                while (!Globals.CasterRoundDict.TryRemove(round.Key, out var _))
+                int retryCount = 0;
+                while (!Globals.CasterRoundDict.TryRemove(round.Key, out var _) && retryCount < 5)
                 {
-                    await Task.Delay(75);
+                    retryCount++;
+                    await Task.Delay(50);
+                }
+
+                // Log if removal consistently fails
+                if (retryCount >= 5)
+                {
+                    ConsoleWriterService.OutputVal($"Warning: Could not remove round {round.Key} from CasterRoundDict");
                 }
             }
         }

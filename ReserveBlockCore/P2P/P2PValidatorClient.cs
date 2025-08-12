@@ -432,7 +432,7 @@ namespace ReserveBlockCore.P2P
             }
 
             var Diff = Globals.MaxBlockCasterPeers - Globals.BlockCasterNodes.Count;
-            newPeers.Take(Diff).ToArray().ParallelLoop(peer =>
+            newPeers.Take(Diff).ToArray().ParallelTwoLoop(peer =>
             {
                 _ = ConnectBlockcaster(peer);
             });

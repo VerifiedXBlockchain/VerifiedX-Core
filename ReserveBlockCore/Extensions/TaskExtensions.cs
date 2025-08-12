@@ -25,7 +25,25 @@ namespace ReserveBlockCore.Extensions
 			});
 		}
 
-		public static async Task WhenAtLeast<T>(this IEnumerable<Task<T>> tasks, Func<T, bool> successPredicate, int atLeast)
+        public static void ParallelTwoLoop<T>(this ICollection<T> source, Action<T> func)
+        {
+            if (source.Count == 0)
+                return;
+            // LIMIT to max 2 parallel connections instead of unlimited
+            Parallel.ForEach(source, new ParallelOptions { MaxDegreeOfParallelism = Math.Min(2, source.Count) }, x =>
+            {
+                try
+                {
+                    func(x);
+                }
+                catch (Exception ex)
+                {
+                    // ignored  
+                }
+            });
+        }
+
+        public static async Task WhenAtLeast<T>(this IEnumerable<Task<T>> tasks, Func<T, bool> successPredicate, int atLeast)
 		{
 			var TaskSource = new TaskCompletionSource();
 
