@@ -37,6 +37,8 @@ namespace ReserveBlockCore.Nodes
         public static ReplacementRound _currentRound;
         public static List<string> _allCasterAddresses;
         public static CasterRoundAudit? CasterRoundAudit = null;
+        private static bool _consensusLoopRunning = false;
+        private static readonly object _consensusLoopLock = new object();
 
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
@@ -407,6 +409,39 @@ namespace ReserveBlockCore.Nodes
 
         #endregion
 
+        #region Start Consensus Loop Management
+        /// <summary>
+        /// Starts the casting rounds consensus loop if not already running.
+        /// This method is called when a validator becomes a caster.
+        /// </summary>
+        public static void EnsureCastingRoundsStarted()
+        {
+            lock (_consensusLoopLock)
+            {
+                if (!_consensusLoopRunning && Globals.IsBlockCaster && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    _consensusLoopRunning = true;
+                    LogUtility.Log("Starting casting rounds consensus loop - became a caster", "BlockcasterNode.EnsureCastingRoundsStarted");
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await StartCastingRounds();
+                        }
+                        finally
+                        {
+                            lock (_consensusLoopLock)
+                            {
+                                _consensusLoopRunning = false;
+                                LogUtility.Log("Casting rounds consensus loop ended", "BlockcasterNode.EnsureCastingRoundsStarted");
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        #endregion
+
         private static async Task StartCastingRounds()
         {
             //start consensus run here.  
@@ -450,12 +485,12 @@ namespace ReserveBlockCore.Nodes
                                 Globals.IsBlockCaster = false;
                         }
                         
-                        // If we're no longer a caster after rotation, exit this round
+                        // If we're no longer a caster after rotation, exit the consensus loop
                         if (!Globals.IsBlockCaster)
                         {
-                            ConsoleWriterService.OutputVal("Caster rotation completed - I am no longer a caster");
-                            await Task.Delay(new TimeSpan(0, 0, 30));
-                            continue;
+                            ConsoleWriterService.OutputVal("Caster rotation completed - I am no longer a caster. Exiting consensus loop.");
+                            LogUtility.Log("Exiting StartCastingRounds due to caster rotation - no longer a caster", "BlockcasterNode.StartCastingRounds");
+                            break; // Exit the while loop completely
                         }
                         
                         ConsoleWriterService.OutputVal("Caster rotation completed - I am still a caster");

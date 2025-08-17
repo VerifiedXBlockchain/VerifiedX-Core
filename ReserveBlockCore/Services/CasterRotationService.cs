@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.SignalR.Client;
 using Newtonsoft.Json;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Nodes;
 using ReserveBlockCore.P2P;
 using ReserveBlockCore.Utilities;
 
@@ -162,9 +163,17 @@ namespace ReserveBlockCore.Services
             }
 
             // Update IsBlockCaster status
+            var wasICaster = Globals.IsBlockCaster;
             if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 Globals.IsBlockCaster = newCasters.Any(c => c.ValidatorAddress == Globals.ValidatorAddress);
+            }
+
+            // If we just became a caster, start the consensus loop
+            if (!wasICaster && Globals.IsBlockCaster)
+            {
+                LogUtility.Log("Became a caster - starting consensus loop", "CasterRotationService.UpdateLocalCasterList");
+                BlockcasterNode.EnsureCastingRoundsStarted();
             }
 
             // Trigger validator connection updates if we're a validator
