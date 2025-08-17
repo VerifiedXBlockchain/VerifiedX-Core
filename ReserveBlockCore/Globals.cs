@@ -97,7 +97,7 @@ namespace ReserveBlockCore
         public static DateTime? ExplorerValDataLastSend = null;
 
 
-        public const int ValidatorRequiredRBX = 50_000;
+        public const int ValidatorRequiredRBX = 5_000;
         public const decimal ADNRRequiredRBX = 5.0M;
         public const decimal ADNRTransferRequiredRBX = 1.0M;
         public const decimal ADNRDeleteRequiredRBX = 0.0M;
@@ -312,6 +312,11 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<long, CasterRoundAudit> CasterRoundAuditDict = new ConcurrentDictionary<long, CasterRoundAudit>();
         public static ConcurrentDictionary<string, Proof> CasterProofDict = new ConcurrentDictionary<string, Proof>();
 
+        // Dynamic Caster System Variables
+        public static ConcurrentDictionary<string, DateTime> FailedConnectivityValidators = new ConcurrentDictionary<string, DateTime>();
+        public static long? DeploymentStartHeight = null;
+        public static bool HasSuccessfulCasterSelection = false;
+        public static bool BootstrapInitialized = false;
 
         #endregion
 

@@ -434,6 +434,38 @@ namespace ReserveBlockCore.Nodes
                 }
 
                 ConsoleWriterService.OutputVal("Top of consensus loop");
+                var Height = Globals.LastBlock.Height + 1;
+
+                // **CRITICAL**: Check for caster rotation at the start of new casting round
+                try
+                {
+                    var rotationProcessed = await CasterRotationService.ProcessCasterRotation(Height);
+                    if (rotationProcessed)
+                    {
+                        if (casterList.Any())
+                        {
+                            if (casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress))
+                                Globals.IsBlockCaster = true;
+                            else
+                                Globals.IsBlockCaster = false;
+                        }
+                        
+                        // If we're no longer a caster after rotation, exit this round
+                        if (!Globals.IsBlockCaster)
+                        {
+                            ConsoleWriterService.OutputVal("Caster rotation completed - I am no longer a caster");
+                            await Task.Delay(new TimeSpan(0, 0, 30));
+                            continue;
+                        }
+                        
+                        ConsoleWriterService.OutputVal("Caster rotation completed - I am still a caster");
+                    }
+                }
+                catch (Exception rotationEx)
+                {
+                    ErrorLogUtility.LogError($"Error processing caster rotation at height {Height}: {rotationEx.Message}", "BlockcasterNode.StartCastingRounds");
+                    // Don't fail the casting round due to rotation errors
+                }
 
                 Block? block = null;
 
@@ -447,8 +479,6 @@ namespace ReserveBlockCore.Nodes
 
                 try
                 {
-                    var Height = Globals.LastBlock.Height + 1;
-
                     if (Height != Globals.LastBlock.Height + 1)
                         continue;
 

@@ -440,6 +440,17 @@ namespace ReserveBlockCore
 
             //This is for consensus start.
 
+            // Initialize the dynamic caster system bootstrap
+            try
+            {
+                await BootstrapService.Initialize();
+                LogUtility.Log("Dynamic caster system initialized successfully", "Program.Main");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to initialize dynamic caster system: {ex.Message}", "Program.Main");
+            }
+
             //deprecate in v5.0.1 or greater
             //await StartupService.GetAdjudicatorPool();
             StartupService.DisplayValidatorAddress();
@@ -620,6 +631,12 @@ namespace ReserveBlockCore
             _ = StartupService.UpdateSCOwnership();
             _ = ReserveService.RunUnlockWipe();
 
+            // Start the validator connectivity monitoring service
+            _ = Task.Run(ValidatorConnectivityService.ValidatorConnectivityMonitor);
+
+            // Start the validator synchronization service
+            _ = ValidatorSyncService.StartValidatorSyncService();
+
             if (startGUI)
             {
                 Process[] pname = Process.GetProcessesByName("VFXWallet");
@@ -658,12 +675,6 @@ namespace ReserveBlockCore
             if (Globals.SelfSTUNServer)
                 _ = Task.Run(() => { StartupService.StartDSTServer(); });//launching off the main thread.
 
-            //deprecate in v5.0.1 or greater
-            //if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            //    _ = WindowsUtilities.AdjAutoRestart();
-
-            //if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            //    _ = LinuxUtilities.AdjAutoRestart();
 
             await Task.Delay(1000);
 

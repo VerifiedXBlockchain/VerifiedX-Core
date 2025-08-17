@@ -33,6 +33,15 @@ namespace ReserveBlockCore.P2P
                     return;
                 }
 
+                // Check for connectivity test - if present, allow connection and immediately disconnect
+                var connectivityTest = httpContext.Request.Headers["CONNECTIVITY_TEST"].ToString();
+                if (!string.IsNullOrEmpty(connectivityTest))
+                {
+                    // This is a connectivity test - allow it to connect then disconnect
+                    Context?.Abort();
+                    return;
+                }
+
                 var portCheck = PortUtility.IsPortOpen(peerIP, Globals.ValPort);
                 if(!portCheck) 
                 {
@@ -705,6 +714,34 @@ namespace ReserveBlockCore.P2P
             Context?.Abort();
         }
 
+        #endregion
+
+        #region Receive Caster Rotation
+        /// <summary>
+        /// Receives caster rotation notifications from the network.
+        /// Updates local caster list and connection status based on the rotation.
+        /// </summary>
+        public async Task ReceiveCasterRotation(string rotationJson)
+        {
+            try
+            {
+                var rotationData = JsonConvert.DeserializeObject<dynamic>(rotationJson);
+                if (rotationData != null)
+                {
+                    var newCasters = JsonConvert.DeserializeObject<List<Peers>>(rotationData.NewCasters.ToString());
+                    var rotationHeight = (long)rotationData.RotationHeight;
+
+                    LogUtility.Log($"Received caster rotation notification for height {rotationHeight}", "P2PValidatorServer.ReceiveCasterRotation");
+
+                    // Process the rotation notification
+                    await CasterRotationService.ProcessCasterRotationNotification(newCasters, rotationHeight);
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error processing caster rotation notification: {ex.Message}", "P2PValidatorServer.ReceiveCasterRotation");
+            }
+        }
         #endregion
 
         #region Get IP

@@ -20,14 +20,16 @@ namespace ReserveBlockCore.Models
         {
             try
             {
-                var verifySig = SignatureService.VerifySignature(
-                                validator.Address,
-                                validator.SignatureMessage,
-                                validator.Signature);
-
-                if (!verifySig)
+                // Enhanced validation using our new connectivity service
+                var isValidForAdmission = await ValidatorConnectivityService.ValidateValidatorForAdmission(validator);
+                
+                if (!isValidForAdmission)
+                {
+                    // ValidatorConnectivityService already logs the specific reason
                     return false;
+                }
 
+                // If we reach here, the validator passed all checks (signature, stake, connectivity)
                 if (Globals.NetworkValidators.TryGetValue(validator.Address, out var networkVal))
                 {
                     if (networkVal != null)
@@ -49,6 +51,7 @@ namespace ReserveBlockCore.Models
             }
             catch (Exception ex)
             {
+                Utilities.ErrorLogUtility.LogError($"Failed to add validator {validator.Address} to pool: {ex.Message}", "NetworkValidator.AddValidatorToPool");
                 return false;
             }
         }

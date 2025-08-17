@@ -127,11 +127,26 @@ namespace ReserveBlockCore.Services
                 {
                     await Task.Delay(1000);
                 }
+
+                // Initialize the dynamic caster system bootstrap
+                try
+                {
+                    await BootstrapService.Initialize();
+                    LogUtility.Log("Dynamic caster system initialized successfully", "ValidatorService.StartupValidatorProcess");
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to initialize dynamic caster system: {ex.Message}", "ValidatorService.StartupValidatorProcess");
+                }
+
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
-                //_ = ValidatorService.StartValidatorServer();
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
+
+                // Start validator-specific services
+                _ = Task.Run(ValidatorConnectivityService.ValidatorConnectivityMonitor);
+                _ = ValidatorSyncService.StartValidatorSyncService();
             }
         }
         internal static async Task StartupValidators()
@@ -353,9 +368,24 @@ namespace ReserveBlockCore.Services
 
                         if (!argsPassed)
                         {
+                            // Initialize the dynamic caster system bootstrap
+                            try
+                            {
+                                await BootstrapService.Initialize();
+                                LogUtility.Log("Dynamic caster system initialized for new validator", "ValidatorService.StartValidating");
+                            }
+                            catch (Exception ex)
+                            {
+                                ErrorLogUtility.LogError($"Failed to initialize dynamic caster system for new validator: {ex.Message}", "ValidatorService.StartValidating");
+                            }
+
                             _ = StartCasterAPIServer();
                             _ = StartValidatorServer();
                             _ = StartupValidators();
+
+                            // Start validator-specific services
+                            _ = Task.Run(ValidatorConnectivityService.ValidatorConnectivityMonitor);
+                            _ = ValidatorSyncService.StartValidatorSyncService();
                         }
 
                         //TODO: start performing some looped actions
