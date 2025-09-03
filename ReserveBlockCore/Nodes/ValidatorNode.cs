@@ -159,133 +159,6 @@ namespace ReserveBlockCore.Nodes
                 return;
             }
 
-            //var peerList = Globals.BlockCasterNodes.Values.ToList();
-
-            //if (!peerList.Any())
-            //{
-            //    return;
-            //}
-
-            //if (Globals.IsBlockCaster)
-            //{
-            //    return;
-            //} 
-
-            //ConcurrentBag<string> CasterIPs = new ConcurrentBag<string>();
-            //ConcurrentDictionary<string, Peers> CasterDict = new ConcurrentDictionary<string, Peers>();
-
-            //var peerDB = Peers.GetAll();
-
-            //var coreCount = Environment.ProcessorCount;
-            //if (coreCount >= 4 || Globals.RunUnsafeCode)
-            //{
-            //    var tasks = peerList.Select(async peer =>
-            //    {
-            //        try
-            //        {
-            //            using (var client = Globals.HttpClientFactory.CreateClient())
-            //            {
-            //                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/Blockcasters/";
-
-            //                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
-            //                await Task.Delay(75);
-
-            //                if (response != null)
-            //                {
-            //                    if (response.IsSuccessStatusCode)
-            //                    {
-            //                        var responseBody = await response.Content.ReadAsStringAsync();
-            //                        if (!string.IsNullOrEmpty(responseBody))
-            //                        {
-            //                            if (responseBody != "0")
-            //                            {
-            //                                var blockCasters = JsonConvert.DeserializeObject<List<Peers>?>(responseBody);
-            //                                if (blockCasters?.Count() > 0)
-            //                                {
-            //                                    blockCasters.ForEach(x => {
-            //                                        CasterIPs.Add(x.PeerIP);
-            //                                        CasterDict.TryAdd(x.PeerIP, x);
-            //                                    });
-            //                                }
-            //                            }
-            //                        }
-            //                        else
-            //                        {
-            //                            //bad response body.
-            //                        }
-            //                    }
-            //                }
-            //            }
-
-            //        }
-            //        catch (Exception ex)
-            //        {
-
-            //        }
-            //    }).ToList();
-
-            //    // Wait for all tasks to complete
-            //    await Task.WhenAll(tasks);
-            //}
-            //else
-            //{
-            //    foreach (var peer in peerList)
-            //    {
-            //        try
-            //        {
-            //            using (var client = Globals.HttpClientFactory.CreateClient())
-            //            {
-            //                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/Blockcasters/";
-
-            //                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
-            //                await Task.Delay(75);
-
-            //                if (response != null)
-            //                {
-            //                    if (response.IsSuccessStatusCode)
-            //                    {
-            //                        var responseBody = await response.Content.ReadAsStringAsync();
-            //                        if (!string.IsNullOrEmpty(responseBody))
-            //                        {
-            //                            if (responseBody != "0")
-            //                            {
-            //                                var blockCasters = JsonConvert.DeserializeObject<List<Peers>?>(responseBody);
-            //                                if (blockCasters?.Count() > 0)
-            //                                {
-            //                                    blockCasters.ForEach(x => {
-            //                                        CasterIPs.Add(x.PeerIP);
-            //                                        CasterDict.TryAdd(x.PeerIP, x);
-            //                                    });
-            //                                }
-            //                            }
-            //                        }
-            //                        else
-            //                        {
-            //                            //bad response body.
-            //                        }
-            //                    }
-            //                }
-            //            }
-            //        }
-            //        catch (Exception ex)
-            //        {
-            //        }
-            //    }
-            //}
-
-            //var top5IPs = CasterIPs
-            //    .GroupBy(ip => ip)
-            //    .OrderByDescending(g => g.Count())
-            //    .Take(5)
-            //    .Select(g => g.Key)
-            //    .ToList();
-
-            //var top5Casters = top5IPs
-            //    .Select(ip => new { IP = ip, Peer = CasterDict.TryGetValue(ip, out var peer) ? peer : null })
-            //    .Where(x => x.Peer != null)
-            //    .Select(x => x.Peer)
-            //    .ToList();
-
             List<Peers> peerList = new List<Peers>()
             {
 
@@ -705,7 +578,7 @@ namespace ReserveBlockCore.Nodes
                                 if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
                                     mempool.InsertSafe(transaction);
-                                    _ = Broadcast("7777", data, "SendTxToMempoolVals");
+                                    _ = Broadcast("7777", transaction, "SendTxToMempoolVals");
 
                                 }
                             }
@@ -856,7 +729,7 @@ namespace ReserveBlockCore.Nodes
         #endregion
 
         #region Broadcast
-        public static async Task Broadcast(string messageType, string data, string method = "")
+        public static async Task Broadcast(string messageType, Transaction data, string method = "")
         {
             await HubContext.Clients.All.SendAsync("GetValMessage", messageType, data);
 

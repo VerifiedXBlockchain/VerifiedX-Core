@@ -610,7 +610,7 @@ namespace ReserveBlockCore
             _ = SeedNodeService.Start();
             _ = SeedNodeService.CallToSeed();
             _ = FortisPoolService.PopulateFortisPoolCache();
-            _ = MempoolBroadcastService.RunBroadcastService();
+            _ = MempoolBroadcastService.Run();
 
             //_ = ValidatorService.ValidatingMonitorService();
 

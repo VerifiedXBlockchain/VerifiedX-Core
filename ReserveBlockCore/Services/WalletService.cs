@@ -236,14 +236,27 @@ namespace ReserveBlockCore.Services
 
             try
             {
-                var result = await VerifyTX(nTx, account);
-                if(result == true)
+                nTx.ToAddress = nTx.ToAddress.ToAddressNormalize();
+                nTx.Amount = nTx.Amount.ToNormalizeDecimal();
+
+                var twSkipVerify = nTx.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
+                var result = !twSkipVerify ? await TransactionValidatorService.VerifyTX(nTx) : await TransactionValidatorService.VerifyTX(nTx, false, false, true);
+                if (result.Item1 == true)
                 {
-                    output = "Success! TxId: " + txHash;
+                    if (nTx.TransactionRating == null)
+                    {
+                        var rating = await TransactionRatingService.GetTransactionRating(nTx);
+                        nTx.TransactionRating = rating;
+                    }
+
+                    TransactionData.AddToPool(nTx);
+                    await P2PClient.SendTXMempool(nTx);//send out to mempool
+
+                    output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Transaction has been broadcasted.", Hash = nTx.Hash });
                 }
                 else
                 {
-                    output = "Fail! Transaction Verify has failed.";
+                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not verified." });
                 }
             }
             catch(Exception ex)

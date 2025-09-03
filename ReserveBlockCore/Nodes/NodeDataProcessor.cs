@@ -59,6 +59,82 @@ namespace ReserveBlockCore.Nodes
                                 
                     }
                 }
+
+                if(message == "7777")
+                {
+                    var transaction = JsonConvert.DeserializeObject<Transaction>(data);
+                    if (transaction != null)
+                    {
+                        var ablList = Globals.ABL.ToList();
+                        if (ablList.Exists(x => x == transaction.FromAddress))
+                        {
+                            return;
+                        }
+
+                        var isTxStale = await TransactionData.IsTxTimestampStale(transaction);
+                        if (!isTxStale)
+                        {
+                            var mempool = TransactionData.GetPool();
+
+                            if (mempool.Count() != 0)
+                            {
+                                var txFound = mempool.FindOne(x => x.Hash == transaction.Hash);
+                                if (txFound == null)
+                                {
+                                    var twSkipVerify = transaction.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
+                                    var txResult = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
+                                    if (txResult.Item1 == true)
+                                    {
+                                        var dblspndChk = await TransactionData.DoubleSpendReplayCheck(transaction);
+                                        var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(transaction);
+                                        var rating = await TransactionRatingService.GetTransactionRating(transaction);
+                                        transaction.TransactionRating = rating;
+
+                                        if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                        {
+                                            mempool.InsertSafe(transaction);
+                                        }
+                                    }
+
+                                }
+                                else
+                                {
+                                    //TODO Add this to also check in-mem blocks
+                                    var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(transaction);
+                                    if (isCraftedIntoBlock)
+                                    {
+                                        try
+                                        {
+                                            mempool.DeleteManySafe(x => x.Hash == transaction.Hash);// tx has been crafted into block. Remove.
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            //delete failed
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                var twSkipVerify = transaction.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
+                                var txResult = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
+                                if (txResult.Item1 == true)
+                                {
+                                    var dblspndChk = await TransactionData.DoubleSpendReplayCheck(transaction);
+                                    var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(transaction);
+                                    var rating = await TransactionRatingService.GetTransactionRating(transaction);
+                                    transaction.TransactionRating = rating;
+
+                                    if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                    {
+                                        mempool.InsertSafe(transaction);
+                                    }
+                                }
+                            }
+                        }
+
+                    }
+                }
             }            
         }
     }

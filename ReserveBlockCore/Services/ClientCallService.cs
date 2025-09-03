@@ -17,7 +17,6 @@ using System.IO.Compression;
 using System.Net;
 using System.Numerics;
 using System.Security;
-using System.Transactions;
 using System.Xml.Linq;
 using static ReserveBlockCore.P2P.ConsensusClient;
 using static System.Net.WebRequestMethods;
@@ -69,13 +68,40 @@ namespace ReserveBlockCore.Services
             _assetTimer = new Timer(DoAssetWork, null, TimeSpan.FromSeconds(30),
                 TimeSpan.FromSeconds(5));
 
-            _consensusBroadcastTimer = new Timer(DoConsensusBroadcastWork, null, TimeSpan.FromSeconds(30),
-                TimeSpan.FromSeconds(30));
+            //_consensusBroadcastTimer = new Timer(DoConsensusBroadcastWork, null, TimeSpan.FromSeconds(30),
+            //    TimeSpan.FromSeconds(30));
 
             return Task.CompletedTask;
         }
 
         #endregion
+
+        public static async Task Broadcast(string messageType, Transaction data, string method = "")
+        {
+            await HubContext.Clients.All.SendAsync("GetMessage", messageType, data);
+
+            if (method == "") return;
+
+            if (!Globals.Nodes.Any()) return;
+
+            var valNodeList = Globals.Nodes.Values.Where(x => x.IsConnected).ToList();
+
+            if (valNodeList == null || valNodeList.Count() == 0) return;
+
+            foreach (var val in valNodeList)
+            {
+                try
+                {
+                    var source = new CancellationTokenSource(2000);
+                    await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
+                }
+                catch(Exception ex) 
+                {
+                    ErrorLogUtility.LogError($"Error sending tx: {ex}", "ClientCallService.Broadcast");
+                }
+                
+            }
+        }
 
         #region Checkpoint Work
         private async void DoCheckpointWork(object? state)

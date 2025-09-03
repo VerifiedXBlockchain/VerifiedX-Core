@@ -1,24 +1,26 @@
-﻿using ReserveBlockCore.Extensions;
+﻿using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
+using NBitcoin.RPC;
 using Newtonsoft.Json;
 using ReserveBlockCore.Beacon;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.EllipticCurve;
+using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.DST;
 using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Numerics;
 using System.Text;
 using System.Threading.Tasks;
-using System.Collections.Concurrent;
-using Microsoft.AspNetCore.SignalR;
 using System.Xml.Linq;
-using System.Net;
 
 namespace ReserveBlockCore.P2P
 {
@@ -1813,55 +1815,19 @@ namespace ReserveBlockCore.P2P
         #region Send Transactions to mempool 
         public static async Task SendTXMempool(Transaction txSend)
         {
-            var peersConnected = await ArePeersConnected();
-
-            if (!peersConnected)
+            try
             {
-                //Need peers
-                Console.WriteLine("Failed to broadcast Transaction. No peers are connected to you.");
-                LogUtility.Log("TX failed. No Peers: " + txSend.Hash, "P2PClient.SendTXMempool()");
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    await P2PValidatorClient.SendTXMempool(txSend);//send directly to vals
+                }
+
+                var txJson = JsonConvert.SerializeObject(txSend);
+                _ = ClientCallService.Broadcast("7777", txSend, "SendTxToMempool");
             }
-            else
+            catch (Exception ex)
             {
-                var valAdjNodes = Globals.Nodes.Values.Where(x => x.IsValidator).ToList();
-                if (valAdjNodes.Count() > 0)
-                {
-                    var successCount = 0;
-                    foreach (var node in valAdjNodes)
-                    {
-                        try
-                        {
-                            string message = Globals.AdjudicateAccount == null ? await node.InvokeAsync<string>("SendTxToMempool", new object?[] { txSend },
-                                () => new CancellationTokenSource(3000).Token, "SendTxToMempool") : await node.Connection.InvokeCoreAsync
-                                <string>("SendTxToMempool", new object?[] { txSend }, new CancellationTokenSource(3000).Token);
-
-                            if (message == "ATMP")
-                            {
-                                //success
-                                successCount += 1;
-                            }
-                            else if (message == "TFVP")
-                            {
-                                if(successCount == 0)
-                                    Console.WriteLine("Transaction Failed Verification Process on remote node");
-                            }
-                            else
-                            {
-                                //already in mempool
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-
-                        }
-                    }
-                }
-                else
-                {
-                    //need method to drop at least 2-3 peers to find validators in event client is not connected to any.
-                    Console.WriteLine("You have no validator peers connected to you. Close wallet and attempt to reconnect.");
-                    ErrorLogUtility.LogError("You have no validator peers connected to you. Close wallet and attempt to reconnect.", "P2PClient.SendTXMempool()");
-                }
+                ErrorLogUtility.LogError($"Error sending tx: {ex}", "P2PClient.SendTxMempool");
             }
         }
 
