@@ -439,7 +439,7 @@ namespace ReserveBlockCore.P2P
                                 if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
                                     mempool.InsertSafe(txReceived);
-                                    _ = ValidatorNode.Broadcast("7777", data, "SendTxToMempoolVals");
+                                    _ = ValidatorNode.Broadcast("7777", txReceived, "SendTxToMempoolVals");
 
                                     return "ATMP";//added to mempool
                                 }
@@ -519,7 +519,7 @@ namespace ReserveBlockCore.P2P
                                 mempool.InsertSafe(txReceived);
                                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                 {
-                                    _ = ValidatorNode.Broadcast("7777", data, "SendTxToMempoolVals");
+                                    _ = ValidatorNode.Broadcast("7777", txReceived, "SendTxToMempoolVals");
                                 } //sends tx to connected peers
                                 return "ATMP";//added to mempool
                             }
