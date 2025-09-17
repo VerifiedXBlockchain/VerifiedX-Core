@@ -43,6 +43,7 @@ namespace ReserveBlockCore
             bool runSingleRequest = false;
             bool skipStateSync = false;
             bool startGUI = false;
+            bool headlessMode = false;
 
             var argList = args.ToList();
             //force culture info to US
@@ -104,7 +105,7 @@ namespace ReserveBlockCore
                         catch (Exception)
                         {
                             exit = true;
-                            Console.WriteLine("Application Starting...");
+                            ConsoleWriterService.Output("Application Starting...");
                         }
                     }
                     await Task.Delay(400);
@@ -136,6 +137,15 @@ namespace ReserveBlockCore
                 argList.ForEach(async x =>
                 {
                     var argC = x.ToLower();
+                    if(argC.Contains("headless"))
+                    {
+                        Console.WriteLine("Headless Mode - On");
+                        headlessMode = true;
+                        Globals.HeadlessMode = true;
+                        Globals.StopConsoleOutput = true;
+                        Globals.StopValConsoleOutput = true;
+                    }
+
                     if(argC.Contains("cFork"))
                     {
                         Globals.IsFork = true;
@@ -362,7 +372,7 @@ namespace ReserveBlockCore
                             var account = await AccountData.RestoreAccount(privateKey);
                             if (account != null)
                             {
-                                Console.WriteLine("Account Loaded: " + account.Address);
+                                ConsoleWriterService.Output("Account Loaded: " + account.Address);
 
                                 if (argList.Exists(x => x.ToLower() == "start-validator"))
                                 {
@@ -475,7 +485,11 @@ namespace ReserveBlockCore
             string url2 = "http://*:" + Globals.Port;
             //Consensus Port URL
 
-            var commandLoopTask = Task.Run(() => CommandLoop(url));
+            Task? commandLoopTask = null;
+            if (!headlessMode)
+            {
+                commandLoopTask = Task.Run(() => CommandLoop(url));
+            }
             var commandLoopTask2 = Task.Run(() => CommandLoop2(url2));
             var commandLoopTask3 = Task.Run(() => CommandLoop3());
 
@@ -668,10 +682,18 @@ namespace ReserveBlockCore
             await Task.Delay(1000);
 
             var tasks = new Task[] {
-                commandLoopTask, //CLI console
                 commandLoopTask2, //awaiting parameters
                 commandLoopTask3//Beacon client/server
             };
+
+            if (commandLoopTask != null)
+            {
+                tasks = new Task[] {
+                commandLoopTask,
+                commandLoopTask2, //awaiting parameters
+                commandLoopTask3//Beacon client/server
+            };
+            }
 
             try
             {
@@ -687,8 +709,10 @@ namespace ReserveBlockCore
 
             _ = ArbiterService.GetArbiterSigningAddress();
 
+            
             await Task.WhenAll(tasks);
 
+            await Task.Delay(-1);
             LogUtility.Log("Line Reached. Should not be reached Program.cs", "Program:Before Task.WaitAll(commandLoopTask, commandLoopTask2)");
 
         }

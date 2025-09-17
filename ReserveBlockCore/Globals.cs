@@ -108,6 +108,7 @@ namespace ReserveBlockCore
         public const decimal DecShopUpdateRequiredRBX = 1.0M;
         public const decimal DecShopDeleteRequiredRBX = 1.0M; //0
         public const decimal RSRVAccountRegisterRBX = 4.0M;
+        public static bool HeadlessMode = false;
 
         public const int ADNRLimit = 65;
         public static int BlockLock = 1079488;
@@ -144,7 +145,7 @@ namespace ReserveBlockCore
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
         public static int MinorVer = 0;
-        public static int RevisionVer = 6;
+        public static int RevisionVer = 7;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
