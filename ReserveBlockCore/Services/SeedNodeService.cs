@@ -227,53 +227,116 @@ namespace ReserveBlockCore.Services
 
         public static async Task GetSeedNodePeersTestnet()
         {
-            if (Globals.IsTestNet == true)
+            if (Globals.IsTestNet)
             {
-                List<Peers> peerList = new List<Peers>();
-
-                Peers n2Peer = new Peers
+                if (Globals.IsCustomTestNet)
                 {
-                    IsIncoming = false,
-                    IsOutgoing = true,
-                    PeerIP = "144.126.156.102",
-                    FailCount = 0,
-                    IsValidator = true,
-                    ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
-                    ValidatorPublicKey = "0498ea84777552a3609143275b0e083086071a6b1453bd46b87a05461d24e0ee99e7de2870a018240026ad6ba892a087df39447f91c5a8f8e50a53b6643c9e713c"
-                };
-
-                Peers n3Peer = new Peers
-                {
-                    IsIncoming = false,
-                    IsOutgoing = true,
-                    PeerIP = "66.94.124.2",
-                    FailCount = 0,
-                    IsValidator = true,
-                    ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
-                    ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
-                };
-
-                peerList.Add(n2Peer);
-                peerList.Add(n3Peer);
-
-                var dbPeers = Peers.GetAll();
-
-                foreach (var peer in peerList)
-                {
-                    var peerExist = dbPeers.FindOne(x => x.PeerIP == peer.PeerIP);
-                    if (peerExist == null)
+                    List<Peers> peerList = new List<Peers>();
+                    Peers n1Peer = new Peers
                     {
-                        dbPeers.InsertSafe(peer);
-                        await BlockcasterNode.AddCaster(peer);
-                    }
-                    else
+                        IsIncoming = false,
+                        IsOutgoing = true,
+                        PeerIP = "209.145.62.196",
+                        FailCount = 0,
+                        IsValidator = true,
+                        ValidatorAddress = "xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi",
+                        ValidatorPublicKey = "0474f0a933dc0241d5fc6059eeb3a14350c4ba890e8e504ae144f33a41c0f5eb9aed9b98e33265507c55e2af1b0c61c5c2a87fa55d86acad0592c0f4774c97e62b"
+                    };
+
+                    Peers n2Peer = new Peers
                     {
-                        peerExist.FailCount = 0;
-                        //peerExist.IsValidator = true;
-                        dbPeers.UpdateSafe(peerExist);
-                        await BlockcasterNode.AddCaster(peerExist);
+                        IsIncoming = false,
+                        IsOutgoing = true,
+                        PeerIP = "207.244.229.243",
+                        FailCount = 0,
+                        IsValidator = true,
+                        ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
+                        ValidatorPublicKey = "0498ea84777552a3609143275b0e083086071a6b1453bd46b87a05461d24e0ee99e7de2870a018240026ad6ba892a087df39447f91c5a8f8e50a53b6643c9e713c"
+                    };
+
+                    Peers n3Peer = new Peers
+                    {
+                        IsIncoming = false,
+                        IsOutgoing = true,
+                        PeerIP = "207.244.232.182",
+                        FailCount = 0,
+                        IsValidator = true,
+                        ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+                        ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
+                    };
+
+                    peerList.Add(n1Peer);
+                    peerList.Add(n2Peer);
+                    peerList.Add(n3Peer);
+
+                    var dbPeers = Peers.GetAll();
+
+                    foreach (var peer in peerList)
+                    {
+                        var peerExist = dbPeers.FindOne(x => x.PeerIP == peer.PeerIP);
+                        if (peerExist == null)
+                        {
+                            dbPeers.InsertSafe(peer);
+                            await BlockcasterNode.AddCaster(peer);
+                        }
+                        else
+                        {
+                            peerExist.FailCount = 0;
+                            //peerExist.IsValidator = true;
+                            dbPeers.UpdateSafe(peerExist);
+                            await BlockcasterNode.AddCaster(peerExist);
+                        }
                     }
                 }
+                else
+                {
+                    List<Peers> peerList = new List<Peers>();
+
+                    Peers n2Peer = new Peers
+                    {
+                        IsIncoming = false,
+                        IsOutgoing = true,
+                        PeerIP = "144.126.156.102",
+                        FailCount = 0,
+                        IsValidator = true,
+                        ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
+                        ValidatorPublicKey = "0498ea84777552a3609143275b0e083086071a6b1453bd46b87a05461d24e0ee99e7de2870a018240026ad6ba892a087df39447f91c5a8f8e50a53b6643c9e713c"
+                    };
+
+                    Peers n3Peer = new Peers
+                    {
+                        IsIncoming = false,
+                        IsOutgoing = true,
+                        PeerIP = "66.94.124.2",
+                        FailCount = 0,
+                        IsValidator = true,
+                        ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+                        ValidatorPublicKey = "04eec44726e6442cc2ec0241f7c8c2a983d9cfbf9f68a2bc3e2040fd1053636f3779ffaeabcda9065627dee6d3ff5f080833e8ff8a3e93b8f17a600d0f7d090687"
+                    };
+
+                    peerList.Add(n2Peer);
+                    peerList.Add(n3Peer);
+
+                    var dbPeers = Peers.GetAll();
+
+                    foreach (var peer in peerList)
+                    {
+                        var peerExist = dbPeers.FindOne(x => x.PeerIP == peer.PeerIP);
+                        if (peerExist == null)
+                        {
+                            dbPeers.InsertSafe(peer);
+                            await BlockcasterNode.AddCaster(peer);
+                        }
+                        else
+                        {
+                            peerExist.FailCount = 0;
+                            //peerExist.IsValidator = true;
+                            dbPeers.UpdateSafe(peerExist);
+                            await BlockcasterNode.AddCaster(peerExist);
+                        }
+                    }
+                }
+                 
             }
         }
         

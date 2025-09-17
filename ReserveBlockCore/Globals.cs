@@ -41,6 +41,8 @@ namespace ReserveBlockCore
 
         #region Timers
         public static bool IsTestNet = false;
+        public static bool IsCustomTestNet = false;
+        public static string CustomTestNetName = "";
 
         public static string LeadAddress = "RBXpH37qVvNwzLjtcZiwEnb3aPNG815TUY";      
         public static Timer? ValidatorListTimer;//checks currents peers and old peers and will request others to try. 
@@ -142,7 +144,7 @@ namespace ReserveBlockCore
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
         public static int MinorVer = 0;
-        public static int RevisionVer = 5;
+        public static int RevisionVer = 6;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;

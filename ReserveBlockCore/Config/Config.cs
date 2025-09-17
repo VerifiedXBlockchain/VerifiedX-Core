@@ -52,7 +52,8 @@ namespace ReserveBlockCore.Config
 		public string? SkipIPs { get; set; }
 		public int ElmahFileStore { get; set; }
 		public string? ReportedIP { get; set; }
-		public Bitcoin.Bitcoin.BitcoinAddressFormat BitcoinAddressFormat { get; set; }
+        public string? TestNetName { get; set; }
+        public Bitcoin.Bitcoin.BitcoinAddressFormat BitcoinAddressFormat { get; set; }
 
         public static Config ReadConfigFile()
         {
@@ -116,6 +117,7 @@ namespace ReserveBlockCore.Config
                 config.BitcoinAddressFormat = dict.ContainsKey("BitcoinAddressFormat") ? (Bitcoin.Bitcoin.BitcoinAddressFormat)Convert.ToInt32(dict["BitcoinAddressFormat"]) : Bitcoin.Bitcoin.BitcoinAddressFormat.Segwit;
                 config.SkipIPs = dict.ContainsKey("SkipIPs") ? dict["SkipIPs"] : null;
                 config.ReportedIP = dict.ContainsKey("ReportedIP") ? dict["ReportedIP"] : null;
+                config.TestNetName = dict.ContainsKey("TestNetName") ? dict["TestNetName"] : null;
 
                 config.AutoDownloadNFTAsset = dict.ContainsKey("AutoDownloadNFTAsset") ? Convert.ToBoolean(dict["AutoDownloadNFTAsset"]) : false;
                 config.IgnoreIncomingNFTs = dict.ContainsKey("IgnoreIncomingNFTs") ? Convert.ToBoolean(dict["IgnoreIncomingNFTs"]) : false;
@@ -270,6 +272,119 @@ namespace ReserveBlockCore.Config
                 }
 			}
 
+            if (config.TestNet == true || Globals.IsTestNet)
+            {
+                Globals.ADJPort = 13339;
+                Globals.ValPort = 13339;
+                Globals.ArbiterPort = 13342;
+                Globals.IsTestNet = true;
+                Globals.GenesisAddress = "xAfPR4w2cBsvmB7Ju5mToBLtJYuv1AZSyo";
+                Globals.Port = 13338;
+                Globals.APIPort = 17292;
+                Globals.ValAPIPort = 17294;
+                Globals.APIPortSSL = 17777;
+                Globals.AddressPrefix = 0x89; //address prefix 'x'
+                Globals.V1ValHeight = 200;
+                Globals.TXHeightRule1 = 200;
+                Globals.TXHeightRule2 = 200;
+                Globals.DSTClientPort = 13341;
+                Globals.SelfSTUNPort = 13340;
+                Globals.BTCNetwork = NBitcoin.Network.TestNet4;
+                Globals.SegwitP2SHStartPrefix = "2";
+                Globals.SegwitTaprootStartPrefix = "tb1";
+                Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString();
+                Globals.TotalArbiterParties = 2;
+                Globals.TotalArbiterThreshold = 2;
+                Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "mempool.space",
+                        Port = 40002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "testnet4-electrumx.wakiyamap.dev",
+                        Port = 51002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "blackie.c3-soft.com",
+                        Port = 57010,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    }
+
+                };
+            }
+
+            if(!string.IsNullOrEmpty(config.TestNetName ))
+            {
+                if(config.TestNetName.ToLower() == "marigold")
+                {
+                    //Marigold Testnet
+                    Globals.IsCustomTestNet = true;
+                    Globals.CustomTestNetName = "Marigold";
+                    Globals.ADJPort = 23339;
+                    Globals.ValPort = 23339;
+                    Globals.ArbiterPort = 23342;
+                    Globals.IsTestNet = true;
+                    Globals.GenesisAddress = "xAfPR4w2cBsvmB7Ju5mToBLtJYuv1AZSyo";
+                    Globals.Port = 23338;
+                    Globals.APIPort = 27292;
+                    Globals.ValAPIPort = 27294;
+                    Globals.APIPortSSL = 27777;
+                    Globals.AddressPrefix = 0x89; //address prefix 'x'
+                    Globals.V1ValHeight = 200;
+                    Globals.TXHeightRule1 = 200;
+                    Globals.TXHeightRule2 = 200;
+                    Globals.DSTClientPort = 23341;
+                    Globals.SelfSTUNPort = 23340;
+                    Globals.BTCNetwork = NBitcoin.Network.TestNet4;
+                    Globals.SegwitP2SHStartPrefix = "2";
+                    Globals.SegwitTaprootStartPrefix = "tb1";
+                    Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString();
+                    Globals.TotalArbiterParties = 2;
+                    Globals.TotalArbiterThreshold = 2;
+                    Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
+                        new Bitcoin.ElectrumX.ClientSettings {
+                            Host = "mempool.space",
+                            Port = 40002,
+                            UseSsl = true,
+                            Count = 0,
+                            FailCount = 0
+                        },
+                        new Bitcoin.ElectrumX.ClientSettings {
+                            Host = "testnet4-electrumx.wakiyamap.dev",
+                            Port = 51002,
+                            UseSsl = true,
+                            Count = 0,
+                            FailCount = 0
+                        },
+                        new Bitcoin.ElectrumX.ClientSettings {
+                            Host = "blackie.c3-soft.com",
+                            Port = 57010,
+                            UseSsl = true,
+                            Count = 0,
+                            FailCount = 0
+                        }
+
+                    };
+                }
+                else if(config.TestNetName == "someothernet")
+                {
+                    //setup other testnet here.
+                }
+                else
+                {
+                    //do nothing
+                }
+            }
+
+
             if (config.STUNServers?.Count() > 0)
 			{
 				var serverList = config.STUNServers.Split(',');
@@ -280,7 +395,7 @@ namespace ReserveBlockCore.Config
 			}
 			else
 			{
-				var port = Globals.IsTestNet ? 13340 : Globals.SelfSTUNPort; //needs to be 3340 **patched  DSTServer.cs Line: 20**
+                var port = Globals.SelfSTUNPort; //needs to be 3340 **patched  DSTServer.cs Line: 20**
 
 				if(!Globals.IsTestNet)
 				{
@@ -300,57 +415,15 @@ namespace ReserveBlockCore.Config
                 }
 				else
 				{
-                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.156.102:{port}", Group = 1, IsNetwork = true });
-                }
-            }
-
-			if (config.TestNet == true)
-			{
-				Globals.ADJPort = 13339;
-				Globals.ValPort = 13339;
-				Globals.ArbiterPort = 13342;
-				Globals.IsTestNet = true;
-				Globals.GenesisAddress = "xAfPR4w2cBsvmB7Ju5mToBLtJYuv1AZSyo";
-				Globals.Port = 13338;
-				Globals.APIPort = 17292;
-                Globals.ValAPIPort = 17294;
-				Globals.APIPortSSL = 17777;
-				Globals.AddressPrefix = 0x89; //address prefix 'x'
-				Globals.V1ValHeight = 200;
-				Globals.TXHeightRule1 = 200;
-				Globals.TXHeightRule2 = 200;
-				Globals.DSTClientPort = 13341;
-				Globals.SelfSTUNPort = 13340;
-				Globals.BTCNetwork = NBitcoin.Network.TestNet4;
-				Globals.SegwitP2SHStartPrefix = "2";
-				Globals.SegwitTaprootStartPrefix = "tb1";
-				Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString();
-				Globals.TotalArbiterParties = 2;
-				Globals.TotalArbiterThreshold = 2;
-				Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> { 
-					new Bitcoin.ElectrumX.ClientSettings {
-						Host = "mempool.space",
-						Port = 40002,
-						UseSsl = true,
-                        Count = 0,
-						FailCount = 0
-                    },
-                    new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "testnet4-electrumx.wakiyamap.dev",
-                        Port = 51002,
-                        UseSsl = true,
-                        Count = 0,
-                        FailCount = 0
-                    },
-                    new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "blackie.c3-soft.com",
-                        Port = 57010,
-                        UseSsl = true,
-                        Count = 0,
-                        FailCount = 0
+                    if (Globals.IsCustomTestNet)
+                    {
+                        Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.152.4:{port}", Group = 1, IsNetwork = true });
                     }
-
-                };
+                    else
+                    {
+                        Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.156.102:{port}", Group = 1, IsNetwork = true });
+                    }
+                }
             }
 
             if (config.ElectrumServers != null)
