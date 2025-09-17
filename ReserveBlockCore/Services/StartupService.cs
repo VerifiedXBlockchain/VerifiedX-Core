@@ -631,18 +631,37 @@ namespace ReserveBlockCore.Services
                 else
                 {
                     //add testnet beacons
-                    List<Beacons> beaconList = new List<Beacons>
+                    if(Globals.IsCustomTestNet)
                     {
-                        new Beacons { IPAddress = "66.94.124.2", Name = "Lily Beacon TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
-                        new Beacons { IPAddress = "144.126.156.102", Name = "Lotus Beacon V2 TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
-                    };
+                        List<Beacons> beaconList = new List<Beacons>
+                        {
+                            new Beacons { IPAddress = "144.126.152.4", Name = "Lily Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "207.244.232.182", Name = "Lotus Beacon Marigold", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                        };
 
-                    foreach (var beacon in beaconList)
-                    {
-                        beacon.BeaconLocator = Beacons.CreateBeaconLocator(beacon);
+                        foreach (var beacon in beaconList)
+                        {
+                            beacon.BeaconLocator = Beacons.CreateBeaconLocator(beacon);
+                        }
+
+                        Beacons.SaveBeaconList(beaconList);
                     }
+                    else
+                    {
+                        List<Beacons> beaconList = new List<Beacons>
+                        {
+                            new Beacons { IPAddress = "66.94.124.2", Name = "Lily Beacon TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "144.126.156.102", Name = "Lotus Beacon V2 TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                        };
 
-                    Beacons.SaveBeaconList(beaconList);
+                        foreach (var beacon in beaconList)
+                        {
+                            beacon.BeaconLocator = Beacons.CreateBeaconLocator(beacon);
+                        }
+
+                        Beacons.SaveBeaconList(beaconList);
+                    }
+                    
                 }
             }         
         }
@@ -1654,7 +1673,15 @@ namespace ReserveBlockCore.Services
                 }
                 else
                 {
-                    AnsiConsole.Write(
+                    if(Globals.IsCustomTestNet)
+                    {
+                        AnsiConsole.Write(
+                        new FigletText($"VFX Wallet - {Globals.CustomTestNetName}")
+                        .LeftJustified()
+                        .Color(Color.Green));
+                    }
+                    else
+                        AnsiConsole.Write(
                     new FigletText("VFX Wallet - TestNet")
                     .LeftJustified()
                     .Color(Color.Green));

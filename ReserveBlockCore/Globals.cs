@@ -41,6 +41,8 @@ namespace ReserveBlockCore
 
         #region Timers
         public static bool IsTestNet = false;
+        public static bool IsCustomTestNet = false;
+        public static string CustomTestNetName = "";
 
         public static string LeadAddress = "RBXpH37qVvNwzLjtcZiwEnb3aPNG815TUY";      
         public static Timer? ValidatorListTimer;//checks currents peers and old peers and will request others to try. 

@@ -19,7 +19,7 @@ namespace ReserveBlockCore.DST
         {
             try
             {
-                var port = Globals.IsTestNet ? 13340 : Globals.SelfSTUNPort; //temporary fix until next release. Adding it this way in case its forgotten.
+                var port = Globals.SelfSTUNPort; //temporary fix until next release. Adding it this way in case its forgotten.
                 udpClient = new UdpClient(port);
 
                 Globals.STUNServerRunning = true;
