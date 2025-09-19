@@ -5,16 +5,17 @@ namespace ReserveBlockCore.EllipticCurve
     public static class EcdsaMath
     {
 
+        /// <summary>
+        /// Computes scalar multiplication of an elliptic curve point using Jacobian coordinates.
+        /// </summary>
+        /// <param name="p">Point on the curve to multiply.</param>
+        /// <param name="n">Scalar multiplier.</param>
+        /// <param name="N">Order of the elliptic curve.</param>
+        /// <param name="A">Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <param name="P">Prime number in the modulus of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <returns>The resulting point n*p.</returns>
         public static Point multiply(Point p, BigInteger n, BigInteger N, BigInteger A, BigInteger P)
         {
-            //Fast way to multily point and scalar in elliptic curves
-
-            //:param p: First Point to mutiply
-            //:param n: Scalar to mutiply
-            //: param N: Order of the elliptic curve
-            // : param P: Prime number in the module of the equation Y^2 = X ^ 3 + A * X + B(mod p)
-            //:param A: Coefficient of the first-order term of the equation Y ^ 2 = X ^ 3 + A * X + B(mod p)
-            //:return: Point that represents the sum of First and Second Point
 
             return fromJacobian(
                 jacobianMultiply(
@@ -28,15 +29,16 @@ namespace ReserveBlockCore.EllipticCurve
             );
         }
 
+        /// <summary>
+        /// Adds two points on an elliptic curve using Jacobian coordinates.
+        /// </summary>
+        /// <param name="p">First point to add.</param>
+        /// <param name="q">Second point to add.</param>
+        /// <param name="A">Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <param name="P">Prime number in the modulus of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <returns>Point that represents the sum of the first and second point.</returns>
         public static Point add(Point p, Point q, BigInteger A, BigInteger P)
         {
-            //Fast way to add two points in elliptic curves
-
-            //:param p: First Point you want to add
-            //:param q: Second Point you want to add
-            //:param P: Prime number in the module of the equation Y^2 = X ^ 3 + A * X + B(mod p)
-            //:param A: Coefficient of the first-order term of the equation Y ^ 2 = X ^ 3 + A * X + B(mod p)
-            //:return: Point that represents the sum of First and Second Point
 
             return fromJacobian(
                 jacobianAdd(
@@ -49,13 +51,15 @@ namespace ReserveBlockCore.EllipticCurve
             );
         }
 
+        /// <summary>
+        /// Computes the modular multiplicative inverse using the Extended Euclidean Algorithm.
+        /// This represents 'division' in elliptic curve operations.
+        /// </summary>
+        /// <param name="x">Value to find the inverse of.</param>
+        /// <param name="n">Modulus for the inverse operation.</param>
+        /// <returns>The modular multiplicative inverse of x modulo n.</returns>
         public static BigInteger inv(BigInteger x, BigInteger n)
         {
-            //Extended Euclidean Algorithm.It's the 'division' in elliptic curves
-
-            //:param x: Divisor
-            //: param n: Mod for division
-            //:return: Value representing the division
 
             if (x.IsZero)
             {
@@ -85,23 +89,25 @@ namespace ReserveBlockCore.EllipticCurve
 
         }
 
+        /// <summary>
+        /// Converts a point from affine coordinates to Jacobian coordinates.
+        /// </summary>
+        /// <param name="p">Point in affine coordinates to convert.</param>
+        /// <returns>Point in Jacobian coordinates.</returns>
         private static Point toJacobian(Point p)
         {
-            //Convert point to Jacobian coordinates
-
-            //: param p: First Point you want to add
-            //:return: Point in Jacobian coordinates
 
             return new Point(p.x, p.y, 1);
         }
 
+        /// <summary>
+        /// Converts a point from Jacobian coordinates back to affine coordinates.
+        /// </summary>
+        /// <param name="p">Point in Jacobian coordinates to convert.</param>
+        /// <param name="P">Prime number in the modulus of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <returns>Point in affine coordinates.</returns>
         private static Point fromJacobian(Point p, BigInteger P)
         {
-            //Convert point back from Jacobian coordinates
-
-            //:param p: First Point you want to add
-            //:param P: Prime number in the module of the equation Y^2 = X ^ 3 + A * X + B(mod p)
-            //:return: Point in default coordinates
 
             BigInteger z = inv(p.z, P);
 
@@ -111,14 +117,15 @@ namespace ReserveBlockCore.EllipticCurve
             );
         }
 
+        /// <summary>
+        /// Doubles a point on an elliptic curve using Jacobian coordinates.
+        /// </summary>
+        /// <param name="p">Point to double.</param>
+        /// <param name="A">Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <param name="P">Prime number in the modulus of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <returns>Point that represents 2*p.</returns>
         private static Point jacobianDouble(Point p, BigInteger A, BigInteger P)
         {
-            //Double a point in elliptic curves
-
-            //:param p: Point you want to double
-            //:param P: Prime number in the module of the equation Y^2 = X ^ 3 + A * X + B(mod p)
-            //:param A: Coefficient of the first-order term of the equation Y ^ 2 = X ^ 3 + A * X + B(mod p)
-            //:return: Point that represents the sum of First and Second Point
 
             if (p.y.IsZero)
             {
@@ -162,15 +169,16 @@ namespace ReserveBlockCore.EllipticCurve
             );
         }
 
+        /// <summary>
+        /// Adds two points on an elliptic curve using Jacobian coordinates.
+        /// </summary>
+        /// <param name="p">First point to add.</param>
+        /// <param name="q">Second point to add.</param>
+        /// <param name="A">Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <param name="P">Prime number in the modulus of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <returns>Point that represents the sum of the first and second point.</returns>
         private static Point jacobianAdd(Point p, Point q, BigInteger A, BigInteger P)
         {
-            // Add two points in elliptic curves
-
-            // :param p: First Point you want to add
-            // :param q: Second Point you want to add
-            // :param P: Prime number in the module of the equation Y^2 = X^3 + A*X + B (mod p)
-            // :param A: Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p)
-            // :return: Point that represents the sum of First and Second Point
 
             if (p.y.IsZero)
             {
@@ -232,16 +240,17 @@ namespace ReserveBlockCore.EllipticCurve
             );
         }
 
+        /// <summary>
+        /// Performs scalar multiplication of an elliptic curve point using Jacobian coordinates.
+        /// </summary>
+        /// <param name="p">Point to multiply.</param>
+        /// <param name="n">Scalar multiplier.</param>
+        /// <param name="N">Order of the elliptic curve.</param>
+        /// <param name="A">Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <param name="P">Prime number in the modulus of the equation Y^2 = X^3 + A*X + B (mod p).</param>
+        /// <returns>The resulting point n*p.</returns>
         private static Point jacobianMultiply(Point p, BigInteger n, BigInteger N, BigInteger A, BigInteger P)
         {
-            // Multily point and scalar in elliptic curves
-
-            // :param p: First Point to mutiply
-            // :param n: Scalar to mutiply
-            // :param N: Order of the elliptic curve
-            // :param P: Prime number in the module of the equation Y^2 = X^3 + A*X + B (mod p)
-            // :param A: Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p)
-            // :return: Point that represents the sum of First and Second Point
 
             if (p.y.IsZero | n.IsZero)
             {
