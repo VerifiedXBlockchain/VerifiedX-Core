@@ -12,12 +12,20 @@ namespace ReserveBlockCore.EllipticCurve
             string hashMessage = sha256(message);
             BigInteger numberMessage = BinaryAscii.numberFromHex(hashMessage);
             CurveFp curve = privateKey.curve;
-            BigInteger randNum = Integer.randomBetween(BigInteger.One, curve.N - 1);
-            Point randSignPoint = EcdsaMath.multiply(curve.G, randNum, curve.N, curve.A, curve.P);
-            BigInteger r = Integer.modulo(randSignPoint.x, curve.N);
-            BigInteger s = Integer.modulo((numberMessage + r * privateKey.secret) * (EcdsaMath.inv(randNum, curve.N)), curve.N);
 
-            return new Signature(r, s);
+            while (true)
+            {
+                BigInteger randNum = Integer.randomBetween(BigInteger.One, curve.N - 1);
+                Point randSignPoint = EcdsaMath.multiply(curve.G, randNum, curve.N, curve.A, curve.P);
+                
+                BigInteger r = Integer.modulo(randSignPoint.x, curve.N);
+                if (r.IsZero) continue; // Retry if r = 0
+                
+                BigInteger s = Integer.modulo((numberMessage + r * privateKey.secret) * EcdsaMath.inv(randNum, curve.N), curve.N);
+                if (s.IsZero) continue; // Retry if s = 0
+                
+                return new Signature(r, s); // Valid signature found
+            }
         }
 
         public static bool verify(string message, Signature signature, PublicKey publicKey)
