@@ -33,6 +33,13 @@ namespace ReserveBlockCore.EllipticCurve
             string hashMessage = sha256(message);
             BigInteger numberMessage = BinaryAscii.numberFromHex(hashMessage);
             CurveFp curve = publicKey.curve;
+            
+            // Validate that the public key point lies on the curve
+            if (!curve.contains(publicKey.point)) 
+            { 
+                return false; 
+            }
+            
             BigInteger sigR = signature.r;
             BigInteger sigS = signature.s;
 
