@@ -41,9 +41,9 @@ namespace ReserveBlockCore.EllipticCurve
                 P
             ).IsZero)
             {
-                return false;
+                return true;
             }
-            return true;
+            return false;
         }
 
         public int length()
