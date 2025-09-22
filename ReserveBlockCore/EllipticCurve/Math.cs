@@ -6,14 +6,14 @@ namespace ReserveBlockCore.EllipticCurve
     {
 
         /// <summary>
-        /// Computes scalar multiplication of an elliptic curve point using Jacobian coordinates.
+        /// Computes scalar multiplication of an elliptic curve point using affine coordinates.
         /// </summary>
-        /// <param name="p">Point on the curve to multiply.</param>
+        /// <param name="p">Point on the curve in affine coordinates to multiply.</param>
         /// <param name="n">Scalar multiplier.</param>
         /// <param name="N">Order of the elliptic curve.</param>
         /// <param name="A">Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p).</param>
         /// <param name="P">Prime number in the modulus of the equation Y^2 = X^3 + A*X + B (mod p).</param>
-        /// <returns>The resulting point n*p.</returns>
+        /// <returns>The resulting point n*p in affine coordinates.</returns>
         public static Point multiply(Point p, BigInteger n, BigInteger N, BigInteger A, BigInteger P)
         {
 
@@ -30,13 +30,13 @@ namespace ReserveBlockCore.EllipticCurve
         }
 
         /// <summary>
-        /// Adds two points on an elliptic curve using Jacobian coordinates.
+        /// Adds two points on an elliptic curve using affine coordinates.
         /// </summary>
-        /// <param name="p">First point to add.</param>
-        /// <param name="q">Second point to add.</param>
+        /// <param name="p">First point in affine coordinates to add.</param>
+        /// <param name="q">Second point in affine coordinates to add.</param>
         /// <param name="A">Coefficient of the first-order term of the equation Y^2 = X^3 + A*X + B (mod p).</param>
         /// <param name="P">Prime number in the modulus of the equation Y^2 = X^3 + A*X + B (mod p).</param>
-        /// <returns>Point that represents the sum of the first and second point.</returns>
+        /// <returns>Point that represents the sum of the first and second point in affine coordinates.</returns>
         public static Point add(Point p, Point q, BigInteger A, BigInteger P)
         {
 
