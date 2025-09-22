@@ -185,5 +185,148 @@ namespace VerfiedXCore.Tests
                 Assert.True(isValid, $"Signature should be valid for curve {curveName}");
             }
         }
+
+        // HAL-04 Tests: Public Key Curve Validation
+        
+        [Fact]
+        public void Verify_ShouldAcceptValidOnCurvePublicKey()
+        {
+            // Arrange
+            var privateKey = new PrivateKey("secp256k1");
+            var publicKey = privateKey.publicKey();
+            var message = "test message";
+            var signature = Ecdsa.sign(message, privateKey);
+
+            // Act
+            var isValid = Ecdsa.verify(message, signature, publicKey);
+
+            // Assert
+            Assert.True(isValid, "Verification should accept valid on-curve public keys");
+        }
+
+        [Fact]
+        public void Verify_ShouldRejectOffCurvePublicKey()
+        {
+            // Arrange
+            var privateKey = new PrivateKey("secp256k1");
+            var curve = privateKey.curve;
+            var message = "test message";
+            var signature = Ecdsa.sign(message, privateKey);
+
+            // Create an off-curve point (coordinates that don't satisfy the curve equation)
+            var offCurveX = BigInteger.One;
+            var offCurveY = BigInteger.One; // (1,1) is definitely not on secp256k1
+            var offCurvePoint = new Point(offCurveX, offCurveY);
+            var offCurvePublicKey = new PublicKey(offCurvePoint, curve);
+
+            // Verify the point is indeed off-curve
+            Assert.False(curve.contains(offCurvePoint), "Test point should be off-curve");
+
+            // Act
+            var isValid = Ecdsa.verify(message, signature, offCurvePublicKey);
+
+            // Assert
+            Assert.False(isValid, "Verification should reject off-curve public keys");
+        }
+
+        [Fact]
+        public void Verify_ShouldRejectOffCurvePublicKey_DifferentCurves()
+        {
+            // Arrange
+            var message = "test message for curve validation";
+            var curves = new[] { "secp256k1", "p256" };
+
+            foreach (var curveName in curves)
+            {
+                var privateKey = new PrivateKey(curveName);
+                var curve = privateKey.curve;
+                var signature = Ecdsa.sign(message, privateKey);
+
+                // Create various off-curve points
+                var offCurvePoints = new[]
+                {
+                    new Point(BigInteger.One, BigInteger.One), // (1,1)
+                    new Point(BigInteger.Zero, BigInteger.One), // (0,1)
+                    new Point(BigInteger.Parse("12345"), BigInteger.Parse("67890")) // Arbitrary coordinates
+                };
+
+                foreach (var offCurvePoint in offCurvePoints)
+                {
+                    // Verify the point is off-curve
+                    Assert.False(curve.contains(offCurvePoint), 
+                        $"Point ({offCurvePoint.x}, {offCurvePoint.y}) should be off-curve for {curveName}");
+
+                    var offCurvePublicKey = new PublicKey(offCurvePoint, curve);
+
+                    // Act
+                    var isValid = Ecdsa.verify(message, signature, offCurvePublicKey);
+
+                    // Assert
+                    Assert.False(isValid, 
+                        $"Verification should reject off-curve public key ({offCurvePoint.x}, {offCurvePoint.y}) for {curveName}");
+                }
+            }
+        }
+
+        [Fact]
+        public void Verify_ShouldRejectInvalidCoordinates()
+        {
+            // Arrange
+            var privateKey = new PrivateKey("secp256k1");
+            var curve = privateKey.curve;
+            var message = "test message";
+            var signature = Ecdsa.sign(message, privateKey);
+
+            // Create points with coordinates outside the valid field range
+            var invalidPoints = new[]
+            {
+                new Point(curve.P, BigInteger.One), // x >= p
+                new Point(BigInteger.One, curve.P), // y >= p
+                new Point(-BigInteger.One, BigInteger.One), // negative x
+                new Point(BigInteger.One, -BigInteger.One)  // negative y
+            };
+
+            foreach (var invalidPoint in invalidPoints)
+            {
+                var invalidPublicKey = new PublicKey(invalidPoint, curve);
+
+                // Act
+                var isValid = Ecdsa.verify(message, signature, invalidPublicKey);
+
+                // Assert
+                Assert.False(isValid, 
+                    $"Verification should reject public key with invalid coordinates ({invalidPoint.x}, {invalidPoint.y})");
+            }
+        }
+
+        [Fact]
+        public void Verify_CombinedHAL03AndHAL04_ShouldWorkTogether()
+        {
+            // Arrange - Test that both HAL-03 and HAL-04 fixes work together
+            var privateKey = new PrivateKey("secp256k1");
+            var curve = privateKey.curve;
+            var message = "combined test for HAL-03 and HAL-04";
+
+            // Act - Generate multiple signatures to test HAL-03 fix (no r=0, s=0)
+            for (int i = 0; i < 50; i++)
+            {
+                var signature = Ecdsa.sign(message + i.ToString(), privateKey);
+                var publicKey = privateKey.publicKey();
+
+                // Assert HAL-03: Valid signature components
+                Assert.True(signature.r > BigInteger.Zero, $"r should be non-zero (iteration {i})");
+                Assert.True(signature.s > BigInteger.Zero, $"s should be non-zero (iteration {i})");
+
+                // Assert HAL-04: Valid verification with on-curve public key
+                var isValid = Ecdsa.verify(message + i.ToString(), signature, publicKey);
+                Assert.True(isValid, $"Valid signature should verify correctly (iteration {i})");
+
+                // Assert HAL-04: Rejection of off-curve public key with same signature
+                var offCurvePoint = new Point(BigInteger.One, BigInteger.One);
+                var offCurvePublicKey = new PublicKey(offCurvePoint, curve);
+                var offCurveResult = Ecdsa.verify(message + i.ToString(), signature, offCurvePublicKey);
+                Assert.False(offCurveResult, $"Off-curve public key should be rejected (iteration {i})");
+            }
+        }
     }
 }
