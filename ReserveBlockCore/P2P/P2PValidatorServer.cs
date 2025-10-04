@@ -31,6 +31,14 @@ namespace ReserveBlockCore.P2P
                     Context.Abort();
                     return;
                 }
+
+                // HAL-14 Security Enhancement: Rate limiting and connection monitoring
+                if (ConnectionSecurityHelper.ShouldRateLimit(peerIP))
+                {
+                    BanService.BanPeer(peerIP, "Connection rate limit exceeded", "OnConnectedAsync-RateLimit");
+                    await EndOnConnect(peerIP, "Too many connection attempts", $"Rate limited IP: {peerIP}");
+                    return;
+                }
                 var httpContext = Context.GetHttpContext();
 
                 if (httpContext == null)
@@ -53,15 +61,6 @@ namespace ReserveBlockCore.P2P
                 var signature = httpContext.Request.Headers["signature"].ToString();
                 var walletVersion = httpContext.Request.Headers["walver"].ToString();
                 var nonce = httpContext.Request.Headers["nonce"].ToString();
-
-                var ablList = Globals.ABL.ToList();
-
-                if (ablList.Exists(x => x == address))
-                {
-                    BanService.BanPeer(peerIP, "Request malformed", "OnConnectedAsync");
-                    await EndOnConnect(peerIP, $"ABL Detected", $"ABL Detected: {peerIP}.");
-                    return;
-                }
 
                 // Validate required fields
                 if (string.IsNullOrWhiteSpace(address) ||
@@ -102,10 +101,19 @@ namespace ReserveBlockCore.P2P
                 // Clean up expired nonces periodically
                 CleanupExpiredNonces(now);
 
+                // HAL-14 Security Enhancement: Validate authentication attempt
+                if (!ConnectionSecurityHelper.ValidateAuthenticationAttempt(peerIP, address))
+                {
+                    ConnectionSecurityHelper.RecordAuthenticationFailure(peerIP, address, "Suspicious authentication pattern");
+                    _ = EndOnConnect(peerIP, "Authentication validation failed.", "Suspicious authentication attempt from: " + peerIP);
+                    return;
+                }
+
                 // Check for nonce reuse (replay attack prevention)
                 var nonceKey = $"{address}:{nonce}";
                 if (!_usedNonces.TryAdd(nonceKey, now))
                 {
+                    ConnectionSecurityHelper.RecordAuthenticationFailure(peerIP, address, "Nonce reuse");
                     _ = EndOnConnect(peerIP, "Nonce already used.", "Replay attack detected from: " + peerIP);
                     return;
                 }
@@ -150,9 +158,18 @@ namespace ReserveBlockCore.P2P
                 var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
                 if (!verifySig)
                 {
+                    ConnectionSecurityHelper.RecordAuthenticationFailure(peerIP, address, "Signature verification failed");
                     _ = EndOnConnect(peerIP,
                         "Connected, but your address signature failed to verify. You are being disconnected.",
                         "Connected, but your address signature failed to verify with Val: " + address);
+                    return;
+                }
+
+                // HAL-14 Fix: Enhanced ABL check AFTER signature verification to prevent spoofing attacks
+                if (ConnectionSecurityHelper.IsAddressBlocklisted(address, peerIP, "Validator Authentication"))
+                {
+                    BanService.BanPeer(peerIP, "ABL violation by authenticated address", "OnConnectedAsync-PostAuth");
+                    await EndOnConnect(peerIP, $"Address is blocklisted", $"ABL violation by authenticated address {address} from IP: {peerIP}");
                     return;
                 }
 
@@ -168,6 +185,9 @@ namespace ReserveBlockCore.P2P
                 Globals.NetworkValidators.TryAdd(address, netVal);
 
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
+
+                // HAL-14 Security Enhancement: Clear security tracking for successful connections
+                ConnectionSecurityHelper.ClearConnectionHistory(peerIP);
 
                 _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
                 _ = Clients.Caller.SendAsync("GetValMessage", "1", peerIP, new CancellationTokenSource(2000).Token);
