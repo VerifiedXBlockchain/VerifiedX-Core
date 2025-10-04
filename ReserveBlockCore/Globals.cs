@@ -47,7 +47,8 @@ namespace ReserveBlockCore
         public static string LeadAddress = "RBXpH37qVvNwzLjtcZiwEnb3aPNG815TUY";      
         public static Timer? ValidatorListTimer;//checks currents peers and old peers and will request others to try. 
         public static Timer? DBCommitTimer;//checks dbs and commits log files. 
-        public static Timer? ConnectionHistoryTimer;//process connections and history of them        
+        public static Timer? ConnectionHistoryTimer;//process connections and history of them
+        public static Timer? ValidatorRegistryCleanupTimer;//HAL-11 Fix: cleans up stale pending validators and reconciles registry
 
         #endregion
 

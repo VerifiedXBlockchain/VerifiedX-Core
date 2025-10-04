@@ -998,55 +998,101 @@ namespace ReserveBlockCore.P2P
                             if (activeVals != null)
                             {
                                 var peerDB = Peers.GetAll();
+                                var advertisingPeerIP = validator.NodeIP;
+
+                                // HAL-11 Fix: Enhanced validation with rate limiting and cross-verification
+                                LogUtility.Log($"Processing {activeVals.Count} validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
 
                                 foreach (var val in activeVals)
                                 {
-                                    var addResult = await NetworkValidator.AddValidatorToPool(val);
-
-                                    if (!addResult)
-                                        continue;
-
-                                    var singleVal = peerDB.FindOne(x => x.PeerIP == val.IPAddress);
-                                    if (singleVal != null)
+                                    try
                                     {
-                                        singleVal.IsValidator = true;
-
-                                        if(singleVal.ValidatorAddress == null)
-                                            singleVal.ValidatorAddress = val.Address;
-
-                                        if(singleVal.ValidatorPublicKey == null)
-                                            singleVal.ValidatorPublicKey = val.PublicKey;
-
-                                        peerDB.UpdateSafe(singleVal);
-                                    }
-                                    else
-                                    {
-                                        Peers nPeer = new Peers
+                                        // HAL-11 Fix: Enhanced validation with timestamp and nonce validation
+                                        if (string.IsNullOrEmpty(val.Address) || string.IsNullOrEmpty(val.IPAddress))
                                         {
-                                            IsIncoming = false,
-                                            IsOutgoing = true,
-                                            PeerIP = val.IPAddress,
-                                            FailCount = 0,
-                                            IsValidator = true,
-                                            ValidatorAddress = val.Address,
-                                            ValidatorPublicKey = val.PublicKey,
-                                            WalletVersion = Globals.CLIVersion,
-                                        };
+                                            ErrorLogUtility.LogError($"Invalid validator entry from {advertisingPeerIP}: missing address or IP", "RequestActiveValidators");
+                                            continue;
+                                        }
 
-                                        peerDB.InsertSafe(nPeer);
+                                        // HAL-11 Fix: Set advertisement metadata if not present
+                                        if (val.AdvertisementTimestamp == 0)
+                                        {
+                                            val.AdvertisementTimestamp = TimeUtil.GetTime();
+                                        }
+
+                                        if (string.IsNullOrEmpty(val.AdvertisementNonce))
+                                        {
+                                            val.AdvertisementNonce = GenerateSecureNonce();
+                                        }
+
+                                        // HAL-11 Fix: Pass advertising peer IP for rate limiting and source tracking
+                                        var addResult = await NetworkValidator.AddValidatorToPool(val, advertisingPeerIP);
+
+                                        if (!addResult)
+                                        {
+                                            ErrorLogUtility.LogError($"Failed to add validator {val.Address} from peer {advertisingPeerIP}", "RequestActiveValidators");
+                                            continue;
+                                        }
+
+                                        // HAL-11 Fix: Only update peer database for fully trusted validators
+                                        if (val.IsFullyTrusted)
+                                        {
+                                            var singleVal = peerDB.FindOne(x => x.PeerIP == val.IPAddress);
+                                            if (singleVal != null)
+                                            {
+                                                singleVal.IsValidator = true;
+
+                                                if(singleVal.ValidatorAddress == null)
+                                                    singleVal.ValidatorAddress = val.Address;
+
+                                                if(singleVal.ValidatorPublicKey == null)
+                                                    singleVal.ValidatorPublicKey = val.PublicKey;
+
+                                                peerDB.UpdateSafe(singleVal);
+                                            }
+                                            else
+                                            {
+                                                Peers nPeer = new Peers
+                                                {
+                                                    IsIncoming = false,
+                                                    IsOutgoing = true,
+                                                    PeerIP = val.IPAddress,
+                                                    FailCount = 0,
+                                                    IsValidator = true,
+                                                    ValidatorAddress = val.Address,
+                                                    ValidatorPublicKey = val.PublicKey,
+                                                    WalletVersion = Globals.CLIVersion,
+                                                };
+
+                                                peerDB.InsertSafe(nPeer);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            LogUtility.Log($"Validator {val.Address} added to pending validation, not updating peer database yet", "RequestActiveValidators");
+                                        }
+                                    }
+                                    catch (Exception valEx)
+                                    {
+                                        ErrorLogUtility.LogError($"Error processing validator {val?.Address} from {advertisingPeerIP}: {valEx.Message}", "RequestActiveValidators");
                                     }
                                 }
+
+                                LogUtility.Log($"Completed processing validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
                             }
                         }
                     }
                     catch (Exception ex)
                     {
-
+                        ErrorLogUtility.LogError($"Error requesting active validators from {validator.NodeIP}: {ex.Message}", "RequestActiveValidators");
                     }
                 }
 
                 waitForVals = false;
             }
+
+            // HAL-11 Fix: Cleanup stale pending validators after processing
+            NetworkValidator.CleanupStaleValidators();
         }
 
         #endregion

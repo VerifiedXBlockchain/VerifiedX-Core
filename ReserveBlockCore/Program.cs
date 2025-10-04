@@ -479,6 +479,10 @@ namespace ReserveBlockCore
             Globals.ConnectionHistoryTimer = new Timer(connectionHistoryTimer_Elapsed); // 1 sec = 1000, 60 sec = 60000
             Globals.ConnectionHistoryTimer.Change(90000, 3 * 10 * 6000); //waits 1.5 minute, then runs every 3 minutes
 
+            // HAL-11 Fix: Initialize validator registry cleanup timer
+            Globals.ValidatorRegistryCleanupTimer = new Timer(validatorRegistryCleanupTimer_Elapsed);
+            Globals.ValidatorRegistryCleanupTimer.Change(180000, 30 * 60 * 1000); //waits 3 minutes, then runs every 30 minutes
+
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL
@@ -943,6 +947,37 @@ namespace ReserveBlockCore
             }
             catch { }
 
+        }
+
+        #endregion
+
+        #region Validator Registry Cleanup Timer (HAL-11 Fix)
+        private static async void validatorRegistryCleanupTimer_Elapsed(object sender)
+        {
+            try
+            {
+                if (Globals.StopAllTimers == false)
+                {
+                    // HAL-11 Fix: Cleanup stale pending validators
+                    NetworkValidator.CleanupStaleValidators();
+                    
+                    // Log registry status for monitoring
+                    var trustedValidators = Globals.NetworkValidators.Count;
+                    var pendingValidators = NetworkValidator.GetPendingValidators().Count;
+                    
+                    LogUtility.Log($"Validator Registry Status - Trusted: {trustedValidators}, Pending: {pendingValidators}", "ValidatorRegistryCleanup");
+                    
+                    // Optional: Alert if too many pending validators (potential attack)
+                    if (pendingValidators > 50)
+                    {
+                        ErrorLogUtility.LogError($"High number of pending validators detected: {pendingValidators}. Possible validator injection attack.", "ValidatorRegistryCleanup");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error during validator registry cleanup: {ex.Message}", "ValidatorRegistryCleanup");
+            }
         }
 
         #endregion
