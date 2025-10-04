@@ -148,21 +148,79 @@ namespace ReserveBlockCore.P2P
             #pragma warning restore CA1816
         }
 
-        protected virtual void Dispose(bool disposing)
+        protected override void Dispose(bool disposing)
         {
-            if (disposing)
+            // All disposal logic has been moved to DisposeAsyncCore to avoid sync-over-async deadlocks.
+            // For proper resource cleanup, always prefer DisposeAsync() over Dispose().
+        }
+
+        protected override async ValueTask DisposeAsyncCore()
+        {
+            const int timeoutSeconds = 30;
+            using var disposalCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var disposalTasks = new List<Task>();
+
+            // Dispose validator nodes
+            foreach (var node in Globals.ValidatorNodes.Values)
             {
-                foreach(var node in Globals.ValidatorNodes.Values)
-                    if(node.Connection != null)
-                        node.Connection.DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();                
+                if (node.Connection != null)
+                {
+                    disposalTasks.Add(DisposeValidatorNodeConnectionSafely(node, disposalCts.Token));
+                }
+            }
+
+            // Also dispose regular nodes (call base class logic)
+            foreach (var node in Globals.Nodes.Values)
+            {
+                if (node.Connection != null)
+                {
+                    disposalTasks.Add(DisposeNodeConnectionSafely(node, disposalCts.Token));
+                }
+            }
+
+            if (disposalTasks.Count > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(disposalTasks).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Log timeout but continue - graceful degradation
+                    LogUtility.Log($"Validator node disposal timed out after {timeoutSeconds} seconds, some connections may not be properly closed", "P2PValidatorClient.DisposeAsyncCore");
+                }
+                catch (Exception ex)
+                {
+                    // Log general errors but don't throw to ensure disposal completes
+                    ErrorLogUtility.LogError($"Error during validator node disposal: {ex}", "P2PValidatorClient.DisposeAsyncCore");
+                }
             }
         }
 
-        protected virtual async ValueTask DisposeAsyncCore()
+        private static async Task DisposeValidatorNodeConnectionSafely(NodeInfo node, CancellationToken cancellationToken)
         {
-            foreach (var node in Globals.Nodes.Values)
-                if(node.Connection != null)
-                    await node.Connection.DisposeAsync();
+            try
+            {
+                await node.Connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - continue disposing other nodes
+                ErrorLogUtility.LogError($"Error disposing validator connection for node {node.NodeIP}: {ex.Message}", "P2PValidatorClient.DisposeValidatorNodeConnectionSafely");
+            }
+        }
+
+        private static async Task DisposeNodeConnectionSafely(NodeInfo node, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await node.Connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - continue disposing other nodes
+                ErrorLogUtility.LogError($"Error disposing connection for node {node.NodeIP}: {ex.Message}", "P2PValidatorClient.DisposeNodeConnectionSafely");
+            }
         }
 
         #endregion
