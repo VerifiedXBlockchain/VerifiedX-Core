@@ -606,15 +606,49 @@ namespace ReserveBlockCore.P2P
 
         public async Task<bool> SendProofList(string proofJson)
         {
-            var proofList = JsonConvert.DeserializeObject<List<Proof>>(proofJson);
+            try
+            {
+                var peerIP = GetIP(Context);
+                
+                // HAL-13 Fix: Secure JSON deserialization with validation
+                var deserializationResult = JsonSecurityHelper.DeserializeProofList(proofJson, $"SendProofList from {peerIP}");
+                
+                if (!deserializationResult.IsSuccess)
+                {
+                    // Log security event
+                    ErrorLogUtility.LogError(
+                        $"HAL-13 Security: Invalid proof list from {peerIP}: {deserializationResult.ValidationResult.Error}",
+                        "P2PValidatorServer.SendProofList()");
+                    
+                    // Ban peer for repeated violations
+                    BanService.BanPeer(peerIP, "Invalid proof list format", "SendProofList");
+                    return false;
+                }
 
-            if (proofList?.Count() == 0) return false;
+                var proofList = deserializationResult.Data;
+                
+                if (proofList?.Count == 0) return false;
+                if (proofList == null) return false;
 
-            if (proofList == null) return false;
+                // Log successful processing
+                if (Globals.OptionalLogging)
+                {
+                    LogUtility.Log($"Successfully processed {proofList.Count} proofs from {peerIP}", "SendProofList");
+                }
 
-            await ProofUtility.SortProofs(proofList);
-
-            return true;
+                await ProofUtility.SortProofs(proofList);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-13 Security: Exception in SendProofList from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendProofList()");
+                
+                BanService.BanPeer(peerIP, "Proof list processing error", "SendProofList");
+                return false;
+            }
         }
 
         #endregion
@@ -623,15 +657,49 @@ namespace ReserveBlockCore.P2P
 
         public async Task<bool> SendWinningProofList(string proofJson)
         {
-            var proofList = JsonConvert.DeserializeObject<List<Proof>>(proofJson);
+            try
+            {
+                var peerIP = GetIP(Context);
+                
+                // HAL-13 Fix: Secure JSON deserialization with validation
+                var deserializationResult = JsonSecurityHelper.DeserializeProofList(proofJson, $"SendWinningProofList from {peerIP}");
+                
+                if (!deserializationResult.IsSuccess)
+                {
+                    // Log security event
+                    ErrorLogUtility.LogError(
+                        $"HAL-13 Security: Invalid winning proof list from {peerIP}: {deserializationResult.ValidationResult.Error}",
+                        "P2PValidatorServer.SendWinningProofList()");
+                    
+                    // Ban peer for repeated violations
+                    BanService.BanPeer(peerIP, "Invalid winning proof list format", "SendWinningProofList");
+                    return false;
+                }
 
-            if (proofList?.Count() == 0) return false;
+                var proofList = deserializationResult.Data;
+                
+                if (proofList?.Count == 0) return false;
+                if (proofList == null) return false;
 
-            if (proofList == null) return false;
+                // Log successful processing
+                if (Globals.OptionalLogging)
+                {
+                    LogUtility.Log($"Successfully processed {proofList.Count} winning proofs from {peerIP}", "SendWinningProofList");
+                }
 
-            await ProofUtility.SortProofs(proofList);
-
-            return true;
+                await ProofUtility.SortProofs(proofList);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-13 Security: Exception in SendWinningProofList from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendWinningProofList()");
+                
+                BanService.BanPeer(peerIP, "Winning proof list processing error", "SendWinningProofList");
+                return false;
+            }
         }
 
         #endregion
@@ -640,16 +708,53 @@ namespace ReserveBlockCore.P2P
 
         public async Task<string> GetWinningProofList()
         {
-            string result = "0";
-            if(Globals.WinningProofs.Count() != 0)
+            try
             {
-                var heightMax = Globals.LastBlock.Height + 10;
-                var list = Globals.WinningProofs.Where(x => x.Key <= heightMax).Select(x => x.Value).ToList();
-                if(list != null)
-                    result = JsonConvert.SerializeObject(list);
-            }
+                string result = "0";
+                if(Globals.WinningProofs.Count() != 0)
+                {
+                    var heightMax = Globals.LastBlock.Height + 10;
+                    var list = Globals.WinningProofs.Where(x => x.Key <= heightMax).Select(x => x.Value).ToList();
+                    
+                    if(list != null && list.Any())
+                    {
+                        // HAL-13 Fix: Use secure serialization with size limits
+                        var serializationResult = JsonSecurityHelper.SerializeWithLimits(list, "GetWinningProofList");
+                        
+                        if (!serializationResult.IsSuccess)
+                        {
+                            var peerIP = GetIP(Context);
+                            ErrorLogUtility.LogError(
+                                $"HAL-13 Security: Response size limit exceeded in GetWinningProofList for {peerIP}: {serializationResult.Error}",
+                                "P2PValidatorServer.GetWinningProofList()");
+                            
+                            // Return truncated list if size exceeds limits
+                            var truncatedList = list.Take(JsonSecurityHelper.MaxCollectionSize / 2).ToList();
+                            var truncatedResult = JsonSecurityHelper.SerializeWithLimits(truncatedList, "GetWinningProofList-Truncated");
+                            
+                            if (truncatedResult.IsSuccess)
+                            {
+                                LogUtility.Log($"Returned truncated winning proof list with {truncatedList.Count} items", "GetWinningProofList");
+                                return truncatedResult.Json;
+                            }
+                            
+                            return "0"; // Fallback if even truncated list is too large
+                        }
+                        
+                        result = serializationResult.Json;
+                    }
+                }
 
-            return result;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-13 Security: Exception in GetWinningProofList for {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.GetWinningProofList()");
+                return "0";
+            }
         }
 
         #endregion
@@ -658,15 +763,52 @@ namespace ReserveBlockCore.P2P
 
         public async Task<string> GetFinalizedWinnersList()
         {
-            string result = "0";
-            if (Globals.WinningProofs.Count() != 0)
+            try
             {
-                var list = Globals.FinalizedWinner.Select(x => x.Value).ToList();
-                if (list != null)
-                    result = JsonConvert.SerializeObject(list);
-            }
+                string result = "0";
+                if (Globals.WinningProofs.Count() != 0)
+                {
+                    var list = Globals.FinalizedWinner.Select(x => x.Value).ToList();
+                    
+                    if (list != null && list.Any())
+                    {
+                        // HAL-13 Fix: Use secure serialization with size limits
+                        var serializationResult = JsonSecurityHelper.SerializeWithLimits(list, "GetFinalizedWinnersList");
+                        
+                        if (!serializationResult.IsSuccess)
+                        {
+                            var peerIP = GetIP(Context);
+                            ErrorLogUtility.LogError(
+                                $"HAL-13 Security: Response size limit exceeded in GetFinalizedWinnersList for {peerIP}: {serializationResult.Error}",
+                                "P2PValidatorServer.GetFinalizedWinnersList()");
+                            
+                            // Return truncated list if size exceeds limits
+                            var truncatedList = list.Take(JsonSecurityHelper.MaxCollectionSize / 2).ToList();
+                            var truncatedResult = JsonSecurityHelper.SerializeWithLimits(truncatedList, "GetFinalizedWinnersList-Truncated");
+                            
+                            if (truncatedResult.IsSuccess)
+                            {
+                                LogUtility.Log($"Returned truncated finalized winners list with {truncatedList.Count} items", "GetFinalizedWinnersList");
+                                return truncatedResult.Json;
+                            }
+                            
+                            return "0"; // Fallback if even truncated list is too large
+                        }
+                        
+                        result = serializationResult.Json;
+                    }
+                }
 
-            return result;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-13 Security: Exception in GetFinalizedWinnersList for {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.GetFinalizedWinnersList()");
+                return "0";
+            }
         }
 
         #endregion
@@ -700,15 +842,62 @@ namespace ReserveBlockCore.P2P
         {
             try
             {
+                var peerIP = GetIP(Context);
+                
+                // HAL-13 Fix: Validate input before deserialization
+                var validationResult = JsonSecurityHelper.ValidateJsonInput(winningProofJson, $"SendWinningProofVote from {peerIP}");
+                
+                if (!validationResult.IsValid)
+                {
+                    ErrorLogUtility.LogError(
+                        $"HAL-13 Security: Invalid winning proof vote from {peerIP}: {validationResult.Error}",
+                        "P2PValidatorServer.SendWinningProofVote()");
+                    
+                    BanService.BanPeer(peerIP, "Invalid winning proof vote format", "SendWinningProofVote");
+                    return;
+                }
+
                 var proof = JsonConvert.DeserializeObject<Proof>(winningProofJson);
                 if (proof != null)
                 {
-                    if(proof.VerifyProof())
+                    // Validate proof object structure
+                    if (string.IsNullOrWhiteSpace(proof.Address) || 
+                        string.IsNullOrWhiteSpace(proof.PublicKey) || 
+                        string.IsNullOrWhiteSpace(proof.ProofHash))
+                    {
+                        ErrorLogUtility.LogError(
+                            $"HAL-13 Security: Invalid proof structure from {peerIP}",
+                            "P2PValidatorServer.SendWinningProofVote()");
+                        
+                        BanService.BanPeer(peerIP, "Invalid proof structure", "SendWinningProofVote");
+                        return;
+                    }
+
+                    if (proof.VerifyProof())
+                    {
                         Globals.Proofs.Add(proof);
+                        
+                        if (Globals.OptionalLogging)
+                        {
+                            LogUtility.Log($"Successfully processed winning proof vote from {peerIP}", "SendWinningProofVote");
+                        }
+                    }
+                    else
+                    {
+                        ErrorLogUtility.LogError(
+                            $"HAL-13 Security: Proof verification failed from {peerIP}",
+                            "P2PValidatorServer.SendWinningProofVote()");
+                    }
                 }
             }
             catch (Exception ex)
             {
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-13 Security: Exception in SendWinningProofVote from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendWinningProofVote()");
+                
+                BanService.BanPeer(peerIP, "Winning proof vote processing error", "SendWinningProofVote");
             }
         }
 
