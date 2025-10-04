@@ -678,7 +678,7 @@ namespace ReserveBlockCore.P2P
             var myHeight = Globals.LastBlock.Height;
             await UpdateNodeHeights();
 
-            foreach (var node in Globals.Nodes.Values)
+            foreach (var node in Globals.ValidatorNodes.Values)
             {
                 var remoteNodeHeight = node.NodeHeight;
                 if (myHeight < remoteNodeHeight)
