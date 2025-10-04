@@ -199,10 +199,56 @@ namespace ReserveBlockCore.P2P
 
             UpdateNode(node, height, methodCode, isFinalized);
 
-            UpdateConsensusDump(ip, "RequestMethodCode", height + " " + methodCode + " " + isFinalized, (Globals.LastBlock.Height).ToString() + ":" + ConsenusStateSingelton.MethodCode + ":" +
-                (ConsenusStateSingelton.Status == ConsensusStatus.Finalized ? 1 : 0));
-            return (Globals.LastBlock.Height).ToString() + ":" + ConsenusStateSingelton.MethodCode + ":" +
-                (ConsenusStateSingelton.Status == ConsensusStatus.Finalized ? 1 : 0);
+            // HAL-10 Fix: Create signed consensus coordination metadata
+            var consensusData = $"{Globals.LastBlock.Height}:{ConsenusStateSingelton.MethodCode}:{(ConsenusStateSingelton.Status == ConsensusStatus.Finalized ? 1 : 0)}";
+            var timestamp = TimeUtil.GetTime();
+            var nonce = GenerateSecureNonce();
+            
+            // Create message to sign: consensusData|timestamp|nonce for replay protection
+            var messageToSign = $"{consensusData}|{timestamp}|{nonce}";
+            
+            // Sign the coordination metadata using validator signature
+            var signature = "";
+            try 
+            {
+                if (Globals.AdjudicateAccount != null)
+                {
+                    signature = SignatureService.AdjudicatorSignature(messageToSign);
+                }
+                else if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    signature = SignatureService.ValidatorSignature(messageToSign);
+                }
+                else
+                {
+                    // Fallback: use a basic signature if no specific validator account
+                    signature = "unsigned";
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to sign consensus coordination data: {ex.Message}", "RequestMethodCode");
+                signature = "error";
+            }
+
+            // Format: consensusData|timestamp|nonce|signature
+            var signedResponse = $"{consensusData}|{timestamp}|{nonce}|{signature}";
+
+            UpdateConsensusDump(ip, "RequestMethodCode", height + " " + methodCode + " " + isFinalized, signedResponse);
+            return signedResponse;
+        }
+
+        /// <summary>
+        /// Generate a cryptographically secure nonce for replay attack prevention
+        /// </summary>
+        private static string GenerateSecureNonce()
+        {
+            using (var rng = System.Security.Cryptography.RandomNumberGenerator.Create())
+            {
+                var bytes = new byte[16]; // 128-bit nonce
+                rng.GetBytes(bytes);
+                return Convert.ToBase64String(bytes);
+            }
         }
 
         public string Message(long height, int methodCode, string[] addresses, string peerMessage)

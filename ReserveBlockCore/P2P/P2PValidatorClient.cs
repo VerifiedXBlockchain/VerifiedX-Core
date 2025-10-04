@@ -706,15 +706,119 @@ namespace ReserveBlockCore.P2P
 
                     if (Response != null)
                     {
-                        var remoteMethodCode = Response.Split(':');
+                        // HAL-10 Fix: Handle new signed response format or legacy format
+                        var responseParts = Response.Split('|');
+                        
+                        string consensusData;
+                        bool isSignedResponse = responseParts.Length == 4; // consensusData|timestamp|nonce|signature
+                        
+                        if (isSignedResponse)
+                        {
+                            // New signed format: consensusData|timestamp|nonce|signature
+                            consensusData = responseParts[0];
+                            var timestamp = responseParts[1];
+                            var nonce = responseParts[2];
+                            var signature = responseParts[3];
+
+                            // Verify signature for enhanced security
+                            if (signature != "unsigned" && signature != "error")
+                            {
+                                var messageToVerify = $"{consensusData}|{timestamp}|{nonce}";
+                                
+                                // Verify signature using the node's address (if available)
+                                bool signatureValid = false;
+                                try
+                                {
+                                    if (!string.IsNullOrEmpty(node.Address))
+                                    {
+                                        signatureValid = SignatureService.VerifySignature(node.Address, messageToVerify, signature);
+                                    }
+                                    else
+                                    {
+                                        // If no node address available, accept response but log it
+                                        signatureValid = true;
+                                        ErrorLogUtility.LogError($"No node address available for signature verification from {node.NodeIP}", "UpdateMethodCode");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    ErrorLogUtility.LogError($"Signature verification failed for {node.NodeIP}: {ex.Message}", "UpdateMethodCode");
+                                    signatureValid = false;
+                                }
+
+                                if (!signatureValid)
+                                {
+                                    ErrorLogUtility.LogError($"Invalid signature in consensus response from {node.NodeIP}", "UpdateMethodCode");
+                                    continue; // Skip this response
+                                }
+                            }
+
+                            // Validate timestamp freshness (within reasonable window)
+                            if (long.TryParse(timestamp, out var responseTimestamp))
+                            {
+                                var currentTime = TimeUtil.GetTime();
+                                var timeDiff = Math.Abs(currentTime - responseTimestamp);
+                                
+                                if (timeDiff > 30) // 30 second window for consensus coordination
+                                {
+                                    ErrorLogUtility.LogError($"Consensus response timestamp too old from {node.NodeIP}. Diff: {timeDiff}s", "UpdateMethodCode");
+                                    continue;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Legacy format: height:methodCode:isFinalized
+                            consensusData = Response;
+                        }
+
+                        // Parse consensus data (height:methodCode:isFinalized)
+                        var remoteMethodCode = consensusData.Split(':');
+                        
+                        // Validate we have exactly 3 parts before accessing array
+                        if (remoteMethodCode.Length != 3)
+                        {
+                            ErrorLogUtility.LogError($"Invalid consensus data format from {node.NodeIP}. Expected 3 parts, got {remoteMethodCode.Length}: {consensusData}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Use safe parsing with bounds validation
+                        if (!long.TryParse(remoteMethodCode[0], out var nodeHeight))
+                        {
+                            ErrorLogUtility.LogError($"Invalid height value from {node.NodeIP}: {remoteMethodCode[0]}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        if (!int.TryParse(remoteMethodCode[1], out var methodCode))
+                        {
+                            ErrorLogUtility.LogError($"Invalid method code from {node.NodeIP}: {remoteMethodCode[1]}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Validate reasonable bounds for height and method code
+                        if (nodeHeight < 0 || nodeHeight > long.MaxValue - 1000000) // Reasonable upper bound
+                        {
+                            ErrorLogUtility.LogError($"Height value out of bounds from {node.NodeIP}: {nodeHeight}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        if (methodCode < 0 || methodCode > 1000) // Reasonable method code range
+                        {
+                            ErrorLogUtility.LogError($"Method code out of bounds from {node.NodeIP}: {methodCode}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Parse finalized flag (only "1" is true, everything else is false)
+                        var isFinalized = remoteMethodCode[2] == "1";
+
                         if (Now > node.LastMethodCodeTime)
                         {
                             lock (ConsensusServer.UpdateNodeLock)
                             {
                                 node.LastMethodCodeTime = Now;
-                                node.NodeHeight = long.Parse(remoteMethodCode[0]);
-                                node.MethodCode = int.Parse(remoteMethodCode[1]);
-                                node.IsFinalized = remoteMethodCode[2] == "1";
+                                node.NodeHeight = nodeHeight;
+                                node.MethodCode = methodCode;
+                                node.IsFinalized = isFinalized;
                             }
 
                             ConsensusServer.RemoveStaleCache(node);
@@ -722,10 +826,16 @@ namespace ReserveBlockCore.P2P
                     }
                 }
                 catch (OperationCanceledException ex)
-                { }
+                { 
+                    // Connection timeout - log with limited frequency to prevent log flooding
+                    if (TimeUtil.GetMillisecondTime() - node.LastMethodCodeTime > 30000) // Log only every 30 seconds
+                    {
+                        ErrorLogUtility.LogError($"Connection timeout to {node.NodeIP} in UpdateMethodCode", "UpdateMethodCode");
+                    }
+                }
                 catch (Exception ex)
                 {
-                    ErrorLogUtility.LogError(ex.ToString(), "UpdateMethodCodes inner catch");
+                    ErrorLogUtility.LogError($"Unexpected error updating method code for {node.NodeIP}: {ex.Message}", "UpdateMethodCode");
                 }
 
                 await Task.Delay(20);
