@@ -62,7 +62,25 @@ namespace ReserveBlockCore.P2P
                 var walletVersion = httpContext.Request.Headers["walver"].ToString();
                 var nonce = httpContext.Request.Headers["nonce"].ToString();
 
-                // Validate required fields
+                // HAL-15 Security Fix: Validate handshake headers with size and format constraints
+                var handshakeValidation = InputValidationHelper.ValidateHandshakeHeaders(
+                    address, time, uName, publicKey, signature, walletVersion, nonce);
+
+                if (!handshakeValidation.IsValid)
+                {
+                    var errorMessage = $"Invalid handshake data: {string.Join(", ", handshakeValidation.Errors)}";
+                    ErrorLogUtility.LogError($"HAL-15 Security: {errorMessage} from {peerIP}", "P2PValidatorServer.OnConnectedAsync()");
+                    
+                    // Record this as a security violation for potential banning
+                    ConnectionSecurityHelper.RecordAuthenticationFailure(peerIP, address ?? "unknown", "Invalid handshake format");
+                    
+                    _ = EndOnConnect(peerIP,
+                        "Connection rejected due to invalid handshake data format.",
+                        $"HAL-15 Security: {errorMessage} from {peerIP}");
+                    return;
+                }
+
+                // Validate required fields (after format validation)
                 if (string.IsNullOrWhiteSpace(address) ||
                     string.IsNullOrWhiteSpace(time) ||
                     string.IsNullOrWhiteSpace(publicKey) ||
@@ -217,7 +235,7 @@ namespace ReserveBlockCore.P2P
         }
         #endregion
 
-        #region Get Network Validator List - TODO: ADD PROTECTION
+        #region Get Network Validator List - HAL-15 Security Fix Applied
         public async Task SendNetworkValidatorList(string data)
         {
             try
@@ -226,11 +244,65 @@ namespace ReserveBlockCore.P2P
 
                 if(!string.IsNullOrEmpty(data))
                 {
-                    var networkValList = JsonConvert.DeserializeObject<List<NetworkValidator>>(data);
-                    if(networkValList?.Count > 0)
+                    // HAL-15 Security Fix: Validate JSON input before deserialization
+                    var jsonValidation = JsonSecurityHelper.ValidateJsonInput(data, $"SendNetworkValidatorList from {peerIP}");
+                    if (!jsonValidation.IsValid)
                     {
-                        foreach(var networkValidator in networkValList)
+                        ErrorLogUtility.LogError(
+                            $"HAL-15 Security: Invalid JSON in SendNetworkValidatorList from {peerIP}: {jsonValidation.Error}",
+                            "P2PValidatorServer.SendNetworkValidatorList()");
+                        
+                        BanService.BanPeer(peerIP, "Invalid validator list JSON format", "SendNetworkValidatorList");
+                        return;
+                    }
+
+                    var networkValList = JsonConvert.DeserializeObject<List<NetworkValidator>>(data);
+                    
+                    // HAL-15 Security Fix: Validate the validator list with size constraints
+                    var listValidation = InputValidationHelper.ValidateNetworkValidatorList(networkValList);
+                    
+                    if (!listValidation.IsValid)
+                    {
+                        var errorMessage = $"Invalid validator list: {string.Join(", ", listValidation.Errors)}";
+                        ErrorLogUtility.LogError(
+                            $"HAL-15 Security: {errorMessage} from {peerIP}",
+                            "P2PValidatorServer.SendNetworkValidatorList()");
+                        
+                        // Ban peer for sending invalid data
+                        BanService.BanPeer(peerIP, "Invalid validator list format", "SendNetworkValidatorList");
+                        return;
+                    }
+
+                    // Use truncated list if the original was too large
+                    var validatorsToProcess = listValidation.ShouldTruncate ? 
+                        listValidation.TruncatedList : networkValList;
+
+                    if (listValidation.ShouldTruncate)
+                    {
+                        ErrorLogUtility.LogError(
+                            $"HAL-15 Security: Truncated oversized validator list from {peerIP}. Original: {networkValList?.Count}, Processed: {validatorsToProcess.Count}",
+                            "P2PValidatorServer.SendNetworkValidatorList()");
+                    }
+
+                    if(validatorsToProcess?.Count > 0)
+                    {
+                        int processedCount = 0;
+                        int rejectedCount = 0;
+
+                        foreach(var networkValidator in validatorsToProcess)
                         {
+                            // HAL-15 Security Fix: Validate each individual validator
+                            var validatorValidation = InputValidationHelper.ValidateNetworkValidator(networkValidator);
+                            if (!validatorValidation.IsValid)
+                            {
+                                rejectedCount++;
+                                if (Globals.OptionalLogging)
+                                {
+                                    LogUtility.Log($"Rejected invalid validator from {peerIP}: {string.Join(", ", validatorValidation.Errors)}", "SendNetworkValidatorList");
+                                }
+                                continue;
+                            }
+
                             if(Globals.NetworkValidators.TryGetValue(networkValidator.Address, out var networkValidatorVal))
                             {
                                 var verifySig = SignatureService.VerifySignature(
@@ -238,21 +310,57 @@ namespace ReserveBlockCore.P2P
                                     networkValidator.SignatureMessage, 
                                     networkValidator.Signature);
 
-                                //if(networkValidatorVal.PublicKey != networkValidator.PublicKey)
-
                                 if(verifySig && networkValidator.Signature.Contains(networkValidator.PublicKey))
+                                {
                                     Globals.NetworkValidators[networkValidator.Address] = networkValidator;
-
+                                    processedCount++;
+                                }
+                                else
+                                {
+                                    rejectedCount++;
+                                }
                             }
                             else
                             {
-                                Globals.NetworkValidators.TryAdd(networkValidator.Address, networkValidator);
+                                // HAL-15 Security Fix: Use secure validator addition method
+                                var added = await NetworkValidator.AddValidatorToPool(networkValidator, peerIP);
+                                if (added)
+                                {
+                                    processedCount++;
+                                }
+                                else
+                                {
+                                    rejectedCount++;
+                                }
                             }
+                        }
+
+                        if (Globals.OptionalLogging)
+                        {
+                            LogUtility.Log($"SendNetworkValidatorList from {peerIP}: Processed {processedCount}, Rejected {rejectedCount}", "SendNetworkValidatorList");
+                        }
+
+                        // HAL-15 Security Fix: Ban peer if rejection rate is too high
+                        if (rejectedCount > processedCount && rejectedCount > 5)
+                        {
+                            ErrorLogUtility.LogError(
+                                $"HAL-15 Security: High rejection rate from {peerIP}. Processed: {processedCount}, Rejected: {rejectedCount}",
+                                "P2PValidatorServer.SendNetworkValidatorList()");
+                            
+                            BanService.BanPeer(peerIP, "High validator rejection rate", "SendNetworkValidatorList");
                         }
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-15 Security: Exception in SendNetworkValidatorList from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendNetworkValidatorList()");
+                
+                BanService.BanPeer(peerIP, "Validator list processing error", "SendNetworkValidatorList");
+            }
         }
         #endregion
 
@@ -451,7 +559,18 @@ namespace ReserveBlockCore.P2P
             if (!vals.Any())
                 return "0";
 
-            return JsonConvert.SerializeObject(vals).ToBase64().ToCompress();
+            // HAL-15 Security Fix: Limit validator list to maximum 2000 validators for broadcast
+            var limitedVals = InputValidationHelper.LimitValidatorListForBroadcast(vals);
+            
+            if (limitedVals.Count < vals.Count)
+            {
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-15 Security: Limited validator broadcast from {vals.Count} to {limitedVals.Count} validators for {peerIP}",
+                    "P2PValidatorServer.SendActiveVals()");
+            }
+
+            return JsonConvert.SerializeObject(limitedVals).ToBase64().ToCompress();
         }
 
         #endregion

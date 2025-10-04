@@ -1087,7 +1087,18 @@ namespace ReserveBlockCore.Nodes
                     if (Globals.NetworkValidators.Count == 0)
                         continue;
 
-                    var networkValsJson = JsonConvert.SerializeObject(Globals.NetworkValidators.Values.ToList());
+                    // HAL-15 Security Fix: Limit validator list to maximum 2000 validators for broadcast
+                    var validators = Globals.NetworkValidators.Values.ToList();
+                    var limitedValidators = InputValidationHelper.LimitValidatorListForBroadcast(validators);
+                    
+                    if (limitedValidators.Count < validators.Count)
+                    {
+                        ErrorLogUtility.LogError(
+                            $"HAL-15 Security: Limited validator broadcast from {validators.Count} to {limitedValidators.Count} validators",
+                            "ValidatorProcessor_BAk.BroadcastNetworkValidators()");
+                    }
+
+                    var networkValsJson = JsonConvert.SerializeObject(limitedValidators);
 
                     await _hubContext.Clients.All.SendAsync("GetValMessage", "3", networkValsJson);
 
@@ -1104,7 +1115,7 @@ namespace ReserveBlockCore.Nodes
                 }
                 catch (Exception ex)
                 {
-
+                    ErrorLogUtility.LogError($"HAL-15 Security: Exception in BroadcastNetworkValidators: {ex.Message}", "ValidatorProcessor_BAk.BroadcastNetworkValidators()");
                 }
                 finally
                 {

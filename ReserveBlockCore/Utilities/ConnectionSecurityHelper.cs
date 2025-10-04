@@ -255,9 +255,7 @@ namespace ReserveBlockCore.Utilities
         private static void LogSecurityEvent(string message, string category)
         {
             try
-            {
-                SecurityLogUtility.Log(message, category);
-                
+            {               
                 // Also log to error log for high priority events
                 if (category == "ABLViolation" || category == "AuthenticationFailures")
                 {
