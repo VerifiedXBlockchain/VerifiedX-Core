@@ -50,6 +50,53 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
+        #region Wallet Version Validation Helper
+
+        /// <summary>
+        /// Safely extracts the first 3 characters from wallet version string with proper validation
+        /// HAL-12 Fix: Prevents ArgumentOutOfRangeException from malformed wallet version strings
+        /// </summary>
+        /// <param name="walletVersion">The wallet version string to process</param>
+        /// <returns>A safe 3-character version prefix or default fallback</returns>
+        private static string GetSafeWalletVersionPrefix(string? walletVersion)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(walletVersion))
+                {
+                    ErrorLogUtility.LogError("Received null or empty wallet version from peer", "GetSafeWalletVersionPrefix");
+                    return "2.1"; // Default fallback version
+                }
+
+                // Validate minimum length requirement
+                if (walletVersion.Length < 3)
+                {
+                    ErrorLogUtility.LogError($"Received short wallet version from peer: '{walletVersion}' (length: {walletVersion.Length})", "GetSafeWalletVersionPrefix");
+                    // Pad short versions with zeros to meet 3-character requirement
+                    return walletVersion.PadRight(3, '0');
+                }
+
+                // Validate that the first 3 characters are reasonable (basic format check)
+                var versionPrefix = walletVersion.Substring(0, 3);
+                if (System.Text.RegularExpressions.Regex.IsMatch(versionPrefix, @"^[0-9]+\.?[0-9]*$"))
+                {
+                    return versionPrefix;
+                }
+                else
+                {
+                    ErrorLogUtility.LogError($"Received malformed wallet version from peer: '{walletVersion}' - prefix: '{versionPrefix}'", "GetSafeWalletVersionPrefix");
+                    return "2.1"; // Default fallback for invalid format
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Unexpected error processing wallet version '{walletVersion}': {ex.Message}", "GetSafeWalletVersionPrefix");
+                return "2.1"; // Safe fallback on any error
+            }
+        }
+
+        #endregion
+
         #region Remove Node from Validator Nodes
         public static async Task RemoveNode(NodeInfo node)
         {
@@ -302,8 +349,10 @@ namespace ReserveBlockCore.P2P
 
                 if (walletVersion != null)
                 {
-                    peer.WalletVersion = walletVersion.Substring(0,3);
-                    node.WalletVersion = walletVersion.Substring(0,3);
+                    // HAL-12 Fix: Use safe wallet version processing to prevent ArgumentOutOfRangeException
+                    var safeVersion = GetSafeWalletVersionPrefix(walletVersion);
+                    peer.WalletVersion = safeVersion;
+                    node.WalletVersion = safeVersion;
 
                     Globals.ValidatorNodes.TryAdd(IPAddress, node);
 
@@ -590,8 +639,10 @@ namespace ReserveBlockCore.P2P
 
                 if (walletVersion != null)
                 {
-                    peer.WalletVersion = walletVersion.Substring(0, 3);
-                    node.WalletVersion = walletVersion.Substring(0, 3);
+                    // HAL-12 Fix: Use safe wallet version processing to prevent ArgumentOutOfRangeException
+                    var safeVersion = GetSafeWalletVersionPrefix(walletVersion);
+                    peer.WalletVersion = safeVersion;
+                    node.WalletVersion = safeVersion;
 
                     Globals.BlockCasterNodes.TryAdd(IPAddress, node);
 
