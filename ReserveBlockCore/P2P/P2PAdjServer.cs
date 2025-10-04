@@ -53,16 +53,45 @@ namespace ReserveBlockCore.P2P
                 var walletVersion = httpContext.Request.Headers["walver"].ToString();
 
                 conQueue.Address = address;
-                var SignedMessage = address;
-                var Now = TimeUtil.GetTime();
-                SignedMessage = address + ":" + time;
-                if (TimeUtil.GetTime() - long.Parse(time) > 300)
+
+                // Validate required fields first
+                if (string.IsNullOrWhiteSpace(address) || 
+                    string.IsNullOrWhiteSpace(time) ||
+                    string.IsNullOrWhiteSpace(uName) || 
+                    string.IsNullOrWhiteSpace(signature))
                 {
-                    await EndOnConnect(peerIP, "20", startTime, conQueue, "Signature Bad time.", "Signature Bad time.");
+                    _ = EndOnConnect(peerIP, "Z", startTime, conQueue,
+                        "Connection Attempted, but missing required field(s). Address, Unique name, Time, and Signature required. You are being disconnected.",
+                        "Connected, but missing required field(s). Address, Unique name, Time, and Signature required: " + address);
                     return;
                 }
 
-                if (!Globals.Signatures.TryAdd(signature, Now))
+                // Safe time parsing to prevent DoS
+                if (!long.TryParse(time, out var timeValue))
+                {
+                    await EndOnConnect(peerIP, "21", startTime, conQueue, "Invalid timestamp format.", "Invalid timestamp format from: " + peerIP);
+                    return;
+                }
+
+                var now = TimeUtil.GetTime();
+                
+                // Reduced time window from 300s to 30s
+                if (now - timeValue > 30)
+                {
+                    await EndOnConnect(peerIP, "20", startTime, conQueue, "Timestamp outside acceptable window.", "Timestamp outside acceptable window from: " + peerIP);
+                    return;
+                }
+
+                // Prevent future timestamps (with small tolerance for clock skew)
+                if (timeValue > now + 5)
+                {
+                    await EndOnConnect(peerIP, "22", startTime, conQueue, "Timestamp from future.", "Future timestamp from: " + peerIP);
+                    return;
+                }
+
+                var SignedMessage = address + ":" + time;
+
+                if (!Globals.Signatures.TryAdd(signature, now))
                 {
                     await EndOnConnect(peerIP, "40", startTime, conQueue, "Reused signature.", "Reused signature.");
                     return;
@@ -70,12 +99,11 @@ namespace ReserveBlockCore.P2P
                                 
                 var walletVersionVerify = WalletVersionUtility.Verify(walletVersion);
 
-                var fortisPool = Globals.FortisPool.Values;                
-                if (string.IsNullOrWhiteSpace(address) || string.IsNullOrWhiteSpace(uName) || string.IsNullOrWhiteSpace(signature) || !walletVersionVerify) 
+                if (!walletVersionVerify)
                 {
-                    _ = EndOnConnect(peerIP, "Z", startTime, conQueue,
-                        "Connection Attempted, but missing field(s). Address, Unique name, and Signature required. You are being disconnected.",
-                        "Connected, but missing field(s). Address, Unique name, and Signature required: " + address);
+                    _ = EndOnConnect(peerIP, "Y", startTime, conQueue,
+                        "Invalid wallet version. You are being disconnected.",
+                        "Invalid wallet version from: " + address);
                     return;
                 }
                 

@@ -354,15 +354,9 @@ namespace ReserveBlockCore.P2P
             try
             {
                 // For now, we implement basic validation
-                // The signature verification later will ensure the address owns the private key
-                // This method can be enhanced with more specific address-pubkey validation
                 if (string.IsNullOrWhiteSpace(address) || string.IsNullOrWhiteSpace(publicKey))
                     return false;
 
-                // Additional validation could include:
-                // - Deriving address from public key and comparing
-                // - Checking against known address-pubkey mappings
-                // For this implementation, we rely on signature verification for binding validation
                 return true;
             }
             catch

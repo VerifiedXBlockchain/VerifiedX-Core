@@ -56,25 +56,36 @@ namespace ReserveBlockCore.P2P
                 var time = httpContext.Request.Headers["time"].ToString();
                 var signature = httpContext.Request.Headers["signature"].ToString();
 
-                var Now = TimeUtil.GetTime();
-                if (Math.Abs(Now - long.Parse(time)) > 15)
-                {
-                    EndOnConnect(peerIP, "Signature Bad time.", "Signature Bad time.");
-                    return;
-                }
-
-                if (!Globals.Signatures.TryAdd(signature, Now))
-                {
-                    EndOnConnect(peerIP, "Reused signature.", "Reused signature.");
-                    return;
-                }
-
-                var fortisPool = Globals.FortisPool.Values;
-                if (string.IsNullOrWhiteSpace(address) || string.IsNullOrWhiteSpace(signature))
+                // Validate required fields first
+                if (string.IsNullOrWhiteSpace(address) || 
+                    string.IsNullOrWhiteSpace(time) ||
+                    string.IsNullOrWhiteSpace(signature))
                 {
                     EndOnConnect(peerIP,
-                        "Connection Attempted, but missing field(s). Address, and Signature required. You are being disconnected.",
-                        "Connected, but missing field(s). Address, and Signature required: " + address);
+                        "Connection Attempted, but missing required field(s). Address, Time, and Signature required. You are being disconnected.",
+                        "Connected, but missing required field(s). Address, Time, and Signature required: " + address);
+                    return;
+                }
+
+                // Safe time parsing to prevent DoS
+                if (!long.TryParse(time, out var timeValue))
+                {
+                    EndOnConnect(peerIP, "Invalid timestamp format.", "Invalid timestamp format from: " + peerIP);
+                    return;
+                }
+
+                var now = TimeUtil.GetTime();
+                
+                // Keep the stricter 15-second window for consensus operations
+                if (Math.Abs(now - timeValue) > 15)
+                {
+                    EndOnConnect(peerIP, "Timestamp outside acceptable window.", "Timestamp outside acceptable window from: " + peerIP);
+                    return;
+                }
+
+                if (!Globals.Signatures.TryAdd(signature, now))
+                {
+                    EndOnConnect(peerIP, "Reused signature.", "Reused signature.");
                     return;
                 }
 

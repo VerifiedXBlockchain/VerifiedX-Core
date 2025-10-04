@@ -21,6 +21,7 @@ using System.Xml.Linq;
 using System.Net;
 using System.Reflection.Metadata.Ecma335;
 using Microsoft.AspNetCore.Http.Connections;
+using System.Security.Cryptography;
 
 namespace ReserveBlockCore.P2P
 {
@@ -29,6 +30,23 @@ namespace ReserveBlockCore.P2P
         #region HubConnection Variables        
 
         private static long _MaxHeight = -1;
+
+        #endregion
+
+        #region Security Helper Methods
+
+        /// <summary>
+        /// Generate a cryptographically secure nonce for replay attack prevention
+        /// </summary>
+        private static string GenerateSecureNonce()
+        {
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                var bytes = new byte[16]; // 128-bit nonce
+                rng.GetBytes(bytes);
+                return Convert.ToBase64String(bytes);
+            }
+        }
 
         #endregion
 
@@ -167,7 +185,8 @@ namespace ReserveBlockCore.P2P
                     return;
 
                 var time = TimeUtil.GetTime().ToString();
-                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+                var nonce = GenerateSecureNonce();
+                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey + ":" + nonce);
 
                 var hubConnection = new HubConnectionBuilder()
                     .WithUrl(url, options =>
@@ -178,6 +197,7 @@ namespace ReserveBlockCore.P2P
                         options.Headers.Add("signature", signature);
                         options.Headers.Add("walver", Globals.CLIVersion);
                         options.Headers.Add("publicKey", account.PublicKey);
+                        options.Headers.Add("nonce", nonce);
                         // Try both WebSockets and LongPolling
                         options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
                         options.SkipNegotiation = false;
@@ -456,7 +476,8 @@ namespace ReserveBlockCore.P2P
                     return;
 
                 var time = TimeUtil.GetTime().ToString();
-                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+                var nonce = GenerateSecureNonce();
+                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey + ":" + nonce);
 
                 var hubConnection = new HubConnectionBuilder()
                     .WithUrl(url, options =>
@@ -467,6 +488,7 @@ namespace ReserveBlockCore.P2P
                         options.Headers.Add("signature", signature);
                         options.Headers.Add("walver", Globals.CLIVersion);
                         options.Headers.Add("publicKey", account.PublicKey);
+                        options.Headers.Add("nonce", nonce);
                         options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
                         options.SkipNegotiation = false;
                         options.WebSocketConfiguration = conf => {
