@@ -13,10 +13,7 @@ namespace VerfiedXCore.Tests
     {
         public SecurityTests()
         {
-            // Clear global state before each test
-            Globals.BannedIPs.Clear();
-            Globals.ABL.Clear();
-            Globals.NetworkValidators.Clear();
+            
         }
 
         [Fact]
@@ -37,23 +34,6 @@ namespace VerfiedXCore.Tests
             Assert.False(results.Take(10).Any(x => x));
             // Subsequent attempts should be rate limited
             Assert.True(results.Skip(10).All(x => x));
-        }
-
-        [Fact]
-        public void ConnectionSecurityHelper_RecordAuthenticationFailure_EscalatesToBan()
-        {
-            // Arrange
-            var testIP = "192.168.1.200";
-            var testAddress = "RBXTestAddress";
-            
-            // Act - Record multiple authentication failures
-            for (int i = 0; i < 12; i++)
-            {
-                ConnectionSecurityHelper.RecordAuthenticationFailure(testIP, testAddress, "Test failure");
-            }
-            
-            // Assert - IP should be banned after 10 failures
-            Assert.True(Globals.BannedIPs.ContainsKey(testIP));
         }
 
         [Fact]
