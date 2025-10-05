@@ -4,7 +4,7 @@ using ReserveBlockCore;
 
 namespace VerfiedXCore.Tests
 {
-    public class HAL17TimeoutConfigurationTests
+    public class TimeoutConfigurationTests
     {
         [Fact]
         public void Config_Should_Have_Default_Timeout_Values()

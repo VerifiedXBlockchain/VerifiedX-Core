@@ -383,6 +383,19 @@ namespace ReserveBlockCore.P2P
         {
             try
             {
+                // HAL-18 Fix: Validate caller is an authenticated validator
+                var callerIP = GetIP(Context);
+                var authenticatedValidator = Globals.NetworkValidators.Values
+                    .FirstOrDefault(v => v.IPAddress == callerIP.Replace("::ffff:", ""));
+                
+                if (authenticatedValidator == null)
+                {
+                    ErrorLogUtility.LogError($"HAL-18 Security: Unauthorized block submission attempt from {callerIP}", 
+                        "P2PValidatorServer.ReceiveBlockVal()");
+                    BanService.BanPeer(callerIP, "Unauthorized block submission", "ReceiveBlockVal");
+                    return false;
+                }
+
                 //Casters get blocks from elsewhere.
                 if (Globals.IsBlockCaster)
                     return true;
