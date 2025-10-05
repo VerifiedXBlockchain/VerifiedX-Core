@@ -251,6 +251,10 @@ namespace ReserveBlockCore
         public static int BlockProcessingDelayMs = 2000;
         public static int NetworkOperationTimeoutMs = 1000;
         
+        // HAL-19 Fix: DoS protection settings for block validation
+        public static int MaxBlockSizeBytes = 10485760; // 10MB default
+        public static int BlockValidationTimeoutMs = 5000;
+        
         public static CancellationToken CancelledToken;
 
         public static ConcurrentDictionary<string, long> MemBlocks = new ConcurrentDictionary<string, long>();

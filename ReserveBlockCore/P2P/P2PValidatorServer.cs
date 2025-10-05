@@ -383,53 +383,69 @@ namespace ReserveBlockCore.P2P
         {
             try
             {
-                // HAL-18 Fix: Validate caller is an authenticated validator
-                var callerIP = GetIP(Context);
-                var authenticatedValidator = Globals.NetworkValidators.Values
-                    .FirstOrDefault(v => v.IPAddress == callerIP.Replace("::ffff:", ""));
-                
-                if (authenticatedValidator == null)
+                // HAL-19 Fix: Add SignalRQueue protection with block size-based cost calculation
+                return await SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, async () =>
                 {
-                    ErrorLogUtility.LogError($"HAL-18 Security: Unauthorized block submission attempt from {callerIP}", 
-                        "P2PValidatorServer.ReceiveBlockVal()");
-                    BanService.BanPeer(callerIP, "Unauthorized block submission", "ReceiveBlockVal");
-                    return false;
-                }
-
-                //Casters get blocks from elsewhere.
-                if (Globals.IsBlockCaster)
-                    return true;
-
-                if (nextBlock.ChainRefId == BlockchainData.ChainRef)
-                {
-                    var IP = GetIP(Context);
-                    var nextHeight = Globals.LastBlock.Height + 1;
-                    var currentHeight = nextBlock.Height;
-
-                    if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                    // HAL-18 Fix: Validate caller is an authenticated validator
+                    var callerIP = GetIP(Context);
+                    var authenticatedValidator = Globals.NetworkValidators.Values
+                        .FirstOrDefault(v => v.IPAddress == callerIP.Replace("::ffff:", ""));
+                    
+                    if (authenticatedValidator == null)
                     {
-                        // HAL-17 Fix: Use configurable delay instead of hardcoded value
-                        await Task.Delay(Globals.BlockProcessingDelayMs);
-
-                        if(Globals.LastBlock.Height < nextBlock.Height)
-                            await BlockValidatorService.ValidateBlocks();
-
-                        if (nextHeight == currentHeight)
-                        {
-                            string data = "";
-                            data = JsonConvert.SerializeObject(nextBlock);
-                            await Clients.All.SendAsync("GetMessage", "blk", data);
-                        }
-
-                        if (nextHeight < currentHeight)
-                            await BlockDownloadService.GetAllBlocks();
-
-                        return true;
+                        ErrorLogUtility.LogError($"HAL-18 Security: Unauthorized block submission attempt from {callerIP}", 
+                            "P2PValidatorServer.ReceiveBlockVal()");
+                        BanService.BanPeer(callerIP, "Unauthorized block submission", "ReceiveBlockVal");
+                        return false;
                     }
-                }
 
-                return false;
-                //});
+                    // HAL-19 Fix: Early block size validation to prevent DoS
+                    if (nextBlock != null)
+                    {
+                        var sizeValidation = InputValidationHelper.ValidateBlockSize(nextBlock, callerIP);
+                        if (!sizeValidation.IsValid)
+                        {
+                            ErrorLogUtility.LogError($"HAL-19 Security: Block size validation failed from {callerIP}: {sizeValidation.ErrorMessage}", 
+                                "P2PValidatorServer.ReceiveBlockVal()");
+                            BanService.BanPeer(callerIP, "Oversized block submission", "ReceiveBlockVal");
+                            return false;
+                        }
+                    }
+
+                    //Casters get blocks from elsewhere.
+                    if (Globals.IsBlockCaster)
+                        return true;
+
+                    if (nextBlock.ChainRefId == BlockchainData.ChainRef)
+                    {
+                        var IP = GetIP(Context);
+                        var nextHeight = Globals.LastBlock.Height + 1;
+                        var currentHeight = nextBlock.Height;
+
+                        if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                        {
+                            // HAL-17 Fix: Use configurable delay instead of hardcoded value
+                            await Task.Delay(Globals.BlockProcessingDelayMs);
+
+                            if(Globals.LastBlock.Height < nextBlock.Height)
+                                await BlockValidatorService.ValidateBlocks();
+
+                            if (nextHeight == currentHeight)
+                            {
+                                string data = "";
+                                data = JsonConvert.SerializeObject(nextBlock);
+                                await Clients.All.SendAsync("GetMessage", "blk", data);
+                            }
+
+                            if (nextHeight < currentHeight)
+                                await BlockDownloadService.GetAllBlocks();
+
+                            return true;
+                        }
+                    }
+
+                    return false;
+                });
             }
             catch { }
 

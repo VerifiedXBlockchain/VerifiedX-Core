@@ -128,7 +128,65 @@ namespace ReserveBlockCore.Utilities
         #region NetworkValidator Validation
 
         /// <summary>
-        /// Validates a NetworkValidator object
+        /// Limits validator list to maximum broadcast size to prevent memory exhaustion
+        /// </summary>
+        public static List<NetworkValidator> LimitValidatorListForBroadcast(List<NetworkValidator> validators)
+        {
+            const int maxValidators = 2000; // Reasonable limit for broadcast
+            
+            if (validators?.Count > maxValidators)
+            {
+                return validators.Take(maxValidators).ToList();
+            }
+            
+            return validators ?? new List<NetworkValidator>();
+        }
+
+        /// <summary>
+        /// HAL-19 Fix: Validates block size for DoS protection
+        /// </summary>
+        public static (bool IsValid, string ErrorMessage) ValidateBlockSize(Block block, string sourceIP = "unknown")
+        {
+            try
+            {
+                if (block == null)
+                {
+                    return (false, "Block is null");
+                }
+
+                // Check if block size exceeds configured maximum
+                if (block.Size > Globals.MaxBlockSizeBytes)
+                {
+                    var errorMsg = $"Block size {block.Size} bytes exceeds maximum allowed {Globals.MaxBlockSizeBytes} bytes";
+                    ErrorLogUtility.LogError($"HAL-19 Security: {errorMsg} from {sourceIP}", "InputValidationHelper.ValidateBlockSize()");
+                    return (false, errorMsg);
+                }
+
+                // Additional sanity checks
+                if (block.Size < 0)
+                {
+                    return (false, "Block size cannot be negative");
+                }
+
+                // Check for reasonable minimum size (at least basic block structure)
+                const int minBlockSize = 100; // Basic block header should be at least this size
+                if (block.Size < minBlockSize)
+                {
+                    return (false, $"Block size {block.Size} is suspiciously small (minimum: {minBlockSize} bytes)");
+                }
+
+                return (true, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                var errorMsg = $"Exception during block size validation: {ex.Message}";
+                ErrorLogUtility.LogError($"HAL-19 Security: {errorMsg} from {sourceIP}", "InputValidationHelper.ValidateBlockSize()");
+                return (false, errorMsg);
+            }
+        }
+
+        /// <summary>
+        /// Validates a single NetworkValidator object
         /// </summary>
         public static NetworkValidatorValidationResult ValidateNetworkValidator(NetworkValidator validator)
         {
@@ -318,9 +376,9 @@ namespace ReserveBlockCore.Utilities
         }
 
         /// <summary>
-        /// Limits and prioritizes validator list for broadcasting
+        /// Limits and prioritizes validator list for broadcasting with advanced sorting
         /// </summary>
-        public static List<NetworkValidator> LimitValidatorListForBroadcast(List<NetworkValidator> validators)
+        public static List<NetworkValidator> LimitAndPrioritizeValidatorListAdvanced(List<NetworkValidator> validators)
         {
             if (validators == null || validators.Count <= MAX_VALIDATOR_BROADCAST_SIZE)
                 return validators ?? new List<NetworkValidator>();

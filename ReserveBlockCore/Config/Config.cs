@@ -60,6 +60,10 @@ namespace ReserveBlockCore.Config
         public int SignalRLongTimeoutMs { get; set; }
         public int BlockProcessingDelayMs { get; set; }
         public int NetworkOperationTimeoutMs { get; set; }
+        
+        // HAL-19 Fix: DoS protection settings for block validation
+        public int MaxBlockSizeBytes { get; set; }
+        public int BlockValidationTimeoutMs { get; set; }
 
         public static Config ReadConfigFile()
         {
@@ -135,6 +139,10 @@ namespace ReserveBlockCore.Config
                 config.SignalRLongTimeoutMs = dict.ContainsKey("SignalRLongTimeoutMs") ? Convert.ToInt32(dict["SignalRLongTimeoutMs"]) : 6000;
                 config.BlockProcessingDelayMs = dict.ContainsKey("BlockProcessingDelayMs") ? Convert.ToInt32(dict["BlockProcessingDelayMs"]) : 2000;
                 config.NetworkOperationTimeoutMs = dict.ContainsKey("NetworkOperationTimeoutMs") ? Convert.ToInt32(dict["NetworkOperationTimeoutMs"]) : 1000;
+
+                // HAL-19 Fix: Load DoS protection configuration with secure defaults
+                config.MaxBlockSizeBytes = dict.ContainsKey("MaxBlockSizeBytes") ? Convert.ToInt32(dict["MaxBlockSizeBytes"]) : 10485760; // 10MB default
+                config.BlockValidationTimeoutMs = dict.ContainsKey("BlockValidationTimeoutMs") ? Convert.ToInt32(dict["BlockValidationTimeoutMs"]) : 5000;
 
                 var rejExtList = new List<string> { ".exe", ".pif", ".application", ".gadget", ".msi", ".msp", ".com", ".scr", ".hta",
 					".cpl", ".msc", ".jar", ".bat", ".cmd", ".vb", ".vbs", ".vbe", ".js", ".jse", ".ws", ".wsf" , ".wsc", ".wsh", ".ps1",
@@ -514,6 +522,10 @@ namespace ReserveBlockCore.Config
 		Globals.SignalRLongTimeoutMs = config.SignalRLongTimeoutMs;
 		Globals.BlockProcessingDelayMs = config.BlockProcessingDelayMs;
 		Globals.NetworkOperationTimeoutMs = config.NetworkOperationTimeoutMs;
+		
+		// HAL-19 Fix: Process DoS protection configuration
+		Globals.MaxBlockSizeBytes = config.MaxBlockSizeBytes;
+		Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
 		
         }
         public static void ProcessABL()
