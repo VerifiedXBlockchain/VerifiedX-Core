@@ -208,8 +208,12 @@ namespace ReserveBlockCore.P2P
                 ConnectionSecurityHelper.ClearConnectionHistory(peerIP);
 
                 _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
-                _ = Clients.Caller.SendAsync("GetValMessage", "1", peerIP, new CancellationTokenSource(2000).Token);
-                _ = Clients.All.SendAsync("GetValMessage", "3", netValSerialize, new CancellationTokenSource(6000).Token);
+                
+                // HAL-16 Fix: Replace fire-and-forget calls with reliable sender
+                Clients.Caller.SendToCallerReliable("GetValMessage", new object[] { "1", peerIP }, 
+                    "OnConnectedAsync", peerIP, 2000, false);
+                Clients.SendToAllReliable("GetValMessage", new object[] { "3", netValSerialize }, 
+                    "OnConnectedAsync", 6000, false);
 
             }
             catch (Exception ex)
@@ -482,14 +486,18 @@ namespace ReserveBlockCore.P2P
                             if (!Globals.BlockQueueBroadcasted.TryGetValue(nextBlock.Height, out var lastBroadcast))
                             {
                                 Globals.BlockQueueBroadcasted.TryAdd(nextBlock.Height, DateTime.UtcNow);
-                                _ = Clients.All.SendAsync("GetValMessage", "6", blockJson);
+                                // HAL-16 Fix: Replace fire-and-forget call with reliable sender
+                                Clients.SendToAllReliable("GetValMessage", new object[] { "6", blockJson }, 
+                                    "ReceiveQueueBlockVal", 6000, false);
                             }
                             else
                             {
                                 if (DateTime.UtcNow.AddSeconds(30) > lastBroadcast)
                                 {
                                     Globals.BlockQueueBroadcasted[nextBlock.Height] = DateTime.UtcNow;
-                                    _ = Clients.All.SendAsync("GetValMessage", "6", blockJson);
+                                    // HAL-16 Fix: Replace fire-and-forget call with reliable sender
+                                    Clients.SendToAllReliable("GetValMessage", new object[] { "6", blockJson }, 
+                                        "ReceiveQueueBlockVal", 6000, false);
                                 }
                             }
                         }

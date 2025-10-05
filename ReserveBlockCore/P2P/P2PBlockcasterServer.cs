@@ -181,8 +181,12 @@ namespace ReserveBlockCore.P2P
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
 
                 _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
-                _ = Clients.Caller.SendAsync("GetCasterMessage", "1", peerIP, new CancellationTokenSource(2000).Token);
-                _ = Clients.All.SendAsync("GetCasterMessage", "3", netValSerialize, new CancellationTokenSource(6000).Token);
+                
+                // HAL-16 Fix: Replace fire-and-forget calls with reliable sender
+                Clients.Caller.SendToCallerReliable("GetCasterMessage", new object[] { "1", peerIP }, 
+                    "OnConnectedAsync", peerIP, 2000, false);
+                Clients.SendToAllReliable("GetCasterMessage", new object[] { "3", netValSerialize }, 
+                    "OnConnectedAsync", 6000, false);
 
             }
             catch (Exception ex)
