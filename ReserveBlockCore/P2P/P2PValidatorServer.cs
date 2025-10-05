@@ -210,10 +210,11 @@ namespace ReserveBlockCore.P2P
                 _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
                 
                 // HAL-16 Fix: Replace fire-and-forget calls with reliable sender
+                // HAL-17 Fix: Use configurable timeouts instead of hardcoded values
                 Clients.Caller.SendToCallerReliable("GetValMessage", new object[] { "1", peerIP }, 
-                    "OnConnectedAsync", peerIP, 2000, false);
+                    "OnConnectedAsync", peerIP, Globals.SignalRShortTimeoutMs, false);
                 Clients.SendToAllReliable("GetValMessage", new object[] { "3", netValSerialize }, 
-                    "OnConnectedAsync", 6000, false);
+                    "OnConnectedAsync", Globals.SignalRLongTimeoutMs, false);
 
             }
             catch (Exception ex)
@@ -235,7 +236,8 @@ namespace ReserveBlockCore.P2P
         }
         private async Task SendValMessageSingle(string message, string data)
         {
-            await Clients.Caller.SendAsync("GetValMessage", message, data, new CancellationTokenSource(1000).Token);
+            // HAL-17 Fix: Use configurable timeout instead of hardcoded value
+            await Clients.Caller.SendAsync("GetValMessage", message, data, new CancellationTokenSource(Globals.NetworkOperationTimeoutMs).Token);
         }
         #endregion
 
@@ -393,7 +395,8 @@ namespace ReserveBlockCore.P2P
 
                     if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
                     {
-                        await Task.Delay(2000);
+                        // HAL-17 Fix: Use configurable delay instead of hardcoded value
+                        await Task.Delay(Globals.BlockProcessingDelayMs);
 
                         if(Globals.LastBlock.Height < nextBlock.Height)
                             await BlockValidatorService.ValidateBlocks();
@@ -487,8 +490,9 @@ namespace ReserveBlockCore.P2P
                             {
                                 Globals.BlockQueueBroadcasted.TryAdd(nextBlock.Height, DateTime.UtcNow);
                                 // HAL-16 Fix: Replace fire-and-forget call with reliable sender
+                                // HAL-17 Fix: Use configurable timeout instead of hardcoded value
                                 Clients.SendToAllReliable("GetValMessage", new object[] { "6", blockJson }, 
-                                    "ReceiveQueueBlockVal", 6000, false);
+                                    "ReceiveQueueBlockVal", Globals.SignalRLongTimeoutMs, false);
                             }
                             else
                             {
@@ -496,8 +500,9 @@ namespace ReserveBlockCore.P2P
                                 {
                                     Globals.BlockQueueBroadcasted[nextBlock.Height] = DateTime.UtcNow;
                                     // HAL-16 Fix: Replace fire-and-forget call with reliable sender
+                                    // HAL-17 Fix: Use configurable timeout instead of hardcoded value
                                     Clients.SendToAllReliable("GetValMessage", new object[] { "6", blockJson }, 
-                                        "ReceiveQueueBlockVal", 6000, false);
+                                        "ReceiveQueueBlockVal", Globals.SignalRLongTimeoutMs, false);
                                 }
                             }
                         }

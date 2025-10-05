@@ -68,6 +68,18 @@ namespace ReserveBlockCore
             await httpClientBuilder.StartAsync();
             Globals.HttpClientFactory = httpClientBuilder.Services.GetRequiredService<HttpService>().HttpClientFactory();
 
+            if (argList.Count() > 0)
+            {
+                argList.ForEach(x =>
+                {
+                    var argC = x.ToLower();
+                    if (argC == "testnet")
+                    {
+                        //Launch testnet
+                        Globals.IsTestNet = true;
+                    }
+                });
+            }
             //Forced Testnet
             Globals.IsTestNet = true;
             Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.

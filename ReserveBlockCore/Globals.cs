@@ -245,6 +245,12 @@ namespace ReserveBlockCore
         public static bool IsArbiter = false;
         public static bool IsBlockCaster = false;
         
+        // HAL-17 Fix: Configurable timeout values
+        public static int SignalRShortTimeoutMs = 2000;
+        public static int SignalRLongTimeoutMs = 6000;
+        public static int BlockProcessingDelayMs = 2000;
+        public static int NetworkOperationTimeoutMs = 1000;
+        
         public static CancellationToken CancelledToken;
 
         public static ConcurrentDictionary<string, long> MemBlocks = new ConcurrentDictionary<string, long>();
