@@ -1,5 +1,8 @@
 using System.Text.RegularExpressions;
+using System.Collections.Concurrent;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Data;
+using ReserveBlockCore.Services;
 
 namespace ReserveBlockCore.Utilities
 {
@@ -25,6 +28,19 @@ namespace ReserveBlockCore.Utilities
         // Collection limits
         public const int MAX_VALIDATOR_LIST_SIZE = 2000;
         public const int MAX_VALIDATOR_BROADCAST_SIZE = 2000;
+        
+        // HAL-20 Fix: Block validation configuration
+        public const int MAX_TIMESTAMP_DRIFT_SECONDS = 300; // 5 minutes
+        public const int RECENT_BLOCKS_CACHE_RETENTION_SECONDS = 600; // 10 minutes
+        
+        #endregion
+
+        #region HAL-20 Fix: Recently Seen Blocks Cache
+        
+        // Cache for recently seen blocks to prevent duplicate processing
+        private static readonly ConcurrentDictionary<string, long> _recentlySeenBlocks = new ConcurrentDictionary<string, long>();
+        private static readonly object _cacheCleanupLock = new object();
+        private static DateTime _lastCacheCleanup = DateTime.UtcNow;
         
         #endregion
 
@@ -121,6 +137,177 @@ namespace ReserveBlockCore.Utilities
 
             result.Errors = errors;
             return result;
+        }
+
+        #endregion
+
+        #region Block Header Validation (HAL-20 Fix)
+
+        /// <summary>
+        /// HAL-20 Fix: Fast pre-validation of block headers to prevent DoS attacks
+        /// Validates version, timestamp drift, parent hash existence, and duplicate detection
+        /// </summary>
+        public static BlockHeaderValidationResult ValidateBlockHeaders(Block block, string sourceIP = "unknown")
+        {
+            var result = new BlockHeaderValidationResult { IsValid = true };
+
+            try
+            {
+                if (block == null)
+                {
+                    result.IsValid = false;
+                    result.ErrorMessage = "Block is null";
+                    return result;
+                }
+
+                // 1. Version validation
+                var expectedVersion = BlockVersionUtility.GetBlockVersion(block.Height);
+                if (block.Version != expectedVersion)
+                {
+                    result.IsValid = false;
+                    result.ErrorMessage = $"Invalid block version {block.Version}, expected {expectedVersion}";
+                    ErrorLogUtility.LogError($"HAL-20 Security: {result.ErrorMessage} from {sourceIP}", "InputValidationHelper.ValidateBlockHeaders()");
+                    return result;
+                }
+
+                // 2. Timestamp drift validation
+                var currentTime = TimeUtil.GetTime();
+                var timeDrift = Math.Abs(currentTime - block.Timestamp);
+                
+                if (timeDrift > MAX_TIMESTAMP_DRIFT_SECONDS)
+                {
+                    result.IsValid = false;
+                    result.ErrorMessage = $"Block timestamp drift {timeDrift}s exceeds maximum allowed {MAX_TIMESTAMP_DRIFT_SECONDS}s";
+                    ErrorLogUtility.LogError($"HAL-20 Security: {result.ErrorMessage} from {sourceIP}", "InputValidationHelper.ValidateBlockHeaders()");
+                    return result;
+                }
+
+                // 3. Parent hash existence validation
+                if (!ValidateParentHashExists(block))
+                {
+                    result.IsValid = false;
+                    result.ErrorMessage = "Parent hash does not exist in blockchain or block queue";
+                    ErrorLogUtility.LogError($"HAL-20 Security: {result.ErrorMessage} from {sourceIP}", "InputValidationHelper.ValidateBlockHeaders()");
+                    return result;
+                }
+
+                // 4. Duplicate block detection
+                if (IsRecentlySeenBlock(block.Hash))
+                {
+                    result.IsValid = false;
+                    result.IsDuplicate = true;
+                    result.ErrorMessage = "Block already processed recently";
+                    ErrorLogUtility.LogError($"HAL-20 Security: {result.ErrorMessage} from {sourceIP}", "InputValidationHelper.ValidateBlockHeaders()");
+                    return result;
+                }
+
+                // Add to recently seen cache only if valid
+                AddToRecentlySeenBlocks(block.Hash);
+
+                // Cleanup old cache entries periodically
+                CleanupRecentlySeenBlocksCache();
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                var errorMsg = $"Exception during block header validation: {ex.Message}";
+                ErrorLogUtility.LogError($"HAL-20 Security: {errorMsg} from {sourceIP}", "InputValidationHelper.ValidateBlockHeaders()");
+                result.IsValid = false;
+                result.ErrorMessage = errorMsg;
+                return result;
+            }
+        }
+
+        /// <summary>
+        /// Validates that the parent hash exists in the blockchain or block queue
+        /// </summary>
+        private static bool ValidateParentHashExists(Block block)
+        {
+            try
+            {
+                if (block.Height == 0)
+                {
+                    // Genesis block - no parent required
+                    return true;
+                }
+
+                var expectedPrevHeight = block.Height - 1;
+
+                // Check if parent exists in the main chain
+                if (Globals.LastBlock.Height >= expectedPrevHeight)
+                {
+                    var parentBlock = BlockchainData.GetBlockByHeight(expectedPrevHeight);
+                    if (parentBlock != null && parentBlock.Hash == block.PrevHash)
+                    {
+                        return true;
+                    }
+                }
+
+                // Check if parent exists in the network block queue
+                if (Globals.NetworkBlockQueue.TryGetValue(expectedPrevHeight, out var queuedParent))
+                {
+                    if (queuedParent.Hash == block.PrevHash)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Checks if a block hash has been seen recently
+        /// </summary>
+        private static bool IsRecentlySeenBlock(string blockHash)
+        {
+            if (string.IsNullOrWhiteSpace(blockHash))
+                return false;
+
+            return _recentlySeenBlocks.ContainsKey(blockHash);
+        }
+
+        /// <summary>
+        /// Adds a block hash to the recently seen cache
+        /// </summary>
+        private static void AddToRecentlySeenBlocks(string blockHash)
+        {
+            if (string.IsNullOrWhiteSpace(blockHash))
+                return;
+
+            var currentTime = TimeUtil.GetTime();
+            _recentlySeenBlocks.TryAdd(blockHash, currentTime);
+        }
+
+        /// <summary>
+        /// Periodically cleans up expired entries from the recently seen blocks cache
+        /// </summary>
+        private static void CleanupRecentlySeenBlocksCache()
+        {
+            // Only cleanup every 60 seconds to avoid performance impact
+            lock (_cacheCleanupLock)
+            {
+                if ((DateTime.UtcNow - _lastCacheCleanup).TotalSeconds < 60)
+                    return;
+
+                _lastCacheCleanup = DateTime.UtcNow;
+            }
+
+            var currentTime = TimeUtil.GetTime();
+            var expiredKeys = _recentlySeenBlocks
+                .Where(kvp => currentTime - kvp.Value > RECENT_BLOCKS_CACHE_RETENTION_SECONDS)
+                .Select(kvp => kvp.Key)
+                .ToList();
+
+            foreach (var key in expiredKeys)
+            {
+                _recentlySeenBlocks.TryRemove(key, out _);
+            }
         }
 
         #endregion
@@ -419,6 +606,13 @@ namespace ReserveBlockCore.Utilities
             public List<string> Errors { get; set; } = new List<string>();
             public bool ShouldTruncate { get; set; }
             public List<NetworkValidator> TruncatedList { get; set; } = new List<NetworkValidator>();
+        }
+
+        public class BlockHeaderValidationResult
+        {
+            public bool IsValid { get; set; }
+            public string ErrorMessage { get; set; } = string.Empty;
+            public bool IsDuplicate { get; set; }
         }
 
         #endregion

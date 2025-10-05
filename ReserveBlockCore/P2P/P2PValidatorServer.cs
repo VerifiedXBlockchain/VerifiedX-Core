@@ -410,6 +410,27 @@ namespace ReserveBlockCore.P2P
                             BanService.BanPeer(callerIP, "Oversized block submission", "ReceiveBlockVal");
                             return false;
                         }
+
+                        // HAL-20 Fix: Fast pre-validation of block headers to prevent DoS attacks
+                        var headerValidation = InputValidationHelper.ValidateBlockHeaders(nextBlock, callerIP);
+                        if (!headerValidation.IsValid)
+                        {
+                            ErrorLogUtility.LogError($"HAL-20 Security: Block header validation failed from {callerIP}: {headerValidation.ErrorMessage}", 
+                                "P2PValidatorServer.ReceiveBlockVal()");
+                            
+                            // For duplicate blocks, use lighter penalty
+                            if (headerValidation.IsDuplicate)
+                            {
+                                // Just log and return false for duplicates - no need to ban
+                                return false;
+                            }
+                            else
+                            {
+                                // Ban for other validation failures (invalid version, timestamp, parent hash)
+                                BanService.BanPeer(callerIP, "Invalid block header", "ReceiveBlockVal");
+                                return false;
+                            }
+                        }
                     }
 
                     //Casters get blocks from elsewhere.
