@@ -152,34 +152,37 @@ namespace ReserveBlockCore.P2P
                 if (!ValidateAddressPublicKeyBinding(address, publicKey))
                 {
                     _ = EndOnConnect(peerIP,
-                        "Address and public key do not match. You are being disconnected.",
+                        "Authentication failed. You are being disconnected.",
                         "Address-PublicKey mismatch from: " + peerIP);
                     return;
                 }
+
+                // HAL-039 Fix: Verify signature BEFORE expensive database operations
+                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
+                if (!verifySig)
+                {
+                    ConnectionSecurityHelper.RecordAuthenticationFailure(peerIP, address, "Signature verification failed");
+                    _ = EndOnConnect(peerIP,
+                        "Authentication failed. You are being disconnected.",
+                        "Signature verification failed from: " + peerIP);
+                    return;
+                }
+
+                // HAL-039 Fix: Only perform expensive database lookups AFTER authentication
                 var stateAddress = StateData.GetSpecificAccountStateTrei(address);
                 if (stateAddress == null)
                 {
                     _ = EndOnConnect(peerIP,
-                        "Connection Attempted, But failed to find the address in trie. You are being disconnected.",
-                        "Connection Attempted, but missing field Address: " + address + " IP: " + peerIP);
+                        "Authentication failed. You are being disconnected.",
+                        "Address not found in state trie: " + address + " IP: " + peerIP);
                     return;
                 }
 
                 if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
                 {
                     _ = EndOnConnect(peerIP,
-                        $"Connected, but you do not have the minimum balance of {ValidatorService.ValidatorRequiredAmount()} VFX. You are being disconnected.",
-                        $"Connected, but you do not have the minimum balance of {ValidatorService.ValidatorRequiredAmount()} VFX: " + address);
-                    return;
-                }
-
-                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
-                if (!verifySig)
-                {
-                    ConnectionSecurityHelper.RecordAuthenticationFailure(peerIP, address, "Signature verification failed");
-                    _ = EndOnConnect(peerIP,
-                        "Connected, but your address signature failed to verify. You are being disconnected.",
-                        "Connected, but your address signature failed to verify with Val: " + address);
+                        "Authentication failed. You are being disconnected.",
+                        $"Insufficient balance for address: " + address);
                     return;
                 }
 

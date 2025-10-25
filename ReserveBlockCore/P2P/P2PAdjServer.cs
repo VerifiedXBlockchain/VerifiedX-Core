@@ -106,30 +106,32 @@ namespace ReserveBlockCore.P2P
                         "Invalid wallet version from: " + address);
                     return;
                 }
+
+                // HAL-039 Fix: Verify signature BEFORE expensive database operations
+                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
+                if(!verifySig)
+                {
+                    _ = EndOnConnect(peerIP, "V", startTime, conQueue,
+                        "Authentication failed. You are being disconnected.",
+                        "Signature verification failed from: " + peerIP);
+                    return;
+                }
                 
+                // HAL-039 Fix: Only perform expensive database lookups AFTER authentication
                 var stateAddress = StateData.GetSpecificAccountStateTrei(address);
                 if(stateAddress == null)
                 {
                     _ = EndOnConnect(peerIP, "X", startTime, conQueue,
-                        "Connection Attempted, But failed to find the address in trie. You are being disconnected.",
-                        "Connection Attempted, but missing field Address: " + address + " IP: " + peerIP);
+                        "Authentication failed. You are being disconnected.",
+                        "Address not found in state trie: " + address + " IP: " + peerIP);
                     return;                    
                 }
 
                 if(stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
                 {
                     _ = EndOnConnect(peerIP, "W", startTime, conQueue,
-                        $"Connected, but you do not have the minimum balance of {ValidatorService.ValidatorRequiredAmount()} VFX. You are being disconnected.",
-                        $"Connected, but you do not have the minimum balance of {ValidatorService.ValidatorRequiredAmount()} VFX: " + address);
-                    return;
-                }
-
-                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
-                if(!verifySig)
-                {
-                    _ = EndOnConnect(peerIP, "V", startTime, conQueue,
-                        "Connected, but your address signature failed to verify. You are being disconnected.",
-                        "Connected, but your address signature failed to verify with ADJ: " + address);
+                        "Authentication failed. You are being disconnected.",
+                        $"Insufficient balance for address: " + address);
                     return;
                 }
 
