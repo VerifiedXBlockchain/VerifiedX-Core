@@ -56,25 +56,36 @@ namespace ReserveBlockCore.P2P
                 var time = httpContext.Request.Headers["time"].ToString();
                 var signature = httpContext.Request.Headers["signature"].ToString();
 
-                var Now = TimeUtil.GetTime();
-                if (Math.Abs(Now - long.Parse(time)) > 15)
-                {
-                    EndOnConnect(peerIP, "Signature Bad time.", "Signature Bad time.");
-                    return;
-                }
-
-                if (!Globals.Signatures.TryAdd(signature, Now))
-                {
-                    EndOnConnect(peerIP, "Reused signature.", "Reused signature.");
-                    return;
-                }
-
-                var fortisPool = Globals.FortisPool.Values;
-                if (string.IsNullOrWhiteSpace(address) || string.IsNullOrWhiteSpace(signature))
+                // Validate required fields first
+                if (string.IsNullOrWhiteSpace(address) || 
+                    string.IsNullOrWhiteSpace(time) ||
+                    string.IsNullOrWhiteSpace(signature))
                 {
                     EndOnConnect(peerIP,
-                        "Connection Attempted, but missing field(s). Address, and Signature required. You are being disconnected.",
-                        "Connected, but missing field(s). Address, and Signature required: " + address);
+                        "Connection Attempted, but missing required field(s). Address, Time, and Signature required. You are being disconnected.",
+                        "Connected, but missing required field(s). Address, Time, and Signature required: " + address);
+                    return;
+                }
+
+                // Safe time parsing to prevent DoS
+                if (!long.TryParse(time, out var timeValue))
+                {
+                    EndOnConnect(peerIP, "Invalid timestamp format.", "Invalid timestamp format from: " + peerIP);
+                    return;
+                }
+
+                var now = TimeUtil.GetTime();
+                
+                // Keep the stricter 15-second window for consensus operations
+                if (Math.Abs(now - timeValue) > 15)
+                {
+                    EndOnConnect(peerIP, "Timestamp outside acceptable window.", "Timestamp outside acceptable window from: " + peerIP);
+                    return;
+                }
+
+                if (!Globals.Signatures.TryAdd(signature, now))
+                {
+                    EndOnConnect(peerIP, "Reused signature.", "Reused signature.");
                     return;
                 }
 
@@ -188,10 +199,56 @@ namespace ReserveBlockCore.P2P
 
             UpdateNode(node, height, methodCode, isFinalized);
 
-            UpdateConsensusDump(ip, "RequestMethodCode", height + " " + methodCode + " " + isFinalized, (Globals.LastBlock.Height).ToString() + ":" + ConsenusStateSingelton.MethodCode + ":" +
-                (ConsenusStateSingelton.Status == ConsensusStatus.Finalized ? 1 : 0));
-            return (Globals.LastBlock.Height).ToString() + ":" + ConsenusStateSingelton.MethodCode + ":" +
-                (ConsenusStateSingelton.Status == ConsensusStatus.Finalized ? 1 : 0);
+            // HAL-10 Fix: Create signed consensus coordination metadata
+            var consensusData = $"{Globals.LastBlock.Height}:{ConsenusStateSingelton.MethodCode}:{(ConsenusStateSingelton.Status == ConsensusStatus.Finalized ? 1 : 0)}";
+            var timestamp = TimeUtil.GetTime();
+            var nonce = GenerateSecureNonce();
+            
+            // Create message to sign: consensusData|timestamp|nonce for replay protection
+            var messageToSign = $"{consensusData}|{timestamp}|{nonce}";
+            
+            // Sign the coordination metadata using validator signature
+            var signature = "";
+            try 
+            {
+                if (Globals.AdjudicateAccount != null)
+                {
+                    signature = SignatureService.AdjudicatorSignature(messageToSign);
+                }
+                else if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    signature = SignatureService.ValidatorSignature(messageToSign);
+                }
+                else
+                {
+                    // Fallback: use a basic signature if no specific validator account
+                    signature = "unsigned";
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to sign consensus coordination data: {ex.Message}", "RequestMethodCode");
+                signature = "error";
+            }
+
+            // Format: consensusData|timestamp|nonce|signature
+            var signedResponse = $"{consensusData}|{timestamp}|{nonce}|{signature}";
+
+            UpdateConsensusDump(ip, "RequestMethodCode", height + " " + methodCode + " " + isFinalized, signedResponse);
+            return signedResponse;
+        }
+
+        /// <summary>
+        /// Generate a cryptographically secure nonce for replay attack prevention
+        /// </summary>
+        private static string GenerateSecureNonce()
+        {
+            using (var rng = System.Security.Cryptography.RandomNumberGenerator.Create())
+            {
+                var bytes = new byte[16]; // 128-bit nonce
+                rng.GetBytes(bytes);
+                return Convert.ToBase64String(bytes);
+            }
         }
 
         public string Message(long height, int methodCode, string[] addresses, string peerMessage)

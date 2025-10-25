@@ -49,7 +49,7 @@ namespace ReserveBlockCore.Services
                 }
                 catch (Exception)
                 {
-                    Console.WriteLine("Application Starting...");
+                    ConsoleWriterService.Output("Application Starting...");
                 }
             }
         }
@@ -124,8 +124,8 @@ namespace ReserveBlockCore.Services
             ValidatorService.ClearOldValidator();
         }
         internal static void StartupDatabase()
-        {                        
-            Console.WriteLine("Initializing Reserve Block Database...");
+        {
+            ConsoleWriterService.Output("Initializing Reserve Block Database...");
             DbContext.Initialize();
             var peerDb = Peers.GetAll();
             Globals.BannedIPs = new ConcurrentDictionary<string, Peers>(

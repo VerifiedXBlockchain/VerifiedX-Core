@@ -47,19 +47,54 @@ namespace ReserveBlockCore.P2P
 
         protected virtual void Dispose(bool disposing)
         {
-            if (disposing)
-            {
-                foreach(var node in Globals.Nodes.Values)
-                    if(node.Connection != null)
-                        node.Connection.DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();                
-            }
+            // All disposal logic has been moved to DisposeAsyncCore to avoid sync-over-async deadlocks.
+            // For proper resource cleanup, always prefer DisposeAsync() over Dispose().
         }
 
         protected virtual async ValueTask DisposeAsyncCore()
         {
+            const int timeoutSeconds = 30;
+            using var disposalCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var disposalTasks = new List<Task>();
+
             foreach (var node in Globals.Nodes.Values)
-                if(node.Connection != null)
-                    await node.Connection.DisposeAsync();
+            {
+                if (node.Connection != null)
+                {
+                    disposalTasks.Add(DisposeConsensusNodeConnectionSafely(node, disposalCts.Token));
+                }
+            }
+
+            if (disposalTasks.Count > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(disposalTasks).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Log timeout but continue - graceful degradation
+                    LogUtility.Log($"Consensus node disposal timed out after {timeoutSeconds} seconds, some connections may not be properly closed", "ConsensusClient.DisposeAsyncCore");
+                }
+                catch (Exception ex)
+                {
+                    // Log general errors but don't throw to ensure disposal completes
+                    ErrorLogUtility.LogError($"Error during consensus node disposal: {ex}", "ConsensusClient.DisposeAsyncCore");
+                }
+            }
+        }
+
+        private static async Task DisposeConsensusNodeConnectionSafely(NodeInfo node, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await node.Connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - continue disposing other nodes
+                ErrorLogUtility.LogError($"Error disposing consensus connection for node {node.NodeIP}: {ex.Message}", "ConsensusClient.DisposeConsensusNodeConnectionSafely");
+            }
         }
 
         #endregion

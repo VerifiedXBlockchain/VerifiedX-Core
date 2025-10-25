@@ -43,6 +43,7 @@ namespace ReserveBlockCore
             bool runSingleRequest = false;
             bool skipStateSync = false;
             bool startGUI = false;
+            bool headlessMode = false;
 
             var argList = args.ToList();
             //force culture info to US
@@ -67,6 +68,18 @@ namespace ReserveBlockCore
             await httpClientBuilder.StartAsync();
             Globals.HttpClientFactory = httpClientBuilder.Services.GetRequiredService<HttpService>().HttpClientFactory();
 
+            if (argList.Count() > 0)
+            {
+                argList.ForEach(x =>
+                {
+                    var argC = x.ToLower();
+                    if (argC == "testnet")
+                    {
+                        //Launch testnet
+                        Globals.IsTestNet = true;
+                    }
+                });
+            }
             //Forced Testnet
             Globals.IsTestNet = true;
             Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
@@ -104,7 +117,7 @@ namespace ReserveBlockCore
                         catch (Exception)
                         {
                             exit = true;
-                            Console.WriteLine("Application Starting...");
+                            ConsoleWriterService.Output("Application Starting...");
                         }
                     }
                     await Task.Delay(400);
@@ -136,6 +149,15 @@ namespace ReserveBlockCore
                 argList.ForEach(async x =>
                 {
                     var argC = x.ToLower();
+                    if(argC.Contains("headless"))
+                    {
+                        Console.WriteLine("Headless Mode - On");
+                        headlessMode = true;
+                        Globals.HeadlessMode = true;
+                        Globals.StopConsoleOutput = true;
+                        Globals.StopValConsoleOutput = true;
+                    }
+
                     if(argC.Contains("cFork"))
                     {
                         Globals.IsFork = true;
@@ -362,7 +384,7 @@ namespace ReserveBlockCore
                             var account = await AccountData.RestoreAccount(privateKey);
                             if (account != null)
                             {
-                                Console.WriteLine("Account Loaded: " + account.Address);
+                                ConsoleWriterService.Output("Account Loaded: " + account.Address);
 
                                 if (argList.Exists(x => x.ToLower() == "start-validator"))
                                 {
@@ -469,13 +491,21 @@ namespace ReserveBlockCore
             Globals.ConnectionHistoryTimer = new Timer(connectionHistoryTimer_Elapsed); // 1 sec = 1000, 60 sec = 60000
             Globals.ConnectionHistoryTimer.Change(90000, 3 * 10 * 6000); //waits 1.5 minute, then runs every 3 minutes
 
+            // HAL-11 Fix: Initialize validator registry cleanup timer
+            Globals.ValidatorRegistryCleanupTimer = new Timer(validatorRegistryCleanupTimer_Elapsed);
+            Globals.ValidatorRegistryCleanupTimer.Change(180000, 30 * 60 * 1000); //waits 3 minutes, then runs every 30 minutes
+
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL
             string url2 = "http://*:" + Globals.Port;
             //Consensus Port URL
 
-            var commandLoopTask = Task.Run(() => CommandLoop(url));
+            Task? commandLoopTask = null;
+            if (!headlessMode)
+            {
+                commandLoopTask = Task.Run(() => CommandLoop(url));
+            }
             var commandLoopTask2 = Task.Run(() => CommandLoop2(url2));
             var commandLoopTask3 = Task.Run(() => CommandLoop3());
 
@@ -668,10 +698,18 @@ namespace ReserveBlockCore
             await Task.Delay(1000);
 
             var tasks = new Task[] {
-                commandLoopTask, //CLI console
                 commandLoopTask2, //awaiting parameters
                 commandLoopTask3//Beacon client/server
             };
+
+            if (commandLoopTask != null)
+            {
+                tasks = new Task[] {
+                commandLoopTask,
+                commandLoopTask2, //awaiting parameters
+                commandLoopTask3//Beacon client/server
+            };
+            }
 
             try
             {
@@ -687,8 +725,10 @@ namespace ReserveBlockCore
 
             _ = ArbiterService.GetArbiterSigningAddress();
 
+            
             await Task.WhenAll(tasks);
 
+            await Task.Delay(-1);
             LogUtility.Log("Line Reached. Should not be reached Program.cs", "Program:Before Task.WaitAll(commandLoopTask, commandLoopTask2)");
 
         }
@@ -919,6 +959,37 @@ namespace ReserveBlockCore
             }
             catch { }
 
+        }
+
+        #endregion
+
+        #region Validator Registry Cleanup Timer (HAL-11 Fix)
+        private static async void validatorRegistryCleanupTimer_Elapsed(object sender)
+        {
+            try
+            {
+                if (Globals.StopAllTimers == false)
+                {
+                    // HAL-11 Fix: Cleanup stale pending validators
+                    NetworkValidator.CleanupStaleValidators();
+                    
+                    // Log registry status for monitoring
+                    var trustedValidators = Globals.NetworkValidators.Count;
+                    var pendingValidators = NetworkValidator.GetPendingValidators().Count;
+                    
+                    LogUtility.Log($"Validator Registry Status - Trusted: {trustedValidators}, Pending: {pendingValidators}", "ValidatorRegistryCleanup");
+                    
+                    // Optional: Alert if too many pending validators (potential attack)
+                    if (pendingValidators > 50)
+                    {
+                        ErrorLogUtility.LogError($"High number of pending validators detected: {pendingValidators}. Possible validator injection attack.", "ValidatorRegistryCleanup");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error during validator registry cleanup: {ex.Message}", "ValidatorRegistryCleanup");
+            }
         }
 
         #endregion

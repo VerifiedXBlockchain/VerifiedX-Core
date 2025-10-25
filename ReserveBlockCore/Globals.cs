@@ -47,7 +47,8 @@ namespace ReserveBlockCore
         public static string LeadAddress = "RBXpH37qVvNwzLjtcZiwEnb3aPNG815TUY";      
         public static Timer? ValidatorListTimer;//checks currents peers and old peers and will request others to try. 
         public static Timer? DBCommitTimer;//checks dbs and commits log files. 
-        public static Timer? ConnectionHistoryTimer;//process connections and history of them        
+        public static Timer? ConnectionHistoryTimer;//process connections and history of them
+        public static Timer? ValidatorRegistryCleanupTimer;//HAL-11 Fix: cleans up stale pending validators and reconciles registry
 
         #endregion
 
@@ -108,6 +109,7 @@ namespace ReserveBlockCore
         public const decimal DecShopUpdateRequiredRBX = 1.0M;
         public const decimal DecShopDeleteRequiredRBX = 1.0M; //0
         public const decimal RSRVAccountRegisterRBX = 4.0M;
+        public static bool HeadlessMode = false;
 
         public const int ADNRLimit = 65;
         public static int BlockLock = 1079488;
@@ -144,7 +146,7 @@ namespace ReserveBlockCore
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
         public static int MinorVer = 0;
-        public static int RevisionVer = 6;
+        public static int RevisionVer = 7;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
@@ -242,6 +244,16 @@ namespace ReserveBlockCore
         public static bool UseV2BlockDownload = false;
         public static bool IsArbiter = false;
         public static bool IsBlockCaster = false;
+        
+        // HAL-17 Fix: Configurable timeout values
+        public static int SignalRShortTimeoutMs = 2000;
+        public static int SignalRLongTimeoutMs = 6000;
+        public static int BlockProcessingDelayMs = 2000;
+        public static int NetworkOperationTimeoutMs = 1000;
+        
+        // HAL-19 Fix: DoS protection settings for block validation
+        public static int MaxBlockSizeBytes = 10485760; // 10MB default
+        public static int BlockValidationTimeoutMs = 5000;
         
         public static CancellationToken CancelledToken;
 
