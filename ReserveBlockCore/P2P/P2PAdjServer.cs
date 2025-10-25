@@ -277,7 +277,19 @@ namespace ReserveBlockCore.P2P
                         return taskAnsRes;
                     }
 
-                    var (Answer, Height) = (int.Parse(taskResult[0]), long.Parse(taskResult[1]));                                        
+                    // HAL-042 Fix: Use safe parsing with TryParse instead of Parse to prevent FormatException
+                    if (!int.TryParse(taskResult[0], out var Answer) || !long.TryParse(taskResult[1], out var Height))
+                    {
+                        taskAnsRes.AnswerCode = 5; // Invalid numeric format
+                        return taskAnsRes;
+                    }
+
+                    // Validate bounds: Answer should be non-negative, Height must be positive
+                    if (Answer < 0 || Height <= 0)
+                    {
+                        taskAnsRes.AnswerCode = 5; // Values out of acceptable range
+                        return taskAnsRes;
+                    }
 
                     //This will result in users not getting their answers chosen if they are not in list.
                     var fortisPool = Globals.FortisPool.Values;
