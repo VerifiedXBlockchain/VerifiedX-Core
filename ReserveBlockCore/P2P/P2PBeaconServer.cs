@@ -11,6 +11,9 @@ namespace ReserveBlockCore.P2P
 {
     public class P2PBeaconServer : Hub
     {
+        // Maximum allowed JSON payload size to prevent memory exhaustion attacks
+        private const int MAX_JSON_PAYLOAD_SIZE = 10000; // ~10KB for array of 2 strings
+
         #region Connect/Disconnect methods
         public override async Task OnConnectedAsync()
         {
@@ -398,6 +401,10 @@ namespace ReserveBlockCore.P2P
             bool output = false;
             try
             {
+                // Validate payload size to prevent memory exhaustion attacks
+                if (string.IsNullOrEmpty(data) || data.Length > MAX_JSON_PAYLOAD_SIZE)
+                    return false;
+
                 var beaconPool = Globals.BeaconPool.Values.ToList();
                 var payload = JsonConvert.DeserializeObject<string[]>(data);
                 if (payload != null)
@@ -448,6 +455,10 @@ namespace ReserveBlockCore.P2P
         {
             var peerIP = GetIP(Context);
 
+            // Validate payload size to prevent memory exhaustion attacks
+            if (string.IsNullOrEmpty(data) || data.Length > MAX_JSON_PAYLOAD_SIZE)
+                return false;
+
             bool result = false;
             var payload = JsonConvert.DeserializeObject<string[]>(data);
             if (payload != null)
@@ -493,6 +504,10 @@ namespace ReserveBlockCore.P2P
         public async Task<bool> BeaconFileIsDownloaded(string data)
         {
             var peerIP = GetIP(Context);
+
+            // Validate payload size to prevent memory exhaustion attacks
+            if (string.IsNullOrEmpty(data) || data.Length > MAX_JSON_PAYLOAD_SIZE)
+                return false;
 
             bool result = false;
             var payload = JsonConvert.DeserializeObject<string[]>(data);
