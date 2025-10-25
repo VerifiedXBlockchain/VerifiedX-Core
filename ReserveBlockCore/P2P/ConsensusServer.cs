@@ -30,6 +30,9 @@ namespace ReserveBlockCore.P2P
         public static ConcurrentDictionary<(long Height, int MethodCode), ConcurrentDictionary<string, (string Message, string Signature)>> Messages;
         public static ConcurrentDictionary<(long Height, int MethodCode), ConcurrentDictionary<string, (string Hash, string Signature)>> Hashes;
 
+        // HAL-034 Fix: Hard caps for cache dictionaries to prevent unbounded growth
+        private const int MaxCacheEntries = 100;
+        
         public static object UpdateNodeLock = new object();
         private static ConsensusState ConsenusStateSingelton;
         private static object UpdateLock = new object();
@@ -178,6 +181,66 @@ namespace ReserveBlockCore.P2P
                 (!node.IsFinalized && x.MethodCode + 1 == node.MethodCode)))
                 if (ConsensusServer.Hashes.TryGetValue(key, out var hash))
                     hash.TryRemove(node.Address, out _);
+            
+            // HAL-034 Fix: Enforce global cache size limits after pruning
+            EnforceCacheLimits();
+        }
+
+        /// <summary>
+        /// HAL-034 Fix: Enforces hard caps on Messages and Hashes cache dictionaries.
+        /// Removes oldest entries (by height) when limits are exceeded to prevent unbounded growth.
+        /// </summary>
+        private static void EnforceCacheLimits()
+        {
+            try
+            {
+                // Enforce limit on Messages cache
+                if (Messages.Count > MaxCacheEntries)
+                {
+                    var messagesToRemove = Messages.Keys
+                        .OrderBy(x => x.Height)
+                        .ThenBy(x => x.MethodCode)
+                        .Take(Messages.Count - MaxCacheEntries)
+                        .ToList();
+
+                    foreach (var key in messagesToRemove)
+                    {
+                        Messages.TryRemove(key, out _);
+                    }
+                }
+
+                // Enforce limit on Hashes cache
+                if (Hashes.Count > MaxCacheEntries)
+                {
+                    var hashesToRemove = Hashes.Keys
+                        .OrderBy(x => x.Height)
+                        .ThenBy(x => x.MethodCode)
+                        .Take(Hashes.Count - MaxCacheEntries)
+                        .ToList();
+
+                    foreach (var key in hashesToRemove)
+                    {
+                        Hashes.TryRemove(key, out _);
+                    }
+                }
+
+                // Also remove entries with empty inner dictionaries to prevent memory waste
+                var emptyMessageKeys = Messages.Where(x => x.Value.IsEmpty).Select(x => x.Key).ToList();
+                foreach (var key in emptyMessageKeys)
+                {
+                    Messages.TryRemove(key, out _);
+                }
+
+                var emptyHashKeys = Hashes.Where(x => x.Value.IsEmpty).Select(x => x.Key).ToList();
+                foreach (var key in emptyHashKeys)
+                {
+                    Hashes.TryRemove(key, out _);
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error enforcing cache limits: {ex.Message}", "ConsensusServer.EnforceCacheLimits");
+            }
         }
 
         public static void UpdateConsensusDump(string ipAddress, string method, string request, string response)
