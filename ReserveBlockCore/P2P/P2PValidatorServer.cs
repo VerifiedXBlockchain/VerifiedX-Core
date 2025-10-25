@@ -316,7 +316,8 @@ namespace ReserveBlockCore.P2P
                                     networkValidator.SignatureMessage, 
                                     networkValidator.Signature);
 
-                                if(verifySig && networkValidator.Signature.Contains(networkValidator.PublicKey))
+                                // HAL-025 Fix: Removed weak .Contains() check - proper cryptographic verification is sufficient
+                                if(verifySig)
                                 {
                                     Globals.NetworkValidators[networkValidator.Address] = networkValidator;
                                     processedCount++;
