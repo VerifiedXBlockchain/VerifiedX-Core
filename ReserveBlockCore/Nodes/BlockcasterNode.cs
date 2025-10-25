@@ -541,6 +541,7 @@ namespace ReserveBlockCore.Nodes
                                         validator.Latency = sw.ElapsedMilliseconds;
                                         if (validator.CheckFailCount <= 3)
                                         {
+                                            NetworkValidator.UpdateLastSeen(winningCasterProof.Address); // HAL-26 Fix: Track validator activity
                                             Globals.NetworkValidators[winningCasterProof.Address] = validator;
                                         }
                                         else
@@ -568,6 +569,7 @@ namespace ReserveBlockCore.Nodes
                                     {
                                         validator.CheckFailCount = 0;
                                         validator.Latency = sw.ElapsedMilliseconds;
+                                        NetworkValidator.UpdateLastSeen(winningCasterProof.Address); // HAL-26 Fix: Track validator activity
                                         Globals.NetworkValidators[winningCasterProof.Address] = validator;
                                     }
 

@@ -18,6 +18,9 @@ namespace ReserveBlockCore.Models
         public int CheckFailCount { get; set; }
         public long Latency { get; set; }
         
+        // HAL-26 Fix: TTL tracking for validator registry cleanup
+        public long LastSeen { get; set; }
+        
         // HAL-11 Security enhancements
         public long AdvertisementTimestamp { get; set; }
         public string AdvertisementNonce { get; set; }
@@ -86,6 +89,7 @@ namespace ReserveBlockCore.Models
                     validator.CheckFailCount = networkVal.CheckFailCount;
                     validator.ConfirmingSources = networkVal.ConfirmingSources;
                     validator.IsFullyTrusted = networkVal.IsFullyTrusted;
+                    validator.LastSeen = TimeUtil.GetTime(); // HAL-26 Fix: Update last seen timestamp
                     Globals.NetworkValidators[networkVal.Address] = validator;
                     return true;
                 }
@@ -101,6 +105,7 @@ namespace ReserveBlockCore.Models
                         {
                             // Promote to fully trusted validator
                             pendingVal.IsFullyTrusted = true;
+                            pendingVal.LastSeen = TimeUtil.GetTime(); // HAL-26 Fix: Set initial last seen
                             Globals.NetworkValidators.TryAdd(pendingVal.Address, pendingVal);
                             _pendingValidators.TryRemove(validator.Address, out _);
                             
@@ -132,6 +137,7 @@ namespace ReserveBlockCore.Models
                     if (IsTrustedBootstrapSource(advertisingPeerIP))
                     {
                         validator.IsFullyTrusted = true;
+                        validator.LastSeen = TimeUtil.GetTime(); // HAL-26 Fix: Set initial last seen
                         Globals.NetworkValidators.TryAdd(validator.Address, validator);
                         LogUtility.Log($"Validator {validator.Address} added directly from trusted bootstrap source {advertisingPeerIP}", "NetworkValidator.AddValidatorToPool");
                     }
@@ -190,17 +196,49 @@ namespace ReserveBlockCore.Models
         }
 
         // HAL-11 Fix: Cleanup stale pending validators
+        // HAL-26 Fix: Enhanced to also cleanup main NetworkValidators registry
         public static void CleanupStaleValidators()
         {
             var currentTime = TimeUtil.GetTime();
-            var staleThreshold = currentTime - 3600; // 1 hour
+            var pendingStaleThreshold = currentTime - 3600; // 1 hour for pending validators
+            var mainRegistryStaleThreshold = currentTime - 86400; // 24 hours for main registry
+            var failCountThreshold = 5; // Remove validators with high fail counts
 
-            var staleValidators = _pendingValidators.Where(kvp => kvp.Value.FirstAdvertised < staleThreshold).ToList();
+            // Cleanup pending validators (1 hour inactivity)
+            var stalePendingValidators = _pendingValidators.Where(kvp => kvp.Value.FirstAdvertised < pendingStaleThreshold).ToList();
             
-            foreach (var staleValidator in staleValidators)
+            foreach (var staleValidator in stalePendingValidators)
             {
                 _pendingValidators.TryRemove(staleValidator.Key, out _);
                 LogUtility.Log($"Removed stale pending validator {staleValidator.Key}", "NetworkValidator.CleanupStaleValidators");
+            }
+
+            // HAL-26 Fix: Cleanup main NetworkValidators registry
+            var staleMainValidators = Globals.NetworkValidators
+                .Where(kvp => 
+                    // Remove if not seen in 24 hours
+                    (kvp.Value.LastSeen > 0 && kvp.Value.LastSeen < mainRegistryStaleThreshold) ||
+                    // Remove if has high fail count
+                    kvp.Value.CheckFailCount > failCountThreshold)
+                .ToList();
+
+            int removedCount = 0;
+            foreach (var staleValidator in staleMainValidators)
+            {
+                if (Globals.NetworkValidators.TryRemove(staleValidator.Key, out var removed))
+                {
+                    removedCount++;
+                    var reason = removed.CheckFailCount > failCountThreshold 
+                        ? $"high fail count ({removed.CheckFailCount})" 
+                        : $"inactive for {(currentTime - removed.LastSeen) / 3600} hours";
+                    
+                    LogUtility.Log($"Removed stale validator {staleValidator.Key} from main registry. Reason: {reason}", "NetworkValidator.CleanupStaleValidators");
+                }
+            }
+
+            if (removedCount > 0)
+            {
+                LogUtility.Log($"HAL-26: Pruned {removedCount} stale validators from main registry. Current registry size: {Globals.NetworkValidators.Count}", "NetworkValidator.CleanupStaleValidators");
             }
         }
 
@@ -208,6 +246,16 @@ namespace ReserveBlockCore.Models
         public static Dictionary<string, NetworkValidator> GetPendingValidators()
         {
             return new Dictionary<string, NetworkValidator>(_pendingValidators);
+        }
+
+        // HAL-26 Fix: Update last seen timestamp for existing validator
+        public static void UpdateLastSeen(string validatorAddress)
+        {
+            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var validator))
+            {
+                validator.LastSeen = TimeUtil.GetTime();
+                Globals.NetworkValidators[validatorAddress] = validator;
+            }
         }
     }
 
