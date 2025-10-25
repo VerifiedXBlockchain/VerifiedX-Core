@@ -86,18 +86,20 @@ namespace ReserveBlockCore.P2P
                     return;
                 }
 
-                if (!Globals.Signatures.TryAdd(signature, now))
-                {
-                    EndOnConnect(peerIP, "Reused signature.", "Reused signature.");
-                    return;
-                }
-
+                // HAL-040 Fix: Verify signature BEFORE adding to signature map
                 var verifySig = SignatureService.VerifySignature(address, address + ":" + time, signature);
                 if (!verifySig)
                 {
                     EndOnConnect(peerIP,
                         "Connected, but your address signature failed to verify. You are being disconnected.",
                         "Connected, but your address signature failed to verify with Consensus: " + address);
+                    return;
+                }
+
+                // HAL-040 Fix: Only add to signature map AFTER successful verification
+                if (!Globals.Signatures.TryAdd(signature, now))
+                {
+                    EndOnConnect(peerIP, "Reused signature.", "Reused signature.");
                     return;
                 }
 

@@ -90,12 +90,6 @@ namespace ReserveBlockCore.P2P
                 }
 
                 var SignedMessage = address + ":" + time;
-
-                if (!Globals.Signatures.TryAdd(signature, now))
-                {
-                    await EndOnConnect(peerIP, "40", startTime, conQueue, "Reused signature.", "Reused signature.");
-                    return;
-                }
                                 
                 var walletVersionVerify = WalletVersionUtility.Verify(walletVersion);
 
@@ -107,13 +101,20 @@ namespace ReserveBlockCore.P2P
                     return;
                 }
 
-                // HAL-039 Fix: Verify signature BEFORE expensive database operations
+                // HAL-039 & HAL-040 Fix: Verify signature BEFORE expensive database operations and signature map insertion
                 var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
                 if(!verifySig)
                 {
                     _ = EndOnConnect(peerIP, "V", startTime, conQueue,
                         "Authentication failed. You are being disconnected.",
                         "Signature verification failed from: " + peerIP);
+                    return;
+                }
+
+                // HAL-040 Fix: Only add to signature map AFTER successful verification
+                if (!Globals.Signatures.TryAdd(signature, now))
+                {
+                    await EndOnConnect(peerIP, "40", startTime, conQueue, "Reused signature.", "Reused signature.");
                     return;
                 }
                 
