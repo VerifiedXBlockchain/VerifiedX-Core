@@ -462,11 +462,24 @@ namespace ReserveBlockCore.P2P
                             if(Globals.LastBlock.Height < nextBlock.Height)
                                 await BlockValidatorService.ValidateBlocks();
 
+                            // HAL-028 Fix: Only broadcast if block was successfully validated and added to blockchain
                             if (nextHeight == currentHeight)
                             {
-                                string data = "";
-                                data = JsonConvert.SerializeObject(nextBlock);
-                                await Clients.All.SendAsync("GetMessage", "blk", data);
+                                // Verify the block was actually accepted by checking if it's now the last block
+                                if (Globals.LastBlock.Height == nextBlock.Height && Globals.LastBlock.Hash == nextBlock.Hash)
+                                {
+                                    string data = "";
+                                    data = JsonConvert.SerializeObject(nextBlock);
+                                    await Clients.All.SendAsync("GetMessage", "blk", data);
+                                }
+                                else
+                                {
+                                    // Block validation failed - do not broadcast invalid block
+                                    ErrorLogUtility.LogError(
+                                        $"HAL-028 Security: Block {nextBlock.Height} from {IP} failed validation - not broadcasting",
+                                        "P2PValidatorServer.ReceiveBlockVal()");
+                                    return false;
+                                }
                             }
 
                             if (nextHeight < currentHeight)
