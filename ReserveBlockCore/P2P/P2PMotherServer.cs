@@ -101,6 +101,13 @@ namespace ReserveBlockCore.P2P
                 Globals.MothersKids.TryGetValue(payload.Address, out var kid);
                 if (kid != null)
                 {
+                    // Validate that the submitting client is authorized to update this address
+                    if (kid.IPAddress != peerIP)
+                    {
+                        // Reject updates from unauthorized IP addresses
+                        return false;
+                    }
+
                     kid.Address = payload.Address;
                     kid.IPAddress = peerIP;
                     kid.Balance = payload.Balance;
