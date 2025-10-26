@@ -1212,20 +1212,36 @@ namespace ReserveBlockCore.P2P
         }
 
         /// <summary>
-        /// Validate that the provided address matches the public key
+        /// HAL-023 Fix: Validate that the provided address matches the public key
+        /// Verifies that the publicKey actually derives the claimed address according to chain's address derivation rules
         /// </summary>
         private static bool ValidateAddressPublicKeyBinding(string address, string publicKey)
         {
             try
             {
-                // For now, we implement basic validation
+                // Basic null/empty validation
                 if (string.IsNullOrWhiteSpace(address) || string.IsNullOrWhiteSpace(publicKey))
                     return false;
 
+                // HAL-023 Fix: Derive the address from the public key and compare
+                var derivedAddress = AccountData.GetHumanAddress(publicKey);
+                
+                // The derived address must exactly match the claimed address
+                if (derivedAddress != address)
+                {
+                    ErrorLogUtility.LogError(
+                        $"HAL-023 Security: Address-PublicKey mismatch detected. Claimed: {address}, Derived: {derivedAddress}",
+                        "P2PValidatorServer.ValidateAddressPublicKeyBinding()");
+                    return false;
+                }
+
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                ErrorLogUtility.LogError(
+                    $"HAL-023 Security: Exception during address-publicKey validation: {ex.Message}",
+                    "P2PValidatorServer.ValidateAddressPublicKeyBinding()");
                 return false;
             }
         }
