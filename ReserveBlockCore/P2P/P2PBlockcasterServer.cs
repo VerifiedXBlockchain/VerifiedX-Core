@@ -38,12 +38,8 @@ namespace ReserveBlockCore.P2P
                     return;
                 }
 
-                var portCheck = PortUtility.IsPortOpen(peerIP, Globals.ValPort);
-                if (!portCheck)
-                {
-                    _ = EndOnConnect(peerIP, $"Port: {Globals.ValPort} was not detected as open.", $"Port: {Globals.ValPort} was not detected as open for IP: {peerIP}.");
-                    return;
-                }
+                // HAL-022 Fix: Port check moved to async post-authentication to prevent DoS
+                // The synchronous pre-auth port check has been removed
 
                 var address = httpContext.Request.Headers["address"].ToString();
                 var time = httpContext.Request.Headers["time"].ToString();
@@ -181,6 +177,17 @@ namespace ReserveBlockCore.P2P
                 Globals.NetworkValidators.TryAdd(address, netVal);
 
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
+
+                // HAL-022 Fix: Async port check after authentication to detect one-way validators
+                // This runs asynchronously and doesn't block the handshake, preventing DoS attacks
+                PortCheckCacheService.CheckAndDisconnectIfClosed(
+                    peerIP, 
+                    Globals.ValPort, 
+                    async () => await EndOnConnect(peerIP, 
+                        $"Port: {Globals.ValPort} was not detected as open.", 
+                        $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}."),
+                    "P2PBlockcasterServer"
+                );
 
                 _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
                 
