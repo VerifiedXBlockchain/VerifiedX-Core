@@ -113,6 +113,8 @@ namespace ReserveBlockCore.Services
 
                         await disconnectAction();
                     }
+
+                    await CleanupExpiredEntries();
                 }
                 catch (Exception ex)
                 {
@@ -124,7 +126,7 @@ namespace ReserveBlockCore.Services
         /// <summary>
         /// Clears expired cache entries to prevent memory buildup
         /// </summary>
-        public static void CleanupExpiredEntries()
+        public static async Task CleanupExpiredEntries()
         {
             var now = DateTime.UtcNow;
             var expiredKeys = _portCheckCache
@@ -132,9 +134,12 @@ namespace ReserveBlockCore.Services
                 .Select(kvp => kvp.Key)
                 .ToList();
 
-            foreach (var key in expiredKeys)
+            if (expiredKeys.Any())
             {
-                _portCheckCache.TryRemove(key, out _);
+                foreach (var key in expiredKeys)
+                {
+                    _portCheckCache.TryRemove(key, out _);
+                }
             }
         }
     }
