@@ -137,14 +137,12 @@ namespace ReserveBlockCore.P2P
 
         private static async Task<T> SignalRQueue<T>(MessageLock Lock, int sizeCost, Func<Task<T>> func)
         {
-            Interlocked.Increment(ref Lock.ConnectionCount);
-            Interlocked.Add(ref Lock.BufferCost, sizeCost);
             T Result = default;
             try
             {
                 await Lock.Semaphore.WaitAsync();
-                Interlocked.Decrement(ref Lock.ConnectionCount);
-                Interlocked.Add(ref Lock.BufferCost, -sizeCost);
+                Interlocked.Increment(ref Lock.ConnectionCount);
+                Interlocked.Add(ref Lock.BufferCost, sizeCost);
 
                 var task = func();
                 if (Lock.DelayLevel == 0)
@@ -157,7 +155,13 @@ namespace ReserveBlockCore.P2P
             catch { }
             finally
             {
-                try { Lock.Semaphore.Release(); } catch { }
+                try 
+                { 
+                    Interlocked.Decrement(ref Lock.ConnectionCount);
+                    Interlocked.Add(ref Lock.BufferCost, -sizeCost);
+                    Lock.Semaphore.Release(); 
+                } 
+                catch { }
             }
                         
             return Result;            
