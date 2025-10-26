@@ -337,6 +337,14 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, MessageLock> MessageLocks = new ConcurrentDictionary<string, MessageLock>();
         public static ConcurrentDictionary<string, int> TxRebroadcastDict = new ConcurrentDictionary<string, int>();
 
+        // HAL-054 Fix: Global resource tracking for distributed DoS protection
+        public static int GlobalConnectionCount = 0;
+        public static long GlobalBufferCost = 0;
+        public const int MaxGlobalConnections = 500; // Maximum concurrent connections across all IPs
+        public const long MaxGlobalBufferCost = 100000000; // 100MB total buffer across all IPs
+        public const int MaxConnectionsPerIP = 20; // Per-IP connection limit
+        public const int MaxBufferCostPerIP = 5000000; // 5MB per-IP buffer limit
+
         #endregion
 
         #region P2P Adj Server Variables

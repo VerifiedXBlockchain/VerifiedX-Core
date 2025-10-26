@@ -93,13 +93,24 @@ namespace ReserveBlockCore.P2P
                     return await func();
             }
 
+            // HAL-054 Fix: Check global resource limits to prevent distributed DoS attacks
+            if (Globals.GlobalConnectionCount >= Globals.MaxGlobalConnections)
+            {
+                throw new HubException("Server at maximum capacity. Too many global connections.");
+            }
+
+            if (Globals.GlobalBufferCost + sizeCost > Globals.MaxGlobalBufferCost)
+            {
+                throw new HubException("Server at maximum capacity. Too much global buffer usage.");
+            }
+
             if (Globals.MessageLocks.TryGetValue(ipAddress, out var Lock))
             {                               
                 var prev = Interlocked.Exchange(ref Lock.LastRequestTime, now);               
-                if (Lock.ConnectionCount > 20)
+                if (Lock.ConnectionCount > Globals.MaxConnectionsPerIP)
                     BanService.BanPeer(ipAddress, ipAddress + ": Connection count exceeded limit.  Peer failed to wait for responses before sending new requests.", func.Method.Name);                                        
                 
-                if (Lock.BufferCost + sizeCost > 5000000)
+                if (Lock.BufferCost + sizeCost > Globals.MaxBufferCostPerIP)
                 {
                     throw new HubException("Too much buffer usage.  Message was dropped.");
                 }
@@ -143,6 +154,10 @@ namespace ReserveBlockCore.P2P
                 await Lock.Semaphore.WaitAsync();
                 Interlocked.Increment(ref Lock.ConnectionCount);
                 Interlocked.Add(ref Lock.BufferCost, sizeCost);
+                
+                // HAL-054 Fix: Track global resources
+                Interlocked.Increment(ref Globals.GlobalConnectionCount);
+                Interlocked.Add(ref Globals.GlobalBufferCost, sizeCost);
 
                 var task = func();
                 if (Lock.DelayLevel == 0)
@@ -159,6 +174,11 @@ namespace ReserveBlockCore.P2P
                 { 
                     Interlocked.Decrement(ref Lock.ConnectionCount);
                     Interlocked.Add(ref Lock.BufferCost, -sizeCost);
+                    
+                    // HAL-054 Fix: Release global resources
+                    Interlocked.Decrement(ref Globals.GlobalConnectionCount);
+                    Interlocked.Add(ref Globals.GlobalBufferCost, -sizeCost);
+                    
                     Lock.Semaphore.Release(); 
                 } 
                 catch { }
