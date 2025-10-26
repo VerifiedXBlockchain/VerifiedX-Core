@@ -479,7 +479,16 @@ namespace ReserveBlockCore.P2P
                     return false;
                 });
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions and ban peer for security-critical method
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024 Security: Exception in ReceiveBlockVal from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.ReceiveBlockVal()");
+                
+                BanService.BanPeer(peerIP, "Block reception error", "ReceiveBlockVal");
+            }
 
             return false;
         }
@@ -522,7 +531,14 @@ namespace ReserveBlockCore.P2P
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in FailedToReachConsensus from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.FailedToReachConsensus()");
+            }
 
             return false;
         }
@@ -570,7 +586,16 @@ namespace ReserveBlockCore.P2P
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions and ban peer for security-critical method
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024 Security: Exception in ReceiveQueueBlockVal from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.ReceiveQueueBlockVal()");
+                
+                BanService.BanPeer(peerIP, "Queued block reception error", "ReceiveQueueBlockVal");
+            }
 
             return false;
         }
@@ -588,7 +613,14 @@ namespace ReserveBlockCore.P2P
                     return block;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in SendQueuedBlock from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendQueuedBlock()");
+            }
 
             return null;
 
@@ -617,7 +649,14 @@ namespace ReserveBlockCore.P2P
                     return null;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in SendBlockVal from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendBlockVal()");
+            }
 
             return null;
 
@@ -800,7 +839,16 @@ namespace ReserveBlockCore.P2P
                     return "";
                 });
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions and ban peer for security-critical method
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024 Security: Exception in SendTxToMempoolVals from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendTxToMempoolVals()");
+                
+                BanService.BanPeer(peerIP, "Transaction mempool error", "SendTxToMempoolVals");
+            }
 
             return "TFVP";
         }
@@ -1043,7 +1091,14 @@ namespace ReserveBlockCore.P2P
                     return "0";
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in SendLockedWinner from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendLockedWinner()");
+            }
 
             return "0";
         }
@@ -1133,7 +1188,13 @@ namespace ReserveBlockCore.P2P
                 var peerCount = Globals.P2PValDict.Count;
                 return peerCount;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in GetConnectedValCount: {ex.Message}",
+                    "P2PValidatorServer.GetConnectedValCount()");
+            }
 
             return -1;
         }
