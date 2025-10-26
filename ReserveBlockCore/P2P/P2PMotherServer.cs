@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Http.Features;
+﻿using Microsoft.AspNetCore.Connections.Features;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
 using ReserveBlockCore.Models;
@@ -14,8 +15,22 @@ namespace ReserveBlockCore.P2P
             bool connected = false;
 
             var peerIP = GetIP(Context);
-            if (Globals.MothersKidsContext.TryGetValue(peerIP, out var context) && context.ConnectionId != Context.ConnectionId)
-                context.Abort();
+            
+            // Check if there's an existing connection from this IP
+            if (Globals.MothersKidsContext.TryGetValue(peerIP, out var existingContext) && existingContext.ConnectionId != Context.ConnectionId)
+            {
+                // Check if existing connection is still alive
+                var connectionFeature = existingContext.Features.Get<IConnectionLifetimeFeature>();
+                if (connectionFeature?.ConnectionClosed.IsCancellationRequested == false)
+                {
+                    // Old connection is still active - reject the new connection attempt to prevent hijacking
+                    Context.Abort();
+                    await base.OnConnectedAsync();
+                    return;
+                }
+                // Old connection is dead, allow replacement by aborting it
+                existingContext.Abort();
+            }
 
             var httpContext = Context.GetHttpContext();
 
