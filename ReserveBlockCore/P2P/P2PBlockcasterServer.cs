@@ -257,39 +257,89 @@ namespace ReserveBlockCore.P2P
         {
             try
             {
-                //return await SignalRQueue(Context, (int)nextBlock.Size, async () =>
-                //{
-                if (nextBlock.ChainRefId == BlockchainData.ChainRef)
+                // HAL-048 Fix: Re-enable SignalRQueue protection with block size-based cost calculation
+                return await P2PServer.SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, async () =>
                 {
-                    var IP = GetIP(Context);
-                    var nextHeight = Globals.LastBlock.Height + 1;
-                    var currentHeight = nextBlock.Height;
-
-                    if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                    // HAL-048 Fix: Add basic validation before processing
+                    var callerIP = GetIP(Context);
+                    
+                    if (nextBlock == null)
                     {
-                        await Task.Delay(2000);
-
-                        if (Globals.LastBlock.Height < nextBlock.Height)
-                            await BlockValidatorService.ValidateBlocks();
-
-                        if (nextHeight == currentHeight)
-                        {
-                            string data = "";
-                            data = JsonConvert.SerializeObject(nextBlock);
-                            await Clients.All.SendAsync("GetCasterMessage", "blk", data);
-                        }
-
-                        if (nextHeight < currentHeight)
-                            await BlockDownloadService.GetAllBlocks();
-
-                        return true;
+                        ErrorLogUtility.LogError($"HAL-048 Security: Null block submission from {callerIP}", 
+                            "P2PBlockcasterServer.ReceiveBlockVal()");
+                        return false;
                     }
-                }
 
-                return false;
-                //});
+                    // HAL-048 Fix: Early block size validation to prevent DoS
+                    var sizeValidation = InputValidationHelper.ValidateBlockSize(nextBlock, callerIP);
+                    if (!sizeValidation.IsValid)
+                    {
+                        ErrorLogUtility.LogError($"HAL-048 Security: Block size validation failed from {callerIP}: {sizeValidation.ErrorMessage}", 
+                            "P2PBlockcasterServer.ReceiveBlockVal()");
+                        BanService.BanPeer(callerIP, "Oversized block submission", "ReceiveBlockVal");
+                        return false;
+                    }
+
+                    // HAL-048 Fix: Fast pre-validation of block headers to prevent DoS attacks
+                    var headerValidation = InputValidationHelper.ValidateBlockHeaders(nextBlock, callerIP);
+                    if (!headerValidation.IsValid)
+                    {
+                        ErrorLogUtility.LogError($"HAL-048 Security: Block header validation failed from {callerIP}: {headerValidation.ErrorMessage}", 
+                            "P2PBlockcasterServer.ReceiveBlockVal()");
+                        
+                        // For duplicate blocks, just return false - no need to ban
+                        if (headerValidation.IsDuplicate)
+                        {
+                            return false;
+                        }
+                        else
+                        {
+                            // Ban for other validation failures (invalid version, timestamp, parent hash)
+                            BanService.BanPeer(callerIP, "Invalid block header", "ReceiveBlockVal");
+                            return false;
+                        }
+                    }
+
+                    if (nextBlock.ChainRefId == BlockchainData.ChainRef)
+                    {
+                        var IP = GetIP(Context);
+                        var nextHeight = Globals.LastBlock.Height + 1;
+                        var currentHeight = nextBlock.Height;
+
+                        if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                        {
+                            await Task.Delay(2000);
+
+                            if (Globals.LastBlock.Height < nextBlock.Height)
+                                await BlockValidatorService.ValidateBlocks();
+
+                            if (nextHeight == currentHeight)
+                            {
+                                string data = "";
+                                data = JsonConvert.SerializeObject(nextBlock);
+                                await Clients.All.SendAsync("GetCasterMessage", "blk", data);
+                            }
+
+                            if (nextHeight < currentHeight)
+                                await BlockDownloadService.GetAllBlocks();
+
+                            return true;
+                        }
+                    }
+
+                    return false;
+                });
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-048 Fix: Log exceptions and ban peer for security-critical method
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-048 Security: Exception in ReceiveBlockVal from {peerIP}: {ex.Message}",
+                    "P2PBlockcasterServer.ReceiveBlockVal()");
+                
+                BanService.BanPeer(peerIP, "Block reception error", "ReceiveBlockVal");
+            }
 
             return false;
         }
