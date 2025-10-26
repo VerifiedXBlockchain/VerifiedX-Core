@@ -208,11 +208,11 @@ namespace ReserveBlockCore.P2P
 
                 // HAL-022 Fix: Async port check after authentication to detect one-way validators
                 // This runs asynchronously and doesn't block the handshake, preventing DoS attacks
-                PortCheckCacheService.CheckAndDisconnectIfClosed(
-                    peerIP, 
-                    Globals.ValPort, 
-                    async () => await EndOnConnect(peerIP, 
-                        $"Port: {Globals.ValPort} was not detected as open.", 
+                _ = PortCheckCacheService.CheckAndDisconnectIfClosed(
+                    peerIP,
+                    Globals.ValPort,
+                    async () => await EndOnConnect(peerIP,
+                        $"Port: {Globals.ValPort} was not detected as open.",
                         $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}."),
                     "P2PValidatorServer"
                 );
