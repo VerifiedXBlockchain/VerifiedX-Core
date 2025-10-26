@@ -215,11 +215,19 @@ namespace ReserveBlockCore.P2P
                             return result; //fail
                         }
 
-                        //var sigCheck = SignatureService.VerifySignature(scState, bdd.SmartContractUID, bdd.Signature);
-                        //if (sigCheck == false)
-                        //{
-                        //    return result; //fail
-                        //}
+                        // HAL-044 Fix: Verify signature from either current owner or next owner
+                        // Both parties can legitimately request downloads during a transfer
+                        var sigCheckOwner = SignatureService.VerifySignature(scState.OwnerAddress, bdd.SmartContractUID, bdd.Signature);
+                        bool sigCheckNextOwner = false;
+                        if (!sigCheckOwner && scState.NextOwner != null)
+                        {
+                            sigCheckNextOwner = SignatureService.VerifySignature(scState.NextOwner, bdd.SmartContractUID, bdd.Signature);
+                        }
+
+                        if (!sigCheckOwner && !sigCheckNextOwner)
+                        {
+                            return result; // fail - neither owner nor next owner signature is valid
+                        }
 
                         var beaconDatas = BeaconData.GetBeacon();
                         var beaconData = BeaconData.GetBeaconData();
