@@ -256,7 +256,8 @@ namespace ReserveBlockCore.P2P
                             var beaconDataRec = beaconData.Where(x => x.SmartContractUID == bdd.SmartContractUID && x.AssetName == fileName && (x.NextAssetOwnerAddress == scState.OwnerAddress || x.NextAssetOwnerAddress == scState.NextOwner)).FirstOrDefault();
                             if(beaconDataRec != null)
                             {
-                                var remoteUser = beaconPool.Where(x => x.Reference == beaconDataRec.Reference).FirstOrDefault();
+                                // Use composite key lookup (IP + Reference) to prevent message hijacking
+                                var remoteUser = beaconPool.Where(x => x.Reference == beaconDataRec.Reference && x.IpAddress == beaconDataRec.IPAdress).FirstOrDefault();
                                 string[] senddata = { beaconDataRec.SmartContractUID, beaconDataRec.AssetName };
                                 var sendJson = JsonConvert.SerializeObject(senddata);
                                 if(remoteUser != null)
@@ -424,7 +425,8 @@ namespace ReserveBlockCore.P2P
 
                             //send message to receiver.
                             var receiverRef = beaconData.NextOwnerReference;
-                            var remoteUser = beaconPool.Where(x => x.Reference == receiverRef).FirstOrDefault();
+                            // Use composite key lookup (IP + Reference) to prevent message hijacking
+                            var remoteUser = beaconPool.Where(x => x.Reference == receiverRef && x.IpAddress == beaconData.DownloadIPAddress).FirstOrDefault();
                             if (remoteUser != null)
                             {
                                 string[] senddata = { beaconData.SmartContractUID, beaconData.AssetName };
@@ -434,7 +436,7 @@ namespace ReserveBlockCore.P2P
                             }
                             else
                             {
-                                SCLogUtility.Log($"Remote user was null. Ref: {receiverRef}", "P2PBeaconServer.BeaconDataIsReady()");
+                                SCLogUtility.Log($"Remote user was null. Ref: {receiverRef}, Expected IP: {beaconData.DownloadIPAddress}", "P2PBeaconServer.BeaconDataIsReady()");
                             }
                         }
                     }
@@ -479,15 +481,14 @@ namespace ReserveBlockCore.P2P
                         else
                         {
                             //attempt to call to person to get file.
-
-                            if (Globals.BeaconPool.TryGetFromKey2(beaconData.Reference, out var remoteUser))
+                            // Use composite key lookup (IP + Reference) to prevent message hijacking
+                            var beaconPool = Globals.BeaconPool.Values.ToList();
+                            var remoteUser = beaconPool.Where(x => x.IpAddress == beaconData.IPAdress && x.Reference == beaconData.Reference).FirstOrDefault();
+                            if (remoteUser != null)
                             {
                                 string[] senddata = { beaconData.SmartContractUID, beaconData.AssetName };
                                 var sendJson = JsonConvert.SerializeObject(senddata);
-                                if (remoteUser.Value != null)
-                                {
-                                    await SendMessageClient(remoteUser.Value.ConnectionId, "send", sendJson);
-                                }
+                                await SendMessageClient(remoteUser.ConnectionId, "send", sendJson);
                             }
                         }
                             
