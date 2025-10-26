@@ -457,59 +457,7 @@ namespace ReserveBlockCore.P2P
             return Prefix;
         }
 
-        public async Task<bool> GetBroadcastedTx(List<TransactionBroadcast> txBroadcastList)
-        {
-            bool result = false;
-            try
-            {
-                var txHashes = JsonConvert.SerializeObject(txBroadcastList.Select(x => x.Hash).ToArray());
-                AdjLogUtility.Log($"UTC Time: {DateTime.Now} TX List Received: {txHashes}", "ConsensusServer.GetBroadcastedTx()");
-                foreach (var txBroadcast in txBroadcastList)
-                {
-                    if (!Globals.ConsensusBroadcastedTrxDict.TryGetValue(txBroadcast.Hash, out _))
-                    {
-                        var isTxStale = await TransactionData.IsTxTimestampStale(txBroadcast.Transaction);
-                        if(!isTxStale)
-                        {
-                            var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(txBroadcast.Transaction);
-
-                            if (!isCraftedIntoBlock)
-                            {
-                                Globals.ConsensusBroadcastedTrxDict[txBroadcast.Hash] = new TransactionBroadcast
-                                {
-                                    Hash = txBroadcast.Hash,
-                                    IsBroadcastedToAdj = false,
-                                    IsBroadcastedToVal = false,
-                                    Transaction = txBroadcast.Transaction,
-                                    RebroadcastCount = 0
-                                };
-                            }
-                            else
-                            {
-                                Globals.BroadcastedTrxDict.TryRemove(txBroadcast.Hash, out _);
-                                Globals.ConsensusBroadcastedTrxDict.TryRemove(txBroadcast.Hash, out _);
-                            }
-                        }
-                        else
-                        {
-                            Globals.BroadcastedTrxDict.TryRemove(txBroadcast.Hash, out _);
-                            Globals.ConsensusBroadcastedTrxDict.TryRemove(txBroadcast.Hash, out _);
-                        }
-                    }
-                }
-
-                result = true;
-            }
-            catch(Exception ex)
-            {
-                result = false;
-                AdjLogUtility.Log($"Error receiving broadcasted TX. Error: {ex.ToString()}", "ConsensusServer.GetBroadcastedTx()");
-                ErrorLogUtility.LogError($"Error receiving broadcasted TX. Error: {ex.ToString()}", "ConsensusServer.GetBroadcastedTx()");
-            }
-
-            return result;
-        }
-
+       
         private static string GetIP(HubCallerContext context)
         {
             try
