@@ -175,33 +175,6 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Returns a task answer list
-        /// </summary>
-        /// <returns></returns>
-        [HttpGet("GetTaskAnswersList")]
-        public async Task<string> GetTaskAnswersList()
-        {
-            string output = "";
-
-            try
-            {
-                var taskAnswerList = Globals.TaskAnswerDictV3.Values.Select(x => new {
-                    Address = x.RBXAddress,
-                    Answer = x.Answer,
-                    IP = x.IPAddress                        
-
-                });
-                output = JsonConvert.SerializeObject(taskAnswerList);                
-            }
-            catch(Exception ex)
-            {
-                output = $"Error calling api: {ex.ToString()}";
-            }
-
-            return output;
-        }
-
-        /// <summary>
         /// Returns ADJ info
         /// </summary>
         /// <returns></returns>
@@ -214,8 +187,6 @@ namespace ReserveBlockCore.Controllers
             {
                 StringBuilder outputBuilder = new StringBuilder();
 
-                var taskSelectedNumbersV3 = Globals.TaskSelectedNumbersV3.Values.ToList();
-
                 var adjConsensusNodes = Globals.Nodes.Values.ToList();
                 var Now = TimeUtil.GetMillisecondTime();
                 if (adjConsensusNodes.Count() > 0)
@@ -225,17 +196,6 @@ namespace ReserveBlockCore.Controllers
                     {
                         var line = $"IP: {cNode.NodeIP} | Address: {cNode.Address} | IsConnected? {cNode.IsConnected} ({Now - cNode.LastMethodCodeTime < ConsensusClient.HeartBeatTimeout})";
                         outputBuilder.AppendLine(line);
-                    }
-                    outputBuilder.AppendLine("******************************************************************************");
-                }
-
-                if (taskSelectedNumbersV3.Count() > 0)
-                {
-                    outputBuilder.AppendLine("*******************************Task Answers V3********************************");
-                    foreach (var taskNum in taskSelectedNumbersV3)
-                    {
-                        var taskLine = $"Address: {taskNum.RBXAddress} |  IP Address: {taskNum.IPAddress} | Answer: {taskNum.Answer}";
-                        outputBuilder.AppendLine(taskLine);
                     }
                     outputBuilder.AppendLine("******************************************************************************");
                 }

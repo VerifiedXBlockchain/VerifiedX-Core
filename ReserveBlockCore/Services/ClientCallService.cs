@@ -524,70 +524,6 @@ namespace ReserveBlockCore.Services
                         
                     }
                 }
-
-                //if (Globals.AdjudicateAccount != null)
-                //{
-                //}
-                //rebroadcast TXs
-                //var pool = TransactionData.GetPool();
-                //var mempool = TransactionData.GetMempool();
-                //var blockHeight = Globals.LastBlock.Height;
-                //if(mempool != null)
-                //{
-                //    var currentTime = TimeUtil.GetTime(-120);
-                //    if (mempool.Count() > 0)
-                //    {
-                //        foreach(var tx in mempool)
-                //        {
-                //            var txBeenBroadcasted = Globals.BroadcastedTrxDict.ContainsKey(tx.Hash);
-                //            if(!txBeenBroadcasted)
-                //            {
-                //                var txTime = tx.Timestamp;
-                //                var sendTx = currentTime > txTime ? true : false;
-                //                if (sendTx)
-                //                {
-                //                    var txResult = await TransactionValidatorService.VerifyTX(tx);
-                //                    if (txResult.Item1 == true)
-                //                    {
-                //                        var dblspndChk = await TransactionData.DoubleSpendReplayCheck(tx);
-                //                        var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(tx);
-
-                //                        if (dblspndChk == false && isCraftedIntoBlock == false && tx.TransactionRating != TransactionRating.F)
-                //                        {
-                //                            var txOutput = "";
-                //                            txOutput = JsonConvert.SerializeObject(tx);
-                //                            await _hubContext.Clients.All.SendAsync("GetAdjMessage", "tx", txOutput);//sends messages to all in fortis pool
-                //                            Globals.BroadcastedTrxDict[tx.Hash] = tx;
-                //                        }
-                //                        else
-                //                        {
-                //                            try
-                //                            {
-                //                                pool.DeleteManySafe(x => x.Hash == tx.Hash);// tx has been crafted into block. Remove.
-                //                            }
-                //                            catch (Exception ex)
-                //                            {                                                
-                //                                //delete failed
-                //                            }
-                //                        }
-                //                    }
-                //                    else
-                //                    {
-                //                        try
-                //                        {
-                //                            pool.DeleteManySafe(x => x.Hash == tx.Hash);// tx has been crafted into block. Remove.
-                //                        }
-                //                        catch (Exception ex)
-                //                        {                                            
-                //                            //delete failed
-                //                        }
-                //                    }
-
-                //                }
-                //            }
-                //        }
-                //    }
-                //}
                 
             }
             catch (Exception ex)
@@ -726,13 +662,6 @@ namespace ReserveBlockCore.Services
                 Now = TimeUtil.GetMillisecondTime();
                 ConsoleWriterService.Output("Done sending - Height: " + block.Height.ToString() + " at " + Now);
 
-                await ProcessFortisPoolV3(Globals.TaskAnswerDictV3.Keys.Select(x => x.RBXAddress).ToArray());
-                ConsoleWriterService.Output("Fortis Pool Processed");
-
-                foreach (var key in Globals.TaskAnswerDictV3.Keys)
-                    if (key.Height <= block.Height)
-                        Globals.TaskAnswerDictV3.TryRemove(key, out _);
-
                 Globals.LastAdjudicateTime = TimeUtil.GetTime();
                 Globals.BroadcastedTrxDict.Clear();
             }
@@ -746,14 +675,6 @@ namespace ReserveBlockCore.Services
         {
             ConsensusServer.Messages.Clear();
             ConsensusServer.Hashes.Clear();
-
-            foreach (var key in Globals.TaskSelectedNumbersV3.Keys)
-                if (key.Height <= height)
-                    Globals.TaskSelectedNumbersV3.TryRemove(key, out _);
-
-            foreach (var key in Globals.TaskWinnerDictV3.Keys)
-                if (key.Height <= height)
-                    Globals.TaskWinnerDictV3.TryRemove(key, out _);           
         }
 
         public static string SerializeSubmissions((string IPAddress, string RBXAddress, int Answer)[] submissions)
@@ -798,33 +719,6 @@ namespace ReserveBlockCore.Services
                     foreach (TaskNumberAnswerV2 taskAnswer in taskAnswerList)
                     {
                         if (Globals.FortisPool.TryGetFromKey2(taskAnswer.Address, out var validator))
-                            validator.Value.LastAnswerSendDate = DateTime.UtcNow;
-                    }
-                }
-
-                var nodeWithAnswer = Globals.FortisPool.Values.Where(x => x.LastAnswerSendDate != null).ToList();
-                var deadNodes = nodeWithAnswer.Where(x => x.LastAnswerSendDate.Value.AddMinutes(15) <= DateTime.UtcNow).ToList();
-                foreach (var deadNode in deadNodes)
-                {
-                    Globals.FortisPool.TryRemoveFromKey1(deadNode.IpAddress, out _);
-                    deadNode.Context?.Abort();
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error: ClientCallService.ProcessFortisPool: " + ex.ToString());
-            }
-        }
-
-        public static async Task ProcessFortisPoolV3(IList<string> rbxAddressSubmissions)
-        {
-            try
-            {
-                if (rbxAddressSubmissions != null)
-                {
-                    foreach (var address in rbxAddressSubmissions)
-                    {
-                        if (Globals.FortisPool.TryGetFromKey2(address, out var validator))
                             validator.Value.LastAnswerSendDate = DateTime.UtcNow;
                     }
                 }

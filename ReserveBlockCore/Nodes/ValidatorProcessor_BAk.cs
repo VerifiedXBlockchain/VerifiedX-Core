@@ -1373,33 +1373,6 @@ namespace ReserveBlockCore.Nodes
 
         #endregion
 
-        #region Deprecate
-
-        public static async void RandomNumberTaskV3(long blockHeight)
-        {
-            if (string.IsNullOrWhiteSpace(Globals.ValidatorAddress))
-                return;
-
-            while (Globals.LastBlock.Height + 1 != blockHeight)
-            {                
-                await BlockDownloadService.GetAllBlocks();
-            }
-
-            if (TimeUtil.GetTime() - Globals.CurrentTaskNumberAnswerV3.Time < 4)
-            {
-                return;
-            }
-
-            if (Globals.CurrentTaskNumberAnswerV3.Height != blockHeight)
-            {
-                var num = TaskQuestionUtility.GenerateRandomNumber(blockHeight);                                
-                Globals.CurrentTaskNumberAnswerV3 = (blockHeight, num, TimeUtil.GetTime());
-            }
-
-            //await P2PClient.SendTaskAnswerV3(Globals.CurrentTaskNumberAnswerV3.Answer + ":" + Globals.CurrentTaskNumberAnswerV3.Height);
-        }
-
-        #endregion
 
         #region Stop/Dispose
         public Task StopAsync(CancellationToken cancellationToken)

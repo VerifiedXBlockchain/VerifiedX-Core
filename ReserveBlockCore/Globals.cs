@@ -347,7 +347,6 @@ namespace ReserveBlockCore
         public static ConcurrentBag<ConnectionHistory> ConnectionHistoryList = new ConcurrentBag<ConnectionHistory>();
         public static ConcurrentDictionary<string, long> Signatures = new ConcurrentDictionary<string, long>();
         
-        public static (long Height, int Answer, long Time) CurrentTaskNumberAnswerV3;
         public static TaskWinner CurrentWinner;
         public static string VerifySecret = "";        
 
@@ -355,9 +354,6 @@ namespace ReserveBlockCore
         public static long ConsensusStartHeight = -1;
         public static long ConsensusSucceses = 0;
         
-        public static ConcurrentDictionary<(string RBXAddress, long Height), Block> TaskWinnerDictV3 = new ConcurrentDictionary<(string RBXAddress, long Height), Block>(); // VFX address        
-        public static ConcurrentDictionary<(string RBXAddress, long Height), (string IPAddress, string RBXAddress, int Answer)> TaskSelectedNumbersV3 = new ConcurrentDictionary<(string RBXAddres, long height), (string IPAddress, string RBXAddress, int Answer)>();        
-        public static ConcurrentDictionary<(string RBXAddress, long Height), (string IPAddress, string RBXAddress, int Answer)> TaskAnswerDictV3 = new ConcurrentDictionary<(string RBXAddres, long height), (string IPAddress, string RBXAddress, int Answer)>();        
         public static ConcurrentDictionary<string, Transaction> BroadcastedTrxDict = new ConcurrentDictionary<string, Transaction>(); // TX Hash
         public static ConcurrentDictionary<string, TransactionBroadcast> ConsensusBroadcastedTrxDict = new ConcurrentDictionary<string, TransactionBroadcast>(); //TX Hash
         public static ConcurrentDictionary<string, DuplicateValidators> DuplicatesBroadcastedDict= new ConcurrentDictionary<string, DuplicateValidators>();

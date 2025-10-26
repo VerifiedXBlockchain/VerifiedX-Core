@@ -1019,8 +1019,6 @@ namespace ReserveBlockCore.Commands
 
         public static async Task AdjudicatorInfo()
         {
-            var taskSelectedNumbersV3 = Globals.TaskSelectedNumbersV3.Values.ToList();
-
             if (Globals.AdjudicateAccount == null)
             {
                 var consensusNodes = Globals.AdjNodes.Values.ToList();
@@ -1057,21 +1055,6 @@ namespace ReserveBlockCore.Commands
                 {
                     ConsoleWriterService.Output("Empty");
                 }
-            }
-
-            if(taskSelectedNumbersV3.Count() > 0)
-            {
-                ConsoleWriterService.Output("*******************************Task Answers V3********************************");
-                foreach (var taskNum in taskSelectedNumbersV3)
-                {
-                    var taskLine = $"Address: {taskNum.RBXAddress} |  IP Address: {taskNum.IPAddress} | Answer: {taskNum.Answer}";
-                    ConsoleWriterService.Output(taskLine);
-                }
-                ConsoleWriterService.Output("******************************************************************************");
-            }
-            else
-            {
-                ConsoleWriterService.Output("Empty 2");
             }
         }
 
