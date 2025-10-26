@@ -33,6 +33,9 @@ namespace ReserveBlockCore.P2P
         // HAL-034 Fix: Hard caps for cache dictionaries to prevent unbounded growth
         private const int MaxCacheEntries = 100;
         
+        // HAL-035 Fix: Maximum input size for consensus messages to prevent memory exhaustion
+        private const int MaxMessageSize = 10000; // 10KB limit for consensus messages
+        
         public static object UpdateNodeLock = new object();
         private static ConsensusState ConsenusStateSingelton;
         private static object UpdateLock = new object();
@@ -340,9 +343,20 @@ namespace ReserveBlockCore.P2P
                 string signature = null;
                 if(peerMessage != null)
                 {
-                    var split = peerMessage.Split(";:;");
-                    (message, signature) = (split[0], split[1]);
-                    message = message.Replace("::", ":");
+                    // HAL-035 Fix: Validate input size and array length before processing
+                    if (peerMessage.Length <= MaxMessageSize)
+                    {
+                        var split = peerMessage.Split(";:;");
+                        if (split.Length >= 2)
+                        {
+                            (message, signature) = (split[0], split[1]);
+                            message = message.Replace("::", ":");
+                        }
+                    }
+                    else
+                    {
+                        ErrorLogUtility.LogError($"Oversized message from {ip}: {peerMessage.Length} bytes", "ConsensusServer.Message()");
+                    }
                 }
 
                 var messages = Messages.GetOrAdd((height, methodCode), new ConcurrentDictionary<string, (string Message, string Signature)>());                
@@ -398,8 +412,19 @@ namespace ReserveBlockCore.P2P
                 string signature = null;
                 if (peerHash != null)
                 {
-                    var split = peerHash.Split(":");
-                    (hash, signature) = (split[0], split[1]);                    
+                    // HAL-035 Fix: Validate input size and array length before processing
+                    if (peerHash.Length <= MaxMessageSize)
+                    {
+                        var split = peerHash.Split(":");
+                        if (split.Length >= 2)
+                        {
+                            (hash, signature) = (split[0], split[1]);
+                        }
+                    }
+                    else
+                    {
+                        ErrorLogUtility.LogError($"Oversized hash from {ip}: {peerHash.Length} bytes", "ConsensusServer.Hash()");
+                    }
                 }
 
                 var hashes = Hashes.GetOrAdd((height, methodCode), new ConcurrentDictionary<string, (string Hash, string Signature)>());
