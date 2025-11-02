@@ -1290,15 +1290,6 @@ namespace ReserveBlockCore.Commands
 
             Console.WriteLine("******************************************************************************");
 
-            var addressesToWaitFor = ConsensusClient.AddressesToWaitFor(Globals.LastBlock.Height + 1, conState.MethodCode, ConsensusClient.HeartBeatTimeout).ToArray();
-
-            LogUtility.LogQueue(JsonConvert.SerializeObject(addressesToWaitFor), "", "cinfo.txt", true);
-            Console.WriteLine("*****************************Addresses To Wait For*******************************");
-
-            Console.WriteLine(JsonConvert.SerializeObject(addressesToWaitFor));
-
-            Console.WriteLine("******************************************************************************");
-
             Console.WriteLine("*****************************Consensus Dump*******************************");
 
             Console.WriteLine(JsonConvert.SerializeObject(JsonConvert.SerializeObject(Globals.ConsensusDump)));

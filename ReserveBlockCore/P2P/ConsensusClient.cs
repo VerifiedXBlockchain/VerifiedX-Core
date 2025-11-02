@@ -108,22 +108,6 @@ namespace ReserveBlockCore.P2P
             Last
         }
 
-        public static HashSet<string> AddressesToWaitFor(long height, int methodCode, int wait)
-        {
-            var Now = TimeUtil.GetMillisecondTime();            
-            return Globals.Nodes.Values.Where(x => Now - x.LastMethodCodeTime < wait && ((x.NodeHeight + 2 == height && methodCode == 0) ||
-                (x.NodeHeight + 1 == height && (x.MethodCode == methodCode || (x.MethodCode == methodCode - 1 && x.IsFinalized)))))
-                .Select(x => x.Address).ToHashSet();
-        }
-
-        public static HashSet<string> HashAddressesToWaitFor(long height, int methodCode, int wait)
-        {
-            var Now = TimeUtil.GetMillisecondTime();
-            return Globals.Nodes.Values.Where(x => Now - x.LastMethodCodeTime < wait && ((x.NodeHeight + 2 == height && methodCode == 0) || 
-                (x.NodeHeight + 1 == height && (x.MethodCode == methodCode || (x.MethodCode == methodCode + 1 && !x.IsFinalized)))))
-                .Select(x => x.Address).ToHashSet();
-        }
-
         public static string[] RotateFrom(string[] arr, string elem)
         {
             var Index = arr.Select((x, i) => (x, i)).Where(x => x.x == elem).Select(x => (int?)x.i).FirstOrDefault() ?? -1;
