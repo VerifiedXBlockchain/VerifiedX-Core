@@ -632,9 +632,6 @@ namespace ReserveBlockCore
 
             await TransactionData.UpdateWalletTXTask();
 
-            ////deprecate in v5.0.1 or greater
-            //_ = StartupService.ConnectToAdjudicators();//MODIFY - Connect to other VALS
-
             _ = BanService.PeerBanUnbanService();
             _ = BeaconService.BeaconRunService();
             _ = SeedNodeService.Start();
