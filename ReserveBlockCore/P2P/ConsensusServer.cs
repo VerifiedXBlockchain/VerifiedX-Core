@@ -362,11 +362,13 @@ namespace ReserveBlockCore.P2P
                 var messages = Messages.GetOrAdd((height, methodCode), new ConcurrentDictionary<string, (string Message, string Signature)>());                
                 var state = GetState();
 
-                
-                if (message != null && ((methodCode == 0 && state.MethodCode != 0)) ||
-                    (height == Globals.LastBlock.Height + 1 
-                    && ((methodCode == state.MethodCode && state.Status != ConsensusStatus.Finalized) || 
-                        (methodCode == state.MethodCode + 1 && state.Status == ConsensusStatus.Finalized)))
+                // HAL-056 Fix: Added explicit parentheses to fix operator precedence vulnerability
+                // Ensures signature verification is ALWAYS required for all code paths, including methodCode == 0
+                if (message != null && 
+                    (((methodCode == 0 && state.MethodCode != 0)) ||
+                     (height == Globals.LastBlock.Height + 1 
+                      && ((methodCode == state.MethodCode && state.Status != ConsensusStatus.Finalized) || 
+                          (methodCode == state.MethodCode + 1 && state.Status == ConsensusStatus.Finalized))))
                     && SignatureService.VerifySignature(node.Address, message, signature))
                     messages[node.Address] = (message, signature);
                 
