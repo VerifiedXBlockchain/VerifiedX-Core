@@ -502,10 +502,11 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        // HAL-063: ClearRoundDicts removed - legacy code for Messages/Hashes dictionaries that are no longer used
         public static void ClearRoundDicts(long height)
         {
-            ConsensusServer.Messages.Clear();
-            ConsensusServer.Hashes.Clear();
+            // This method is kept as a stub to avoid breaking existing references
+            // Legacy clearing of Messages/Hashes has been removed
         }
 
         public static string SerializeSubmissions((string IPAddress, string RBXAddress, int Answer)[] submissions)

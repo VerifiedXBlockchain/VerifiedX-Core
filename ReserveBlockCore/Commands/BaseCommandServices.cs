@@ -1270,8 +1270,8 @@ namespace ReserveBlockCore.Commands
 
             Console.WriteLine("******************************************************************************");
 
-            var conMessage = string.Join("\r\n", ConsensusServer.Messages.Select(x => x.Value.Select(y => x.Key.Height + " " + x.Key.MethodCode + " " + y.Key + " " + y.Value.Message + " " + y.Value.Signature))
-                .SelectMany(x => x));
+            // HAL-063: Diagnostic code removed - Messages and Hashes dictionaries no longer exist
+            var conMessage = "Legacy Messages dictionary removed (HAL-063)";
             LogUtility.LogQueue(conMessage, "", "cinfo.txt", true);
 
             Console.WriteLine("*****************************Consensus Messages*******************************");
@@ -1280,8 +1280,7 @@ namespace ReserveBlockCore.Commands
 
             Console.WriteLine("******************************************************************************");
 
-            var hashMessage = string.Join("\r\n", ConsensusServer.Hashes.Select(x => x.Value.Select(y => x.Key.Height + " " + x.Key.MethodCode + " " + y.Key + " " + y.Value.Hash + " " + y.Value.Signature))
-                            .SelectMany(x => x));
+            var hashMessage = "Legacy Hashes dictionary removed (HAL-063)";
             LogUtility.LogQueue(hashMessage, "", "cinfo.txt", true);
 
             Console.WriteLine("*****************************Consensus Hashes*******************************");
