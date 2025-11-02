@@ -125,6 +125,10 @@ namespace ReserveBlockCore
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds
 
+        // HAL-068 Fix: Transaction timestamp validation thresholds
+        public const int MaxTxAgeSeconds = 3600; // 60 minutes - transactions older than this are rejected
+        public const int MaxFutureSkewSeconds = 120; // 2 minutes - allows for clock skew tolerance
+
         //public static long Validating
         public static long LastAdjudicateTime = 0;
         public static SemaphoreSlim BlocksDownloadSlim = new SemaphoreSlim(1, 1);

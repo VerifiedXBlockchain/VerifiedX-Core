@@ -303,20 +303,25 @@ namespace ReserveBlockCore.Data
             return false;
         }
 
-        public static async Task<bool> IsTxTimestampStale(Transaction tx)
+        // HAL-068 Fix: Centralized timestamp staleness validation with configurable thresholds
+        public static async Task<bool> IsTxTimestampStale(Transaction tx, bool allowHistorical = false)
         {
-            var result = false;
+            // Skip validation during block sync/verification of historical transactions
+            if (allowHistorical)
+                return false;
 
             var currentTime = TimeUtil.GetTime();
             var timeDiff = currentTime - tx.Timestamp;
-            var minuteDiff = timeDiff / 60M;
+            
+            // Check if transaction is too old (exceeds max age)
+            if (timeDiff > Globals.MaxTxAgeSeconds)
+                return true;
+            
+            // Check if transaction timestamp is too far in the future (clock skew protection)
+            if (timeDiff < -Globals.MaxFutureSkewSeconds)
+                return true;
 
-            if (minuteDiff > 60.0M)
-            {
-                result = true;
-            }
-
-            return result;
+            return false;
         }
 
         public static void AddToPool(Transaction transaction)

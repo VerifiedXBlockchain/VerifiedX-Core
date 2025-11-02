@@ -11,6 +11,10 @@
 	<SignAssembly>False</SignAssembly>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="VerfiedXCore.Tests" />
+  </ItemGroup>
+
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
     <Deterministic>True</Deterministic>
   </PropertyGroup>

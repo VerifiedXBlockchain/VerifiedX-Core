@@ -96,16 +96,14 @@ namespace ReserveBlockCore.Services
                 }
             }
 
-            //Timestamp Check
-            if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
+            // HAL-068 Fix: Timestamp validation using explicit blockDownloads parameter instead of semaphore state
+            // Skip validation during block sync, enforce for new transactions
+            if (!blockDownloads)
             {
-                var currentTime = TimeUtil.GetTime();
-                var timeDiff = currentTime - txRequest.Timestamp;
-                var minuteDiff = timeDiff / 60M;
-
-                if (minuteDiff > 60.0M)
+                var isTxStale = await TransactionData.IsTxTimestampStale(txRequest, allowHistorical: false);
+                if (isTxStale)
                 {
-                    return (txResult, "The timestamp of this transactions is too old to be sent now.");
+                    return (txResult, "The timestamp of this transaction is too old or too far in the future.");
                 }
             }
 
