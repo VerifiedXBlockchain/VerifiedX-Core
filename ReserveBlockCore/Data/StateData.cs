@@ -82,6 +82,24 @@ namespace ReserveBlockCore.Data
                         {
                             var from = GetSpecificAccountStateTrei(tx.FromAddress);
 
+                            if(from == null)
+                            {
+                                var acctStateTreiFrom = new AccountStateTrei
+                                {
+                                    Key = tx.FromAddress,
+                                    Nonce = tx.Nonce + 1, //increase Nonce for next use
+                                    Balance = 0, //subtract from the address
+                                    StateRoot = block.StateRoot
+                                };
+
+                                accStTrei.InsertSafe(acctStateTreiFrom);
+
+                                from = GetSpecificAccountStateTrei(tx.FromAddress);
+
+                                if (from == null)
+                                    continue;
+                            }
+
                             if (!tx.FromAddress.StartsWith("xRBX"))
                             {
                                 from.Nonce += 1;

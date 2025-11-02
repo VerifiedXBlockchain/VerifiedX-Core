@@ -167,6 +167,111 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        public static async Task<string> SendTXOutRBF(string FromAddress, string ToAddress, decimal Amount, decimal NewFee, string ReplacingTxHash)
+        {
+            string output = "Bad TX Format... Please Try Again";
+            var account = AccountData.GetSingleAccount(FromAddress);
+            if (account == null)
+            {
+                output = "Bad Account Information or Null Account Info";
+                return output;
+            }
+
+            ToAddress = ToAddress.ToAddressNormalize();
+
+            // Get original TX from mempool to extract nonce
+            var mempool = TransactionData.GetPool();
+            var originalTx = mempool.FindOne(x => x.Hash == ReplacingTxHash);
+            if (originalTx == null)
+            {
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "Original transaction not found in mempool" });
+                return output;
+            }
+
+            // Verify new fee > original fee
+            if (NewFee <= originalTx.Fee)
+            {
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"New fee ({NewFee}) must be higher than original fee ({originalTx.Fee})" });
+                return output;
+            }
+
+            var nTx = new Transaction
+            {
+                Timestamp = TimeUtil.GetTime(),
+                FromAddress = FromAddress,
+                ToAddress = ToAddress,
+                Amount = Amount,
+                Fee = NewFee,
+                Nonce = originalTx.Nonce, // Use same nonce as original TX
+                TransactionType = TransactionType.TX,
+                Data = $"[RBF:{ReplacingTxHash}]" // RBF marker with original hash
+            };
+
+            nTx.Build();
+
+            //balance check on funds
+            var senderBalance = AccountStateTrei.GetAccountBalance(account.Address);
+            if ((nTx.Amount + nTx.Fee) > senderBalance)
+            {
+                output = "Insufficient Funds. You have: " + senderBalance.ToString() + " VFX on the network and the total was: " + (nTx.Amount + nTx.Fee).ToString() + " VFX";
+                Console.WriteLine("\\nError! Sender ({0}) don't have enough balance!", account.Address);
+                Console.WriteLine("Sender ({0}) balance is {1}", account.Address, senderBalance);
+                return output;
+            }
+
+            BigInteger b1 = BigInteger.Parse(account.GetKey, NumberStyles.AllowHexSpecifier);
+            PrivateKey privateKey = new PrivateKey("secp256k1", b1);
+
+            var txHash = nTx.Hash;
+            var signature = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
+            if (signature == "ERROR")
+            {
+                return "ERROR! There was an error signing your transaction. Please verify private key belongs to public address.";
+            }
+
+            nTx.Signature = signature;
+
+            try
+            {
+                nTx.ToAddress = nTx.ToAddress.ToAddressNormalize();
+                nTx.Amount = nTx.Amount.ToNormalizeDecimal();
+
+                var result = await TransactionValidatorService.VerifyTX(nTx);
+                if (result.Item1 == true)
+                {
+                    if (nTx.TransactionRating == null)
+                    {
+                        var rating = await TransactionRatingService.GetTransactionRating(nTx);
+                        nTx.TransactionRating = rating;
+                    }
+
+                    TransactionData.AddToPool(nTx);
+                    await P2PClient.SendTXMempool(nTx);
+
+                    // Update original TX status locally
+                    var localTxDb = TransactionData.GetAll();
+                    var localOriginalTx = localTxDb.FindOne(x => x.Hash == ReplacingTxHash);
+                    if (localOriginalTx != null)
+                    {
+                        localOriginalTx.TransactionStatus = TransactionStatus.ReplacedByFee;
+                        localTxDb.UpdateSafe(localOriginalTx);
+                    }
+
+                    output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"RBF transaction has been broadcasted.", NewHash = nTx.Hash, ReplacedHash = ReplacingTxHash });
+                }
+                else
+                {
+                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not verified. Error: {result.Item2}" });
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error: {0}", ex.ToString());
+            }
+
+            return output;
+        }
+
         public static async Task<string> SendTXOut(string FromAddress, string ToAddress, decimal Amount, TransactionType tranType = TransactionType.TX)
         {
             string output = "Bad TX Format... Please Try Again";

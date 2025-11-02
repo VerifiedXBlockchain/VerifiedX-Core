@@ -19,7 +19,7 @@ namespace ReserveBlockCore.Services
 {
     public class TransactionValidatorService
     {
-        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false)
+        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null)
         {
             bool txResult = false;
             bool runReserveCheck = true;
@@ -45,6 +45,38 @@ namespace ReserveBlockCore.Services
                 if (from.Balance < (txRequest.Amount + txRequest.Fee))
                 {
                     return (txResult, "The balance of this account is less than the amount being sent.");//balance was less than the amount they are trying to send.
+                }
+            }
+
+            // HAL-067 Fix: Nonce validation to enforce sequential transaction ordering
+            // Only enforced after TXHeightRule4 activation to avoid rejecting historical blocks
+            if (Globals.LastBlock.Height > Globals.TXHeightRule4)
+            {
+                if (txRequest.FromAddress != "Coinbase_BlkRwd" && txRequest.FromAddress != "Coinbase_TrxFees")
+                {
+                    long expectedNonce;
+                    
+                    if (processedNonces != null && processedNonces.ContainsKey(txRequest.FromAddress))
+                    {
+                        // During block validation: use tracked nonce from earlier TXs in this block
+                        expectedNonce = processedNonces[txRequest.FromAddress];
+                    }
+                    else
+                    {
+                        // Regular mempool admission: use state trei nonce
+                        expectedNonce = from != null ? from.Nonce : 0;
+                    }
+                    
+                    if (txRequest.Nonce != expectedNonce)
+                    {
+                        return (txResult, $"Invalid transaction nonce. Expected: {expectedNonce}, Received: {txRequest.Nonce}");
+                    }
+                    
+                    // Update processed nonces tracker if provided
+                    if (processedNonces != null)
+                    {
+                        processedNonces[txRequest.FromAddress] = expectedNonce + 1;
+                    }
                 }
             }
 

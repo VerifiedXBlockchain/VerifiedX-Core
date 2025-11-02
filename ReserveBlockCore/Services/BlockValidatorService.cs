@@ -381,11 +381,34 @@ namespace ReserveBlockCore.Services
                     {
                         //validate transactions.
                         bool rejectBlock = false;
-                        foreach (Transaction blkTransaction in block.Transactions)
+                        // HAL-067 Fix: Track nonces per address during block validation to support multiple TXs from same sender
+                        // Initialize dictionary with current state nonces for all addresses in block
+                        var processedNonces = new Dictionary<string, long>();
+                        var uniqueAddresses = block.Transactions
+                            .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
+                            .Select(x => x.FromAddress)
+                            .Distinct();
+                        
+                        foreach (var address in uniqueAddresses)
+                        {
+                            var stateAccount = StateData.GetSpecificAccountStateTrei(address);
+                            if (stateAccount != null)
+                            {
+                                processedNonces[address] = stateAccount.Nonce;
+                            }
+                        }
+                        
+                        // Process transactions ordered by nonce to ensure sequential validation
+                        var orderedTransactions = block.Transactions
+                            .OrderBy(x => x.FromAddress)
+                            .ThenBy(x => x.Nonce)
+                            .ToList();
+                        
+                        foreach (Transaction blkTransaction in orderedTransactions)
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
                             {
-                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true);
+                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces);
                                 if(txResult.Item1 == false)
                                 {
                                     //testing
