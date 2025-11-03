@@ -306,8 +306,27 @@ namespace ReserveBlockCore.P2P
                         var nextHeight = Globals.LastBlock.Height + 1;
                         var currentHeight = nextBlock.Height;
 
-                        if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                        // HAL-066 Fix: Add block to competing blocks list
+                        if (currentHeight >= nextHeight)
                         {
+                            BlockDownloadService.BlockDict.AddOrUpdate(
+                                currentHeight,
+                                new List<(Block, string)> { (nextBlock, IP) },
+                                (height, existingList) =>
+                                {
+                                    if (!existingList.Any(b => b.Item1.Hash == nextBlock.Hash))
+                                    {
+                                        existingList.Add((nextBlock, IP));
+                                        if (existingList.Count > 1 && Globals.OptionalLogging)
+                                        {
+                                            ErrorLogUtility.LogError(
+                                                $"HAL-066: Competing block received at height {height}. Now have {existingList.Count} candidates.",
+                                                "P2PBlockcasterServer.ReceiveBlockVal()");
+                                        }
+                                    }
+                                    return existingList;
+                                });
+
                             await Task.Delay(2000);
 
                             if (Globals.LastBlock.Height < nextBlock.Height)

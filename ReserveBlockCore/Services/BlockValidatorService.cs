@@ -135,9 +135,15 @@ namespace ReserveBlockCore.Services
                         .Select(x => x.height).ToArray();
                     foreach (var height in heights)
                     {
-                        if (!BlockDownloadService.BlockDict.TryRemove(height, out var blockInfo))
+                        if (!BlockDownloadService.BlockDict.TryRemove(height, out var competingBlocks))
                             continue;
-                        var (block, ipAddress) = blockInfo;
+                        
+                        // HAL-066 Fix: Apply fork-choice rule to select canonical block from competing candidates
+                        var block = BlockDownloadService.SelectCanonicalBlock(competingBlocks);
+                        if (block == null)
+                            continue;
+                        
+                        var ipAddress = competingBlocks.FirstOrDefault(b => b.block.Hash == block.Hash).IPAddress ?? "unknown";
 
                         var startupDownload = Globals.BlocksDownloadSlim.CurrentCount == 0 ? true : false;
                         var stopwatch1 = new Stopwatch();
