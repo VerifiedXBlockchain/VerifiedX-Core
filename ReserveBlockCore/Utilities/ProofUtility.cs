@@ -338,6 +338,7 @@ namespace ReserveBlockCore.Utilities
 
                 var validProofs = proofs.Where(p =>
                     p.BlockHeight == processHeight &&
+                    p.PreviousBlockHash == Globals.LastBlock.Hash &&
                     p.VerifyProof() &&
                     !Globals.ABL.Exists(x => x == p.Address)
                 ).ToList();
