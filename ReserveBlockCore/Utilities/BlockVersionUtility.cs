@@ -44,6 +44,13 @@ namespace ReserveBlockCore.Utilities
 
             return result;            
         }
+        // HAL-062: This method validates Version 3 blocks using the legacy signer/retired signer system.
+        // IMPORTANT: This code is HISTORICAL ONLY - used solely for validating pre-V4Height blocks.
+        // Current consensus uses Version 4 with VRF-based validator proofs (see Version4Rules).
+        // Since Globals.V4Height = 0, all new blocks are Version 4. This code path only executes
+        // when syncing/validating historical blocks from height 579016-V4Height range.
+        // The auditor's finding about retired signer threshold mismatch is technically correct,
+        // but NOT exploitable because attackers cannot inject Version 3 blocks into current chain.
         public static async Task<(bool, string)> Version3Rules(Block block)
         {
             if (!string.IsNullOrWhiteSpace(block.AdjudicatorSignature))

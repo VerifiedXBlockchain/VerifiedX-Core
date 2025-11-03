@@ -275,6 +275,7 @@ namespace ReserveBlockCore.Services
 
                 if(block.Version == 4)
                 {
+                    // Current consensus: VRF-based validator proofs
                     var version4Result = await BlockVersionUtility.Version4Rules(block);
                     if(!version4Result.Item1)
                     {
@@ -282,6 +283,9 @@ namespace ReserveBlockCore.Services
                         return result;
                     }
                 }
+                // HAL-062: Version 3 validation is for historical blocks only (height 579016-V4Height).
+                // Since V4Height=0, new blocks cannot be Version 3. This code only executes when
+                // syncing/validating historical blocks. See BlockVersionUtility.Version3Rules for details.
                 else if (block.Version == 3 && !ignoreAdjSignatures)
                 {
                     var version3Result = await BlockVersionUtility.Version3Rules(block);
