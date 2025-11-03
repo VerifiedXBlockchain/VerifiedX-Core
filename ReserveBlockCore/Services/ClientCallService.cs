@@ -388,16 +388,9 @@ namespace ReserveBlockCore.Services
             }
         }
 
-        public static int CombineRandoms(IList<int> randoms, int minValue, int maxValue)
-        {
-            return Modulo(randoms.Sum(x => (long)x), maxValue - minValue) + minValue;
-        }
-
-        public static int Modulo(long k, int n)
-        {
-            var mod = k % n;
-            return mod < 0 ? (int)mod + n : (int)mod;
-        }        
+        // HAL-060: Legacy consensus randomness methods removed - these were part of an old 
+        // linear combination approach that enabled last-revealer attacks. Current consensus 
+        // uses VRF-based proofs instead. Methods removed: CombineRandoms, Modulo
 
         public static async Task HadBadValidator(FortisPool pool, string key, int type)
         {            
@@ -509,19 +502,8 @@ namespace ReserveBlockCore.Services
             // Legacy clearing of Messages/Hashes has been removed
         }
 
-        public static string SerializeSubmissions((string IPAddress, string RBXAddress, int Answer)[] submissions)
-        {
-            return string.Join("|", submissions.Select(x => x.IPAddress + ":" + x.RBXAddress + ":" + x.Answer));
-        }
-
-        public static (string IPAddress, string RBXAddress, int Answer)[] DeserializeSubmissions(string submisisons)
-        {
-            return submisisons.Split('|').Where(x => !string.IsNullOrWhiteSpace(x)).Select(x =>
-            {
-                var split = x.Split(':');
-                return (split[0], split[1], int.Parse(split[2]));
-            }).ToArray();
-        }
+        // HAL-060: Legacy submission serialization methods removed - these were used with the old 
+        // consensus mechanism. Methods removed: SerializeSubmissions, DeserializeSubmissions
 
         #endregion
 
