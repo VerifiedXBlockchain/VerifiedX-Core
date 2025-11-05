@@ -521,6 +521,13 @@ namespace ReserveBlockCore.Data
             {
                 try
                 {
+                    // HAL-070 Fix: Idempotence guard - skip if already confirmed
+                    if (rtx.ReserveTransactionStatus == ReserveTransactionStatus.Confirmed)
+                    {
+                        ErrorLogUtility.LogError($"UpdateTreiFromReserve skipped for hash {rtx.Hash} - already Confirmed", "StateData.UpdateTreiFromReserve()");
+                        continue;
+                    }
+
                     if(rtx.TransactionType == TransactionType.TX)
                     {
                         if (rtx.FromAddress != "Coinbase_TrxFees" && rtx.FromAddress != "Coinbase_BlkRwd" && rtx.ToAddress != "Reserve_Base")
@@ -528,7 +535,16 @@ namespace ReserveBlockCore.Data
                             var from = GetSpecificAccountStateTrei(rtx.FromAddress);
                             if (from != null)
                             {
-                                from.LockedBalance -= rtx.Amount;
+                                // HAL-070 Fix: Lower-bound check on LockedBalance
+                                if (from.LockedBalance >= rtx.Amount)
+                                {
+                                    from.LockedBalance -= rtx.Amount;
+                                }
+                                else
+                                {
+                                    ErrorLogUtility.LogError($"UpdateTreiFromReserve clamping LockedBalance to 0 for {from.Key} - attempted to subtract {rtx.Amount} from {from.LockedBalance}", "StateData.UpdateTreiFromReserve()");
+                                    from.LockedBalance = 0;
+                                }
                                 accStTrei.UpdateSafe(from);
                             }
 
@@ -549,7 +565,16 @@ namespace ReserveBlockCore.Data
                                     if (rtx.FromAddress.StartsWith("xRBX"))
                                     {
                                         to.Balance += rtx.Amount;
-                                        to.LockedBalance -= rtx.Amount;
+                                        // HAL-070 Fix: Lower-bound check on LockedBalance
+                                        if (to.LockedBalance >= rtx.Amount)
+                                        {
+                                            to.LockedBalance -= rtx.Amount;
+                                        }
+                                        else
+                                        {
+                                            ErrorLogUtility.LogError($"UpdateTreiFromReserve clamping LockedBalance to 0 for {to.Key} - attempted to subtract {rtx.Amount} from {to.LockedBalance}", "StateData.UpdateTreiFromReserve()");
+                                            to.LockedBalance = 0;
+                                        }
 
                                         accStTrei.UpdateSafe(to);
                                     }
@@ -691,6 +716,13 @@ namespace ReserveBlockCore.Data
                     var rTX = ReserveTransactions.GetTransactions(callBackHash);
                     if (rTX != null)
                     {
+                        // HAL-070 Fix: Idempotence guard - skip if already processed
+                        if (rTX.ReserveTransactionStatus != ReserveTransactionStatus.Pending)
+                        {
+                            ErrorLogUtility.LogError($"CallBack skipped for hash {callBackHash} - status is {rTX.ReserveTransactionStatus}, not Pending", "StateData.CallBackReserveAccountTx()");
+                            return;
+                        }
+
                         var rtxDb = ReserveTransactions.GetReserveTransactionsDb();
 
                         if(rTX.TransactionType == TransactionType.TX)
@@ -702,7 +734,16 @@ namespace ReserveBlockCore.Data
                             if (stateTreiFrom != null)
                             {
                                 //return amount to From address
-                                stateTreiFrom.LockedBalance -= rTX.Amount;
+                                // HAL-070 Fix: Lower-bound check on LockedBalance
+                                if (stateTreiFrom.LockedBalance >= rTX.Amount)
+                                {
+                                    stateTreiFrom.LockedBalance -= rTX.Amount;
+                                }
+                                else
+                                {
+                                    ErrorLogUtility.LogError($"CallBack clamping LockedBalance to 0 for {stateTreiFrom.Key} - attempted to subtract {rTX.Amount} from {stateTreiFrom.LockedBalance}", "StateData.CallBackReserveAccountTx()");
+                                    stateTreiFrom.LockedBalance = 0;
+                                }
                                 stateTreiFrom.Balance += rTX.Amount;
                                 if (stDb != null)
                                     stDb.UpdateSafe(stateTreiFrom);
@@ -711,7 +752,16 @@ namespace ReserveBlockCore.Data
                                 if (rLocalAccount != null)
                                 {
                                     var rDb = ReserveAccount.GetReserveAccountsDb();
-                                    rLocalAccount.LockedBalance -= rTX.Amount;
+                                    // HAL-070 Fix: Lower-bound check on LockedBalance
+                                    if (rLocalAccount.LockedBalance >= rTX.Amount)
+                                    {
+                                        rLocalAccount.LockedBalance -= rTX.Amount;
+                                    }
+                                    else
+                                    {
+                                        ErrorLogUtility.LogError($"CallBack clamping ReserveAccount LockedBalance to 0 for {rLocalAccount.Address} - attempted to subtract {rTX.Amount} from {rLocalAccount.LockedBalance}", "StateData.CallBackReserveAccountTx()");
+                                        rLocalAccount.LockedBalance = 0;
+                                    }
                                     rLocalAccount.AvailableBalance += rTX.Amount;
                                     if (rDb != null)
                                         rDb.UpdateSafe(rLocalAccount);
@@ -720,7 +770,16 @@ namespace ReserveBlockCore.Data
                             if (stateTreiTo != null)
                             {
                                 //remove amount from locked To address
-                                stateTreiTo.LockedBalance -= rTX.Amount;
+                                // HAL-070 Fix: Lower-bound check on LockedBalance
+                                if (stateTreiTo.LockedBalance >= rTX.Amount)
+                                {
+                                    stateTreiTo.LockedBalance -= rTX.Amount;
+                                }
+                                else
+                                {
+                                    ErrorLogUtility.LogError($"CallBack clamping LockedBalance to 0 for {stateTreiTo.Key} - attempted to subtract {rTX.Amount} from {stateTreiTo.LockedBalance}", "StateData.CallBackReserveAccountTx()");
+                                    stateTreiTo.LockedBalance = 0;
+                                }
                                 if (stDb != null)
                                     stDb.UpdateSafe(stateTreiTo);
 
@@ -728,7 +787,16 @@ namespace ReserveBlockCore.Data
                                 if (localAccount != null)
                                 {
                                     var accountDB = AccountData.GetAccounts();
-                                    localAccount.LockedBalance -= rTX.Amount;
+                                    // HAL-070 Fix: Lower-bound check on LockedBalance
+                                    if (localAccount.LockedBalance >= rTX.Amount)
+                                    {
+                                        localAccount.LockedBalance -= rTX.Amount;
+                                    }
+                                    else
+                                    {
+                                        ErrorLogUtility.LogError($"CallBack clamping Account LockedBalance to 0 for {localAccount.Address} - attempted to subtract {rTX.Amount} from {localAccount.LockedBalance}", "StateData.CallBackReserveAccountTx()");
+                                        localAccount.LockedBalance = 0;
+                                    }
                                     if (accountDB != null)
                                         accountDB.UpdateSafe(localAccount);
                                 }
@@ -737,7 +805,16 @@ namespace ReserveBlockCore.Data
                                 if (rLocalAccount != null)
                                 {
                                     var rDb = ReserveAccount.GetReserveAccountsDb();
-                                    rLocalAccount.LockedBalance -= rTX.Amount;
+                                    // HAL-070 Fix: Lower-bound check on LockedBalance
+                                    if (rLocalAccount.LockedBalance >= rTX.Amount)
+                                    {
+                                        rLocalAccount.LockedBalance -= rTX.Amount;
+                                    }
+                                    else
+                                    {
+                                        ErrorLogUtility.LogError($"CallBack clamping ReserveAccount LockedBalance to 0 for {rLocalAccount.Address} - attempted to subtract {rTX.Amount} from {rLocalAccount.LockedBalance}", "StateData.CallBackReserveAccountTx()");
+                                        rLocalAccount.LockedBalance = 0;
+                                    }
                                     if (rDb != null)
                                         rDb.UpdateSafe(rLocalAccount);
                                 }
@@ -795,7 +872,10 @@ namespace ReserveBlockCore.Data
 
                 if(rTXList?.Count() > 0)
                 {
-                    foreach(var rTX in rTXList) 
+                    // HAL-070 Fix: Filter to only Pending transactions for recovery
+                    var pendingTXList = rTXList.Where(x => x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList();
+                    
+                    foreach(var rTX in pendingTXList) 
                     {
                         var rtxDb = ReserveTransactions.GetReserveTransactionsDb();
                         var stateTreiFrom = GetSpecificAccountStateTrei(rTX.FromAddress);
@@ -808,7 +888,16 @@ namespace ReserveBlockCore.Data
                                 var recoveryAddress = stateTreiFrom.RecoveryAccount;
                                 if (recoveryAddress != null)
                                 {
-                                    stateTreiFrom.LockedBalance -= rTX.Amount;
+                                    // HAL-070 Fix: Lower-bound check on LockedBalance
+                                    if (stateTreiFrom.LockedBalance >= rTX.Amount)
+                                    {
+                                        stateTreiFrom.LockedBalance -= rTX.Amount;
+                                    }
+                                    else
+                                    {
+                                        ErrorLogUtility.LogError($"Recover clamping LockedBalance to 0 for {stateTreiFrom.Key} - attempted to subtract {rTX.Amount} from {stateTreiFrom.LockedBalance}", "StateData.RecoverReserveAccountTx()");
+                                        stateTreiFrom.LockedBalance = 0;
+                                    }
                                     if (stDb != null)
                                         stDb.UpdateSafe(stateTreiFrom);
 
@@ -816,7 +905,16 @@ namespace ReserveBlockCore.Data
                                     if (rLocalAccount != null)
                                     {
                                         var rDb = ReserveAccount.GetReserveAccountsDb();
-                                        rLocalAccount.LockedBalance -= rTX.Amount;
+                                        // HAL-070 Fix: Lower-bound check on LockedBalance
+                                        if (rLocalAccount.LockedBalance >= rTX.Amount)
+                                        {
+                                            rLocalAccount.LockedBalance -= rTX.Amount;
+                                        }
+                                        else
+                                        {
+                                            ErrorLogUtility.LogError($"Recover clamping ReserveAccount LockedBalance to 0 for {rLocalAccount.Address} - attempted to subtract {rTX.Amount} from {rLocalAccount.LockedBalance}", "StateData.RecoverReserveAccountTx()");
+                                            rLocalAccount.LockedBalance = 0;
+                                        }
                                         if (rDb != null)
                                             rDb.UpdateSafe(rLocalAccount);
                                     }
@@ -856,7 +954,16 @@ namespace ReserveBlockCore.Data
 
                             if (stateTreiTo != null)
                             {
-                                stateTreiTo.LockedBalance -= rTX.Amount;
+                                // HAL-070 Fix: Lower-bound check on LockedBalance
+                                if (stateTreiTo.LockedBalance >= rTX.Amount)
+                                {
+                                    stateTreiTo.LockedBalance -= rTX.Amount;
+                                }
+                                else
+                                {
+                                    ErrorLogUtility.LogError($"Recover clamping LockedBalance to 0 for {stateTreiTo.Key} - attempted to subtract {rTX.Amount} from {stateTreiTo.LockedBalance}", "StateData.RecoverReserveAccountTx()");
+                                    stateTreiTo.LockedBalance = 0;
+                                }
                                 if (stDb != null)
                                     stDb.UpdateSafe(stateTreiTo);
                             }
