@@ -454,9 +454,19 @@ namespace ReserveBlockCore.P2P
                         var nextHeight = Globals.LastBlock.Height + 1;
                         var currentHeight = nextBlock.Height;
 
-                        if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                        if (currentHeight >= nextHeight)
                         {
-                            // HAL-17 Fix: Use configurable delay instead of hardcoded value
+                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                            BlockDownloadService.BlockDict.AddOrUpdate(
+                                currentHeight,
+                                new List<(Block, string)> { (nextBlock, IP) },
+                                (key, existingList) =>
+                                {
+                                    existingList.Add((nextBlock, IP));
+                                    return existingList;
+                                });
+
+                            // HAL-017 Fix: Use configurable delay instead of hardcoded value
                             await Task.Delay(Globals.BlockProcessingDelayMs);
 
                             if(Globals.LastBlock.Height < nextBlock.Height)

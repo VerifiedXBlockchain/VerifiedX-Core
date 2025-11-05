@@ -915,7 +915,15 @@ namespace ReserveBlockCore.Nodes
                                                 {
                                                     CasterRoundAudit.AddStep($"Processing Block.", true);
                                                     //ConsoleWriterService.OutputVal($"Processing Block");
-                                                    BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                    // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                                                    BlockDownloadService.BlockDict.AddOrUpdate(
+                                                        currentHeight,
+                                                        new List<(Block, string)> { (block, IP) },
+                                                        (key, existingList) =>
+                                                        {
+                                                            existingList.Add((block, IP));
+                                                            return existingList;
+                                                        });
                                                     if (nextHeight == currentHeight)
                                                         await BlockValidatorService.ValidateBlocks();
                                                     if (nextHeight < currentHeight)
@@ -1002,15 +1010,23 @@ namespace ReserveBlockCore.Nodes
                                                                         var nextHeight = Globals.LastBlock.Height + 1;
                                                                         var currentHeight = block.Height;
 
-                                                                        if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                                                        {
-                                                                            //ConsoleWriterService.OutputVal($"Inside block service A");
-                                                                            BlockDownloadService.BlockDict[currentHeight] = (block, IP);
-                                                                            if (nextHeight == currentHeight)
-                                                                                await BlockValidatorService.ValidateBlocks();
-                                                                            if (nextHeight < currentHeight)
-                                                                                await BlockDownloadService.GetAllBlocks();
-                                                                        }
+                                                if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                                {
+                                                    //ConsoleWriterService.OutputVal($"Processing Block");
+                                                    // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                                                    BlockDownloadService.BlockDict.AddOrUpdate(
+                                                        currentHeight,
+                                                        new List<(Block, string)> { (block, IP) },
+                                                        (key, existingList) =>
+                                                        {
+                                                            existingList.Add((block, IP));
+                                                            return existingList;
+                                                        });
+                                                    if (nextHeight == currentHeight)
+                                                        await BlockValidatorService.ValidateBlocks();
+                                                    if (nextHeight < currentHeight)
+                                                        await BlockDownloadService.GetAllBlocks();
+                                                }
 
                                                                         if (currentHeight < nextHeight)
                                                                         {
@@ -1036,7 +1052,15 @@ namespace ReserveBlockCore.Nodes
                                                                             //ConsoleWriterService.OutputVal($"Inside block service C");
                                                                             if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
                                                                             {
-                                                                                BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                                                // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                                                                                BlockDownloadService.BlockDict.AddOrUpdate(
+                                                                                    currentHeight,
+                                                                                    new List<(Block, string)> { (block, IP) },
+                                                                                    (key, existingList) =>
+                                                                                    {
+                                                                                        existingList.Add((block, IP));
+                                                                                        return existingList;
+                                                                                    });
                                                                                 if (nextHeight == currentHeight)
                                                                                     await BlockValidatorService.ValidateBlocks();
                                                                                 if (nextHeight < currentHeight)
@@ -1553,7 +1577,15 @@ namespace ReserveBlockCore.Nodes
                                             {
                                                 CasterRoundAudit.AddStep($"Processing Block.", true);
                                                 //ConsoleWriterService.OutputVal($"Processing Block");
-                                                BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                                                BlockDownloadService.BlockDict.AddOrUpdate(
+                                                    currentHeight,
+                                                    new List<(Block, string)> { (block, IP) },
+                                                    (key, existingList) =>
+                                                    {
+                                                        existingList.Add((block, IP));
+                                                        return existingList;
+                                                    });
                                                 if (nextHeight == currentHeight)
                                                     await BlockValidatorService.ValidateBlocks();
                                                 if (nextHeight < currentHeight)
@@ -1655,7 +1687,15 @@ namespace ReserveBlockCore.Nodes
                                                                     if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
                                                                     {
                                                                         //ConsoleWriterService.OutputVal($"Inside block service A");
-                                                                        BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                                        // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                                                                        BlockDownloadService.BlockDict.AddOrUpdate(
+                                                                            currentHeight,
+                                                                            new List<(Block, string)> { (block, IP) },
+                                                                            (key, existingList) =>
+                                                                            {
+                                                                                existingList.Add((block, IP));
+                                                                                return existingList;
+                                                                            });
                                                                         if (nextHeight == currentHeight)
                                                                             await BlockValidatorService.ValidateBlocks();
                                                                         if (nextHeight < currentHeight)
@@ -1686,7 +1726,15 @@ namespace ReserveBlockCore.Nodes
                                                                         //ConsoleWriterService.OutputVal($"Inside block service C");
                                                                         if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
                                                                         {
-                                                                            BlockDownloadService.BlockDict[currentHeight] = (block, IP);
+                                                                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                                                                            BlockDownloadService.BlockDict.AddOrUpdate(
+                                                                                currentHeight,
+                                                                                new List<(Block, string)> { (block, IP) },
+                                                                                (key, existingList) =>
+                                                                                {
+                                                                                    existingList.Add((block, IP));
+                                                                                    return existingList;
+                                                                                });
                                                                             if (nextHeight == currentHeight)
                                                                                 await BlockValidatorService.ValidateBlocks();
                                                                             if (nextHeight < currentHeight)

@@ -272,7 +272,9 @@ namespace ReserveBlockCore.P2P
 
                         if (message != "IP")
                         {
-                            await NodeDataProcessor.ProcessData(message, data, IPAddress);
+                            // HAL-072 Fix: Pass cancellation token to prevent runaway deserialization
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                            await NodeDataProcessor.ProcessData(message, data, IPAddress, cts.Token);
                         }
                         else
                         {
