@@ -495,6 +495,9 @@ namespace ReserveBlockCore
             Globals.ValidatorRegistryCleanupTimer = new Timer(validatorRegistryCleanupTimer_Elapsed);
             Globals.ValidatorRegistryCleanupTimer.Change(180000, 30 * 60 * 1000); //waits 3 minutes, then runs every 30 minutes
 
+            // HAL-071 Fix: Start mempool cleanup service to prevent unbounded growth
+            MempoolCleanupService.Start();
+
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL

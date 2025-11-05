@@ -130,6 +130,12 @@ namespace ReserveBlockCore
         public const int MaxTxAgeSeconds = 3600; // 60 minutes - transactions older than this are rejected
         public const int MaxFutureSkewSeconds = 120; // 2 minutes - allows for clock skew tolerance
 
+        // HAL-071 Fix: Mempool resource limits to prevent unbounded growth
+        public const int MaxMempoolEntries = 10000; // Maximum number of transactions in mempool
+        public const long MaxMempoolSizeBytes = 52428800; // 50 MB maximum mempool size
+        public const decimal MinFeePerKB = 0.000003M; // Minimum fee per kilobyte to prevent spam
+        public const int MempoolCleanupIntervalMinutes = 5; // How often to run mempool cleanup
+
         //public static long Validating
         public static long LastAdjudicateTime = 0;
         public static SemaphoreSlim BlocksDownloadSlim = new SemaphoreSlim(1, 1);

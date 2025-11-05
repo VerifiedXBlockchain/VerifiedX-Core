@@ -429,6 +429,34 @@ namespace ReserveBlockCore.P2P
 
                                 if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
+                                    // HAL-071 Fix: Validate minimum fee and enforce mempool limits
+                                    var feeValidation = MempoolEvictionUtility.ValidateMinimumFee(txReceived);
+                                    if (!feeValidation.isValid)
+                                    {
+                                        return "TFVP"; // Transaction failed - fee below minimum
+                                    }
+
+                                    var stats = MempoolEvictionUtility.GetMempoolStats();
+                                    var canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
+                                    
+                                    if (!canAdd.canAdd)
+                                    {
+                                        // Try to evict lower priority transactions to make room
+                                        MempoolEvictionUtility.EvictLowestPriority(
+                                            targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
+                                            targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95)
+                                        );
+                                        
+                                        // Check again after eviction
+                                        stats = MempoolEvictionUtility.GetMempoolStats();
+                                        canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
+                                        
+                                        if (!canAdd.canAdd)
+                                        {
+                                            return "TFVP"; // Mempool full, cannot add
+                                        }
+                                    }
+
                                     mempool.InsertSafe(txReceived);
                                     if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                     {
@@ -510,6 +538,34 @@ namespace ReserveBlockCore.P2P
 
                             if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                             {
+                                // HAL-071 Fix: Validate minimum fee and enforce mempool limits
+                                var feeValidation = MempoolEvictionUtility.ValidateMinimumFee(txReceived);
+                                if (!feeValidation.isValid)
+                                {
+                                    return "TFVP"; // Transaction failed - fee below minimum
+                                }
+
+                                var stats = MempoolEvictionUtility.GetMempoolStats();
+                                var canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
+                                
+                                if (!canAdd.canAdd)
+                                {
+                                    // Try to evict lower priority transactions to make room
+                                    MempoolEvictionUtility.EvictLowestPriority(
+                                        targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
+                                        targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95)
+                                    );
+                                    
+                                    // Check again after eviction
+                                    stats = MempoolEvictionUtility.GetMempoolStats();
+                                    canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
+                                    
+                                    if (!canAdd.canAdd)
+                                    {
+                                        return "TFVP"; // Mempool full, cannot add
+                                    }
+                                }
+
                                 mempool.InsertSafe(txReceived);
                                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                 {
