@@ -138,9 +138,14 @@ namespace ReserveBlockCore.Services
 
             try
             {
-                var fileExist = File.Exists(deleteFrom + assetName);
-                if(fileExist)
-                    File.Delete(deleteFrom + assetName);
+                // Sanitize path to prevent directory traversal
+                var safeFileName = Path.GetFileName(assetName);
+                if (string.IsNullOrWhiteSpace(safeFileName))
+                    return;
+
+                var fullPath = Path.Combine(deleteFrom, safeFileName);
+                if (File.Exists(fullPath))
+                    File.Delete(fullPath);
             }
             catch { }
         }

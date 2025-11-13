@@ -172,16 +172,46 @@ namespace ReserveBlockCore.Services
         {
             try
             {
+                // Disconnect from all SignalR hub connections
+                if (Globals.P2PPeerDict.TryRemove(ipAddress, out var peerContext))
+                    peerContext?.Abort();
+
+                if (Globals.P2PValDict.TryRemove(ipAddress, out var valContext))
+                    valContext?.Abort();
+
+                if (Globals.BeaconPeerDict.TryRemove(ipAddress, out var beaconContext))
+                    beaconContext?.Abort();
+
+                // Disconnect from Fortis pool
                 if (Globals.FortisPool.TryGetFromKey1(ipAddress, out var pool))
                     pool.Value.Context?.Abort();
 
+                // Disconnect from node connections
                 if (Globals.AdjNodes.TryRemove(ipAddress, out var adjnode) && adjnode.Connection != null)
                     adjnode.Connection.DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();
 
                 if (Globals.Nodes.TryRemove(ipAddress, out var node) && node.Connection != null)
                     node.Connection.DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+
+                // Remove from validator registry (by IP address)
+                var normalizedIP = ipAddress.Replace("::ffff:", "");
+                var validatorsToRemove = Globals.NetworkValidators
+                    .Where(kvp => kvp.Value.IPAddress == normalizedIP)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+
+                foreach (var validatorAddress in validatorsToRemove)
+                {
+                    Globals.NetworkValidators.TryRemove(validatorAddress, out _);
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // Log any exceptions during peer release
+                ErrorLogUtility.LogError(
+                    $"Exception during ReleasePeer for {ipAddress}: {ex.Message}",
+                    "BanService.ReleasePeer()");
+            }
         }
 
         public static async Task RunUnban()

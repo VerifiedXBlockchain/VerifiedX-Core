@@ -121,9 +121,20 @@ namespace ReserveBlockCore
         public static long TXHeightRule1 = 820457; //March 31th, 2023 at 03:44 UTC
         public static long TXHeightRule2 = 847847; //around April 7, 2023 at 18:30 UTC
         public static long TXHeightRule3 = 1079488; //around June 13th, 2023 at 19:30 UTC
+        public static long TXHeightRule4 = 999999999999; //HAL-067: Nonce validation activation height
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds
+
+        // HAL-068 Fix: Transaction timestamp validation thresholds
+        public const int MaxTxAgeSeconds = 3600; // 60 minutes - transactions older than this are rejected
+        public const int MaxFutureSkewSeconds = 120; // 2 minutes - allows for clock skew tolerance
+
+        // HAL-071 Fix: Mempool resource limits to prevent unbounded growth
+        public const int MaxMempoolEntries = 10000; // Maximum number of transactions in mempool
+        public const long MaxMempoolSizeBytes = 52428800; // 50 MB maximum mempool size
+        public const decimal MinFeePerKB = 0.000003M; // Minimum fee per kilobyte to prevent spam
+        public const int MempoolCleanupIntervalMinutes = 5; // How often to run mempool cleanup
 
         //public static long Validating
         public static long LastAdjudicateTime = 0;
@@ -337,6 +348,14 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, MessageLock> MessageLocks = new ConcurrentDictionary<string, MessageLock>();
         public static ConcurrentDictionary<string, int> TxRebroadcastDict = new ConcurrentDictionary<string, int>();
 
+        // HAL-054 Fix: Global resource tracking for distributed DoS protection
+        public static int GlobalConnectionCount = 0;
+        public static long GlobalBufferCost = 0;
+        public const int MaxGlobalConnections = 500; // Maximum concurrent connections across all IPs
+        public const long MaxGlobalBufferCost = 100000000; // 100MB total buffer across all IPs
+        public const int MaxConnectionsPerIP = 20; // Per-IP connection limit
+        public const int MaxBufferCostPerIP = 5000000; // 5MB per-IP buffer limit
+
         #endregion
 
         #region P2P Adj Server Variables
@@ -347,7 +366,6 @@ namespace ReserveBlockCore
         public static ConcurrentBag<ConnectionHistory> ConnectionHistoryList = new ConcurrentBag<ConnectionHistory>();
         public static ConcurrentDictionary<string, long> Signatures = new ConcurrentDictionary<string, long>();
         
-        public static (long Height, int Answer, long Time) CurrentTaskNumberAnswerV3;
         public static TaskWinner CurrentWinner;
         public static string VerifySecret = "";        
 
@@ -355,9 +373,6 @@ namespace ReserveBlockCore
         public static long ConsensusStartHeight = -1;
         public static long ConsensusSucceses = 0;
         
-        public static ConcurrentDictionary<(string RBXAddress, long Height), Block> TaskWinnerDictV3 = new ConcurrentDictionary<(string RBXAddress, long Height), Block>(); // VFX address        
-        public static ConcurrentDictionary<(string RBXAddress, long Height), (string IPAddress, string RBXAddress, int Answer)> TaskSelectedNumbersV3 = new ConcurrentDictionary<(string RBXAddres, long height), (string IPAddress, string RBXAddress, int Answer)>();        
-        public static ConcurrentDictionary<(string RBXAddress, long Height), (string IPAddress, string RBXAddress, int Answer)> TaskAnswerDictV3 = new ConcurrentDictionary<(string RBXAddres, long height), (string IPAddress, string RBXAddress, int Answer)>();        
         public static ConcurrentDictionary<string, Transaction> BroadcastedTrxDict = new ConcurrentDictionary<string, Transaction>(); // TX Hash
         public static ConcurrentDictionary<string, TransactionBroadcast> ConsensusBroadcastedTrxDict = new ConcurrentDictionary<string, TransactionBroadcast>(); //TX Hash
         public static ConcurrentDictionary<string, DuplicateValidators> DuplicatesBroadcastedDict= new ConcurrentDictionary<string, DuplicateValidators>();

@@ -272,7 +272,9 @@ namespace ReserveBlockCore.P2P
 
                         if (message != "IP")
                         {
-                            await NodeDataProcessor.ProcessData(message, data, IPAddress);
+                            // HAL-072 Fix: Pass cancellation token to prevent runaway deserialization
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                            await NodeDataProcessor.ProcessData(message, data, IPAddress, cts.Token);
                         }
                         else
                         {
@@ -485,11 +487,9 @@ namespace ReserveBlockCore.P2P
                         Connection = hubConnection,
                         IpAddress = IPAddress,
                         AdjudicatorConnectDate = DateTime.UtcNow,
-                        Address = bench.RBXAddress
+                    Address = bench.RBXAddress
                 };
                 }
-
-                ValidatorProcessor_BAk.RandomNumberTaskV3(Globals.LastBlock.Height + 1);
 
                 return true;
             }
@@ -647,129 +647,6 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
-        #region Send Winning Task V3
-
-        public static async Task SendWinningTaskV3(AdjNodeInfo node, string block, long height)
-        {
-            var now = DateTime.Now;
-            for (var i = 1; i < 4; i++)
-            {
-                try
-                {
-                    if ((DateTime.Now - now).Milliseconds > 2000)
-                        return;
-                    var result = await node.InvokeAsync<bool>("ReceiveWinningBlockV3", new object[] { block },
-                        () => new CancellationTokenSource(3000).Token);
-                    if (result)
-                    {
-                        node.LastWinningTaskError = false;
-                        node.LastWinningTaskSentTime = DateTime.Now;
-                        node.LastWinningTaskBlockHeight = height;
-                        break;
-                    }
-                    else
-                    {
-                        node.LastWinningTaskError = true;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    node.LastTaskError = true;
-
-                    ValidatorLogUtility.Log("Unhandled Error Sending Task. Check Error Log for more details.", "P2PClient.SendTaskAnswer()");
-
-                    string errorMsg = string.Format("Error Sending Task - {0}. Error Message : {1}", block != null ?
-                        DateTime.Now.ToString() : "No Time", ex.ToString());
-                    ErrorLogUtility.LogError(errorMsg, "SendTaskAnswer(TaskAnswer taskAnswer)");
-                }
-            }
-            if (node.LastTaskError == true)
-            {
-                ValidatorLogUtility.Log("Failed to send or receive back from Adjudicator 4 times. Please verify node integrity and crafted blocks.", "P2PClient.SendTaskAnswer()");
-            }
-        }
-
-        #endregion
-
-        #region Send Task Answer V3
-
-        public static async Task SendTaskAnswerV3(string taskAnswer)
-        {
-            if (taskAnswer == null || Globals.TimeSyncError) //adding time sync check here.
-                return;
-
-            var tasks = new ConcurrentBag<Task>();
-            Globals.AdjNodes.Values.Where(x => x.IsConnected).ToArray().ParallelLoop(x =>
-            {
-                tasks.Add(SendTaskAnswerV3(x, taskAnswer));
-            });            
-
-            await Task.WhenAll(tasks);
-        }
-
-        private static async Task SendTaskAnswerV3(AdjNodeInfo node, string taskAnswer)
-        {
-            if (node.LastSentBlockHeight == Globals.LastBlock.Height + 1)
-                return;
-
-            Random rand = new Random();
-            int randNum = rand.Next(0, 3000);
-            for (var i = 1; i < 4; i++)
-            {
-                if (i == 1)                
-                    await Task.Delay(randNum);                                
-                try
-                {
-                    var result = await node.InvokeAsync<TaskAnswerResult>("ReceiveTaskAnswerV3", new object[] { taskAnswer },
-                                            () => new CancellationTokenSource(3000).Token);                    
-                    if (result != null)
-                    {
-                        if (result.AnswerAccepted)
-                        {
-                            node.LastTaskError = false;
-                            node.LastTaskSentTime = DateTime.Now;
-                            node.LastSentBlockHeight = Globals.LastBlock.Height + 1;
-                            node.LastTaskErrorCount = 0;
-                            break;
-                        }
-                        else if(result.AnswerCode == 7)
-                        {
-                            node.LastTaskSentTime = DateTime.Now;
-                            node.LastTaskError = false;
-                            node.LastSentBlockHeight = Globals.LastBlock.Height + 1;
-                            return;
-                        }
-                        else
-                        {
-                            var errorCodeDesc = await TaskAnswerCodeUtility.TaskAnswerCodeReason(result.AnswerCode);
-                            if(result.AnswerCode != 6)
-                                ConsoleWriterService.Output($"Task was not accpeted: From: {node.IpAddress} Error Code: {result.AnswerCode} - Reason: {errorCodeDesc} Attempt: {i}/3.");
-                            ValidatorLogUtility.Log($"Task Answer was not accepted. Error Code: {result.AnswerCode} - Reason: {errorCodeDesc}", "P2PClient.SendTaskAnswer_New()");
-                            node.LastTaskError = true;
-   
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    node.LastTaskError = true;
-
-                    ValidatorLogUtility.Log("Unhandled Error Sending Task. Check Error Log for more details.", "P2PClient.SendTaskAnswer()");
-
-                    string errorMsg = string.Format("Error Sending Task - {0}. Error Message : {1}", taskAnswer != null ?
-                        taskAnswer : "No Time", ex.ToString());
-                    ErrorLogUtility.LogError(errorMsg, "SendTaskAnswer(TaskAnswer taskAnswer)");
-                }
-            }
-
-            if (node.LastTaskError == true)
-            {
-                node.LastTaskErrorCount += 1;
-                ValidatorLogUtility.Log("Failed to send or receive back from Adjudicator 4 times. Please verify node integrity and crafted blocks.", "P2PClient.SendTaskAnswer()");
-            }
-        }
-
-        #endregion
 
         #region Send TX To Adjudicators
         public static async Task SendTXToAdjudicator(Transaction tx)

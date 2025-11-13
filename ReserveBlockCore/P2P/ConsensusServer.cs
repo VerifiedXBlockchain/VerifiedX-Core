@@ -21,15 +21,17 @@ namespace ReserveBlockCore.P2P
         static ConsensusServer()
         {
             AdjPool = new ConcurrentDictionary<string, AdjPool>();
-            Messages = new ConcurrentDictionary<(long Height, int MethodCode), ConcurrentDictionary<string, (string Message, string Signature)>>();
-            Hashes = new ConcurrentDictionary<(long Height, int MethodCode), ConcurrentDictionary<string, (string Hash, string Signature)>>();
             ConsenusStateSingelton = new ConsensusState();
         }
 
         public static ConcurrentDictionary<string, AdjPool> AdjPool;
-        public static ConcurrentDictionary<(long Height, int MethodCode), ConcurrentDictionary<string, (string Message, string Signature)>> Messages;
-        public static ConcurrentDictionary<(long Height, int MethodCode), ConcurrentDictionary<string, (string Hash, string Signature)>> Hashes;
 
+        // HAL-034 Fix: Hard caps for cache dictionaries to prevent unbounded growth
+        private const int MaxCacheEntries = 100;
+        
+        // HAL-035 Fix: Maximum input size for consensus messages to prevent memory exhaustion
+        private const int MaxMessageSize = 10000; // 10KB limit for consensus messages
+        
         public static object UpdateNodeLock = new object();
         private static ConsensusState ConsenusStateSingelton;
         private static object UpdateLock = new object();
@@ -83,18 +85,20 @@ namespace ReserveBlockCore.P2P
                     return;
                 }
 
-                if (!Globals.Signatures.TryAdd(signature, now))
-                {
-                    EndOnConnect(peerIP, "Reused signature.", "Reused signature.");
-                    return;
-                }
-
+                // HAL-040 Fix: Verify signature BEFORE adding to signature map
                 var verifySig = SignatureService.VerifySignature(address, address + ":" + time, signature);
                 if (!verifySig)
                 {
                     EndOnConnect(peerIP,
                         "Connected, but your address signature failed to verify. You are being disconnected.",
                         "Connected, but your address signature failed to verify with Consensus: " + address);
+                    return;
+                }
+
+                // HAL-040 Fix: Only add to signature map AFTER successful verification
+                if (!Globals.Signatures.TryAdd(signature, now))
+                {
+                    EndOnConnect(peerIP, "Reused signature.", "Reused signature.");
                     return;
                 }
 
@@ -164,20 +168,11 @@ namespace ReserveBlockCore.P2P
             RemoveStaleCache(node);
         }
 
+        // HAL-063: RemoveStaleCache removed - legacy code for Messages/Hashes dictionaries that are no longer used
         public static void RemoveStaleCache(NodeInfo node)
         {
-            var NodeHeight = node.NodeHeight + 1;
-            var MessageKeys = ConsensusServer.Messages.Where(x => x.Value.ContainsKey(node.Address)).Select(x => x.Key).ToHashSet();
-            var HashKeys = ConsensusServer.Hashes.Where(x => x.Value.ContainsKey(node.Address)).Select(x => x.Key).ToHashSet();
-
-            var state = GetState();
-            foreach (var key in MessageKeys.Where(x => x.MethodCode != node.MethodCode && state.MethodCode != x.MethodCode))
-                if (ConsensusServer.Messages.TryGetValue(key, out var message))
-                    message.TryRemove(node.Address, out _);
-            foreach (var key in HashKeys.Where(x => (node.IsFinalized && x.MethodCode != node.MethodCode) || 
-                (!node.IsFinalized && x.MethodCode + 1 == node.MethodCode)))
-                if (ConsensusServer.Hashes.TryGetValue(key, out var hash))
-                    hash.TryRemove(node.Address, out _);
+            // This method is kept as a stub to avoid breaking existing references
+            // Legacy cache cleanup for Messages/Hashes has been removed
         }
 
         public static void UpdateConsensusDump(string ipAddress, string method, string request, string response)
@@ -251,175 +246,11 @@ namespace ReserveBlockCore.P2P
             }
         }
 
-        public string Message(long height, int methodCode, string[] addresses, string peerMessage)
-        {
-            //var now = DateTime.Now.ToString();
-            string Prefix = null;
-            string ip = null;
-            try
-            {
-                ip = GetIP(Context);
-                LogUtility.LogQueue(ip + " " + height + " " + methodCode + " " + string.IsNullOrWhiteSpace(peerMessage) + " " + TimeUtil.GetMillisecondTime(), "Message", "ConsensusServer.txt", false);                
-                if (!Globals.Nodes.TryGetValue(ip, out var node))
-                {
-                    Context?.Abort();
-                    UpdateConsensusDump(ip, "Message", height + " " + methodCode + " (" + string.Join(",", addresses) + ") " + peerMessage, null);
-                    return null;
-                }
+        // HAL-063: Message() and Hash() methods removed - legacy code from old adjudicator consensus model
+        // These methods were part of the deprecated message/hash exchange pattern that has been replaced
+        // by the blockcaster/validator proof-based consensus mechanism
 
-                UpdateNode(node, height - 1, methodCode, false);
-                Prefix = (Globals.LastBlock.Height).ToString() + ":" + ConsenusStateSingelton.MethodCode + ":" +
-                                    (ConsenusStateSingelton.Status == ConsensusStatus.Finalized ? 1 : 0);
-
-                string message = null;
-                string signature = null;
-                if(peerMessage != null)
-                {
-                    var split = peerMessage.Split(";:;");
-                    (message, signature) = (split[0], split[1]);
-                    message = message.Replace("::", ":");
-                }
-
-                var messages = Messages.GetOrAdd((height, methodCode), new ConcurrentDictionary<string, (string Message, string Signature)>());                
-                var state = GetState();
-
-                
-                if (message != null && ((methodCode == 0 && state.MethodCode != 0)) ||
-                    (height == Globals.LastBlock.Height + 1 
-                    && ((methodCode == state.MethodCode && state.Status != ConsensusStatus.Finalized) || 
-                        (methodCode == state.MethodCode + 1 && state.Status == ConsensusStatus.Finalized)))
-                    && SignatureService.VerifySignature(node.Address, message, signature))
-                    messages[node.Address] = (message, signature);
-                
-                foreach (var address in addresses)
-                {
-                    if (messages.TryGetValue(address, out var Value))
-                    {
-                        UpdateConsensusDump(ip, "Message", height + " " + methodCode + " (" + string.Join(",", addresses) + ") " + peerMessage,
-                            Prefix + "|" + address + ";:;" + Value.Message.Replace(":", "::") + ";:;" + Value.Signature);
-                        return Prefix + "|" + address + ";:;" + Value.Message.Replace(":", "::") + ";:;" + Value.Signature;
-                    }
-                }               
-            }
-            catch(Exception ex)
-            {
-                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "ConsensusServer.Message()");
-            }
-
-            UpdateConsensusDump(ip, "Message", height + " " + methodCode + " (" + string.Join(",", addresses) + ") " + peerMessage, Prefix);
-            return Prefix;
-        }
-
-        public string Hash(long height, int methodCode, string[] addresses, string peerHash)
-        {
-            string Prefix = null;
-            string ip = null;
-            try
-            {
-                ip = GetIP(Context);
-                LogUtility.LogQueue(ip + " " + height + " " + methodCode + " " + string.IsNullOrWhiteSpace(peerHash) + " " + TimeUtil.GetMillisecondTime(), "Hash", "ConsensusServer.txt", false);                
-                if (!Globals.Nodes.TryGetValue(ip, out var node))
-                {
-                    Context?.Abort();
-                    UpdateConsensusDump(ip, "Hash", height + " " + methodCode + " (" + string.Join(",", addresses) + ") " + peerHash, null);
-                    return null;
-                }
-
-                UpdateNode(node, height - 1, methodCode, true);
-                Prefix = (Globals.LastBlock.Height).ToString() + ":" + ConsenusStateSingelton.MethodCode + ":" +
-                                    (ConsenusStateSingelton.Status == ConsensusStatus.Finalized ? 1 : 0);
-
-                string hash = null;
-                string signature = null;
-                if (peerHash != null)
-                {
-                    var split = peerHash.Split(":");
-                    (hash, signature) = (split[0], split[1]);                    
-                }
-
-                var hashes = Hashes.GetOrAdd((height, methodCode), new ConcurrentDictionary<string, (string Hash, string Signature)>());
-                var state = GetState();
-                if (hash != null && height == Globals.LastBlock.Height + 1 && methodCode == state.MethodCode && SignatureService.VerifySignature(node.Address, hash, signature))
-                    hashes[node.Address] = (hash, signature);
-
-                if (ConsenusStateSingelton.Status != ConsensusStatus.Finalized && methodCode == state.MethodCode)
-                {
-                    UpdateConsensusDump(ip, "Hash", height + " " + methodCode + " (" + string.Join(",", addresses) + ") " + peerHash, null);
-                    return null;
-                }
-                
-                foreach (var address in addresses)
-                {
-                    if (hashes.TryGetValue(address, out var Value))
-                    {
-                        UpdateConsensusDump(ip, "Hash", height + " " + methodCode + " (" + string.Join(",", addresses) + ") " + peerHash,
-                            Prefix + "|" + address + ":" + Value.Hash + ":" + Value.Signature);
-                        return Prefix + "|" + address + ":" + Value.Hash + ":" + Value.Signature;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "ConsensusServer.Hash()");
-            }
-
-            UpdateConsensusDump(ip, "Hash", height + " " + methodCode + " (" + string.Join(",", addresses) + ") " + peerHash, Prefix);
-            return Prefix;
-        }
-
-        public async Task<bool> GetBroadcastedTx(List<TransactionBroadcast> txBroadcastList)
-        {
-            bool result = false;
-            try
-            {
-                var txHashes = JsonConvert.SerializeObject(txBroadcastList.Select(x => x.Hash).ToArray());
-                AdjLogUtility.Log($"UTC Time: {DateTime.Now} TX List Received: {txHashes}", "ConsensusServer.GetBroadcastedTx()");
-                foreach (var txBroadcast in txBroadcastList)
-                {
-                    if (!Globals.ConsensusBroadcastedTrxDict.TryGetValue(txBroadcast.Hash, out _))
-                    {
-                        var isTxStale = await TransactionData.IsTxTimestampStale(txBroadcast.Transaction);
-                        if(!isTxStale)
-                        {
-                            var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(txBroadcast.Transaction);
-
-                            if (!isCraftedIntoBlock)
-                            {
-                                Globals.ConsensusBroadcastedTrxDict[txBroadcast.Hash] = new TransactionBroadcast
-                                {
-                                    Hash = txBroadcast.Hash,
-                                    IsBroadcastedToAdj = false,
-                                    IsBroadcastedToVal = false,
-                                    Transaction = txBroadcast.Transaction,
-                                    RebroadcastCount = 0
-                                };
-                            }
-                            else
-                            {
-                                Globals.BroadcastedTrxDict.TryRemove(txBroadcast.Hash, out _);
-                                Globals.ConsensusBroadcastedTrxDict.TryRemove(txBroadcast.Hash, out _);
-                            }
-                        }
-                        else
-                        {
-                            Globals.BroadcastedTrxDict.TryRemove(txBroadcast.Hash, out _);
-                            Globals.ConsensusBroadcastedTrxDict.TryRemove(txBroadcast.Hash, out _);
-                        }
-                    }
-                }
-
-                result = true;
-            }
-            catch(Exception ex)
-            {
-                result = false;
-                AdjLogUtility.Log($"Error receiving broadcasted TX. Error: {ex.ToString()}", "ConsensusServer.GetBroadcastedTx()");
-                ErrorLogUtility.LogError($"Error receiving broadcasted TX. Error: {ex.ToString()}", "ConsensusServer.GetBroadcastedTx()");
-            }
-
-            return result;
-        }
-
+       
         private static string GetIP(HubCallerContext context)
         {
             try

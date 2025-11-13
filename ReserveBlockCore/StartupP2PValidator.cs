@@ -30,7 +30,7 @@ namespace ReserveBlockCore
                 options.MaximumReceiveMessageSize = 1179648;
                 options.StreamBufferCapacity = 1024;
                 options.EnableDetailedErrors = true;
-                options.MaximumParallelInvocationsPerClient = int.MaxValue;
+                options.MaximumParallelInvocationsPerClient = 20; // HAL-054 Fix: Limit concurrent invocations per client
                 options.HandshakeTimeout = TimeSpan.FromSeconds(30);
             }).AddHubOptions<P2PValidatorServer>(options =>
             {

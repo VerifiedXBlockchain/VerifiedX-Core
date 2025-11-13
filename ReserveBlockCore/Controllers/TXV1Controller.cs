@@ -1310,6 +1310,61 @@ namespace ReserveBlockCore.Controllers
 
 
         /// <summary>
+        /// Replace transaction by fee (RBF). Specify original TX hash and new fee
+        /// </summary>
+        /// <param name="txHash"></param>
+        /// <param name="newFee"></param>
+        /// <returns></returns>
+        [HttpGet("ReplaceTransactionByFee/{txHash}/{newFee}")]
+        public async Task<string> ReplaceTransactionByFee(string txHash, decimal newFee)
+        {
+            var output = "FAIL";
+
+            // Look up original TX in mempool
+            var mempool = TransactionData.GetPool();
+            var originalTx = mempool.FindOne(x => x.Hash == txHash);
+
+            if (originalTx == null)
+            {
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "Transaction not found in mempool" });
+                return output;
+            }
+
+            if (Globals.IsWalletEncrypted == true)
+            {
+                if (Globals.EncryptPassword.Length > 0)
+                {
+                    var result = await WalletService.SendTXOutRBF(
+                        originalTx.FromAddress,
+                        originalTx.ToAddress,
+                        originalTx.Amount,
+                        newFee,
+                        txHash
+                    );
+
+                    output = result;
+                }
+                else
+                {
+                    output = "FAIL. Please type in wallet encryption password first.";
+                }
+            }
+            else
+            {
+                var result = await WalletService.SendTXOutRBF(
+                    originalTx.FromAddress,
+                    originalTx.ToAddress,
+                    originalTx.Amount,
+                    newFee,
+                    txHash
+                );
+                output = result;
+            }
+
+            return output;
+        }
+
+        /// <summary>
         /// Send a transaction. Specify from, to, and amount
         /// </summary>
         /// <param name="faddr"></param>

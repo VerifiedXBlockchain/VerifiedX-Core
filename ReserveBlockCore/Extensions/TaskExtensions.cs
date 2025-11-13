@@ -11,19 +11,21 @@ namespace ReserveBlockCore.Extensions
 {
     public static class TaskExtensions
     {
-		public static void ParallelLoop<T>(this ICollection<T> source, Action<T> func)
+	public static void ParallelLoop<T>(this ICollection<T> source, Action<T> func)
+	{
+		if (source.Count == 0)
+			return;
+		// HAL-049 Fix: Cap parallel operations to prevent resource exhaustion
+		const int MAX_PARALLEL = 14;
+		Parallel.ForEach(source, new ParallelOptions { MaxDegreeOfParallelism = Math.Min(MAX_PARALLEL, source.Count) }, x =>
 		{
-			if (source.Count == 0)
-				return;
-			Parallel.ForEach(source, new ParallelOptions { MaxDegreeOfParallelism = source.Count }, x =>
+			try
 			{
-				try
-				{
-					func(x);
-				}
-				catch { }
-			});
-		}
+				func(x);
+			}
+			catch { }
+		});
+	}
 
         public static void ParallelTwoLoop<T>(this ICollection<T> source, Action<T> func)
         {

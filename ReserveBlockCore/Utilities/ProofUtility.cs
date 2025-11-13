@@ -338,13 +338,16 @@ namespace ReserveBlockCore.Utilities
 
                 var validProofs = proofs.Where(p =>
                     p.BlockHeight == processHeight &&
+                    p.PreviousBlockHash == Globals.LastBlock.Hash &&
                     p.VerifyProof() &&
                     !Globals.ABL.Exists(x => x == p.Address)
                 ).ToList();
 
-                // Sort deterministically by VRF number
+                // Sort deterministically by VRF number with tiebreaking
                 return validProofs
                     .OrderBy(x => x.VRFNumber)  // Closest to zero wins
+                    .ThenBy(x => x.ProofHash)   // Tiebreak by proof hash
+                    .ThenBy(x => x.Address)     // Final tiebreak by address
                     .FirstOrDefault();
 
             }
