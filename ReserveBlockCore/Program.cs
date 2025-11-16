@@ -81,7 +81,7 @@ namespace ReserveBlockCore
                 });
             }
             //Forced Testnet
-            //Globals.IsTestNet = true;
+            Globals.IsTestNet = true;
             Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
             Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
             Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
