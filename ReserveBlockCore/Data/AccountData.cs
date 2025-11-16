@@ -165,6 +165,63 @@ namespace ReserveBlockCore.Data
                         }
                     }
 
+                    // Check for smart contracts where this address has a tokenization balance
+                    var allContracts = scStateTrei.Query().ToEnumerable();
+                    var contractsWithBalance = allContracts.Where(contract =>
+                        contract.SCStateTreiTokenizationTXes != null &&
+                        contract.SCStateTreiTokenizationTXes.Any(tx =>
+                            tx.ToAddress == account.Address || tx.FromAddress == account.Address));
+
+                    if (contractsWithBalance.Any())
+                    {
+                        foreach (var sc in contractsWithBalance)
+                        {
+                            // Skip if already restored as owner or minter
+                            if (scs.Any(x => x.SmartContractUID == sc.SmartContractUID))
+                                continue;
+
+                            try
+                            {
+								if (sc.SCStateTreiTokenizationTXes == null)
+									continue;
+                                // Calculate balance for this address
+                                var transactions = sc.SCStateTreiTokenizationTXes.Where(tx =>
+                                    tx.ToAddress == account.Address || tx.FromAddress == account.Address).ToList();
+                                var balance = transactions.Sum(x => x.Amount);
+
+                                // Only import if balance is greater than zero
+                                if (balance <= 0)
+                                    continue;
+
+                                var scMain = SmartContractMain.GenerateSmartContractInMemory(sc.ContractData);
+                                
+                                SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
+
+                                if (scMain.Features != null)
+                                {
+                                    var tokenizedBitcoinFeature = scMain.Features.Where(x => x.FeatureName == FeatureName.Tokenization).FirstOrDefault();
+                                    if (tokenizedBitcoinFeature != null)
+                                    {
+                                        await TokenizedBitcoin.SaveSmartContractCoinTransfer(scMain, account.Address, null);
+                                        
+                                        // Update the balance for the restored token
+                                        var tokenDb = TokenizedBitcoin.GetDb();
+                                        var token = tokenDb.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.RBXAddress == account.Address);
+                                        if (token != null)
+                                        {
+                                            token.Balance = balance;
+                                            tokenDb.UpdateSafe(token);
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                ErrorLogUtility.LogError($"Failed to import Smart contract with tokenization balance during account restore. SCUID: {sc.SmartContractUID}", "AccountData.RestoreAccount()");
+                            }
+                        }
+                    }
+
                     var accountCheck = AccountData.GetSingleAccount(account.Address);
                     if (accountCheck == null)
                     {

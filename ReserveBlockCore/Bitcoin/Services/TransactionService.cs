@@ -16,6 +16,7 @@ using ReserveBlockCore.SecretSharing.Cryptography;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using Spectre.Console;
+using System;
 using System.Reflection;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
@@ -876,7 +877,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Timestamp = timestamp,
                     UniqueId = uniqueId,
                     Signature = signature,
-                    Amount = (amountToSend + finalFee)
+                    Amount = sendAmount
                 };
 
                 var postData = JsonConvert.SerializeObject(sigData);

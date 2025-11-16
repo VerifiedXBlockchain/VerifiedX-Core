@@ -202,7 +202,7 @@ namespace ReserveBlockCore.Arbiter
                                 {
                                     if (scState.SCStateTreiTokenizationTXes != null)
                                     {
-                                        var vBTCList = scState.SCStateTreiTokenizationTXes.Where(x => x.ToAddress == result.VFXAddress && x.FromAddress == result.VFXAddress).ToList();
+                                        var vBTCList = scState.SCStateTreiTokenizationTXes.Where(x => x.ToAddress == result.VFXAddress || x.FromAddress == result.VFXAddress).ToList();
                                         if (vBTCList.Count() > 0)
                                         {
                                             //Also get the state level stuff we are saving now.
