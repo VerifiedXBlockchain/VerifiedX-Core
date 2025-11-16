@@ -1453,7 +1453,7 @@ namespace ReserveBlockCore.Controllers
         /// </summary>
         /// <returns></returns>
         [HttpGet("AddPeer/{**ipAddr}")]
-        public static async Task<string> AddPeer(string ipAddr)
+        public async Task<string> AddPeer(string ipAddr)
         {
             IPAddress ip;
             var peer = ipAddr;
