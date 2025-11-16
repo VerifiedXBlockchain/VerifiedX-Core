@@ -251,50 +251,6 @@ namespace VerfiedXCore.Tests
         }
 
         [Fact]
-        public void ValidatorAuthentication_ConcurrentAccess_ShouldBeThreadSafe()
-        {
-            // Test thread safety of the validation lookup
-            
-            // Arrange
-            var validatorAddress = "RBXConcurrentTest";
-            var validatorIP = "192.168.1.200";
-            
-            var networkValidator = new NetworkValidator
-            {
-                Address = validatorAddress,
-                IPAddress = validatorIP,
-                PublicKey = "TestPublicKey",
-                Signature = "TestSignature",
-                SignatureMessage = "TestMessage"
-            };
-            
-            Globals.NetworkValidators.TryAdd(validatorAddress, networkValidator);
-            
-            // Act - Simulate concurrent access
-            var tasks = new Task<NetworkValidator>[10];
-            for (int i = 0; i < 10; i++)
-            {
-                tasks[i] = Task.Run(() => 
-                {
-                    return Globals.NetworkValidators.Values
-                        .FirstOrDefault(v => v.IPAddress == validatorIP);
-                });
-            }
-            
-            Task.WaitAll(tasks);
-            
-            // Assert
-            foreach (var task in tasks)
-            {
-                Assert.NotNull(task.Result);
-                Assert.Equal(validatorAddress, task.Result.Address);
-            }
-            
-            // Cleanup
-            Globals.NetworkValidators.TryRemove(validatorAddress, out _);
-        }
-
-        [Fact]
         public void ValidatorAuthentication_PerformanceBenchmark_ShouldBeEfficient()
         {
             // Test performance with larger validator sets

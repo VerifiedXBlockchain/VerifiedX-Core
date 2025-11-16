@@ -47,12 +47,8 @@ namespace ReserveBlockCore.P2P
                     return;
                 }
 
-                var portCheck = PortUtility.IsPortOpen(peerIP, Globals.ValPort);
-                if(!portCheck) 
-                {
-                    _ = EndOnConnect(peerIP, $"Port: {Globals.ValPort} was not detected as open.", $"Port: {Globals.ValPort} was not detected as open for IP: {peerIP}.");
-                    return;
-                }
+                // HAL-022 Fix: Port check moved to async post-authentication to prevent DoS
+                // The synchronous pre-auth port check has been removed
 
                 var address = httpContext.Request.Headers["address"].ToString();
                 var time = httpContext.Request.Headers["time"].ToString();
@@ -152,34 +148,37 @@ namespace ReserveBlockCore.P2P
                 if (!ValidateAddressPublicKeyBinding(address, publicKey))
                 {
                     _ = EndOnConnect(peerIP,
-                        "Address and public key do not match. You are being disconnected.",
+                        "Authentication failed. You are being disconnected.",
                         "Address-PublicKey mismatch from: " + peerIP);
                     return;
                 }
+
+                // HAL-039 Fix: Verify signature BEFORE expensive database operations
+                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
+                if (!verifySig)
+                {
+                    ConnectionSecurityHelper.RecordAuthenticationFailure(peerIP, address, "Signature verification failed");
+                    _ = EndOnConnect(peerIP,
+                        "Authentication failed. You are being disconnected.",
+                        "Signature verification failed from: " + peerIP);
+                    return;
+                }
+
+                // HAL-039 Fix: Only perform expensive database lookups AFTER authentication
                 var stateAddress = StateData.GetSpecificAccountStateTrei(address);
                 if (stateAddress == null)
                 {
                     _ = EndOnConnect(peerIP,
-                        "Connection Attempted, But failed to find the address in trie. You are being disconnected.",
-                        "Connection Attempted, but missing field Address: " + address + " IP: " + peerIP);
+                        "Authentication failed. You are being disconnected.",
+                        "Address not found in state trie: " + address + " IP: " + peerIP);
                     return;
                 }
 
                 if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
                 {
                     _ = EndOnConnect(peerIP,
-                        $"Connected, but you do not have the minimum balance of {ValidatorService.ValidatorRequiredAmount()} VFX. You are being disconnected.",
-                        $"Connected, but you do not have the minimum balance of {ValidatorService.ValidatorRequiredAmount()} VFX: " + address);
-                    return;
-                }
-
-                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
-                if (!verifySig)
-                {
-                    ConnectionSecurityHelper.RecordAuthenticationFailure(peerIP, address, "Signature verification failed");
-                    _ = EndOnConnect(peerIP,
-                        "Connected, but your address signature failed to verify. You are being disconnected.",
-                        "Connected, but your address signature failed to verify with Val: " + address);
+                        "Authentication failed. You are being disconnected.",
+                        $"Insufficient balance for address: " + address);
                     return;
                 }
 
@@ -206,6 +205,17 @@ namespace ReserveBlockCore.P2P
 
                 // HAL-14 Security Enhancement: Clear security tracking for successful connections
                 ConnectionSecurityHelper.ClearConnectionHistory(peerIP);
+
+                // HAL-022 Fix: Async port check after authentication to detect one-way validators
+                // This runs asynchronously and doesn't block the handshake, preventing DoS attacks
+                _ = PortCheckCacheService.CheckAndDisconnectIfClosed(
+                    peerIP,
+                    Globals.ValPort,
+                    async () => await EndOnConnect(peerIP,
+                        $"Port: {Globals.ValPort} was not detected as open.",
+                        $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}."),
+                    "P2PValidatorServer"
+                );
 
                 _ = Peers.UpdatePeerAsVal(peerIP, address, walletVersion, address, publicKey);
                 
@@ -316,7 +326,8 @@ namespace ReserveBlockCore.P2P
                                     networkValidator.SignatureMessage, 
                                     networkValidator.Signature);
 
-                                if(verifySig && networkValidator.Signature.Contains(networkValidator.PublicKey))
+                                // HAL-025 Fix: Removed weak .Contains() check - proper cryptographic verification is sufficient
+                                if(verifySig)
                                 {
                                     Globals.NetworkValidators[networkValidator.Address] = networkValidator;
                                     processedCount++;
@@ -443,19 +454,42 @@ namespace ReserveBlockCore.P2P
                         var nextHeight = Globals.LastBlock.Height + 1;
                         var currentHeight = nextBlock.Height;
 
-                        if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
+                        if (currentHeight >= nextHeight)
                         {
-                            // HAL-17 Fix: Use configurable delay instead of hardcoded value
+                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                            BlockDownloadService.BlockDict.AddOrUpdate(
+                                currentHeight,
+                                new List<(Block, string)> { (nextBlock, IP) },
+                                (key, existingList) =>
+                                {
+                                    existingList.Add((nextBlock, IP));
+                                    return existingList;
+                                });
+
+                            // HAL-017 Fix: Use configurable delay instead of hardcoded value
                             await Task.Delay(Globals.BlockProcessingDelayMs);
 
                             if(Globals.LastBlock.Height < nextBlock.Height)
                                 await BlockValidatorService.ValidateBlocks();
 
+                            // HAL-028 Fix: Only broadcast if block was successfully validated and added to blockchain
                             if (nextHeight == currentHeight)
                             {
-                                string data = "";
-                                data = JsonConvert.SerializeObject(nextBlock);
-                                await Clients.All.SendAsync("GetMessage", "blk", data);
+                                // Verify the block was actually accepted by checking if it's now the last block
+                                if (Globals.LastBlock.Height == nextBlock.Height && Globals.LastBlock.Hash == nextBlock.Hash)
+                                {
+                                    string data = "";
+                                    data = JsonConvert.SerializeObject(nextBlock);
+                                    await Clients.All.SendAsync("GetMessage", "blk", data);
+                                }
+                                else
+                                {
+                                    // Block validation failed - do not broadcast invalid block
+                                    ErrorLogUtility.LogError(
+                                        $"HAL-028 Security: Block {nextBlock.Height} from {IP} failed validation - not broadcasting",
+                                        "P2PValidatorServer.ReceiveBlockVal()");
+                                    return false;
+                                }
                             }
 
                             if (nextHeight < currentHeight)
@@ -468,7 +502,16 @@ namespace ReserveBlockCore.P2P
                     return false;
                 });
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions and ban peer for security-critical method
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024 Security: Exception in ReceiveBlockVal from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.ReceiveBlockVal()");
+                
+                BanService.BanPeer(peerIP, "Block reception error", "ReceiveBlockVal");
+            }
 
             return false;
         }
@@ -511,7 +554,14 @@ namespace ReserveBlockCore.P2P
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in FailedToReachConsensus from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.FailedToReachConsensus()");
+            }
 
             return false;
         }
@@ -559,7 +609,16 @@ namespace ReserveBlockCore.P2P
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions and ban peer for security-critical method
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024 Security: Exception in ReceiveQueueBlockVal from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.ReceiveQueueBlockVal()");
+                
+                BanService.BanPeer(peerIP, "Queued block reception error", "ReceiveQueueBlockVal");
+            }
 
             return false;
         }
@@ -577,7 +636,14 @@ namespace ReserveBlockCore.P2P
                     return block;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in SendQueuedBlock from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendQueuedBlock()");
+            }
 
             return null;
 
@@ -606,7 +672,14 @@ namespace ReserveBlockCore.P2P
                     return null;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in SendBlockVal from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendBlockVal()");
+            }
 
             return null;
 
@@ -789,7 +862,16 @@ namespace ReserveBlockCore.P2P
                     return "";
                 });
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions and ban peer for security-critical method
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024 Security: Exception in SendTxToMempoolVals from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendTxToMempoolVals()");
+                
+                BanService.BanPeer(peerIP, "Transaction mempool error", "SendTxToMempoolVals");
+            }
 
             return "TFVP";
         }
@@ -1032,7 +1114,14 @@ namespace ReserveBlockCore.P2P
                     return "0";
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                var peerIP = GetIP(Context);
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in SendLockedWinner from {peerIP}: {ex.Message}",
+                    "P2PValidatorServer.SendLockedWinner()");
+            }
 
             return "0";
         }
@@ -1122,7 +1211,13 @@ namespace ReserveBlockCore.P2P
                 var peerCount = Globals.P2PValDict.Count;
                 return peerCount;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // HAL-024 Fix: Log exceptions for operational monitoring
+                ErrorLogUtility.LogError(
+                    $"HAL-024: Exception in GetConnectedValCount: {ex.Message}",
+                    "P2PValidatorServer.GetConnectedValCount()");
+            }
 
             return -1;
         }
@@ -1201,20 +1296,36 @@ namespace ReserveBlockCore.P2P
         }
 
         /// <summary>
-        /// Validate that the provided address matches the public key
+        /// HAL-023 Fix: Validate that the provided address matches the public key
+        /// Verifies that the publicKey actually derives the claimed address according to chain's address derivation rules
         /// </summary>
         private static bool ValidateAddressPublicKeyBinding(string address, string publicKey)
         {
             try
             {
-                // For now, we implement basic validation
+                // Basic null/empty validation
                 if (string.IsNullOrWhiteSpace(address) || string.IsNullOrWhiteSpace(publicKey))
                     return false;
 
+                // HAL-023 Fix: Derive the address from the public key and compare
+                var derivedAddress = AccountData.GetHumanAddress(publicKey);
+                
+                // The derived address must exactly match the claimed address
+                if (derivedAddress != address)
+                {
+                    ErrorLogUtility.LogError(
+                        $"HAL-023 Security: Address-PublicKey mismatch detected. Claimed: {address}, Derived: {derivedAddress}",
+                        "P2PValidatorServer.ValidateAddressPublicKeyBinding()");
+                    return false;
+                }
+
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                ErrorLogUtility.LogError(
+                    $"HAL-023 Security: Exception during address-publicKey validation: {ex.Message}",
+                    "P2PValidatorServer.ValidateAddressPublicKeyBinding()");
                 return false;
             }
         }

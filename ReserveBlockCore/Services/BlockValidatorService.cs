@@ -135,9 +135,15 @@ namespace ReserveBlockCore.Services
                         .Select(x => x.height).ToArray();
                     foreach (var height in heights)
                     {
-                        if (!BlockDownloadService.BlockDict.TryRemove(height, out var blockInfo))
+                        if (!BlockDownloadService.BlockDict.TryRemove(height, out var competingBlocks))
                             continue;
-                        var (block, ipAddress) = blockInfo;
+                        
+                        // HAL-066 Fix: Apply fork-choice rule to select canonical block from competing candidates
+                        var block = BlockDownloadService.SelectCanonicalBlock(competingBlocks);
+                        if (block == null)
+                            continue;
+                        
+                        var ipAddress = competingBlocks.FirstOrDefault(b => b.block.Hash == block.Hash).IPAddress ?? "unknown";
 
                         var startupDownload = Globals.BlocksDownloadSlim.CurrentCount == 0 ? true : false;
                         var stopwatch1 = new Stopwatch();
@@ -275,6 +281,7 @@ namespace ReserveBlockCore.Services
 
                 if(block.Version == 4)
                 {
+                    // Current consensus: VRF-based validator proofs
                     var version4Result = await BlockVersionUtility.Version4Rules(block);
                     if(!version4Result.Item1)
                     {
@@ -282,6 +289,9 @@ namespace ReserveBlockCore.Services
                         return result;
                     }
                 }
+                // HAL-062: Version 3 validation is for historical blocks only (height 579016-V4Height).
+                // Since V4Height=0, new blocks cannot be Version 3. This code only executes when
+                // syncing/validating historical blocks. See BlockVersionUtility.Version3Rules for details.
                 else if (block.Version == 3 && !ignoreAdjSignatures)
                 {
                     var version3Result = await BlockVersionUtility.Version3Rules(block);
@@ -381,11 +391,34 @@ namespace ReserveBlockCore.Services
                     {
                         //validate transactions.
                         bool rejectBlock = false;
-                        foreach (Transaction blkTransaction in block.Transactions)
+                        // HAL-067 Fix: Track nonces per address during block validation to support multiple TXs from same sender
+                        // Initialize dictionary with current state nonces for all addresses in block
+                        var processedNonces = new Dictionary<string, long>();
+                        var uniqueAddresses = block.Transactions
+                            .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
+                            .Select(x => x.FromAddress)
+                            .Distinct();
+                        
+                        foreach (var address in uniqueAddresses)
+                        {
+                            var stateAccount = StateData.GetSpecificAccountStateTrei(address);
+                            if (stateAccount != null)
+                            {
+                                processedNonces[address] = stateAccount.Nonce;
+                            }
+                        }
+                        
+                        // Process transactions ordered by nonce to ensure sequential validation
+                        var orderedTransactions = block.Transactions
+                            .OrderBy(x => x.FromAddress)
+                            .ThenBy(x => x.Nonce)
+                            .ToList();
+                        
+                        foreach (Transaction blkTransaction in orderedTransactions)
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
                             {
-                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true);
+                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces);
                                 if(txResult.Item1 == false)
                                 {
                                     //testing

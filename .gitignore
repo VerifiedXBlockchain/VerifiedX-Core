@@ -291,3 +291,4 @@ ReserveBlockCore/DBs - Copy/
 ReserveBlockCore/Properties/
 ReserveBlockCore/Properties/launchSettings.json
 .github/workflows/dotnet.yml
+.clinerules
