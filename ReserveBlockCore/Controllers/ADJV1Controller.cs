@@ -175,33 +175,6 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Returns a task answer list
-        /// </summary>
-        /// <returns></returns>
-        [HttpGet("GetTaskAnswersList")]
-        public async Task<string> GetTaskAnswersList()
-        {
-            string output = "";
-
-            try
-            {
-                var taskAnswerList = Globals.TaskAnswerDictV3.Values.Select(x => new {
-                    Address = x.RBXAddress,
-                    Answer = x.Answer,
-                    IP = x.IPAddress                        
-
-                });
-                output = JsonConvert.SerializeObject(taskAnswerList);                
-            }
-            catch(Exception ex)
-            {
-                output = $"Error calling api: {ex.ToString()}";
-            }
-
-            return output;
-        }
-
-        /// <summary>
         /// Returns ADJ info
         /// </summary>
         /// <returns></returns>
@@ -213,8 +186,6 @@ namespace ReserveBlockCore.Controllers
             try
             {
                 StringBuilder outputBuilder = new StringBuilder();
-
-                var taskSelectedNumbersV3 = Globals.TaskSelectedNumbersV3.Values.ToList();
 
                 var adjConsensusNodes = Globals.Nodes.Values.ToList();
                 var Now = TimeUtil.GetMillisecondTime();
@@ -229,17 +200,6 @@ namespace ReserveBlockCore.Controllers
                     outputBuilder.AppendLine("******************************************************************************");
                 }
 
-                if (taskSelectedNumbersV3.Count() > 0)
-                {
-                    outputBuilder.AppendLine("*******************************Task Answers V3********************************");
-                    foreach (var taskNum in taskSelectedNumbersV3)
-                    {
-                        var taskLine = $"Address: {taskNum.RBXAddress} |  IP Address: {taskNum.IPAddress} | Answer: {taskNum.Answer}";
-                        outputBuilder.AppendLine(taskLine);
-                    }
-                    outputBuilder.AppendLine("******************************************************************************");
-                }
-
                 output = outputBuilder.ToString();
             }
             catch(Exception ex) 
@@ -249,83 +209,5 @@ namespace ReserveBlockCore.Controllers
              
             return output;
         }
-
-        /// <summary>
-        /// Returns Consensus Info
-        /// </summary>
-        /// <returns></returns>
-        [HttpGet("GetConsensusInfo")]
-        public async Task<string> GetConsensusInfo()
-        {
-            var output = "";
-
-            try
-            {
-                StringBuilder outputBuilder = new StringBuilder();
-
-                var conState = ConsensusServer.GetState();
-                outputBuilder.AppendLine("*******************************Consensus State********************************");
-
-                var conStateLine = $"Next Height: {Globals.LastBlock.Height + 1} | Status: {conState.Status} | Answer: {conState.Answer} | Method Code: {conState.MethodCode}";
-                outputBuilder.AppendLine(conStateLine);
-                LogUtility.LogQueue(conStateLine, "", "cinfo.txt", true);
-
-                outputBuilder.AppendLine("******************************************************************************");
-
-                var conMessage = string.Join("\r\n", ConsensusServer.Messages.Select(x => x.Value.Select(y => x.Key.Height + " " + x.Key.MethodCode + " " + y.Key + " " + y.Value.Message + " " + y.Value.Signature))
-                    .SelectMany(x => x));
-                LogUtility.LogQueue(conMessage, "", "cinfo.txt", true);
-
-                outputBuilder.AppendLine("*****************************Consensus Messages*******************************");
-
-                outputBuilder.AppendLine(conMessage);
-
-                outputBuilder.AppendLine("******************************************************************************");
-
-                var hashMessage = string.Join("\r\n", ConsensusServer.Hashes.Select(x => x.Value.Select(y => x.Key.Height + " " + x.Key.MethodCode + " " + y.Key + " " + y.Value.Hash + " " + y.Value.Signature))
-                                .SelectMany(x => x));
-                LogUtility.LogQueue(hashMessage, "", "cinfo.txt", true);
-
-                outputBuilder.AppendLine("*****************************Consensus Hashes*******************************");
-
-                outputBuilder.AppendLine(hashMessage);
-
-                outputBuilder.AppendLine("******************************************************************************");
-
-                var addressesToWaitFor = ConsensusClient.AddressesToWaitFor(Globals.LastBlock.Height + 1, conState.MethodCode, ConsensusClient.HeartBeatTimeout).ToArray();
-
-                LogUtility.LogQueue(JsonConvert.SerializeObject(addressesToWaitFor), "", "cinfo.txt", true);
-                outputBuilder.AppendLine("*****************************Addresses To Wait For*******************************");
-
-                outputBuilder.AppendLine(JsonConvert.SerializeObject(addressesToWaitFor));
-
-                outputBuilder.AppendLine("******************************************************************************");
-
-                outputBuilder.AppendLine("*****************************Consensus Dump*******************************");
-
-                outputBuilder.AppendLine(JsonConvert.SerializeObject(JsonConvert.SerializeObject(Globals.ConsensusDump)));
-
-                LogUtility.LogQueue(JsonConvert.SerializeObject(Globals.ConsensusDump), "", "cinfo.txt", true);
-                outputBuilder.AppendLine("******************************************************************************");
-
-                outputBuilder.AppendLine("*****************************Node Dump*******************************");
-
-                outputBuilder.AppendLine("Now: " + TimeUtil.GetMillisecondTime() + "\r\n");
-
-                LogUtility.LogQueue(JsonConvert.SerializeObject(JsonConvert.SerializeObject(Globals.Nodes.Values)), "", "cinfo.txt", true);
-                outputBuilder.AppendLine(JsonConvert.SerializeObject(JsonConvert.SerializeObject(Globals.Nodes.Values)));
-
-                outputBuilder.AppendLine("******************************************************************************");
-
-                output = outputBuilder.ToString();
-            }
-            catch (Exception ex)
-            {
-                output = $"Error calling api: {ex.ToString()}";
-            }
-
-            return output;
-        }
-
     }
 }

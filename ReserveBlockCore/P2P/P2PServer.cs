@@ -93,13 +93,24 @@ namespace ReserveBlockCore.P2P
                     return await func();
             }
 
+            // HAL-054 Fix: Check global resource limits to prevent distributed DoS attacks
+            if (Globals.GlobalConnectionCount >= Globals.MaxGlobalConnections)
+            {
+                throw new HubException("Server at maximum capacity. Too many global connections.");
+            }
+
+            if (Globals.GlobalBufferCost + sizeCost > Globals.MaxGlobalBufferCost)
+            {
+                throw new HubException("Server at maximum capacity. Too much global buffer usage.");
+            }
+
             if (Globals.MessageLocks.TryGetValue(ipAddress, out var Lock))
             {                               
                 var prev = Interlocked.Exchange(ref Lock.LastRequestTime, now);               
-                if (Lock.ConnectionCount > 20)
+                if (Lock.ConnectionCount > Globals.MaxConnectionsPerIP)
                     BanService.BanPeer(ipAddress, ipAddress + ": Connection count exceeded limit.  Peer failed to wait for responses before sending new requests.", func.Method.Name);                                        
                 
-                if (Lock.BufferCost + sizeCost > 5000000)
+                if (Lock.BufferCost + sizeCost > Globals.MaxBufferCostPerIP)
                 {
                     throw new HubException("Too much buffer usage.  Message was dropped.");
                 }
@@ -137,14 +148,16 @@ namespace ReserveBlockCore.P2P
 
         private static async Task<T> SignalRQueue<T>(MessageLock Lock, int sizeCost, Func<Task<T>> func)
         {
-            Interlocked.Increment(ref Lock.ConnectionCount);
-            Interlocked.Add(ref Lock.BufferCost, sizeCost);
             T Result = default;
             try
             {
                 await Lock.Semaphore.WaitAsync();
-                Interlocked.Decrement(ref Lock.ConnectionCount);
-                Interlocked.Add(ref Lock.BufferCost, -sizeCost);
+                Interlocked.Increment(ref Lock.ConnectionCount);
+                Interlocked.Add(ref Lock.BufferCost, sizeCost);
+                
+                // HAL-054 Fix: Track global resources
+                Interlocked.Increment(ref Globals.GlobalConnectionCount);
+                Interlocked.Add(ref Globals.GlobalBufferCost, sizeCost);
 
                 var task = func();
                 if (Lock.DelayLevel == 0)
@@ -157,7 +170,18 @@ namespace ReserveBlockCore.P2P
             catch { }
             finally
             {
-                try { Lock.Semaphore.Release(); } catch { }
+                try 
+                { 
+                    Interlocked.Decrement(ref Lock.ConnectionCount);
+                    Interlocked.Add(ref Lock.BufferCost, -sizeCost);
+                    
+                    // HAL-054 Fix: Release global resources
+                    Interlocked.Decrement(ref Globals.GlobalConnectionCount);
+                    Interlocked.Add(ref Globals.GlobalBufferCost, -sizeCost);
+                    
+                    Lock.Semaphore.Release(); 
+                } 
+                catch { }
             }
                         
             return Result;            
@@ -179,8 +203,18 @@ namespace ReserveBlockCore.P2P
                         var nextHeight = Globals.LastBlock.Height + 1;
                         var currentHeight = nextBlock.Height;
                         
-                        if (currentHeight >= nextHeight && BlockDownloadService.BlockDict.TryAdd(currentHeight, (nextBlock, IP)))
-                        {                            
+                        if (currentHeight >= nextHeight)
+                        {
+                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
+                            BlockDownloadService.BlockDict.AddOrUpdate(
+                                currentHeight,
+                                new List<(Block, string)> { (nextBlock, IP) },
+                                (key, existingList) =>
+                                {
+                                    existingList.Add((nextBlock, IP));
+                                    return existingList;
+                                });
+
                             await BlockValidatorService.ValidateBlocks();
 
                             if (nextHeight == currentHeight)
@@ -395,6 +429,34 @@ namespace ReserveBlockCore.P2P
 
                                 if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
+                                    // HAL-071 Fix: Validate minimum fee and enforce mempool limits
+                                    var feeValidation = MempoolEvictionUtility.ValidateMinimumFee(txReceived);
+                                    if (!feeValidation.isValid)
+                                    {
+                                        return "TFVP"; // Transaction failed - fee below minimum
+                                    }
+
+                                    var stats = MempoolEvictionUtility.GetMempoolStats();
+                                    var canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
+                                    
+                                    if (!canAdd.canAdd)
+                                    {
+                                        // Try to evict lower priority transactions to make room
+                                        MempoolEvictionUtility.EvictLowestPriority(
+                                            targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
+                                            targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95)
+                                        );
+                                        
+                                        // Check again after eviction
+                                        stats = MempoolEvictionUtility.GetMempoolStats();
+                                        canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
+                                        
+                                        if (!canAdd.canAdd)
+                                        {
+                                            return "TFVP"; // Mempool full, cannot add
+                                        }
+                                    }
+
                                     mempool.InsertSafe(txReceived);
                                     if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                     {
@@ -476,6 +538,34 @@ namespace ReserveBlockCore.P2P
 
                             if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                             {
+                                // HAL-071 Fix: Validate minimum fee and enforce mempool limits
+                                var feeValidation = MempoolEvictionUtility.ValidateMinimumFee(txReceived);
+                                if (!feeValidation.isValid)
+                                {
+                                    return "TFVP"; // Transaction failed - fee below minimum
+                                }
+
+                                var stats = MempoolEvictionUtility.GetMempoolStats();
+                                var canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
+                                
+                                if (!canAdd.canAdd)
+                                {
+                                    // Try to evict lower priority transactions to make room
+                                    MempoolEvictionUtility.EvictLowestPriority(
+                                        targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
+                                        targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95)
+                                    );
+                                    
+                                    // Check again after eviction
+                                    stats = MempoolEvictionUtility.GetMempoolStats();
+                                    canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
+                                    
+                                    if (!canAdd.canAdd)
+                                    {
+                                        return "TFVP"; // Mempool full, cannot add
+                                    }
+                                }
+
                                 mempool.InsertSafe(txReceived);
                                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                 {

@@ -1375,25 +1375,6 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Returns a task answer list
-        /// </summary>
-        /// <returns></returns>
-        [HttpGet("GetTaskAnswersList")]
-        public async Task<string> GetTaskAnswersList()
-        {
-            string output = "";
-
-            var taskAnswerList = Globals.TaskAnswerDictV3.Values.Select(x => new {
-                Address = x.RBXAddress,
-                Answer = x.Answer,
-                IP = x.IPAddress,                    
-            });
-            output = JsonConvert.SerializeObject(taskAnswerList);            
-
-            return output;
-        }
-
-        /// <summary>
         /// Returns master node list that is sent
         /// </summary>
         /// <returns></returns>
@@ -1472,7 +1453,7 @@ namespace ReserveBlockCore.Controllers
         /// </summary>
         /// <returns></returns>
         [HttpGet("AddPeer/{**ipAddr}")]
-        public static async Task<string> AddPeer(string ipAddr)
+        public async Task<string> AddPeer(string ipAddr)
         {
             IPAddress ip;
             var peer = ipAddr;

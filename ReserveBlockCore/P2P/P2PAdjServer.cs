@@ -53,55 +53,86 @@ namespace ReserveBlockCore.P2P
                 var walletVersion = httpContext.Request.Headers["walver"].ToString();
 
                 conQueue.Address = address;
-                var SignedMessage = address;
-                var Now = TimeUtil.GetTime();
-                SignedMessage = address + ":" + time;
-                if (TimeUtil.GetTime() - long.Parse(time) > 300)
+
+                // Validate required fields first
+                if (string.IsNullOrWhiteSpace(address) || 
+                    string.IsNullOrWhiteSpace(time) ||
+                    string.IsNullOrWhiteSpace(uName) || 
+                    string.IsNullOrWhiteSpace(signature))
                 {
-                    await EndOnConnect(peerIP, "20", startTime, conQueue, "Signature Bad time.", "Signature Bad time.");
+                    _ = EndOnConnect(peerIP, "Z", startTime, conQueue,
+                        "Connection Attempted, but missing required field(s). Address, Unique name, Time, and Signature required. You are being disconnected.",
+                        "Connected, but missing required field(s). Address, Unique name, Time, and Signature required: " + address);
                     return;
                 }
 
-                if (!Globals.Signatures.TryAdd(signature, Now))
+                // Safe time parsing to prevent DoS
+                if (!long.TryParse(time, out var timeValue))
+                {
+                    await EndOnConnect(peerIP, "21", startTime, conQueue, "Invalid timestamp format.", "Invalid timestamp format from: " + peerIP);
+                    return;
+                }
+
+                var now = TimeUtil.GetTime();
+                
+                // Reduced time window from 300s to 30s
+                if (now - timeValue > 30)
+                {
+                    await EndOnConnect(peerIP, "20", startTime, conQueue, "Timestamp outside acceptable window.", "Timestamp outside acceptable window from: " + peerIP);
+                    return;
+                }
+
+                // Prevent future timestamps (with small tolerance for clock skew)
+                if (timeValue > now + 5)
+                {
+                    await EndOnConnect(peerIP, "22", startTime, conQueue, "Timestamp from future.", "Future timestamp from: " + peerIP);
+                    return;
+                }
+
+                var SignedMessage = address + ":" + time;
+                                
+                var walletVersionVerify = WalletVersionUtility.Verify(walletVersion);
+
+                if (!walletVersionVerify)
+                {
+                    _ = EndOnConnect(peerIP, "Y", startTime, conQueue,
+                        "Invalid wallet version. You are being disconnected.",
+                        "Invalid wallet version from: " + address);
+                    return;
+                }
+
+                // HAL-039 & HAL-040 Fix: Verify signature BEFORE expensive database operations and signature map insertion
+                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
+                if(!verifySig)
+                {
+                    _ = EndOnConnect(peerIP, "V", startTime, conQueue,
+                        "Authentication failed. You are being disconnected.",
+                        "Signature verification failed from: " + peerIP);
+                    return;
+                }
+
+                // HAL-040 Fix: Only add to signature map AFTER successful verification
+                if (!Globals.Signatures.TryAdd(signature, now))
                 {
                     await EndOnConnect(peerIP, "40", startTime, conQueue, "Reused signature.", "Reused signature.");
                     return;
                 }
-                                
-                var walletVersionVerify = WalletVersionUtility.Verify(walletVersion);
-
-                var fortisPool = Globals.FortisPool.Values;                
-                if (string.IsNullOrWhiteSpace(address) || string.IsNullOrWhiteSpace(uName) || string.IsNullOrWhiteSpace(signature) || !walletVersionVerify) 
-                {
-                    _ = EndOnConnect(peerIP, "Z", startTime, conQueue,
-                        "Connection Attempted, but missing field(s). Address, Unique name, and Signature required. You are being disconnected.",
-                        "Connected, but missing field(s). Address, Unique name, and Signature required: " + address);
-                    return;
-                }
                 
+                // HAL-039 Fix: Only perform expensive database lookups AFTER authentication
                 var stateAddress = StateData.GetSpecificAccountStateTrei(address);
                 if(stateAddress == null)
                 {
                     _ = EndOnConnect(peerIP, "X", startTime, conQueue,
-                        "Connection Attempted, But failed to find the address in trie. You are being disconnected.",
-                        "Connection Attempted, but missing field Address: " + address + " IP: " + peerIP);
+                        "Authentication failed. You are being disconnected.",
+                        "Address not found in state trie: " + address + " IP: " + peerIP);
                     return;                    
                 }
 
                 if(stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
                 {
                     _ = EndOnConnect(peerIP, "W", startTime, conQueue,
-                        $"Connected, but you do not have the minimum balance of {ValidatorService.ValidatorRequiredAmount()} VFX. You are being disconnected.",
-                        $"Connected, but you do not have the minimum balance of {ValidatorService.ValidatorRequiredAmount()} VFX: " + address);
-                    return;
-                }
-
-                var verifySig = SignatureService.VerifySignature(address, SignedMessage, signature);
-                if(!verifySig)
-                {
-                    _ = EndOnConnect(peerIP, "V", startTime, conQueue,
-                        "Connected, but your address signature failed to verify. You are being disconnected.",
-                        "Connected, but your address signature failed to verify with ADJ: " + address);
+                        "Authentication failed. You are being disconnected.",
+                        $"Insufficient balance for address: " + address);
                     return;
                 }
 
@@ -218,115 +249,6 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
-        #region Receive Rand Num and Task Answer V3
-        public async Task<TaskAnswerResult> ReceiveTaskAnswerV3(string request)
-        {
-            if (Globals.AdjudicateAccount == null)
-            {                
-                return new TaskAnswerResult { AnswerCode = 4 }; //adjudicator is still booting up
-            }
-
-            var ipAddress = GetIP(Context);
-            if (request?.Length > 30)
-            {
-                BanService.BanPeer(ipAddress, "request too big", "ReceiveTaskAnswerV3");
-                return new TaskAnswerResult { AnswerCode = 5 };
-            }
-
-            try
-            {
-                return  await P2PServer.SignalRQueue(Context, request.Length, async () =>
-                {
-                    var taskAnsRes = new TaskAnswerResult();
-                                        
-                    var taskResult = request?.Split(':');
-                    if (taskResult == null || taskResult.Length != 2)
-                    {
-                        taskAnsRes.AnswerCode = 5; // Task answer was null. Should not be possible.
-                        return taskAnsRes;
-                    }
-
-                    var (Answer, Height) = (int.Parse(taskResult[0]), long.Parse(taskResult[1]));                                        
-
-                    //This will result in users not getting their answers chosen if they are not in list.
-                    var fortisPool = Globals.FortisPool.Values;
-                    if (Globals.FortisPool.TryGetFromKey1(ipAddress, out var Pool))
-                    {
-                        if (Height != Globals.LastBlock.Height + 1 && Height != Globals.LastBlock.Height + 2)
-                        {
-                            taskAnsRes.AnswerCode = 6;
-                            return taskAnsRes;
-                        }
-                        
-                        if (!Globals.TaskAnswerDictV3.TryAdd((Pool.Key2, Height), (ipAddress, Pool.Key2, Answer)))
-                        {
-                            taskAnsRes.AnswerAccepted = true;
-                            taskAnsRes.AnswerCode = 0;
-                            return taskAnsRes;
-                        }
-
-                        taskAnsRes.AnswerCode = 7; // Answer was already submitted
-                        return taskAnsRes;
-                    }
-
-                    Context.Abort();
-                    taskAnsRes.AnswerCode = 3; //address is not pressent in the fortis pool
-                    return taskAnsRes;
-                });
-
-            }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Error Processing Task - Error: {ex.ToString()}", "P2PAdjServer.ReceiveTaskAnswerV3()");
-            }
-            
-            return new TaskAnswerResult {  AnswerCode = 1337 }; // Unknown Error
-        }
-
-        #endregion
-
-        #region Receive Winning Task Block Answer V3
-        public async Task<bool> ReceiveWinningBlockV3(string blockString)
-        {
-            try
-            {
-                if (blockString == null || Globals.AdjudicateAccount == null)
-                    return false;
-                
-                var ipAddress = GetIP(Context);
-                if (blockString.Length > 1048576 || !Globals.FortisPool.TryGetFromKey1(ipAddress, out var Pool))
-                {
-                    BanService.BanPeer(ipAddress, "block size too big", "ReceiveWinningBlockV3");
-                    return false;
-                }
-
-                var block = JsonConvert.DeserializeObject<Block>(blockString);                
-                var RBXAddress = Pool.Key2;
-                if (!Globals.TaskSelectedNumbersV3.ContainsKey((RBXAddress, block.Height)))
-                {
-                    BanService.BanPeer(ipAddress, "unselected block was submitted", "ReceiveWinningBlockV3");
-                    return false;
-                }
-
-                if (block.Height != Globals.LastBlock.Height + 1)
-                    return false;
-
-                return await P2PServer.SignalRQueue(Context, blockString.Length, async () =>
-                {                                        
-                    if (SignatureService.VerifySignature(RBXAddress, block.Hash, block.ValidatorSignature)
-                        && RBXAddress == block.Validator && Globals.TaskWinnerDictV3.TryAdd((RBXAddress, block.Height), block))
-                    {
-                        return true;
-                    }
-
-                    return false;
-                });
-            }
-            catch { }
-            return false;
-        }
-
-        #endregion
 
         #region Receive TX to relay
         public async Task<bool> ReceiveTX(Transaction transaction)

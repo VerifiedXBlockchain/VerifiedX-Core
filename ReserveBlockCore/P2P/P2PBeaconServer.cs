@@ -11,6 +11,9 @@ namespace ReserveBlockCore.P2P
 {
     public class P2PBeaconServer : Hub
     {
+        // Maximum allowed JSON payload size to prevent memory exhaustion attacks
+        private const int MAX_JSON_PAYLOAD_SIZE = 10000; // ~10KB for array of 2 strings
+
         #region Connect/Disconnect methods
         public override async Task OnConnectedAsync()
         {
@@ -212,11 +215,19 @@ namespace ReserveBlockCore.P2P
                             return result; //fail
                         }
 
-                        //var sigCheck = SignatureService.VerifySignature(scState, bdd.SmartContractUID, bdd.Signature);
-                        //if (sigCheck == false)
-                        //{
-                        //    return result; //fail
-                        //}
+                        // HAL-044 Fix: Verify signature from either current owner or next owner
+                        // Both parties can legitimately request downloads during a transfer
+                        var sigCheckOwner = SignatureService.VerifySignature(scState.OwnerAddress, bdd.SmartContractUID, bdd.Signature);
+                        bool sigCheckNextOwner = false;
+                        if (!sigCheckOwner && scState.NextOwner != null)
+                        {
+                            sigCheckNextOwner = SignatureService.VerifySignature(scState.NextOwner, bdd.SmartContractUID, bdd.Signature);
+                        }
+
+                        if (!sigCheckOwner && !sigCheckNextOwner)
+                        {
+                            return result; // fail - neither owner nor next owner signature is valid
+                        }
 
                         var beaconDatas = BeaconData.GetBeacon();
                         var beaconData = BeaconData.GetBeaconData();
@@ -253,7 +264,8 @@ namespace ReserveBlockCore.P2P
                             var beaconDataRec = beaconData.Where(x => x.SmartContractUID == bdd.SmartContractUID && x.AssetName == fileName && (x.NextAssetOwnerAddress == scState.OwnerAddress || x.NextAssetOwnerAddress == scState.NextOwner)).FirstOrDefault();
                             if(beaconDataRec != null)
                             {
-                                var remoteUser = beaconPool.Where(x => x.Reference == beaconDataRec.Reference).FirstOrDefault();
+                                // Use composite key lookup (IP + Reference) to prevent message hijacking
+                                var remoteUser = beaconPool.Where(x => x.Reference == beaconDataRec.Reference && x.IpAddress == beaconDataRec.IPAdress).FirstOrDefault();
                                 string[] senddata = { beaconDataRec.SmartContractUID, beaconDataRec.AssetName };
                                 var sendJson = JsonConvert.SerializeObject(senddata);
                                 if(remoteUser != null)
@@ -398,6 +410,10 @@ namespace ReserveBlockCore.P2P
             bool output = false;
             try
             {
+                // Validate payload size to prevent memory exhaustion attacks
+                if (string.IsNullOrEmpty(data) || data.Length > MAX_JSON_PAYLOAD_SIZE)
+                    return false;
+
                 var beaconPool = Globals.BeaconPool.Values.ToList();
                 var payload = JsonConvert.DeserializeObject<string[]>(data);
                 if (payload != null)
@@ -417,7 +433,8 @@ namespace ReserveBlockCore.P2P
 
                             //send message to receiver.
                             var receiverRef = beaconData.NextOwnerReference;
-                            var remoteUser = beaconPool.Where(x => x.Reference == receiverRef).FirstOrDefault();
+                            // Use composite key lookup (IP + Reference) to prevent message hijacking
+                            var remoteUser = beaconPool.Where(x => x.Reference == receiverRef && x.IpAddress == beaconData.DownloadIPAddress).FirstOrDefault();
                             if (remoteUser != null)
                             {
                                 string[] senddata = { beaconData.SmartContractUID, beaconData.AssetName };
@@ -427,7 +444,7 @@ namespace ReserveBlockCore.P2P
                             }
                             else
                             {
-                                SCLogUtility.Log($"Remote user was null. Ref: {receiverRef}", "P2PBeaconServer.BeaconDataIsReady()");
+                                SCLogUtility.Log($"Remote user was null. Ref: {receiverRef}, Expected IP: {beaconData.DownloadIPAddress}", "P2PBeaconServer.BeaconDataIsReady()");
                             }
                         }
                     }
@@ -447,6 +464,10 @@ namespace ReserveBlockCore.P2P
         public async Task<bool> BeaconIsFileReady(string data)
         {
             var peerIP = GetIP(Context);
+
+            // Validate payload size to prevent memory exhaustion attacks
+            if (string.IsNullOrEmpty(data) || data.Length > MAX_JSON_PAYLOAD_SIZE)
+                return false;
 
             bool result = false;
             var payload = JsonConvert.DeserializeObject<string[]>(data);
@@ -468,15 +489,14 @@ namespace ReserveBlockCore.P2P
                         else
                         {
                             //attempt to call to person to get file.
-
-                            if (Globals.BeaconPool.TryGetFromKey2(beaconData.Reference, out var remoteUser))
+                            // Use composite key lookup (IP + Reference) to prevent message hijacking
+                            var beaconPool = Globals.BeaconPool.Values.ToList();
+                            var remoteUser = beaconPool.Where(x => x.IpAddress == beaconData.IPAdress && x.Reference == beaconData.Reference).FirstOrDefault();
+                            if (remoteUser != null)
                             {
                                 string[] senddata = { beaconData.SmartContractUID, beaconData.AssetName };
                                 var sendJson = JsonConvert.SerializeObject(senddata);
-                                if (remoteUser.Value != null)
-                                {
-                                    await SendMessageClient(remoteUser.Value.ConnectionId, "send", sendJson);
-                                }
+                                await SendMessageClient(remoteUser.ConnectionId, "send", sendJson);
                             }
                         }
                             
@@ -493,6 +513,10 @@ namespace ReserveBlockCore.P2P
         public async Task<bool> BeaconFileIsDownloaded(string data)
         {
             var peerIP = GetIP(Context);
+
+            // Validate payload size to prevent memory exhaustion attacks
+            if (string.IsNullOrEmpty(data) || data.Length > MAX_JSON_PAYLOAD_SIZE)
+                return false;
 
             bool result = false;
             var payload = JsonConvert.DeserializeObject<string[]>(data);
@@ -530,13 +554,25 @@ namespace ReserveBlockCore.P2P
         {
             var now = TimeUtil.GetMillisecondTime();
             var ipAddress = GetIP(context);
+            
+            // HAL-054 Fix: Check global resource limits to prevent distributed DoS attacks
+            if (Globals.GlobalConnectionCount >= Globals.MaxGlobalConnections)
+            {
+                throw new HubException("Server at maximum capacity. Too many global connections.");
+            }
+
+            if (Globals.GlobalBufferCost + sizeCost > Globals.MaxGlobalBufferCost)
+            {
+                throw new HubException("Server at maximum capacity. Too much global buffer usage.");
+            }
+            
             if (Globals.MessageLocks.TryGetValue(ipAddress, out var Lock))
             {
                 var prev = Interlocked.Exchange(ref Lock.LastRequestTime, now);
-                if (Lock.ConnectionCount > 20)
+                if (Lock.ConnectionCount > Globals.MaxConnectionsPerIP)
                     BanService.BanPeer(ipAddress, "Connection count exceeded limit", "P2PBeaconServer.SignalRQueue()");
 
-                if (Lock.BufferCost + sizeCost > 5000000)
+                if (Lock.BufferCost + sizeCost > Globals.MaxBufferCostPerIP)
                 {
                     throw new HubException("Too much buffer usage.  Message was dropped.");
                 }
@@ -574,12 +610,17 @@ namespace ReserveBlockCore.P2P
 
         private static async Task<T> SignalRQueue<T>(MessageLock Lock, int sizeCost, Func<Task<T>> func)
         {
-            Interlocked.Increment(ref Lock.ConnectionCount);
-            Interlocked.Add(ref Lock.BufferCost, sizeCost);
             T Result = default;
             try
             {
                 await Lock.Semaphore.WaitAsync();
+                Interlocked.Increment(ref Lock.ConnectionCount);
+                Interlocked.Add(ref Lock.BufferCost, sizeCost);
+                
+                // HAL-054 Fix: Track global resources
+                Interlocked.Increment(ref Globals.GlobalConnectionCount);
+                Interlocked.Add(ref Globals.GlobalBufferCost, sizeCost);
+
                 var task = func();
                 if (Lock.DelayLevel == 0)
                     return await task;
@@ -591,11 +632,20 @@ namespace ReserveBlockCore.P2P
             catch { }
             finally
             {
-                try { Lock.Semaphore.Release(); } catch { }
+                try 
+                { 
+                    Interlocked.Decrement(ref Lock.ConnectionCount);
+                    Interlocked.Add(ref Lock.BufferCost, -sizeCost);
+                    
+                    // HAL-054 Fix: Release global resources
+                    Interlocked.Decrement(ref Globals.GlobalConnectionCount);
+                    Interlocked.Add(ref Globals.GlobalBufferCost, -sizeCost);
+                    
+                    Lock.Semaphore.Release(); 
+                } 
+                catch { }
             }
 
-            Interlocked.Decrement(ref Lock.ConnectionCount);
-            Interlocked.Add(ref Lock.BufferCost, -sizeCost);
             return Result;
         }
 

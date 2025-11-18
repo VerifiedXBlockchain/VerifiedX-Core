@@ -46,6 +46,26 @@ namespace ReserveBlockCore.Models
                 nonce = account.Nonce;
             }
 
+            // HAL-067 Fix: Check mempool for pending TXs from this address to prevent duplicate nonces
+            // when sending multiple transactions in rapid succession
+            var mempool = Data.TransactionData.GetPool();
+            if (mempool != null)
+            {
+                var pendingTxs = mempool.Find(x => x.FromAddress == address)
+                    .OrderBy(x => x.Nonce)
+                    .ToList();
+
+                if (pendingTxs.Any())
+                {
+                    // Return highest mempool nonce + 1
+                    var highestNonce = pendingTxs.Last().Nonce;
+                    if (highestNonce >= nonce)
+                    {
+                        nonce = highestNonce + 1;
+                    }
+                }
+            }
+
             return nonce;
         }
     }

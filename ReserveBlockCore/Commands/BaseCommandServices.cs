@@ -1019,8 +1019,6 @@ namespace ReserveBlockCore.Commands
 
         public static async Task AdjudicatorInfo()
         {
-            var taskSelectedNumbersV3 = Globals.TaskSelectedNumbersV3.Values.ToList();
-
             if (Globals.AdjudicateAccount == null)
             {
                 var consensusNodes = Globals.AdjNodes.Values.ToList();
@@ -1057,21 +1055,6 @@ namespace ReserveBlockCore.Commands
                 {
                     ConsoleWriterService.Output("Empty");
                 }
-            }
-
-            if(taskSelectedNumbersV3.Count() > 0)
-            {
-                ConsoleWriterService.Output("*******************************Task Answers V3********************************");
-                foreach (var taskNum in taskSelectedNumbersV3)
-                {
-                    var taskLine = $"Address: {taskNum.RBXAddress} |  IP Address: {taskNum.IPAddress} | Answer: {taskNum.Answer}";
-                    ConsoleWriterService.Output(taskLine);
-                }
-                ConsoleWriterService.Output("******************************************************************************");
-            }
-            else
-            {
-                ConsoleWriterService.Output("Empty 2");
             }
         }
 
@@ -1287,8 +1270,8 @@ namespace ReserveBlockCore.Commands
 
             Console.WriteLine("******************************************************************************");
 
-            var conMessage = string.Join("\r\n", ConsensusServer.Messages.Select(x => x.Value.Select(y => x.Key.Height + " " + x.Key.MethodCode + " " + y.Key + " " + y.Value.Message + " " + y.Value.Signature))
-                .SelectMany(x => x));
+            // HAL-063: Diagnostic code removed - Messages and Hashes dictionaries no longer exist
+            var conMessage = "Legacy Messages dictionary removed (HAL-063)";
             LogUtility.LogQueue(conMessage, "", "cinfo.txt", true);
 
             Console.WriteLine("*****************************Consensus Messages*******************************");
@@ -1297,22 +1280,12 @@ namespace ReserveBlockCore.Commands
 
             Console.WriteLine("******************************************************************************");
 
-            var hashMessage = string.Join("\r\n", ConsensusServer.Hashes.Select(x => x.Value.Select(y => x.Key.Height + " " + x.Key.MethodCode + " " + y.Key + " " + y.Value.Hash + " " + y.Value.Signature))
-                            .SelectMany(x => x));
+            var hashMessage = "Legacy Hashes dictionary removed (HAL-063)";
             LogUtility.LogQueue(hashMessage, "", "cinfo.txt", true);
 
             Console.WriteLine("*****************************Consensus Hashes*******************************");
 
             Console.WriteLine(hashMessage);
-
-            Console.WriteLine("******************************************************************************");
-
-            var addressesToWaitFor = ConsensusClient.AddressesToWaitFor(Globals.LastBlock.Height + 1, conState.MethodCode, ConsensusClient.HeartBeatTimeout).ToArray();
-
-            LogUtility.LogQueue(JsonConvert.SerializeObject(addressesToWaitFor), "", "cinfo.txt", true);
-            Console.WriteLine("*****************************Addresses To Wait For*******************************");
-
-            Console.WriteLine(JsonConvert.SerializeObject(addressesToWaitFor));
 
             Console.WriteLine("******************************************************************************");
 

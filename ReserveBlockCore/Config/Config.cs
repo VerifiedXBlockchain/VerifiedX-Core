@@ -54,6 +54,16 @@ namespace ReserveBlockCore.Config
 		public string? ReportedIP { get; set; }
         public string? TestNetName { get; set; }
         public Bitcoin.Bitcoin.BitcoinAddressFormat BitcoinAddressFormat { get; set; }
+        
+        // HAL-17 Fix: Configurable timeout settings
+        public int SignalRShortTimeoutMs { get; set; }
+        public int SignalRLongTimeoutMs { get; set; }
+        public int BlockProcessingDelayMs { get; set; }
+        public int NetworkOperationTimeoutMs { get; set; }
+        
+        // HAL-19 Fix: DoS protection settings for block validation
+        public int MaxBlockSizeBytes { get; set; }
+        public int BlockValidationTimeoutMs { get; set; }
 
         public static Config ReadConfigFile()
         {
@@ -121,8 +131,18 @@ namespace ReserveBlockCore.Config
 
                 config.AutoDownloadNFTAsset = dict.ContainsKey("AutoDownloadNFTAsset") ? Convert.ToBoolean(dict["AutoDownloadNFTAsset"]) : false;
                 config.IgnoreIncomingNFTs = dict.ContainsKey("IgnoreIncomingNFTs") ? Convert.ToBoolean(dict["IgnoreIncomingNFTs"]) : false;
-				config.RejectAssetExtensionTypes = new List<string>();
+			config.RejectAssetExtensionTypes = new List<string>();
                 config.ElmahFileStore = dict.ContainsKey("ElmahFileStore") ? Convert.ToInt32(dict["ElmahFileStore"]) : 10000;
+
+                // HAL-17 Fix: Load timeout configuration with backward-compatible defaults
+                config.SignalRShortTimeoutMs = dict.ContainsKey("SignalRShortTimeoutMs") ? Convert.ToInt32(dict["SignalRShortTimeoutMs"]) : 2000;
+                config.SignalRLongTimeoutMs = dict.ContainsKey("SignalRLongTimeoutMs") ? Convert.ToInt32(dict["SignalRLongTimeoutMs"]) : 6000;
+                config.BlockProcessingDelayMs = dict.ContainsKey("BlockProcessingDelayMs") ? Convert.ToInt32(dict["BlockProcessingDelayMs"]) : 2000;
+                config.NetworkOperationTimeoutMs = dict.ContainsKey("NetworkOperationTimeoutMs") ? Convert.ToInt32(dict["NetworkOperationTimeoutMs"]) : 1000;
+
+                // HAL-19 Fix: Load DoS protection configuration with secure defaults
+                config.MaxBlockSizeBytes = dict.ContainsKey("MaxBlockSizeBytes") ? Convert.ToInt32(dict["MaxBlockSizeBytes"]) : 10485760; // 10MB default
+                config.BlockValidationTimeoutMs = dict.ContainsKey("BlockValidationTimeoutMs") ? Convert.ToInt32(dict["BlockValidationTimeoutMs"]) : 5000;
 
                 var rejExtList = new List<string> { ".exe", ".pif", ".application", ".gadget", ".msi", ".msp", ".com", ".scr", ".hta",
 					".cpl", ".msc", ".jar", ".bat", ".cmd", ".vb", ".vbs", ".vbe", ".js", ".jse", ".ws", ".wsf" , ".wsc", ".wsh", ".ps1",
@@ -490,13 +510,23 @@ namespace ReserveBlockCore.Config
 				Globals.ConfigValidatorName = config.ValidatorName;
             }
 
-			if(!string.IsNullOrEmpty(config.MotherAddress))
-			{
-				Globals.MotherAddress = config.MotherAddress;
-				Globals.MotherPassword = config.MotherPassword != null ? config.MotherPassword.ToSecureString() : null;
-				Globals.ConnectToMother = true;
-			}
-			
+		if(!string.IsNullOrEmpty(config.MotherAddress))
+		{
+			Globals.MotherAddress = config.MotherAddress;
+			Globals.MotherPassword = config.MotherPassword != null ? config.MotherPassword.ToSecureString() : null;
+			Globals.ConnectToMother = true;
+		}
+
+		// HAL-17 Fix: Process timeout configuration
+		Globals.SignalRShortTimeoutMs = config.SignalRShortTimeoutMs;
+		Globals.SignalRLongTimeoutMs = config.SignalRLongTimeoutMs;
+		Globals.BlockProcessingDelayMs = config.BlockProcessingDelayMs;
+		Globals.NetworkOperationTimeoutMs = config.NetworkOperationTimeoutMs;
+		
+		// HAL-19 Fix: Process DoS protection configuration
+		Globals.MaxBlockSizeBytes = config.MaxBlockSizeBytes;
+		Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
+		
         }
         public static void ProcessABL()
         {

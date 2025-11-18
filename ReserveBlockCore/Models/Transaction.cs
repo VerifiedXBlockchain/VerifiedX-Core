@@ -100,6 +100,7 @@ namespace ReserveBlockCore.Models
         Reserved,
         CalledBack,
         Recovered,
+        ReplacedByFee,
         Invalid = 999
     }
 

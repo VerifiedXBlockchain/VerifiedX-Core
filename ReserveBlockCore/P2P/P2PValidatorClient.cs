@@ -21,6 +21,7 @@ using System.Xml.Linq;
 using System.Net;
 using System.Reflection.Metadata.Ecma335;
 using Microsoft.AspNetCore.Http.Connections;
+using System.Security.Cryptography;
 
 namespace ReserveBlockCore.P2P
 {
@@ -29,6 +30,70 @@ namespace ReserveBlockCore.P2P
         #region HubConnection Variables        
 
         private static long _MaxHeight = -1;
+
+        #endregion
+
+        #region Security Helper Methods
+
+        /// <summary>
+        /// Generate a cryptographically secure nonce for replay attack prevention
+        /// </summary>
+        private static string GenerateSecureNonce()
+        {
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                var bytes = new byte[16]; // 128-bit nonce
+                rng.GetBytes(bytes);
+                return Convert.ToBase64String(bytes);
+            }
+        }
+
+        #endregion
+
+        #region Wallet Version Validation Helper
+
+        /// <summary>
+        /// Safely extracts the first 3 characters from wallet version string with proper validation
+        /// HAL-12 Fix: Prevents ArgumentOutOfRangeException from malformed wallet version strings
+        /// </summary>
+        /// <param name="walletVersion">The wallet version string to process</param>
+        /// <returns>A safe 3-character version prefix or default fallback</returns>
+        private static string GetSafeWalletVersionPrefix(string? walletVersion)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(walletVersion))
+                {
+                    ErrorLogUtility.LogError("Received null or empty wallet version from peer", "GetSafeWalletVersionPrefix");
+                    return "2.1"; // Default fallback version
+                }
+
+                // Validate minimum length requirement
+                if (walletVersion.Length < 3)
+                {
+                    ErrorLogUtility.LogError($"Received short wallet version from peer: '{walletVersion}' (length: {walletVersion.Length})", "GetSafeWalletVersionPrefix");
+                    // Pad short versions with zeros to meet 3-character requirement
+                    return walletVersion.PadRight(3, '0');
+                }
+
+                // Validate that the first 3 characters are reasonable (basic format check)
+                var versionPrefix = walletVersion.Substring(0, 3);
+                if (System.Text.RegularExpressions.Regex.IsMatch(versionPrefix, @"^[0-9]+\.?[0-9]*$"))
+                {
+                    return versionPrefix;
+                }
+                else
+                {
+                    ErrorLogUtility.LogError($"Received malformed wallet version from peer: '{walletVersion}' - prefix: '{versionPrefix}'", "GetSafeWalletVersionPrefix");
+                    return "2.1"; // Default fallback for invalid format
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Unexpected error processing wallet version '{walletVersion}': {ex.Message}", "GetSafeWalletVersionPrefix");
+                return "2.1"; // Safe fallback on any error
+            }
+        }
 
         #endregion
 
@@ -130,21 +195,79 @@ namespace ReserveBlockCore.P2P
             #pragma warning restore CA1816
         }
 
-        protected virtual void Dispose(bool disposing)
+        protected override void Dispose(bool disposing)
         {
-            if (disposing)
+            // All disposal logic has been moved to DisposeAsyncCore to avoid sync-over-async deadlocks.
+            // For proper resource cleanup, always prefer DisposeAsync() over Dispose().
+        }
+
+        protected override async ValueTask DisposeAsyncCore()
+        {
+            const int timeoutSeconds = 30;
+            using var disposalCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var disposalTasks = new List<Task>();
+
+            // Dispose validator nodes
+            foreach (var node in Globals.ValidatorNodes.Values)
             {
-                foreach(var node in Globals.ValidatorNodes.Values)
-                    if(node.Connection != null)
-                        node.Connection.DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();                
+                if (node.Connection != null)
+                {
+                    disposalTasks.Add(DisposeValidatorNodeConnectionSafely(node, disposalCts.Token));
+                }
+            }
+
+            // Also dispose regular nodes (call base class logic)
+            foreach (var node in Globals.Nodes.Values)
+            {
+                if (node.Connection != null)
+                {
+                    disposalTasks.Add(DisposeNodeConnectionSafely(node, disposalCts.Token));
+                }
+            }
+
+            if (disposalTasks.Count > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(disposalTasks).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Log timeout but continue - graceful degradation
+                    LogUtility.Log($"Validator node disposal timed out after {timeoutSeconds} seconds, some connections may not be properly closed", "P2PValidatorClient.DisposeAsyncCore");
+                }
+                catch (Exception ex)
+                {
+                    // Log general errors but don't throw to ensure disposal completes
+                    ErrorLogUtility.LogError($"Error during validator node disposal: {ex}", "P2PValidatorClient.DisposeAsyncCore");
+                }
             }
         }
 
-        protected virtual async ValueTask DisposeAsyncCore()
+        private static async Task DisposeValidatorNodeConnectionSafely(NodeInfo node, CancellationToken cancellationToken)
         {
-            foreach (var node in Globals.Nodes.Values)
-                if(node.Connection != null)
-                    await node.Connection.DisposeAsync();
+            try
+            {
+                await node.Connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - continue disposing other nodes
+                ErrorLogUtility.LogError($"Error disposing validator connection for node {node.NodeIP}: {ex.Message}", "P2PValidatorClient.DisposeValidatorNodeConnectionSafely");
+            }
+        }
+
+        private static async Task DisposeNodeConnectionSafely(NodeInfo node, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await node.Connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - continue disposing other nodes
+                ErrorLogUtility.LogError($"Error disposing connection for node {node.NodeIP}: {ex.Message}", "P2PValidatorClient.DisposeNodeConnectionSafely");
+            }
         }
 
         #endregion
@@ -167,7 +290,8 @@ namespace ReserveBlockCore.P2P
                     return;
 
                 var time = TimeUtil.GetTime().ToString();
-                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+                var nonce = GenerateSecureNonce();
+                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey + ":" + nonce);
 
                 var hubConnection = new HubConnectionBuilder()
                     .WithUrl(url, options =>
@@ -178,6 +302,7 @@ namespace ReserveBlockCore.P2P
                         options.Headers.Add("signature", signature);
                         options.Headers.Add("walver", Globals.CLIVersion);
                         options.Headers.Add("publicKey", account.PublicKey);
+                        options.Headers.Add("nonce", nonce);
                         // Try both WebSockets and LongPolling
                         options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
                         options.SkipNegotiation = false;
@@ -224,8 +349,10 @@ namespace ReserveBlockCore.P2P
 
                 if (walletVersion != null)
                 {
-                    peer.WalletVersion = walletVersion.Substring(0,3);
-                    node.WalletVersion = walletVersion.Substring(0,3);
+                    // HAL-12 Fix: Use safe wallet version processing to prevent ArgumentOutOfRangeException
+                    var safeVersion = GetSafeWalletVersionPrefix(walletVersion);
+                    peer.WalletVersion = safeVersion;
+                    node.WalletVersion = safeVersion;
 
                     Globals.ValidatorNodes.TryAdd(IPAddress, node);
 
@@ -456,7 +583,8 @@ namespace ReserveBlockCore.P2P
                     return;
 
                 var time = TimeUtil.GetTime().ToString();
-                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+                var nonce = GenerateSecureNonce();
+                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey + ":" + nonce);
 
                 var hubConnection = new HubConnectionBuilder()
                     .WithUrl(url, options =>
@@ -467,6 +595,7 @@ namespace ReserveBlockCore.P2P
                         options.Headers.Add("signature", signature);
                         options.Headers.Add("walver", Globals.CLIVersion);
                         options.Headers.Add("publicKey", account.PublicKey);
+                        options.Headers.Add("nonce", nonce);
                         options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
                         options.SkipNegotiation = false;
                         options.WebSocketConfiguration = conf => {
@@ -510,8 +639,10 @@ namespace ReserveBlockCore.P2P
 
                 if (walletVersion != null)
                 {
-                    peer.WalletVersion = walletVersion.Substring(0, 3);
-                    node.WalletVersion = walletVersion.Substring(0, 3);
+                    // HAL-12 Fix: Use safe wallet version processing to prevent ArgumentOutOfRangeException
+                    var safeVersion = GetSafeWalletVersionPrefix(walletVersion);
+                    peer.WalletVersion = safeVersion;
+                    node.WalletVersion = safeVersion;
 
                     Globals.BlockCasterNodes.TryAdd(IPAddress, node);
 
@@ -626,15 +757,119 @@ namespace ReserveBlockCore.P2P
 
                     if (Response != null)
                     {
-                        var remoteMethodCode = Response.Split(':');
+                        // HAL-10 Fix: Handle new signed response format or legacy format
+                        var responseParts = Response.Split('|');
+                        
+                        string consensusData;
+                        bool isSignedResponse = responseParts.Length == 4; // consensusData|timestamp|nonce|signature
+                        
+                        if (isSignedResponse)
+                        {
+                            // New signed format: consensusData|timestamp|nonce|signature
+                            consensusData = responseParts[0];
+                            var timestamp = responseParts[1];
+                            var nonce = responseParts[2];
+                            var signature = responseParts[3];
+
+                            // Verify signature for enhanced security
+                            if (signature != "unsigned" && signature != "error")
+                            {
+                                var messageToVerify = $"{consensusData}|{timestamp}|{nonce}";
+                                
+                                // Verify signature using the node's address (if available)
+                                bool signatureValid = false;
+                                try
+                                {
+                                    if (!string.IsNullOrEmpty(node.Address))
+                                    {
+                                        signatureValid = SignatureService.VerifySignature(node.Address, messageToVerify, signature);
+                                    }
+                                    else
+                                    {
+                                        // If no node address available, accept response but log it
+                                        signatureValid = true;
+                                        ErrorLogUtility.LogError($"No node address available for signature verification from {node.NodeIP}", "UpdateMethodCode");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    ErrorLogUtility.LogError($"Signature verification failed for {node.NodeIP}: {ex.Message}", "UpdateMethodCode");
+                                    signatureValid = false;
+                                }
+
+                                if (!signatureValid)
+                                {
+                                    ErrorLogUtility.LogError($"Invalid signature in consensus response from {node.NodeIP}", "UpdateMethodCode");
+                                    continue; // Skip this response
+                                }
+                            }
+
+                            // Validate timestamp freshness (within reasonable window)
+                            if (long.TryParse(timestamp, out var responseTimestamp))
+                            {
+                                var currentTime = TimeUtil.GetTime();
+                                var timeDiff = Math.Abs(currentTime - responseTimestamp);
+                                
+                                if (timeDiff > 30) // 30 second window for consensus coordination
+                                {
+                                    ErrorLogUtility.LogError($"Consensus response timestamp too old from {node.NodeIP}. Diff: {timeDiff}s", "UpdateMethodCode");
+                                    continue;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Legacy format: height:methodCode:isFinalized
+                            consensusData = Response;
+                        }
+
+                        // Parse consensus data (height:methodCode:isFinalized)
+                        var remoteMethodCode = consensusData.Split(':');
+                        
+                        // Validate we have exactly 3 parts before accessing array
+                        if (remoteMethodCode.Length != 3)
+                        {
+                            ErrorLogUtility.LogError($"Invalid consensus data format from {node.NodeIP}. Expected 3 parts, got {remoteMethodCode.Length}: {consensusData}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Use safe parsing with bounds validation
+                        if (!long.TryParse(remoteMethodCode[0], out var nodeHeight))
+                        {
+                            ErrorLogUtility.LogError($"Invalid height value from {node.NodeIP}: {remoteMethodCode[0]}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        if (!int.TryParse(remoteMethodCode[1], out var methodCode))
+                        {
+                            ErrorLogUtility.LogError($"Invalid method code from {node.NodeIP}: {remoteMethodCode[1]}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Validate reasonable bounds for height and method code
+                        if (nodeHeight < 0 || nodeHeight > long.MaxValue - 1000000) // Reasonable upper bound
+                        {
+                            ErrorLogUtility.LogError($"Height value out of bounds from {node.NodeIP}: {nodeHeight}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        if (methodCode < 0 || methodCode > 1000) // Reasonable method code range
+                        {
+                            ErrorLogUtility.LogError($"Method code out of bounds from {node.NodeIP}: {methodCode}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Parse finalized flag (only "1" is true, everything else is false)
+                        var isFinalized = remoteMethodCode[2] == "1";
+
                         if (Now > node.LastMethodCodeTime)
                         {
                             lock (ConsensusServer.UpdateNodeLock)
                             {
                                 node.LastMethodCodeTime = Now;
-                                node.NodeHeight = long.Parse(remoteMethodCode[0]);
-                                node.MethodCode = int.Parse(remoteMethodCode[1]);
-                                node.IsFinalized = remoteMethodCode[2] == "1";
+                                node.NodeHeight = nodeHeight;
+                                node.MethodCode = methodCode;
+                                node.IsFinalized = isFinalized;
                             }
 
                             ConsensusServer.RemoveStaleCache(node);
@@ -642,10 +877,16 @@ namespace ReserveBlockCore.P2P
                     }
                 }
                 catch (OperationCanceledException ex)
-                { }
+                { 
+                    // Connection timeout - log with limited frequency to prevent log flooding
+                    if (TimeUtil.GetMillisecondTime() - node.LastMethodCodeTime > 30000) // Log only every 30 seconds
+                    {
+                        ErrorLogUtility.LogError($"Connection timeout to {node.NodeIP} in UpdateMethodCode", "UpdateMethodCode");
+                    }
+                }
                 catch (Exception ex)
                 {
-                    ErrorLogUtility.LogError(ex.ToString(), "UpdateMethodCodes inner catch");
+                    ErrorLogUtility.LogError($"Unexpected error updating method code for {node.NodeIP}: {ex.Message}", "UpdateMethodCode");
                 }
 
                 await Task.Delay(20);
@@ -678,7 +919,7 @@ namespace ReserveBlockCore.P2P
             var myHeight = Globals.LastBlock.Height;
             await UpdateNodeHeights();
 
-            foreach (var node in Globals.Nodes.Values)
+            foreach (var node in Globals.ValidatorNodes.Values)
             {
                 var remoteNodeHeight = node.NodeHeight;
                 if (myHeight < remoteNodeHeight)
@@ -808,55 +1049,101 @@ namespace ReserveBlockCore.P2P
                             if (activeVals != null)
                             {
                                 var peerDB = Peers.GetAll();
+                                var advertisingPeerIP = validator.NodeIP;
+
+                                // HAL-11 Fix: Enhanced validation with rate limiting and cross-verification
+                                LogUtility.Log($"Processing {activeVals.Count} validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
 
                                 foreach (var val in activeVals)
                                 {
-                                    var addResult = await NetworkValidator.AddValidatorToPool(val);
-
-                                    if (!addResult)
-                                        continue;
-
-                                    var singleVal = peerDB.FindOne(x => x.PeerIP == val.IPAddress);
-                                    if (singleVal != null)
+                                    try
                                     {
-                                        singleVal.IsValidator = true;
-
-                                        if(singleVal.ValidatorAddress == null)
-                                            singleVal.ValidatorAddress = val.Address;
-
-                                        if(singleVal.ValidatorPublicKey == null)
-                                            singleVal.ValidatorPublicKey = val.PublicKey;
-
-                                        peerDB.UpdateSafe(singleVal);
-                                    }
-                                    else
-                                    {
-                                        Peers nPeer = new Peers
+                                        // HAL-11 Fix: Enhanced validation with timestamp and nonce validation
+                                        if (string.IsNullOrEmpty(val.Address) || string.IsNullOrEmpty(val.IPAddress))
                                         {
-                                            IsIncoming = false,
-                                            IsOutgoing = true,
-                                            PeerIP = val.IPAddress,
-                                            FailCount = 0,
-                                            IsValidator = true,
-                                            ValidatorAddress = val.Address,
-                                            ValidatorPublicKey = val.PublicKey,
-                                            WalletVersion = Globals.CLIVersion,
-                                        };
+                                            ErrorLogUtility.LogError($"Invalid validator entry from {advertisingPeerIP}: missing address or IP", "RequestActiveValidators");
+                                            continue;
+                                        }
 
-                                        peerDB.InsertSafe(nPeer);
+                                        // HAL-11 Fix: Set advertisement metadata if not present
+                                        if (val.AdvertisementTimestamp == 0)
+                                        {
+                                            val.AdvertisementTimestamp = TimeUtil.GetTime();
+                                        }
+
+                                        if (string.IsNullOrEmpty(val.AdvertisementNonce))
+                                        {
+                                            val.AdvertisementNonce = GenerateSecureNonce();
+                                        }
+
+                                        // HAL-11 Fix: Pass advertising peer IP for rate limiting and source tracking
+                                        var addResult = await NetworkValidator.AddValidatorToPool(val, advertisingPeerIP);
+
+                                        if (!addResult)
+                                        {
+                                            ErrorLogUtility.LogError($"Failed to add validator {val.Address} from peer {advertisingPeerIP}", "RequestActiveValidators");
+                                            continue;
+                                        }
+
+                                        // HAL-11 Fix: Only update peer database for fully trusted validators
+                                        if (val.IsFullyTrusted)
+                                        {
+                                            var singleVal = peerDB.FindOne(x => x.PeerIP == val.IPAddress);
+                                            if (singleVal != null)
+                                            {
+                                                singleVal.IsValidator = true;
+
+                                                if(singleVal.ValidatorAddress == null)
+                                                    singleVal.ValidatorAddress = val.Address;
+
+                                                if(singleVal.ValidatorPublicKey == null)
+                                                    singleVal.ValidatorPublicKey = val.PublicKey;
+
+                                                peerDB.UpdateSafe(singleVal);
+                                            }
+                                            else
+                                            {
+                                                Peers nPeer = new Peers
+                                                {
+                                                    IsIncoming = false,
+                                                    IsOutgoing = true,
+                                                    PeerIP = val.IPAddress,
+                                                    FailCount = 0,
+                                                    IsValidator = true,
+                                                    ValidatorAddress = val.Address,
+                                                    ValidatorPublicKey = val.PublicKey,
+                                                    WalletVersion = Globals.CLIVersion,
+                                                };
+
+                                                peerDB.InsertSafe(nPeer);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            LogUtility.Log($"Validator {val.Address} added to pending validation, not updating peer database yet", "RequestActiveValidators");
+                                        }
+                                    }
+                                    catch (Exception valEx)
+                                    {
+                                        ErrorLogUtility.LogError($"Error processing validator {val?.Address} from {advertisingPeerIP}: {valEx.Message}", "RequestActiveValidators");
                                     }
                                 }
+
+                                LogUtility.Log($"Completed processing validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
                             }
                         }
                     }
                     catch (Exception ex)
                     {
-
+                        ErrorLogUtility.LogError($"Error requesting active validators from {validator.NodeIP}: {ex.Message}", "RequestActiveValidators");
                     }
                 }
 
                 waitForVals = false;
             }
+
+            // HAL-11 Fix: Cleanup stale pending validators after processing
+            NetworkValidator.CleanupStaleValidators();
         }
 
         #endregion

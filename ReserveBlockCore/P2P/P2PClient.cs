@@ -38,6 +38,53 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
+        #region Wallet Version Validation Helper
+
+        /// <summary>
+        /// Safely extracts the first 3 characters from wallet version string with proper validation
+        /// HAL-12 Fix: Prevents ArgumentOutOfRangeException from malformed wallet version strings
+        /// </summary>
+        /// <param name="walletVersion">The wallet version string to process</param>
+        /// <returns>A safe 3-character version prefix or default fallback</returns>
+        private static string GetSafeWalletVersionPrefix(string? walletVersion)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(walletVersion))
+                {
+                    ErrorLogUtility.LogError("Received null or empty wallet version from peer", "GetSafeWalletVersionPrefix");
+                    return "2.1"; // Default fallback version
+                }
+
+                // Validate minimum length requirement
+                if (walletVersion.Length < 3)
+                {
+                    ErrorLogUtility.LogError($"Received short wallet version from peer: '{walletVersion}' (length: {walletVersion.Length})", "GetSafeWalletVersionPrefix");
+                    // Pad short versions with zeros to meet 3-character requirement
+                    return walletVersion.PadRight(3, '0');
+                }
+
+                // Validate that the first 3 characters are reasonable (basic format check)
+                var versionPrefix = walletVersion.Substring(0, 3);
+                if (System.Text.RegularExpressions.Regex.IsMatch(versionPrefix, @"^[0-9]+\.?[0-9]*$"))
+                {
+                    return versionPrefix;
+                }
+                else
+                {
+                    ErrorLogUtility.LogError($"Received malformed wallet version from peer: '{walletVersion}' - prefix: '{versionPrefix}'", "GetSafeWalletVersionPrefix");
+                    return "2.1"; // Default fallback for invalid format
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Unexpected error processing wallet version '{walletVersion}': {ex.Message}", "GetSafeWalletVersionPrefix");
+                return "2.1"; // Safe fallback on any error
+            }
+        }
+
+        #endregion
+
         #region Get Available HubConnections for Peers
         public static async Task RemoveNode(NodeInfo node)
         {
@@ -146,19 +193,54 @@ namespace ReserveBlockCore.P2P
 
         protected virtual void Dispose(bool disposing)
         {
-            if (disposing)
-            {
-                foreach(var node in Globals.Nodes.Values)
-                    if(node.Connection != null)
-                        node.Connection.DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();                
-            }
+            // All disposal logic has been moved to DisposeAsyncCore to avoid sync-over-async deadlocks.
+            // For proper resource cleanup, always prefer DisposeAsync() over Dispose().
         }
 
         protected virtual async ValueTask DisposeAsyncCore()
         {
+            const int timeoutSeconds = 30;
+            using var disposalCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var disposalTasks = new List<Task>();
+
             foreach (var node in Globals.Nodes.Values)
-                if(node.Connection != null)
-                    await node.Connection.DisposeAsync();
+            {
+                if (node.Connection != null)
+                {
+                    disposalTasks.Add(DisposeNodeConnectionSafely(node, disposalCts.Token));
+                }
+            }
+
+            if (disposalTasks.Count > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(disposalTasks).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Log timeout but continue - graceful degradation
+                    LogUtility.Log($"Node disposal timed out after {timeoutSeconds} seconds, some connections may not be properly closed", "P2PClient.DisposeAsyncCore");
+                }
+                catch (Exception ex)
+                {
+                    // Log general errors but don't throw to ensure disposal completes
+                    ErrorLogUtility.LogError($"Error during node disposal: {ex}", "P2PClient.DisposeAsyncCore");
+                }
+            }
+        }
+
+        private static async Task DisposeNodeConnectionSafely(NodeInfo node, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await node.Connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - continue disposing other nodes
+                ErrorLogUtility.LogError($"Error disposing connection for node {node.NodeIP}: {ex.Message}", "P2PClient.DisposeNodeConnectionSafely");
+            }
         }
 
         #endregion
@@ -190,7 +272,9 @@ namespace ReserveBlockCore.P2P
 
                         if (message != "IP")
                         {
-                            await NodeDataProcessor.ProcessData(message, data, IPAddress);
+                            // HAL-072 Fix: Pass cancellation token to prevent runaway deserialization
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                            await NodeDataProcessor.ProcessData(message, data, IPAddress, cts.Token);
                         }
                         else
                         {
@@ -233,8 +317,10 @@ namespace ReserveBlockCore.P2P
 
                 if (walletVersion != null)
                 {
-                    peer.WalletVersion = walletVersion.Substring(0,3);
-                    node.WalletVersion = walletVersion.Substring(0,3);
+                    // HAL-12 Fix: Use safe wallet version processing to prevent ArgumentOutOfRangeException
+                    var safeVersion = GetSafeWalletVersionPrefix(walletVersion);
+                    peer.WalletVersion = safeVersion;
+                    node.WalletVersion = safeVersion;
 
                     Globals.Nodes.TryAdd(IPAddress, node);
 
@@ -401,11 +487,9 @@ namespace ReserveBlockCore.P2P
                         Connection = hubConnection,
                         IpAddress = IPAddress,
                         AdjudicatorConnectDate = DateTime.UtcNow,
-                        Address = bench.RBXAddress
+                    Address = bench.RBXAddress
                 };
                 }
-
-                ValidatorProcessor_BAk.RandomNumberTaskV3(Globals.LastBlock.Height + 1);
 
                 return true;
             }
@@ -563,129 +647,6 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
-        #region Send Winning Task V3
-
-        public static async Task SendWinningTaskV3(AdjNodeInfo node, string block, long height)
-        {
-            var now = DateTime.Now;
-            for (var i = 1; i < 4; i++)
-            {
-                try
-                {
-                    if ((DateTime.Now - now).Milliseconds > 2000)
-                        return;
-                    var result = await node.InvokeAsync<bool>("ReceiveWinningBlockV3", new object[] { block },
-                        () => new CancellationTokenSource(3000).Token);
-                    if (result)
-                    {
-                        node.LastWinningTaskError = false;
-                        node.LastWinningTaskSentTime = DateTime.Now;
-                        node.LastWinningTaskBlockHeight = height;
-                        break;
-                    }
-                    else
-                    {
-                        node.LastWinningTaskError = true;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    node.LastTaskError = true;
-
-                    ValidatorLogUtility.Log("Unhandled Error Sending Task. Check Error Log for more details.", "P2PClient.SendTaskAnswer()");
-
-                    string errorMsg = string.Format("Error Sending Task - {0}. Error Message : {1}", block != null ?
-                        DateTime.Now.ToString() : "No Time", ex.ToString());
-                    ErrorLogUtility.LogError(errorMsg, "SendTaskAnswer(TaskAnswer taskAnswer)");
-                }
-            }
-            if (node.LastTaskError == true)
-            {
-                ValidatorLogUtility.Log("Failed to send or receive back from Adjudicator 4 times. Please verify node integrity and crafted blocks.", "P2PClient.SendTaskAnswer()");
-            }
-        }
-
-        #endregion
-
-        #region Send Task Answer V3
-
-        public static async Task SendTaskAnswerV3(string taskAnswer)
-        {
-            if (taskAnswer == null || Globals.TimeSyncError) //adding time sync check here.
-                return;
-
-            var tasks = new ConcurrentBag<Task>();
-            Globals.AdjNodes.Values.Where(x => x.IsConnected).ToArray().ParallelLoop(x =>
-            {
-                tasks.Add(SendTaskAnswerV3(x, taskAnswer));
-            });            
-
-            await Task.WhenAll(tasks);
-        }
-
-        private static async Task SendTaskAnswerV3(AdjNodeInfo node, string taskAnswer)
-        {
-            if (node.LastSentBlockHeight == Globals.LastBlock.Height + 1)
-                return;
-
-            Random rand = new Random();
-            int randNum = rand.Next(0, 3000);
-            for (var i = 1; i < 4; i++)
-            {
-                if (i == 1)                
-                    await Task.Delay(randNum);                                
-                try
-                {
-                    var result = await node.InvokeAsync<TaskAnswerResult>("ReceiveTaskAnswerV3", new object[] { taskAnswer },
-                                            () => new CancellationTokenSource(3000).Token);                    
-                    if (result != null)
-                    {
-                        if (result.AnswerAccepted)
-                        {
-                            node.LastTaskError = false;
-                            node.LastTaskSentTime = DateTime.Now;
-                            node.LastSentBlockHeight = Globals.LastBlock.Height + 1;
-                            node.LastTaskErrorCount = 0;
-                            break;
-                        }
-                        else if(result.AnswerCode == 7)
-                        {
-                            node.LastTaskSentTime = DateTime.Now;
-                            node.LastTaskError = false;
-                            node.LastSentBlockHeight = Globals.LastBlock.Height + 1;
-                            return;
-                        }
-                        else
-                        {
-                            var errorCodeDesc = await TaskAnswerCodeUtility.TaskAnswerCodeReason(result.AnswerCode);
-                            if(result.AnswerCode != 6)
-                                ConsoleWriterService.Output($"Task was not accpeted: From: {node.IpAddress} Error Code: {result.AnswerCode} - Reason: {errorCodeDesc} Attempt: {i}/3.");
-                            ValidatorLogUtility.Log($"Task Answer was not accepted. Error Code: {result.AnswerCode} - Reason: {errorCodeDesc}", "P2PClient.SendTaskAnswer_New()");
-                            node.LastTaskError = true;
-   
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    node.LastTaskError = true;
-
-                    ValidatorLogUtility.Log("Unhandled Error Sending Task. Check Error Log for more details.", "P2PClient.SendTaskAnswer()");
-
-                    string errorMsg = string.Format("Error Sending Task - {0}. Error Message : {1}", taskAnswer != null ?
-                        taskAnswer : "No Time", ex.ToString());
-                    ErrorLogUtility.LogError(errorMsg, "SendTaskAnswer(TaskAnswer taskAnswer)");
-                }
-            }
-
-            if (node.LastTaskError == true)
-            {
-                node.LastTaskErrorCount += 1;
-                ValidatorLogUtility.Log("Failed to send or receive back from Adjudicator 4 times. Please verify node integrity and crafted blocks.", "P2PClient.SendTaskAnswer()");
-            }
-        }
-
-        #endregion
 
         #region Send TX To Adjudicators
         public static async Task SendTXToAdjudicator(Transaction tx)
@@ -904,15 +865,119 @@ namespace ReserveBlockCore.P2P
 
                     if (Response != null)
                     {
-                        var remoteMethodCode = Response.Split(':');
+                        // HAL-10 Fix: Handle new signed response format or legacy format  
+                        var responseParts = Response.Split('|');
+                        
+                        string consensusData;
+                        bool isSignedResponse = responseParts.Length == 4; // consensusData|timestamp|nonce|signature
+                        
+                        if (isSignedResponse)
+                        {
+                            // New signed format: consensusData|timestamp|nonce|signature
+                            consensusData = responseParts[0];
+                            var timestamp = responseParts[1];
+                            var nonce = responseParts[2];
+                            var signature = responseParts[3];
+
+                            // Verify signature for enhanced security
+                            if (signature != "unsigned" && signature != "error")
+                            {
+                                var messageToVerify = $"{consensusData}|{timestamp}|{nonce}";
+                                
+                                // Verify signature using the node's address (if available)
+                                bool signatureValid = false;
+                                try
+                                {
+                                    if (!string.IsNullOrEmpty(node.Address))
+                                    {
+                                        signatureValid = SignatureService.VerifySignature(node.Address, messageToVerify, signature);
+                                    }
+                                    else
+                                    {
+                                        // If no node address available, accept response but log it
+                                        signatureValid = true;
+                                        ErrorLogUtility.LogError($"No node address available for signature verification from {node.NodeIP}", "UpdateMethodCode");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    ErrorLogUtility.LogError($"Signature verification failed for {node.NodeIP}: {ex.Message}", "UpdateMethodCode");
+                                    signatureValid = false;
+                                }
+
+                                if (!signatureValid)
+                                {
+                                    ErrorLogUtility.LogError($"Invalid signature in consensus response from {node.NodeIP}", "UpdateMethodCode");
+                                    continue; // Skip this response
+                                }
+                            }
+
+                            // Validate timestamp freshness (within reasonable window)
+                            if (long.TryParse(timestamp, out var responseTimestamp))
+                            {
+                                var currentTime = TimeUtil.GetTime();
+                                var timeDiff = Math.Abs(currentTime - responseTimestamp);
+                                
+                                if (timeDiff > 30) // 30 second window for consensus coordination
+                                {
+                                    ErrorLogUtility.LogError($"Consensus response timestamp too old from {node.NodeIP}. Diff: {timeDiff}s", "UpdateMethodCode");
+                                    continue;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Legacy format: height:methodCode:isFinalized
+                            consensusData = Response;
+                        }
+
+                        // Parse consensus data (height:methodCode:isFinalized)
+                        var remoteMethodCode = consensusData.Split(':');
+                        
+                        // Validate we have exactly 3 parts before accessing array
+                        if (remoteMethodCode.Length != 3)
+                        {
+                            ErrorLogUtility.LogError($"Invalid consensus data format from {node.NodeIP}. Expected 3 parts, got {remoteMethodCode.Length}: {consensusData}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Use safe parsing with bounds validation
+                        if (!long.TryParse(remoteMethodCode[0], out var nodeHeight))
+                        {
+                            ErrorLogUtility.LogError($"Invalid height value from {node.NodeIP}: {remoteMethodCode[0]}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        if (!int.TryParse(remoteMethodCode[1], out var methodCode))
+                        {
+                            ErrorLogUtility.LogError($"Invalid method code from {node.NodeIP}: {remoteMethodCode[1]}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Validate reasonable bounds for height and method code
+                        if (nodeHeight < 0 || nodeHeight > long.MaxValue - 1000000) // Reasonable upper bound
+                        {
+                            ErrorLogUtility.LogError($"Height value out of bounds from {node.NodeIP}: {nodeHeight}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        if (methodCode < 0 || methodCode > 1000) // Reasonable method code range
+                        {
+                            ErrorLogUtility.LogError($"Method code out of bounds from {node.NodeIP}: {methodCode}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Parse finalized flag (only "1" is true, everything else is false)
+                        var isFinalized = remoteMethodCode[2] == "1";
+
                         if (Now > node.LastMethodCodeTime)
                         {
                             lock (ConsensusServer.UpdateNodeLock)
                             {
                                 node.LastMethodCodeTime = Now;
-                                node.NodeHeight = long.Parse(remoteMethodCode[0]);
-                                node.MethodCode = int.Parse(remoteMethodCode[1]);
-                                node.IsFinalized = remoteMethodCode[2] == "1";
+                                node.NodeHeight = nodeHeight;
+                                node.MethodCode = methodCode;
+                                node.IsFinalized = isFinalized;
                             }
 
                             ConsensusServer.RemoveStaleCache(node);
@@ -920,10 +985,16 @@ namespace ReserveBlockCore.P2P
                     }
                 }
                 catch (OperationCanceledException ex)
-                { }
+                { 
+                    // Connection timeout - log with limited frequency to prevent log flooding
+                    if (TimeUtil.GetMillisecondTime() - node.LastMethodCodeTime > 30000) // Log only every 30 seconds
+                    {
+                        ErrorLogUtility.LogError($"Connection timeout to {node.NodeIP} in UpdateMethodCode", "UpdateMethodCode");
+                    }
+                }
                 catch (Exception ex)
                 {
-                    ErrorLogUtility.LogError(ex.ToString(), "UpdateMethodCodes inner catch");
+                    ErrorLogUtility.LogError($"Unexpected error updating method code for {node.NodeIP}: {ex.Message}", "UpdateMethodCode");
                 }
 
                 await Task.Delay(20);

@@ -303,20 +303,25 @@ namespace ReserveBlockCore.Data
             return false;
         }
 
-        public static async Task<bool> IsTxTimestampStale(Transaction tx)
+        // HAL-068 Fix: Centralized timestamp staleness validation with configurable thresholds
+        public static async Task<bool> IsTxTimestampStale(Transaction tx, bool allowHistorical = false)
         {
-            var result = false;
+            // Skip validation during block sync/verification of historical transactions
+            if (allowHistorical)
+                return false;
 
             var currentTime = TimeUtil.GetTime();
             var timeDiff = currentTime - tx.Timestamp;
-            var minuteDiff = timeDiff / 60M;
+            
+            // Check if transaction is too old (exceeds max age)
+            if (timeDiff > Globals.MaxTxAgeSeconds)
+                return true;
+            
+            // Check if transaction timestamp is too far in the future (clock skew protection)
+            if (timeDiff < -Globals.MaxFutureSkewSeconds)
+                return true;
 
-            if (minuteDiff > 60.0M)
-            {
-                result = true;
-            }
-
-            return result;
+            return false;
         }
 
         public static void AddToPool(Transaction transaction)
@@ -614,7 +619,73 @@ namespace ReserveBlockCore.Data
                                         var txVerify = await TransactionValidatorService.VerifyTX(tx);
 
                                         if (txVerify.Item1 && !dblspndChk && !isCraftedIntoBlock)
-                                            approvedMemPoolList.Add(tx);
+                                        {
+                                            // HAL-067 Fix: RBF + Nonce Ordering (only after TXHeightRule4 activation)
+                                            if (Globals.LastBlock.Height > Globals.TXHeightRule4)
+                                            {
+                                                // Get current expected nonce for this account
+                                                var expectedNonce = AccountStateTrei.GetNextNonce(tx.FromAddress);
+                                                
+                                                // Check if there are already approved TXs from this address
+                                                var approvedTxsFromSender = approvedMemPoolList
+                                                    .Where(x => x.FromAddress == tx.FromAddress)
+                                                    .OrderBy(x => x.Nonce)
+                                                    .ToList();
+
+                                                // If there are approved TXs, the next expected nonce is the highest nonce + 1
+                                                if (approvedTxsFromSender.Count > 0)
+                                                {
+                                                    expectedNonce = approvedTxsFromSender.Last().Nonce + 1;
+                                                }
+
+                                                // Check for duplicate nonce (RBF scenario)
+                                                var existingTx = approvedMemPoolList.FirstOrDefault(x => 
+                                                    x.FromAddress == tx.FromAddress && 
+                                                    x.Nonce == tx.Nonce
+                                                );
+
+                                                if (existingTx != null)
+                                                {
+                                                    // RBF: Replace with higher fee transaction
+                                                    if (tx.Fee > existingTx.Fee)
+                                                    {
+                                                        approvedMemPoolList.Remove(existingTx);
+                                                        collection.DeleteManySafe(x => x.Hash == existingTx.Hash);
+
+                                                        // Mark old TX as replaced locally
+                                                        var localTxDb = TransactionData.GetAll();
+                                                        var localTx = localTxDb.FindOne(x => x.Hash == existingTx.Hash);
+                                                        if (localTx != null)
+                                                        {
+                                                            localTx.TransactionStatus = TransactionStatus.ReplacedByFee;
+                                                            localTxDb.UpdateSafe(localTx);
+                                                        }
+
+                                                        approvedMemPoolList.Add(tx);
+                                                    }
+                                                    else
+                                                    {
+                                                        // Keep existing (higher fee), reject this one
+                                                        collection.DeleteManySafe(x => x.Hash == tx.Hash);
+                                                    }
+                                                }
+                                                else if (tx.Nonce == expectedNonce)
+                                                {
+                                                    // Nonce is sequential - accept it
+                                                    approvedMemPoolList.Add(tx);
+                                                }
+                                                else
+                                                {
+                                                    // Nonce is out of order (gap or stale) - keep in mempool but don't approve yet
+                                                    // This allows future nonces to wait for earlier ones
+                                                    // Don't delete it - it may become valid when earlier nonces arrive
+                                                }
+                                            }
+                                            else
+                                            {
+                                                approvedMemPoolList.Add(tx);
+                                            }
+                                        }
                                     }
                                     else
                                     {

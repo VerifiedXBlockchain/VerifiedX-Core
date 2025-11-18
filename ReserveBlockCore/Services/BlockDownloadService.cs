@@ -13,11 +13,41 @@ namespace ReserveBlockCore.Services
 {
     public class BlockDownloadService
     {
-        public static ConcurrentDictionary<long, (Block block, string IPAddress)> BlockDict = 
-            new ConcurrentDictionary<long, (Block, string)>();
+        // HAL-066 Fix: Track competing blocks at each height for fork-choice resolution
+        public static ConcurrentDictionary<long, List<(Block block, string IPAddress)>> BlockDict = 
+            new ConcurrentDictionary<long, List<(Block, string)>>();
 
         public const int MaxDownloadBuffer = 52428800;
         public const long MaxBlockRequestBuffer = 1048576;
+
+        /// <summary>
+        /// HAL-066 Fix: Deterministic fork-choice rule - selects block with lowest hash
+        /// when multiple valid blocks exist at the same height
+        /// </summary>
+        public static Block? SelectCanonicalBlock(List<(Block block, string IPAddress)> competingBlocks)
+        {
+            if (competingBlocks == null || competingBlocks.Count == 0)
+                return null;
+            
+            if (competingBlocks.Count == 1)
+                return competingBlocks[0].block;
+            
+            // Fork-choice rule: Select block with lowest hash value (deterministic across all nodes)
+            var selectedBlock = competingBlocks
+                .OrderBy(b => b.block.Hash, StringComparer.Ordinal)
+                .First()
+                .block;
+            
+            if (Globals.OptionalLogging)
+            {
+                ErrorLogUtility.LogError(
+                    $"HAL-066: Fork detected at height {selectedBlock.Height}. " +
+                    $"Selected block {selectedBlock.Hash} from {competingBlocks.Count} competing candidates.",
+                    "BlockDownloadService.SelectCanonicalBlock()");
+            }
+            
+            return selectedBlock;
+        }
 
         public static async Task GetAllBlocksV2()
         {
@@ -126,9 +156,26 @@ namespace ReserveBlockCore.Services
                     {
                         var blockBagOrdered = blockBag.OrderBy(x => x.Item1.Height);
 
+                        // HAL-066 Fix: Add blocks to competing blocks list
                         foreach (var block in blockBagOrdered)
                         {
-                            BlockDict[block.Item1.Height] = (block.Item1, block.Item2);
+                            BlockDict.AddOrUpdate(
+                                block.Item1.Height,
+                                new List<(Block, string)> { (block.Item1, block.Item2) },
+                                (height, existingList) =>
+                                {
+                                    if (!existingList.Any(b => b.Item1.Hash == block.Item1.Hash))
+                                    {
+                                        existingList.Add((block.Item1, block.Item2));
+                                        if (existingList.Count > 1 && Globals.OptionalLogging)
+                                        {
+                                            ErrorLogUtility.LogError(
+                                                $"HAL-066: Competing block received at height {height}. Now have {existingList.Count} candidates.",
+                                                "BlockDownloadService.GetAllBlocksV2()");
+                                        }
+                                    }
+                                    return existingList;
+                                });
                         }
 
                         var stopwatch2 = new Stopwatch();
@@ -148,7 +195,7 @@ namespace ReserveBlockCore.Services
 
                         if (AvailableNode != null)
                         {
-                            var DownloadBuffer = BlockDict.AsParallel().Sum(x => x.Value.block.Size);
+                            var DownloadBuffer = BlockDict.AsParallel().Sum(x => x.Value.Sum(b => b.block.Size));
                             if (DownloadBuffer > MaxDownloadBuffer)
                             {
                                 
@@ -231,7 +278,26 @@ namespace ReserveBlockCore.Services
                             {
                                 var resultHeight = result.Height;
                                 var (_, ipAddress) = taskDict[resultHeight];
-                                BlockDict[resultHeight] = (result, ipAddress);
+                                
+                                // HAL-066 Fix: Add block to competing blocks list
+                                BlockDict.AddOrUpdate(
+                                    resultHeight,
+                                    new List<(Block, string)> { (result, ipAddress) },
+                                    (height, existingList) =>
+                                    {
+                                        if (!existingList.Any(b => b.Item1.Hash == result.Hash))
+                                        {
+                                            existingList.Add((result, ipAddress));
+                                            if (existingList.Count > 1 && Globals.OptionalLogging)
+                                            {
+                                                ErrorLogUtility.LogError(
+                                                    $"HAL-066: Competing block received at height {height}. Now have {existingList.Count} candidates.",
+                                                    "BlockDownloadService.GetAllBlocks()");
+                                            }
+                                        }
+                                        return existingList;
+                                    });
+                                
                                 taskDict.TryRemove(resultHeight, out _);
                                 _ = BlockValidatorService.ValidateBlocks(true);
                             }
@@ -240,7 +306,7 @@ namespace ReserveBlockCore.Services
                             var AvailableNode = Globals.Nodes.Values.Where(x => x.IsSendingBlock == 0).OrderByDescending(x => x.NodeHeight).FirstOrDefault();
                             if (AvailableNode != null)
                             {
-                                var DownloadBuffer = BlockDict.AsParallel().Sum(x => x.Value.block.Size);
+                                var DownloadBuffer = BlockDict.AsParallel().Sum(x => x.Value.Sum(b => b.block.Size));
                                 if (DownloadBuffer > MaxDownloadBuffer)
                                 {
                                     if (TimeUtil.GetTime() - coolDownTime > 30 && taskDict.Keys.Any())
@@ -290,9 +356,36 @@ namespace ReserveBlockCore.Services
             return false;
         }
 
-        public static async Task BlockCollisionResolve(Block badBlock, Block goodBlock)
+        /// <summary>
+        /// HAL-066 Fix: Resolve block collisions using deterministic fork-choice rule
+        /// </summary>
+        public static async Task<Block?> BlockCollisionResolve(Block block1, Block block2)
         {
-
+            if (block1.Height != block2.Height)
+            {
+                ErrorLogUtility.LogError(
+                    $"BlockCollisionResolve called with blocks at different heights: {block1.Height} vs {block2.Height}",
+                    "BlockDownloadService.BlockCollisionResolve()");
+                return null;
+            }
+            
+            if (block1.Hash == block2.Hash)
+                return block1; // Same block
+            
+            // Fork-choice rule: Lowest hash wins (deterministic across all nodes)
+            var winner = string.Compare(block1.Hash, block2.Hash, StringComparison.Ordinal) < 0 
+                ? block1 
+                : block2;
+            
+            if (Globals.OptionalLogging)
+            {
+                ErrorLogUtility.LogError(
+                    $"HAL-066: Fork resolved at height {block1.Height}. " +
+                    $"Selected: {winner.Hash}, Rejected: {(winner == block1 ? block2.Hash : block1.Hash)}",
+                    "BlockDownloadService.BlockCollisionResolve()");
+            }
+            
+            return winner;
         }
 
     }

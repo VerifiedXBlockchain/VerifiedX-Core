@@ -1001,6 +1001,17 @@ namespace ReserveBlockCore.Services
                             await P2PValidatorClient.RemoveNode(node);
                     }
 
+                    //Removing for now, but might be needed for validators
+                    //if(Globals.BlockCasterNodes.Any())
+                    //{
+                    //    var maxBCHeight = Globals.BlockCasterNodes.Values.Select(x => x.NodeHeight).OrderByDescending(x => x).FirstOrDefault();
+                    //    if (maxHeight > Globals.LastBlock.Height)
+                    //    {
+                    //        P2PValidatorClient.UpdateMaxHeight(maxHeight);
+                    //        _ = BlockDownloadService.GetAllBlocks();
+                    //    }
+                    //}
+
                 }
                 catch { }
 
