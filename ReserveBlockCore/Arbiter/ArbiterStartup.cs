@@ -207,11 +207,20 @@ namespace ReserveBlockCore.Arbiter
                                         {
                                             //Also get the state level stuff we are saving now.
                                             totalOwned = vBTCList.Sum(x => x.Amount);
-                                            if (totalOwned < postData.Amount)
+                                            
+                                            // CRITICAL SECURITY FIX: Check for incomplete withdrawals and subtract from available balance
+                                            // This prevents spam attack where user could request multiple withdrawals exceeding their balance
+                                            var incompleteWithdrawals = TokenizedWithdrawals.GetIncompleteWithdrawalAmount(result.VFXAddress, result.SCUID);
+                                            var availableBalance = totalOwned - incompleteWithdrawals;
+                                            
+                                            if (availableBalance < postData.Amount)
                                             {
                                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                                 context.Response.ContentType = "application/json";
-                                                var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient Balance" }, Formatting.Indented);
+                                                var response = JsonConvert.SerializeObject(new { 
+                                                    Success = false, 
+                                                    Message = $"Insufficient Balance. Total: {totalOwned} vBTC, Pending Withdrawals: {incompleteWithdrawals} vBTC, Available: {availableBalance} vBTC, Requested: {postData.Amount} vBTC" 
+                                                }, Formatting.Indented);
                                                 await context.Response.WriteAsync(response);
                                                 return;
                                             }
@@ -236,7 +245,32 @@ namespace ReserveBlockCore.Arbiter
                                 }
                                 else
                                 {
-                                    //TODO: Do owner balance check here!
+                                    // Owner balance check - includes incomplete withdrawal protection
+                                    var incompleteWithdrawals = TokenizedWithdrawals.GetIncompleteWithdrawalAmount(result.VFXAddress, result.SCUID);
+                                    
+                                    // Calculate owner's total balance from smart contract state
+                                    decimal ownerBalance = 0M;
+                                    if (scState.SCStateTreiTokenizationTXes != null)
+                                    {
+                                        var ownerBalances = scState.SCStateTreiTokenizationTXes
+                                            .Where(x => x.ToAddress == result.VFXAddress || x.FromAddress == result.VFXAddress)
+                                            .ToList();
+                                        ownerBalance = ownerBalances.Sum(x => x.Amount);
+                                    }
+                                    
+                                    var availableBalance = ownerBalance - incompleteWithdrawals;
+                                    
+                                    if (availableBalance < postData.Amount)
+                                    {
+                                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                        context.Response.ContentType = "application/json";
+                                        var response = JsonConvert.SerializeObject(new { 
+                                            Success = false, 
+                                            Message = $"Insufficient Balance (Owner). Total: {ownerBalance} vBTC, Pending Withdrawals: {incompleteWithdrawals} vBTC, Available: {availableBalance} vBTC, Requested: {postData.Amount} vBTC" 
+                                        }, Formatting.Indented);
+                                        await context.Response.WriteAsync(response);
+                                        return;
+                                    }
                                 }
 
                                 var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);

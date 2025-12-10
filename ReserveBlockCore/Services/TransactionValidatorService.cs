@@ -933,6 +933,59 @@ namespace ReserveBlockCore.Services
                                             if(tw == null)
                                                 return (txResult, $"Tokenized Withdrawal was null.");
 
+                                            // ===== MEMPOOL DEDUPLICATION (OPTIMIZATION) =====
+                                            // Check mempool for duplicate withdrawal requests from other arbiters
+                                            // This is an optimization to reduce duplicates, not a hard consensus rule
+                                            // The blockchain is the final source of truth (see post-block cleanup)
+                                            var mempool = TransactionData.GetPool();
+                                            var duplicateInMempool = mempool.Query().Where(x => 
+                                                x.TransactionType == TransactionType.TKNZ_WD_ARB &&
+                                                x.Hash != txRequest.Hash
+                                            ).ToList();
+                                            
+                                            if (duplicateInMempool.Any())
+                                            {
+                                                foreach (var existingTx in duplicateInMempool)
+                                                {
+                                                    try
+                                                    {
+                                                        var existingData = JObject.Parse(existingTx.Data);
+                                                        var existingTW = existingData["TokenizedWithdrawal"]?.ToObject<TokenizedWithdrawals?>();
+                                                        
+                                                        if (existingTW != null &&
+                                                            existingTW.OriginalUniqueId == tw.OriginalUniqueId &&
+                                                            existingTW.RequestorAddress == tw.RequestorAddress &&
+                                                            existingTW.SmartContractUID == tw.SmartContractUID)
+                                                        {
+                                                            // DETERMINISTIC SELECTION: Compare arbiter addresses lexicographically
+                                                            // This ensures all nodes make the same choice regardless of arrival order
+                                                            var comparison = string.Compare(
+                                                                txRequest.FromAddress, 
+                                                                existingTx.FromAddress, 
+                                                                StringComparison.Ordinal
+                                                            );
+                                                            
+                                                            if (comparison > 0)
+                                                            {
+                                                                // This TX has "higher" address - reject it, keep existing
+                                                                return (txResult, $"Duplicate withdrawal request in mempool. Keeping arbiter {existingTx.FromAddress}'s version (deterministic selection).");
+                                                            }
+                                                            else if (comparison < 0)
+                                                            {
+                                                                // This TX has "lower" address - accept it, remove existing
+                                                                mempool.DeleteManySafe(x => x.Hash == existingTx.Hash);
+                                                            }
+                                                            else
+                                                            {
+                                                                // Same arbiter sending twice - reject duplicate
+                                                                return (txResult, $"Duplicate withdrawal request from same arbiter.");
+                                                            }
+                                                        }
+                                                    }
+                                                    catch { }
+                                                }
+                                            }
+
                                             var sigCheck = SignatureService.VerifySignature(tw.RequestorAddress, $"{tw.RequestorAddress}.{tw.OriginalRequestTime}.{tw.OriginalUniqueId}", tw.OriginalSignature);
 
                                             if(!sigCheck)
@@ -944,6 +997,14 @@ namespace ReserveBlockCore.Services
                                             {
                                                 if(twCheck.IsCompleted)
                                                     return (txResult, $"TW is already complete.");
+                                            }
+
+                                            // ===== PREVENT MULTIPLE PENDING WITHDRAWALS =====
+                                            // Security: Ensure user completes existing withdrawal before starting a new one
+                                            var hasIncomplete = TokenizedWithdrawals.IncompleteRequestCheck(tw.RequestorAddress, tw.SmartContractUID);
+                                            if (hasIncomplete == true)
+                                            {
+                                                return (txResult, $"You have an incomplete withdrawal for this token. Please complete it before requesting a new one.");
                                             }
 
                                             if(txRequest.Amount > 0.0M)
