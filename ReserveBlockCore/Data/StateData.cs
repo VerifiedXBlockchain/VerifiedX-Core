@@ -1281,14 +1281,42 @@ namespace ReserveBlockCore.Data
         private static void AddNewlyMintedContract(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
-            if (scData != null)
+            
+            // Handle both JArray and JObject formats defensively
+            string function = "";
+            string data = "";
+            string scUID = "";
+            string md5List = "";
+            bool skip = false;
+            JToken? scData = null;
+            
+            try
             {
-                var function = (string?)scData["Function"];
-                var data = (string?)scData["Data"];
-                var scUID = (string?)scData["ContractUID"];
-                var md5List = (string?)scData["MD5List"];
+                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                scData = scDataArray[0];
+                function = (string?)scData["Function"];
+                data = (string?)scData["Data"];
+                scUID = (string?)scData["ContractUID"];
+                md5List = (string?)scData["MD5List"];
+                skip = true;
+            }
+            catch { }
+            
+            try
+            {
+                if (!skip)
+                {
+                    var jobj = JObject.Parse(tx.Data);
+                    function = jobj["Function"]?.ToObject<string?>();
+                    data = jobj["Data"]?.ToObject<string?>();
+                    scUID = jobj["ContractUID"]?.ToObject<string?>();
+                    md5List = jobj["MD5List"]?.ToObject<string?>();
+                }
+            }
+            catch { }
+            
+            if (!string.IsNullOrWhiteSpace(scUID))
+            {
 
 
                 scST.ContractData = data;
