@@ -661,6 +661,7 @@ namespace ReserveBlockCore
                     {
                         FileName = @"C:\Program Files\VFXWallet\VFXWallet.exe",
                         Verb = "runas",
+                        Arguments = Globals.IsTestNet ? "--testnet" : "",
                         WorkingDirectory = @"C:\Program Files\VFXWallet\"
                     };
                     Globals.GUIProcess.Start();

@@ -933,10 +933,33 @@ namespace ReserveBlockCore.Services
                                             if(tw == null)
                                                 return (txResult, $"Tokenized Withdrawal was null.");
 
-                                            // ===== MEMPOOL DEDUPLICATION (OPTIMIZATION) =====
-                                            // Check mempool for duplicate withdrawal requests from other arbiters
-                                            // This is an optimization to reduce duplicates, not a hard consensus rule
-                                            // The blockchain is the final source of truth (see post-block cleanup)
+                                            // ===== HARD CONSENSUS RULE: Only designated lead arbiter may create withdrawal request =====
+                                            // This prevents race conditions where multiple arbiters create duplicate requests
+                                            var activeArbiters = Utilities.ArbiterUtility.GetActiveArbiters();
+                                            
+                                            if (!activeArbiters.Any())
+                                            {
+                                                return (txResult, $"Could not determine lead arbiter. No active arbiters available.");
+                                            }
+                                            
+                                            // Use helper method to check if this is the lead arbiter
+                                            var leadArbiter = Utilities.ArbiterUtility.SelectLeadArbiter(tw.OriginalUniqueId, scUID, activeArbiters);
+                                            
+                                            if (leadArbiter is null)
+                                            {
+                                                return (txResult, $"Could not determine lead arbiter. Selection returned null.");
+                                            }
+                                            
+                                            // Extract address to local variable after null check
+                                            var leadArbiterAddress = leadArbiter!.SigningAddress;
+                                            
+                                            if (txRequest.FromAddress != leadArbiterAddress)
+                                            {
+                                                return (txResult, $"Withdrawal request must come from designated lead arbiter: {leadArbiterAddress}. Received from: {txRequest.FromAddress}");
+                                            }
+
+                                            // ===== MEMPOOL DEDUPLICATION (ADDITIONAL SAFETY CHECK) =====
+                                            // Even with lead arbiter rule, check for duplicates as additional safety measure
                                             var mempool = TransactionData.GetPool();
                                             var duplicateInMempool = mempool.Query().Where(x => 
                                                 x.TransactionType == TransactionType.TKNZ_WD_ARB &&
@@ -957,29 +980,8 @@ namespace ReserveBlockCore.Services
                                                             existingTW.RequestorAddress == tw.RequestorAddress &&
                                                             existingTW.SmartContractUID == tw.SmartContractUID)
                                                         {
-                                                            // DETERMINISTIC SELECTION: Compare arbiter addresses lexicographically
-                                                            // This ensures all nodes make the same choice regardless of arrival order
-                                                            var comparison = string.Compare(
-                                                                txRequest.FromAddress, 
-                                                                existingTx.FromAddress, 
-                                                                StringComparison.Ordinal
-                                                            );
-                                                            
-                                                            if (comparison > 0)
-                                                            {
-                                                                // This TX has "higher" address - reject it, keep existing
-                                                                return (txResult, $"Duplicate withdrawal request in mempool. Keeping arbiter {existingTx.FromAddress}'s version (deterministic selection).");
-                                                            }
-                                                            else if (comparison < 0)
-                                                            {
-                                                                // This TX has "lower" address - accept it, remove existing
-                                                                mempool.DeleteManySafe(x => x.Hash == existingTx.Hash);
-                                                            }
-                                                            else
-                                                            {
-                                                                // Same arbiter sending twice - reject duplicate
-                                                                return (txResult, $"Duplicate withdrawal request from same arbiter.");
-                                                            }
+                                                            // Duplicate found - reject this one
+                                                            return (txResult, $"Duplicate withdrawal request already exists in mempool. TX Hash: {existingTx.Hash}");
                                                         }
                                                     }
                                                     catch { }
