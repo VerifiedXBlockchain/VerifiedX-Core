@@ -450,18 +450,21 @@ namespace ReserveBlockCore.Arbiter
                                         TokenizedWithdrawals = nTokenizedWithdrawal,
                                     };
 
-                                    var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
-
-                                    if (account == null)
+                                    // CRITICAL FIX: Use arbiter signing address instead of validator address
+                                    // The transaction must originate from the signing address to match validation logic
+                                    if (Globals.ArbiterSigningAddress == null)
                                     {
-                                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                                         context.Response.ContentType = "application/json";
-                                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Error with Validator/Arb Account." }, Formatting.Indented);
+                                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Arbiter signing address not initialized." }, Formatting.Indented);
                                         await context.Response.WriteAsync(response);
                                         return;
                                     }
 
-                                    var wtx = await TokenizationService.CreateTokenizedWithdrawal(nTokenizedWithdrawal, Globals.ValidatorAddress, result.VFXAddress, account, result.SCUID, true);
+                                    var signingAddress = Globals.ArbiterSigningAddress.Address;
+                                    var signingAccount = Globals.ArbiterSigningAddress;
+
+                                    var wtx = await TokenizationService.CreateTokenizedWithdrawal(nTokenizedWithdrawal, signingAddress, result.VFXAddress, signingAccount, result.SCUID, true);
 
                                     if (wtx.Item1 == null)
                                     {
@@ -480,9 +483,9 @@ namespace ReserveBlockCore.Arbiter
                                     {
                                         scTx.TransactionStatus = TransactionStatus.Pending;
 
-                                        if (account != null)
+                                        if (signingAccount != null)
                                         {
-                                            await WalletService.SendTransaction(scTx, account);
+                                            await WalletService.SendTransaction(scTx, signingAccount);
                                         }
 
                                         context.Response.StatusCode = StatusCodes.Status200OK;
@@ -495,7 +498,7 @@ namespace ReserveBlockCore.Arbiter
                                     {
                                         context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                         context.Response.ContentType = "application/json";
-                                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Failed to create withdrawal transaction." }, Formatting.Indented);
+                                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Failed to create withdrawal transaction. Tx failed: {txresult.Item2}" }, Formatting.Indented);
                                         await context.Response.WriteAsync(response);
                                         return;
                                     }

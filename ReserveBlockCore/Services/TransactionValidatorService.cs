@@ -80,6 +80,9 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+            if(txRequest.TransactionType == TransactionType.TKNZ_WD_ARB && txRequest.Amount > 0.00M)
+                return (txResult, "This transaction type cannot have a send amount.");
+
             if (txRequest.Fee <= 0 && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
