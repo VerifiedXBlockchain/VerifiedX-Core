@@ -36,13 +36,13 @@ namespace ReserveBlockCore.Services
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);
 
             //Balance Check
-            if (from == null)
+            if (from == null && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
             {
                 return (txResult, "This is a new account with no balance, or your wallet does not have all the blocks in the chain.");
             }
             else
             {
-                if (from.Balance < (txRequest.Amount + txRequest.Fee))
+                if (from != null && from.Balance < (txRequest.Amount + txRequest.Fee))
                 {
                     return (txResult, "The balance of this account is less than the amount being sent.");//balance was less than the amount they are trying to send.
                 }
