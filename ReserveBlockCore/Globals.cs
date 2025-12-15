@@ -122,6 +122,7 @@ namespace ReserveBlockCore
         public static long TXHeightRule2 = 847847; //around April 7, 2023 at 18:30 UTC
         public static long TXHeightRule3 = 1079488; //around June 13th, 2023 at 19:30 UTC
         public static long TXHeightRule4 = 999999999999; //HAL-067: Nonce validation activation height
+        public static long TXHeightRule5 = 5431143; //vBTC Lead signer changes
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds
