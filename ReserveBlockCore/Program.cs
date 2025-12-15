@@ -86,7 +86,7 @@ namespace ReserveBlockCore
             Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
             Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
             Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
-            Globals.TXHeightRule4 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule4;
+            Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
