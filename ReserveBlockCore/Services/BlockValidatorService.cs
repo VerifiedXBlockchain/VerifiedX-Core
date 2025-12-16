@@ -1,5 +1,6 @@
 ﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
@@ -88,6 +89,71 @@ namespace ReserveBlockCore.Services
             foreach (var pair in Globals.MemMutliTransfers.Where(x => x.Value <= timeToRemove))
             {
                 Globals.MemMutliTransfers.TryRemove(pair.Key, out _);
+            }
+        }
+
+        /// <summary>
+        /// Cleans up mempool after a block is accepted.
+        /// Removes duplicate TokenizedWithdrawalRequest transactions that match
+        /// withdrawals already processed in the accepted block.
+        /// CRITICAL: This ensures all nodes converge to same state regardless of
+        /// which arbiter's transaction they received first during network split.
+        /// </summary>
+        public static void CleanupMempoolAfterBlock(Block block)
+        {
+            var mempool = TransactionData.GetPool();
+            
+            if (mempool == null)
+                return;
+            
+            foreach (var blockTx in block.Transactions)
+            {
+                if (blockTx.TransactionType == TransactionType.TKNZ_WD_ARB)
+                {
+                    try
+                    {
+                        // Extract withdrawal info from block transaction
+                        var blockData = JObject.Parse(blockTx.Data);
+                        var blockTW = blockData["TokenizedWithdrawal"]?.ToObject<TokenizedWithdrawals?>();
+                        
+                        if (blockTW != null)
+                        {
+                            // Find ALL duplicate withdrawal requests in mempool
+                            var duplicatesInMempool = mempool.Query().Where(x =>
+                                x.TransactionType == TransactionType.TKNZ_WD_ARB
+                            ).ToList();
+                            
+                            foreach (var mempoolTx in duplicatesInMempool)
+                            {
+                                try
+                                {
+                                    var mempoolData = JObject.Parse(mempoolTx.Data);
+                                    var mempoolTW = mempoolData["TokenizedWithdrawal"]?.ToObject<TokenizedWithdrawals?>();
+                                    
+                                    if (mempoolTW != null &&
+                                        mempoolTW.OriginalUniqueId == blockTW.OriginalUniqueId &&
+                                        mempoolTW.RequestorAddress == blockTW.RequestorAddress &&
+                                        mempoolTW.SmartContractUID == blockTW.SmartContractUID)
+                                    {
+                                        // This is a duplicate of the withdrawal in the block
+                                        // Remove it from mempool
+                                        mempool.DeleteManySafe(x => x.Hash == mempoolTx.Hash);
+                                        
+                                        VFXLogging.LogInfo($"Cleaned up duplicate withdrawal request from mempool. TX Hash: {mempoolTx.Hash}, Arbiter: {mempoolTx.FromAddress}", "BlockValidatorService.CleanupMempoolAfterBlock()");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    ErrorLogUtility.LogError($"Error processing mempool TX during cleanup: {ex}", "BlockValidatorService.CleanupMempoolAfterBlock()");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Error processing block TX during mempool cleanup: {ex}", "BlockValidatorService.CleanupMempoolAfterBlock()");
+                    }
+                }
             }
         }
 
@@ -659,6 +725,7 @@ namespace ReserveBlockCore.Services
                         await BlockchainData.AddBlock(block, updateCLI);//add block to chain.
                         UpdateMemBlocks(block);//update mem blocks
                         UpdateMemBlocksHashes(block);
+                        CleanupMempoolAfterBlock(block);//cleanup duplicate withdrawal requests from mempool
 
                         await StateData.UpdateTreis(block); //update treis
                         await ReserveService.Run(); //updates treis for reserve pending txs

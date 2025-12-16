@@ -142,6 +142,36 @@ namespace ReserveBlockCore.Bitcoin.Models
             return false;
         }
         #endregion
+
+        #region Get Incomplete Withdrawal Amount
+        /// <summary>
+        /// Gets the total amount of incomplete (pending) withdrawals for an address and smart contract.
+        /// This is used to calculate available balance during withdrawal validation.
+        /// SECURITY: Prevents spam attack where user could request multiple withdrawals exceeding their balance.
+        /// </summary>
+        public static decimal GetIncompleteWithdrawalAmount(string address, string scUID)
+        {
+            var twDb = GetTWDb();
+            if (twDb == null)
+            {
+                ErrorLogUtility.LogError("GetTWDb() returned a null value.", "TokenizedWithdrawals.GetIncompleteWithdrawalAmount()");
+                return 0M;
+            }
+            
+            var incompleteWithdrawals = twDb.Query()
+                .Where(x => x.RequestorAddress == address && 
+                            x.SmartContractUID == scUID && 
+                            !x.IsCompleted)
+                .ToList();
+            
+            if (incompleteWithdrawals.Any())
+            {
+                return incompleteWithdrawals.Sum(x => x.Amount);
+            }
+            
+            return 0M;
+        }
+        #endregion
     }
 
     public enum WithdrawalRequestType

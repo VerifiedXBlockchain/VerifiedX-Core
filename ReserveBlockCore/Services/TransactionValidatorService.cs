@@ -36,13 +36,13 @@ namespace ReserveBlockCore.Services
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);
 
             //Balance Check
-            if (from == null)
+            if (from == null && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
             {
                 return (txResult, "This is a new account with no balance, or your wallet does not have all the blocks in the chain.");
             }
             else
             {
-                if (from.Balance < (txRequest.Amount + txRequest.Fee))
+                if (from != null && from.Balance < (txRequest.Amount + txRequest.Fee))
                 {
                     return (txResult, "The balance of this account is less than the amount being sent.");//balance was less than the amount they are trying to send.
                 }
@@ -79,6 +79,9 @@ namespace ReserveBlockCore.Services
                     }
                 }
             }
+
+            if(txRequest.TransactionType == TransactionType.TKNZ_WD_ARB && txRequest.Amount > 0.00M)
+                return (txResult, "This transaction type cannot have a send amount.");
 
             if (txRequest.Fee <= 0 && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
             {
@@ -933,18 +936,85 @@ namespace ReserveBlockCore.Services
                                             if(tw == null)
                                                 return (txResult, $"Tokenized Withdrawal was null.");
 
-                                            var sigCheck = SignatureService.VerifySignature(tw.RequestorAddress, $"{tw.RequestorAddress}.{tw.OriginalRequestTime}.{tw.OriginalUniqueId}", tw.OriginalSignature);
-
-                                            if(!sigCheck)
-                                                return (txResult, $"Signature Check Failed.");
-
-                                            var twCheck = TokenizedWithdrawals.GetTokenizedRecord(tw.RequestorAddress, tw.OriginalUniqueId, tw.SmartContractUID);
-
-                                            if(twCheck != null)
+                                            // ===== HARD CONSENSUS RULE: Only designated lead arbiter may create withdrawal request =====
+                                            // This prevents race conditions where multiple arbiters create duplicate requests
+                                            if(Globals.LastBlock.Height > Globals.TXHeightRule5)
                                             {
-                                                if(twCheck.IsCompleted)
-                                                    return (txResult, $"TW is already complete.");
+                                                var activeArbiters = Utilities.ArbiterUtility.GetActiveArbiters();
+
+                                                if (!activeArbiters.Any())
+                                                {
+                                                    return (txResult, $"Could not determine lead arbiter. No active arbiters available.");
+                                                }
+
+                                                // Use helper method to check if this is the lead arbiter
+                                                var leadArbiter = Utilities.ArbiterUtility.SelectLeadArbiter(tw.OriginalUniqueId, scUID, activeArbiters);
+
+                                                if (leadArbiter is null)
+                                                {
+                                                    return (txResult, $"Could not determine lead arbiter. Selection returned null.");
+                                                }
+
+                                                // Extract address to local variable after null check
+                                                var leadArbiterAddress = leadArbiter!.SigningAddress;
+
+                                                if (txRequest.FromAddress != leadArbiterAddress)
+                                                {
+                                                    return (txResult, $"Withdrawal request must come from designated lead arbiter: {leadArbiterAddress}. Received from: {txRequest.FromAddress}");
+                                                }
+
+                                                // ===== MEMPOOL DEDUPLICATION (ADDITIONAL SAFETY CHECK) =====
+                                                // Even with lead arbiter rule, check for duplicates as additional safety measure
+                                                var mempool = TransactionData.GetPool();
+                                                var duplicateInMempool = mempool.Query().Where(x =>
+                                                    x.TransactionType == TransactionType.TKNZ_WD_ARB &&
+                                                    x.Hash != txRequest.Hash
+                                                ).ToList();
+
+                                                if (duplicateInMempool.Any())
+                                                {
+                                                    foreach (var existingTx in duplicateInMempool)
+                                                    {
+                                                        try
+                                                        {
+                                                            var existingData = JObject.Parse(existingTx.Data);
+                                                            var existingTW = existingData["TokenizedWithdrawal"]?.ToObject<TokenizedWithdrawals?>();
+
+                                                            if (existingTW != null &&
+                                                                existingTW.OriginalUniqueId == tw.OriginalUniqueId &&
+                                                                existingTW.RequestorAddress == tw.RequestorAddress &&
+                                                                existingTW.SmartContractUID == tw.SmartContractUID)
+                                                            {
+                                                                // Duplicate found - reject this one
+                                                                return (txResult, $"Duplicate withdrawal request already exists in mempool. TX Hash: {existingTx.Hash}");
+                                                            }
+                                                        }
+                                                        catch { }
+                                                    }
+                                                }
+
+                                                var sigCheck = SignatureService.VerifySignature(tw.RequestorAddress, $"{tw.RequestorAddress}.{tw.OriginalRequestTime}.{tw.OriginalUniqueId}", tw.OriginalSignature);
+
+                                                if (!sigCheck)
+                                                    return (txResult, $"Signature Check Failed.");
+
+                                                var twCheck = TokenizedWithdrawals.GetTokenizedRecord(tw.RequestorAddress, tw.OriginalUniqueId, tw.SmartContractUID);
+
+                                                if (twCheck != null)
+                                                {
+                                                    if (twCheck.IsCompleted)
+                                                        return (txResult, $"TW is already complete.");
+                                                }
+
+                                                // ===== PREVENT MULTIPLE PENDING WITHDRAWALS =====
+                                                // Security: Ensure user completes existing withdrawal before starting a new one
+                                                var hasIncomplete = TokenizedWithdrawals.IncompleteRequestCheck(tw.RequestorAddress, tw.SmartContractUID);
+                                                if (hasIncomplete == true)
+                                                {
+                                                    return (txResult, $"You have an incomplete withdrawal for this token. Please complete it before requesting a new one.");
+                                                }
                                             }
+                                            
 
                                             if(txRequest.Amount > 0.0M)
                                                 return (txResult, $"Amount not allowed in here.");

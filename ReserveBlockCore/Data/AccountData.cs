@@ -382,46 +382,73 @@ namespace ReserveBlockCore.Data
 				//do nothing as account is already in table. They are attempting to restore a key that already exist.
             }
 		}
-		public static void UpdateLocalBalance(string address, decimal amount)
+	public static void UpdateLocalBalance(string address, decimal amount)
         {
-			var accountList = GetAccounts();
-			var localAccount = accountList.FindOne(x => x.Address == address);
+		var accountList = GetAccounts();
+		var localAccount = accountList.FindOne(x => x.Address == address);
+		
+		// Check if account exists in local wallet before updating balance
+		if (localAccount == null)
+		{
+			// Account not found - this can happen with arbiter signing addresses
+			// that are generated programmatically and not stored in the wallet
+			return;
+		}
+		
             if (amount < 0M)
                 amount = amount * -1.0M;
 
             localAccount.Balance -= amount;
 
-			accountList.UpdateSafe(localAccount);
-		}
-		public static void UpdateLocalBalanceSub(string address, decimal amount)
+		accountList.UpdateSafe(localAccount);
+	}
+	public static void UpdateLocalBalanceSub(string address, decimal amount)
+	{
+		var accountList = GetAccounts();
+		var localAccount = accountList.FindOne(x => x.Address == address);
+		
+		// Check if account exists in local wallet before updating balance
+		if (localAccount == null)
 		{
-			var accountList = GetAccounts();
-			var localAccount = accountList.FindOne(x => x.Address == address);
-			localAccount.Balance += amount;
-
-			accountList.UpdateSafe(localAccount);
-			accountList.UpdateSafe(localAccount);
+			// Account not found - this can happen with arbiter signing addresses
+			// that are generated programmatically and not stored in the wallet
+			return;
 		}
+		
+		localAccount.Balance += amount;
 
-		public static void UpdateLocalBalanceAdd(string address, decimal amount, bool isReserveSend = false)
+		accountList.UpdateSafe(localAccount);
+		accountList.UpdateSafe(localAccount);
+	}
+
+	public static void UpdateLocalBalanceAdd(string address, decimal amount, bool isReserveSend = false)
+	{
+		var accountList = GetAccounts();
+		var localAccount = accountList.FindOne(x => x.Address == address);
+		
+		// Check if account exists in local wallet before updating balance
+		if (localAccount == null)
 		{
-			var accountList = GetAccounts();
-			var localAccount = accountList.FindOne(x => x.Address == address);
-			if (amount < 0M)
-				amount = amount * -1.0M;
+			// Account not found - this can happen with arbiter signing addresses
+			// that are generated programmatically and not stored in the wallet
+			return;
+		}
+		
+		if (amount < 0M)
+			amount = amount * -1.0M;
 
-			if(isReserveSend)
-			{
+		if(isReserveSend)
+		{
                 localAccount.LockedBalance += amount;
             }
-			else
-			{
+		else
+		{
                 localAccount.Balance += amount;
             }
-			
+		
 
-			accountList.UpdateSafe(localAccount);
-		}
+		accountList.UpdateSafe(localAccount);
+	}
 		public static LiteDB.ILiteCollection<Account> GetAccounts()
 		{
             try

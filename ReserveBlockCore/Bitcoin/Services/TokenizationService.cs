@@ -719,6 +719,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
         }
 
+        //Local TX Withdrawal
         public static async Task<string> WithdrawalCoin(string vfxAddress, string btcToAddress, string scUID, decimal amount, long chosenFeeRate = 10)
         {
             try
@@ -801,7 +802,14 @@ namespace ReserveBlockCore.Bitcoin.Services
                             pubKeys.Add(pubKey);
                         }
                         //return await TransactionService.TestMultiSigScriptCreation(pubKeys, scUID);
-                        return await TransactionService.SendMultiSigTransactions(pubKeys, amount, account, btcToAddress, btcTkn.DepositAddress, chosenFeeRate, scUID);
+                        return await TransactionService.SendMultiSigTransactions(
+                            pubKeys, 
+                            amount, 
+                            account, 
+                            btcToAddress, 
+                            btcTkn.DepositAddress, 
+                            chosenFeeRate, 
+                            scUID);
                     }
                 }
                 else if(isOwner)
@@ -817,7 +825,14 @@ namespace ReserveBlockCore.Bitcoin.Services
                         pubKeys.Add(pubKey);
                     }
                     //return await TransactionService.TestMultiSigScriptCreation(pubKeys, scUID);
-                    return await TransactionService.SendMultiSigTransactions(pubKeys, amount, account, btcToAddress, btcTkn.DepositAddress, chosenFeeRate, scUID);
+                    return await TransactionService.SendMultiSigTransactions(
+                        pubKeys, 
+                        amount, 
+                        account, 
+                        btcToAddress, 
+                        btcTkn.DepositAddress, 
+                        chosenFeeRate, 
+                        scUID);
                 }
                 else
                 {
@@ -833,6 +848,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             return await SCLogUtility.LogAndReturn($"EOM ERROR", "TokenizationService.WithdrawalCoin()", false);
         }
 
+        //Raw TX Withdrawal
         public static async Task<string> WithdrawalCoin(string vfxAddress, string btcToAddress, string scUID, decimal amount, long timestamp, string uniqueId, string signature, bool isTest, long chosenFeeRate = 10)
         {
             try

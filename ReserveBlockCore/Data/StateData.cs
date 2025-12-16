@@ -1281,14 +1281,42 @@ namespace ReserveBlockCore.Data
         private static void AddNewlyMintedContract(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
-            if (scData != null)
+            
+            // Handle both JArray and JObject formats defensively
+            string function = "";
+            string data = "";
+            string scUID = "";
+            string md5List = "";
+            bool skip = false;
+            JToken? scData = null;
+            
+            try
             {
-                var function = (string?)scData["Function"];
-                var data = (string?)scData["Data"];
-                var scUID = (string?)scData["ContractUID"];
-                var md5List = (string?)scData["MD5List"];
+                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                scData = scDataArray[0];
+                function = (string?)scData["Function"];
+                data = (string?)scData["Data"];
+                scUID = (string?)scData["ContractUID"];
+                md5List = (string?)scData["MD5List"];
+                skip = true;
+            }
+            catch { }
+            
+            try
+            {
+                if (!skip)
+                {
+                    var jobj = JObject.Parse(tx.Data);
+                    function = jobj["Function"]?.ToObject<string?>();
+                    data = jobj["Data"]?.ToObject<string?>();
+                    scUID = jobj["ContractUID"]?.ToObject<string?>();
+                    md5List = jobj["MD5List"]?.ToObject<string?>();
+                }
+            }
+            catch { }
+            
+            if (!string.IsNullOrWhiteSpace(scUID))
+            {
 
 
                 scST.ContractData = data;
@@ -1972,16 +2000,57 @@ namespace ReserveBlockCore.Data
                 
                 if (uniqueId != null && scUID != null && txHash != null)
                 {
-                    TokenizedWithdrawals.CompleteTokenizedWithdrawals(tx.FromAddress, uniqueId, scUID, txHash);
+                    // Get the withdrawal record to find the amount before completing it
+                    var tw = TokenizedWithdrawals.GetTokenizedRecord(tx.FromAddress, uniqueId, scUID);
+                    
+                    if (tw != null)
+                    {
+                        // Mark withdrawal as completed
+                        TokenizedWithdrawals.CompleteTokenizedWithdrawals(tx.FromAddress, uniqueId, scUID, txHash);
+                        
+                        // CRITICAL FIX: Decrement vBTC balance from smart contract state
+                        // This prevents users from withdrawing the same funds multiple times
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                        
+                        if (scStateTreiRec != null)
+                        {
+                            // Create debit entry to subtract withdrawn amount from user's balance
+                            // This mirrors the pattern used in TransferCoin() for vBTC transfers
+                            List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                            {
+                                new SmartContractStateTreiTokenizationTX
+                                {
+                                    Amount = tw.Amount * -1.0M,  // Negative amount = debit/withdrawal
+                                    FromAddress = tx.FromAddress,
+                                    ToAddress = "-"  // "-" indicates withdrawal/burn
+                                }
+                            };
+
+                            if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                            {
+                                scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                            }
+                            else
+                            {
+                                scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                            }
+
+                            SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                        }
+                    }
+                    else
+                    {
+                        ErrorLogUtility.LogError($"Could not find withdrawal record for UniqueId: {uniqueId}", "StateData.TokenizedWithdrawalComplete()");
+                    }
                 }
                 else
                 {
-                    ErrorLogUtility.LogError($"Tokenized Withdrawal was NULL.", "StateData.TokenizedWithdrawalRequest()");
+                    ErrorLogUtility.LogError($"Tokenized Withdrawal was NULL.", "StateData.TokenizedWithdrawalComplete()");
                 }
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Failed to save TW From Arb. ERROR: {ex}", "StateData.TokenizedWithdrawalRequest()");
+                ErrorLogUtility.LogError($"Failed to complete TW. ERROR: {ex}", "StateData.TokenizedWithdrawalComplete()");
             }
         }
 

@@ -30,7 +30,7 @@ namespace ReserveBlockCore.Services
                 period: intervalMs   // Subsequent runs every interval
             );
 
-            ErrorLogUtility.LogError($"HAL-071: Mempool cleanup service started (interval: {Globals.MempoolCleanupIntervalMinutes} minutes)",
+            LogUtility.Log($"HAL-071: Mempool cleanup service started (interval: {Globals.MempoolCleanupIntervalMinutes} minutes)",
                 "MempoolCleanupService.Start");
         }
 
@@ -45,7 +45,7 @@ namespace ReserveBlockCore.Services
                 _cleanupTimer = null;
                 _isRunning = false;
 
-                ErrorLogUtility.LogError("HAL-071: Mempool cleanup service stopped",
+                LogUtility.Log("HAL-071: Mempool cleanup service stopped",
                     "MempoolCleanupService.Stop");
             }
         }
@@ -71,10 +71,10 @@ namespace ReserveBlockCore.Services
                 if (statsBefore.count != statsAfter.count || 
                     Math.Abs(statsBefore.sizeBytes - statsAfter.sizeBytes) > 1000000) // > 1MB change
                 {
-                    ErrorLogUtility.LogError(
-                        $"HAL-071: Mempool cleanup completed. Before: {statsBefore.count} txs ({statsBefore.sizeBytes} bytes), " +
-                        $"After: {statsAfter.count} txs ({statsAfter.sizeBytes} bytes)",
-                        "MempoolCleanupService.RunCleanup");
+                    //ErrorLogUtility.LogError(
+                    //    $"HAL-071: Mempool cleanup completed. Before: {statsBefore.count} txs ({statsBefore.sizeBytes} bytes), " +
+                    //    $"After: {statsAfter.count} txs ({statsAfter.sizeBytes} bytes)",
+                    //    "MempoolCleanupService.RunCleanup");
                 }
             }
             catch (Exception ex)

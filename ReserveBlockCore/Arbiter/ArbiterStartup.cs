@@ -5,6 +5,7 @@ using Microsoft.Extensions.Configuration;
 using NBitcoin;
 using NBitcoin.Protocol;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Bitcoin.Services;
 using ReserveBlockCore.Data;
@@ -207,11 +208,20 @@ namespace ReserveBlockCore.Arbiter
                                         {
                                             //Also get the state level stuff we are saving now.
                                             totalOwned = vBTCList.Sum(x => x.Amount);
-                                            if (totalOwned < postData.Amount)
+                                            
+                                            // CRITICAL SECURITY FIX: Check for incomplete withdrawals and subtract from available balance
+                                            // This prevents spam attack where user could request multiple withdrawals exceeding their balance
+                                            var incompleteWithdrawals = TokenizedWithdrawals.GetIncompleteWithdrawalAmount(result.VFXAddress, result.SCUID);
+                                            var availableBalance = totalOwned - incompleteWithdrawals;
+                                            
+                                            if (availableBalance < postData.Amount)
                                             {
                                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                                 context.Response.ContentType = "application/json";
-                                                var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient Balance" }, Formatting.Indented);
+                                                var response = JsonConvert.SerializeObject(new { 
+                                                    Success = false, 
+                                                    Message = $"Insufficient Balance. Total: {totalOwned} vBTC, Pending Withdrawals: {incompleteWithdrawals} vBTC, Available: {availableBalance} vBTC, Requested: {postData.Amount} vBTC" 
+                                                }, Formatting.Indented);
                                                 await context.Response.WriteAsync(response);
                                                 return;
                                             }
@@ -236,7 +246,32 @@ namespace ReserveBlockCore.Arbiter
                                 }
                                 else
                                 {
-                                    //TODO: Do owner balance check here!
+                                    // Owner balance check - includes incomplete withdrawal protection
+                                    var incompleteWithdrawals = TokenizedWithdrawals.GetIncompleteWithdrawalAmount(result.VFXAddress, result.SCUID);
+                                    
+                                    // Calculate owner's total balance from smart contract state
+                                    decimal ownerBalance = 0M;
+                                    if (scState.SCStateTreiTokenizationTXes != null)
+                                    {
+                                        var ownerBalances = scState.SCStateTreiTokenizationTXes
+                                            .Where(x => x.ToAddress == result.VFXAddress || x.FromAddress == result.VFXAddress)
+                                            .ToList();
+                                        ownerBalance = ownerBalances.Sum(x => x.Amount);
+                                    }
+                                    
+                                    var availableBalance = ownerBalance - incompleteWithdrawals;
+                                    
+                                    if (availableBalance < postData.Amount)
+                                    {
+                                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                        context.Response.ContentType = "application/json";
+                                        var response = JsonConvert.SerializeObject(new { 
+                                            Success = false, 
+                                            Message = $"Insufficient Balance (Owner). Total: {ownerBalance} vBTC, Pending Withdrawals: {incompleteWithdrawals} vBTC, Available: {availableBalance} vBTC, Requested: {postData.Amount} vBTC" 
+                                        }, Formatting.Indented);
+                                        await context.Response.WriteAsync(response);
+                                        return;
+                                    }
                                 }
 
                                 var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
@@ -320,61 +355,170 @@ namespace ReserveBlockCore.Arbiter
                                     ArbiterUniqueId = RandomStringUtility.GetRandomStringOnlyLetters(16)
                                 };
 
-                                var responseData = new ResponseData.MultiSigSigningResponse
+                                // CRITICAL FIX: Deterministic lead arbiter selection to prevent race conditions
+                                // Only the lead arbiter creates and broadcasts the withdrawal request transaction
+                                
+                                var activeArbiters = Utilities.ArbiterUtility.GetActiveArbiters();
+                                var leadArbiter = Utilities.ArbiterUtility.SelectLeadArbiter(result.UniqueId, result.SCUID, activeArbiters);
+                                
+                                bool isLeadArbiter = false;
+                                if (Globals.ArbiterSigningAddress != null)
                                 {
-                                    Success = true,
-                                    Message = "Transaction Signed",
-                                    SignedTransaction = keySignedHex,
-                                    TokenizedWithdrawals = nTokenizedWithdrawal,
-                                };
-
-                                var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
-
-                                if (account == null)
-                                {
-                                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                    context.Response.ContentType = "application/json";
-                                    var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Error with Validator/Arb Account." }, Formatting.Indented);
-                                    await context.Response.WriteAsync(response);
-                                    return;
+                                    isLeadArbiter = Utilities.ArbiterUtility.IsLeadArbiter(Globals.ArbiterSigningAddress.Address, result.UniqueId, result.SCUID);
                                 }
 
-                                var wtx = await TokenizationService.CreateTokenizedWithdrawal(nTokenizedWithdrawal, Globals.ValidatorAddress, result.VFXAddress, account, result.SCUID, true);
-
-                                if (wtx.Item1 == null)
+                                // Non-lead arbiters check if withdrawal request already exists
+                                if (!isLeadArbiter)
                                 {
-                                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                    context.Response.ContentType = "application/json";
-                                    var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Failed to create withdrawal transaction. Reason: {wtx.Item2}" }, Formatting.Indented);
-                                    await context.Response.WriteAsync(response);
-                                    return;
-                                }
-
-                                var scTx = wtx.Item1;
-
-                                var txresult = await TransactionValidatorService.VerifyTX(scTx);
-
-                                if (txresult.Item1 == true)
-                                {
-                                    scTx.TransactionStatus = TransactionStatus.Pending;
-
-                                    if (account != null)
+                                    // Brief delay to allow lead arbiter's transaction to propagate
+                                    await Task.Delay(2500);
+                                    
+                                    // Check if withdrawal request already exists in database
+                                    var existingRequest = TokenizedWithdrawals.GetTokenizedRecord(
+                                        result.VFXAddress, 
+                                        result.UniqueId, 
+                                        result.SCUID
+                                    );
+                                    
+                                    if (existingRequest != null)
                                     {
-                                        await WalletService.SendTransaction(scTx, account);
+                                        // Lead arbiter already created the request - just return BTC signature
+                                        var responseData = new ResponseData.MultiSigSigningResponse
+                                        {
+                                            Success = true,
+                                            Message = "Transaction Signed (Non-Lead Arbiter - Request Already Exists in DB)",
+                                            SignedTransaction = keySignedHex,
+                                            TokenizedWithdrawals = null
+                                        };
+                                        
+                                        context.Response.StatusCode = StatusCodes.Status200OK;
+                                        context.Response.ContentType = "application/json";
+                                        var requestorResponseJson = JsonConvert.SerializeObject(responseData, Formatting.Indented);
+                                        await context.Response.WriteAsync(requestorResponseJson);
+                                        return;
+                                    }
+                                    
+                                    // Check mempool for pending requests
+                                    var mempool = TransactionData.GetPool();
+                                    if (mempool != null)
+                                    {
+                                        var pendingRequests = mempool.Query().Where(x => 
+                                            x.TransactionType == TransactionType.TKNZ_WD_ARB
+                                        ).ToList();
+                                        
+                                        foreach (var pendingTx in pendingRequests)
+                                        {
+                                            try
+                                            {
+                                                var pendingData = JObject.Parse(pendingTx.Data);
+                                                var pendingTW = pendingData["TokenizedWithdrawal"]?.ToObject<TokenizedWithdrawals>();
+                                                
+                                                if (pendingTW != null &&
+                                                    pendingTW.OriginalUniqueId == result.UniqueId &&
+                                                    pendingTW.RequestorAddress == result.VFXAddress &&
+                                                    pendingTW.SmartContractUID == result.SCUID)
+                                                {
+                                                    // Request already in mempool - just return BTC signature
+                                                    var responseData = new ResponseData.MultiSigSigningResponse
+                                                    {
+                                                        Success = true,
+                                                        Message = "Transaction Signed (Non-Lead Arbiter - Request Already in Mempool)",
+                                                        SignedTransaction = keySignedHex,
+                                                        TokenizedWithdrawals = null
+                                                    };
+                                                    
+                                                    context.Response.StatusCode = StatusCodes.Status200OK;
+                                                    context.Response.ContentType = "application/json";
+                                                    var requestorResponseJson = JsonConvert.SerializeObject(responseData, Formatting.Indented);
+                                                    await context.Response.WriteAsync(requestorResponseJson);
+                                                    return;
+                                                }
+                                            }
+                                            catch { }
+                                        }
+                                    }
+                                }
+
+                                // Only lead arbiter creates and broadcasts withdrawal request
+                                if (isLeadArbiter)
+                                {
+                                    var responseData = new ResponseData.MultiSigSigningResponse
+                                    {
+                                        Success = true,
+                                        Message = "Transaction Signed (Lead Arbiter - Creating Withdrawal Request)",
+                                        SignedTransaction = keySignedHex,
+                                        TokenizedWithdrawals = nTokenizedWithdrawal,
+                                    };
+
+                                    // CRITICAL FIX: Use arbiter signing address instead of validator address
+                                    // The transaction must originate from the signing address to match validation logic
+                                    if (Globals.ArbiterSigningAddress == null)
+                                    {
+                                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                                        context.Response.ContentType = "application/json";
+                                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Arbiter signing address not initialized." }, Formatting.Indented);
+                                        await context.Response.WriteAsync(response);
+                                        return;
                                     }
 
+                                    var signingAddress = Globals.ArbiterSigningAddress.Address;
+                                    var signingAccount = Globals.ArbiterSigningAddress;
+
+                                    var wtx = await TokenizationService.CreateTokenizedWithdrawal(nTokenizedWithdrawal, signingAddress, result.VFXAddress, signingAccount, result.SCUID, true);
+
+                                    if (wtx.Item1 == null)
+                                    {
+                                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                        context.Response.ContentType = "application/json";
+                                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Failed to create withdrawal transaction. Reason: {wtx.Item2}" }, Formatting.Indented);
+                                        await context.Response.WriteAsync(response);
+                                        return;
+                                    }
+
+                                    var scTx = wtx.Item1;
+
+                                    var txresult = await TransactionValidatorService.VerifyTX(scTx);
+
+                                    if (txresult.Item1 == true)
+                                    {
+                                        scTx.TransactionStatus = TransactionStatus.Pending;
+
+                                        if (signingAccount != null)
+                                        {
+                                            await WalletService.SendTransaction(scTx, signingAccount);
+                                        }
+
+                                        context.Response.StatusCode = StatusCodes.Status200OK;
+                                        context.Response.ContentType = "application/json";
+                                        var requestorResponseJson = JsonConvert.SerializeObject(responseData, Formatting.Indented);
+                                        await context.Response.WriteAsync(requestorResponseJson);
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                        context.Response.ContentType = "application/json";
+                                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Failed to create withdrawal transaction. Tx failed: {txresult.Item2}" }, Formatting.Indented);
+                                        await context.Response.WriteAsync(response);
+                                        return;
+                                    }
+                                }
+                                else
+                                {
+                                    // Non-lead arbiter - withdrawal request doesn't exist yet (edge case/fallback)
+                                    // This shouldn't normally happen due to delay above, but handle gracefully
+                                    var responseData = new ResponseData.MultiSigSigningResponse
+                                    {
+                                        Success = true,
+                                        Message = "Transaction Signed (Non-Lead Arbiter - No Request Found)",
+                                        SignedTransaction = keySignedHex,
+                                        TokenizedWithdrawals = null
+                                    };
+                                    
                                     context.Response.StatusCode = StatusCodes.Status200OK;
                                     context.Response.ContentType = "application/json";
                                     var requestorResponseJson = JsonConvert.SerializeObject(responseData, Formatting.Indented);
                                     await context.Response.WriteAsync(requestorResponseJson);
-                                    return;
-                                }
-                                else
-                                {
-                                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                    context.Response.ContentType = "application/json";
-                                    var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Failed to create withdrawal transaction." }, Formatting.Indented);
-                                    await context.Response.WriteAsync(response);
                                     return;
                                 }
 

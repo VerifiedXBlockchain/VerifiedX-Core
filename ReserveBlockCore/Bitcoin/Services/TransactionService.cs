@@ -494,6 +494,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
         }
 
+        //Local TX Send
         public static async Task<string> SendMultiSigTransactions(List<PubKey> pubKeys, decimal sendAmount, Account vfxAccount, string toAddress, string changeAddress, long chosenFeeRate, string scUID)
         {
             try
@@ -741,7 +742,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
         }
 
-        //for raw
+        //for raw tx
         public static async Task<string> SendMultiSigTransactions(List<PubKey> pubKeys, decimal sendAmount, string toAddress, string changeAddress, long chosenFeeRate, string scUID, string signature, long timestamp, string vfxAddress, string uniqueId, bool isTest)
         {
             try
