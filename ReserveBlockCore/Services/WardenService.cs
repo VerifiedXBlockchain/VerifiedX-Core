@@ -1,6 +1,8 @@
 using ReserveBlockCore.Utilities;
 using System.Diagnostics;
 using System.Net.Http;
+using System.Reflection;
+using System.Runtime.InteropServices;
 
 namespace ReserveBlockCore.Services
 {
@@ -106,22 +108,60 @@ namespace ReserveBlockCore.Services
         {
             try
             {
-                var executablePath = Process.GetCurrentProcess().MainModule?.FileName;
-                if (string.IsNullOrEmpty(executablePath))
+                var isLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
+                ProcessStartInfo startInfo;
+                
+                if (isLinux)
                 {
-                    ErrorLogUtility.LogError("Could not determine executable path", "WardenService.StartChildProcess()");
-                    return;
+                    // Linux: Use dotnet + DLL path
+                    var exeLocation = Path.GetDirectoryName(Assembly.GetEntryAssembly()?.Location);
+                    if (string.IsNullOrEmpty(exeLocation))
+                    {
+                        ErrorLogUtility.LogError("Could not determine assembly location", "WardenService.StartChildProcess()");
+                        return;
+                    }
+                    
+                    var dllPath = Path.Combine(exeLocation, "ReserveBlockCore.dll");
+                    
+                    // Build arguments: "dllPath arg1 arg2 arg3"
+                    var allArgs = new List<string> { dllPath };
+                    allArgs.AddRange(args);
+                    
+                    startInfo = new ProcessStartInfo
+                    {
+                        FileName = "dotnet",
+                        Arguments = string.Join(" ", allArgs),
+                        UseShellExecute = false,
+                        RedirectStandardOutput = false,
+                        RedirectStandardError = false,
+                        CreateNoWindow = false,
+                        WorkingDirectory = exeLocation
+                    };
+                    
+                    LogUtility.Log($"Starting child process on Linux: dotnet {string.Join(" ", allArgs)}", "WardenService.StartChildProcess()");
                 }
-
-                var startInfo = new ProcessStartInfo
+                else
                 {
-                    FileName = executablePath,
-                    Arguments = string.Join(" ", args),
-                    UseShellExecute = false,
-                    RedirectStandardOutput = false,
-                    RedirectStandardError = false,
-                    CreateNoWindow = false
-                };
+                    // Windows: Use executable directly
+                    var executablePath = Process.GetCurrentProcess().MainModule?.FileName;
+                    if (string.IsNullOrEmpty(executablePath))
+                    {
+                        ErrorLogUtility.LogError("Could not determine executable path", "WardenService.StartChildProcess()");
+                        return;
+                    }
+
+                    startInfo = new ProcessStartInfo
+                    {
+                        FileName = executablePath,
+                        Arguments = string.Join(" ", args),
+                        UseShellExecute = false,
+                        RedirectStandardOutput = false,
+                        RedirectStandardError = false,
+                        CreateNoWindow = false
+                    };
+                    
+                    LogUtility.Log($"Starting child process on Windows: {executablePath} {string.Join(" ", args)}", "WardenService.StartChildProcess()");
+                }
 
                 _childProcess = new Process { StartInfo = startInfo };
                 _childProcess.Start();
