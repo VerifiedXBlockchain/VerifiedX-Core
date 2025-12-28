@@ -158,7 +158,7 @@ namespace ReserveBlockCore
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
         public static int MinorVer = 2;
-        public static int RevisionVer = 0;
+        public static int RevisionVer = 1;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
@@ -256,6 +256,7 @@ namespace ReserveBlockCore
         public static bool UseV2BlockDownload = false;
         public static bool IsArbiter = false;
         public static bool IsBlockCaster = false;
+        public static bool IsWardenMonitoring = false;
         
         // HAL-17 Fix: Configurable timeout values
         public static int SignalRShortTimeoutMs = 2000;

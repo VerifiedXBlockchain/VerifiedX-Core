@@ -70,6 +70,22 @@ namespace ReserveBlockCore
 
             if (argList.Count() > 0)
             {
+                if (argList.Any(x => x.ToLower() == "testnet"))
+                {
+                    Globals.IsTestNet = true;
+                }
+                // Check for warden mode BEFORE any other processing
+                if (argList.Any(x => x.ToLower() == "warden"))
+                {
+                    Console.WriteLine("Warden Mode - On");
+                    _ = WardenService.StartWarden(args);
+                    await Task.Delay(-1); // Keep warden running
+                    return;
+                }
+            }
+
+            if (argList.Count() > 0)
+            {
                 argList.ForEach(x =>
                 {
                     var argC = x.ToLower();
@@ -78,7 +94,19 @@ namespace ReserveBlockCore
                         //Launch testnet
                         Globals.IsTestNet = true;
                     }
+                    if (argC == "warden_monitoring")
+                    {
+                        Globals.IsWardenMonitoring = true;
+                    }
                 });
+            }
+
+
+            // Start monitoring service if warden_monitoring is enabled
+            if (Globals.IsWardenMonitoring)
+            {
+                MonitoringService.Start();
+                LogUtility.Log("Warden monitoring service started", "Program.Main()");
             }
             //Forced Testnet
             Globals.IsTestNet = true;
@@ -143,7 +171,7 @@ namespace ReserveBlockCore
             Globals.CLIVersion = $"{Globals.MajorVer}.{Globals.MinorVer}.{Globals.RevisionVer}.{WalletVersionUtility.GetBuildVersion()}-beta";
 
             var logCLIVer = Globals.CLIVersion;
-
+            
             if (argList.Count() > 0)
             {
                 Globals.StartArguments = args.ToStringFromArray();//store for later in case of update restart.
@@ -727,7 +755,6 @@ namespace ReserveBlockCore
             _ = MemoryService.RunGlobals();
 
             _ = ArbiterService.GetArbiterSigningAddress();
-
             
             await Task.WhenAll(tasks);
 

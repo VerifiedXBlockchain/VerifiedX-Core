@@ -1539,6 +1539,12 @@ namespace ReserveBlockCore.Services
                 Console.WriteLine("|type /menu to come back to main area  |");
                 Console.WriteLine("|type /btc to access the bitcoin menu  |");
                 Console.WriteLine("|======================================|");
+                if(Globals.IsWardenMonitoring)
+                {
+                    AnsiConsole.MarkupLine("|[blue]======================================[/]|");
+                    AnsiConsole.MarkupLine("|[green]Warden is Monitoring[/]                  |");
+                    AnsiConsole.MarkupLine("|[blue]======================================[/]|");
+                }
 
                 if (Globals.DuplicateAdjAddr)
                 { Console.WriteLine("|Duplicate Address Found Validating!   |"); }
