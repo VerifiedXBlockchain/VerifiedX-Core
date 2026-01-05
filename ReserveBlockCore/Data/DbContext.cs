@@ -126,6 +126,9 @@ namespace ReserveBlockCore.Data
         public const string RSRV_BITCOIN_TOKENS = "rsrv_bitcoin_tokens";
         public const string RSRV_TOKENIZED_WITHDRAWALS = "rsrv_tokenized_withdrawals";
         public const string RSRV_SHARES = "rsrv_shares";
+        public const string RSRV_VBTC_V2_VALIDATORS = "rsrv_vbtc_v2_validators";
+        public const string RSRV_VBTC_V2_CONTRACTS = "rsrv_vbtc_v2_contracts";
+        public const string RSRV_VBTC_V2_CANCELLATIONS = "rsrv_vbtc_v2_cancellations";
 
         internal static void Initialize()
         {

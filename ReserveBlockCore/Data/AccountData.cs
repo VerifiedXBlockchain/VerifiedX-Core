@@ -148,12 +148,19 @@ namespace ReserveBlockCore.Data
 
                                 SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
 
-								if(scMain.Features != null)
-								{
+							if(scMain.Features != null)
+							{
                                     var tokenizedBitcoinFeature = scMain.Features.Where(x => x.FeatureName == FeatureName.Tokenization).FirstOrDefault();
-									if(tokenizedBitcoinFeature != null)
-									{
+								if(tokenizedBitcoinFeature != null)
+								{
                                         await TokenizedBitcoin.SaveSmartContract(scMain, null, account.Address);
+                                    }
+                                    
+                                    // vBTC V2 restoration
+                                    var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
+                                    if(tokenizedBitcoinV2Feature != null)
+                                    {
+                                        await VBTCContractV2.SaveSmartContract(scMain, null, account.Address);
                                     }
                                 }
                             }
@@ -211,6 +218,22 @@ namespace ReserveBlockCore.Data
                                         {
                                             token.Balance = balance;
                                             tokenDb.UpdateSafe(token);
+                                        }
+                                    }
+                                    
+                                    // vBTC V2 balance restoration
+                                    var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
+                                    if (tokenizedBitcoinV2Feature != null)
+                                    {
+                                        await VBTCContractV2.SaveSmartContractTransfer(scMain, account.Address, null);
+                                        
+                                        // Update the balance for the restored vBTC V2 token
+                                        var contractDb = VBTCContractV2.GetDb();
+                                        var contract = contractDb.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.OwnerAddress == account.Address);
+                                        if (contract != null && balance > 0)
+                                        {
+                                            contract.Balance = balance;
+                                            contractDb.UpdateSafe(contract);
                                         }
                                     }
                                 }

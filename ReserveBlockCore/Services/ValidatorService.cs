@@ -127,6 +127,10 @@ namespace ReserveBlockCore.Services
                 {
                     await Task.Delay(1000);
                 }
+                
+                // Ensure validator is registered for vBTC V2 MPC pool
+                await EnsureValidatorMPCRegistration(Globals.ValidatorAddress);
+                
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
                 //_ = ValidatorService.StartValidatorServer();
@@ -348,6 +352,23 @@ namespace ReserveBlockCore.Services
 
                         Globals.ValidatorAddress = validator.Address;
                         Globals.ValidatorPublicKey = account.PublicKey;
+
+                        // Register for vBTC V2 MPC pool
+                        try
+                        {
+                            var ipAddress = Globals.ReportedIP;
+                            var mpcRegResult = await RegisterForMPCPool(validator.Address, ipAddress);
+                            if (!mpcRegResult)
+                            {
+                                ErrorLogUtility.LogError($"Failed to register validator {validator.Address} for vBTC V2 MPC pool", 
+                                    "ValidatorService.StartValidating()");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            ErrorLogUtility.LogError($"Error registering for MPC pool: {ex}", 
+                                "ValidatorService.StartValidating()");
+                        }
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 
@@ -1016,6 +1037,86 @@ namespace ReserveBlockCore.Services
                 catch { }
 
                 await Task.Delay(10000);
+            }
+        }
+
+        #endregion
+
+        #region vBTC V2 MPC Pool Registration
+
+        /// <summary>
+        /// Register validator for vBTC V2 MPC pool
+        /// </summary>
+        private static async Task<bool> RegisterForMPCPool(string validatorAddress, string ipAddress)
+        {
+            try
+            {
+                // TODO: MPC/ZENGO INTEGRATION
+                // This will be replaced with actual MPC key generation when ZenGo is integrated
+                // For now, create placeholder VBTCValidator record
+                
+                var vbtcValidator = new Bitcoin.Models.VBTCValidator
+                {
+                    ValidatorAddress = validatorAddress,
+                    IPAddress = ipAddress,
+                    RegistrationBlockHeight = Globals.LastBlock.Height,
+                    LastHeartbeatBlock = Globals.LastBlock.Height,
+                    IsActive = true,
+                    BTCPublicKeyShare = "PLACEHOLDER_MPC_PUBLIC_KEY_SHARE",
+                    MPCSignature = "PLACEHOLDER_MPC_SIGNATURE"
+                };
+                
+                // Save to vBTC validator database
+                // TODO: Implement VBTCValidator.GetVBTCValidatorDb() and save methods
+                // var db = VBTCValidator.GetVBTCValidatorDb();
+                // db.InsertSafe(vbtcValidator);
+                
+                LogUtility.Log($"Validator {validatorAddress} registered for vBTC V2 MPC pool (PLACEHOLDER)", 
+                    "ValidatorService.RegisterForMPCPool()");
+                
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error registering for MPC pool: {ex}", 
+                    "ValidatorService.RegisterForMPCPool()");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Ensure validator is registered for vBTC V2 MPC pool on startup
+        /// </summary>
+        private static async Task EnsureValidatorMPCRegistration(string validatorAddress)
+        {
+            try
+            {
+                // Check if already registered for MPC
+                // TODO: Implement check against VBTCValidator database
+                // var vbtcValidatorDb = VBTCValidator.GetVBTCValidatorDb();
+                // var existingReg = vbtcValidatorDb.FindOne(x => x.ValidatorAddress == validatorAddress);
+                
+                // if (existingReg == null)
+                // {
+                    // Not registered - auto-register
+                    var ipAddress = Globals.ReportedIP;
+                    var result = await RegisterForMPCPool(validatorAddress, ipAddress);
+                    if (result)
+                    {
+                        LogUtility.Log($"Validator {validatorAddress} auto-registered for vBTC V2 MPC pool on startup", 
+                            "ValidatorService.EnsureValidatorMPCRegistration()");
+                    }
+                // }
+                // else
+                // {
+                //     LogUtility.Log($"Validator {validatorAddress} already registered for vBTC V2 MPC pool", 
+                //         "ValidatorService.EnsureValidatorMPCRegistration()");
+                // }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error during MPC registration check: {ex}", 
+                    "ValidatorService.EnsureValidatorMPCRegistration()");
             }
         }
 

@@ -82,7 +82,15 @@ namespace ReserveBlockCore.Models
         TKNZ_TX,//tokenization token tx
         TKNZ_BURN,//tokenization token burn
         TKNZ_WD_ARB,
-        TKNZ_WD_OWNER
+        TKNZ_WD_OWNER,
+        VBTC_V2_VALIDATOR_REGISTER,      // Validator registers for vBTC v2
+        VBTC_V2_VALIDATOR_HEARTBEAT,     // Validator heartbeat
+        VBTC_V2_CONTRACT_CREATE,         // Create vBTC v2 contract
+        VBTC_V2_TRANSFER,                // Transfer vBTC v2 tokens
+        VBTC_V2_WITHDRAWAL_REQUEST,      // Request withdrawal to BTC
+        VBTC_V2_WITHDRAWAL_COMPLETE,     // Complete withdrawal
+        VBTC_V2_WITHDRAWAL_CANCEL,       // Request cancellation
+        VBTC_V2_WITHDRAWAL_VOTE          // Validator votes on cancellation
     }
 
     public enum ReserveTransactionType

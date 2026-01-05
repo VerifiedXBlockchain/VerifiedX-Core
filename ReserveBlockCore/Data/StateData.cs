@@ -294,6 +294,12 @@ namespace ReserveBlockCore.Data
                                     case "TransferCoinMulti()":
                                         TransferCoinMulti(tx);
                                         break;
+                                    case "TransferVBTC()":
+                                        TransferVBTC(tx);
+                                        break;
+                                    case "TransferVBTCMulti()":
+                                        TransferVBTCMulti(tx);
+                                        break;
                                     case "TokenizedWithdrawalRequest()":
                                         TokenizedWithdrawalRequest(tx);
                                         break;
@@ -2397,6 +2403,124 @@ namespace ReserveBlockCore.Data
                             ToAddress = "-"
                         }
                     };
+
+                        if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                        {
+                            scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                        }
+                        else
+                        {
+                            scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                        }
+
+                        SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                    }
+                }
+            }
+        }
+
+        private static void TransferVBTC(Transaction tx)
+        {
+            string scUID = "";
+            string function = "";
+            bool skip = false;
+            JToken? scData = null;
+            decimal? amountVal = null;
+
+            try
+            {
+                var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
+                scData = scDataArray[0];
+
+                function = (string?)scData["Function"];
+                scUID = (string?)scData["ContractUID"];
+                amountVal = (decimal?)scData["Amount"];
+                skip = true;
+            }
+            catch { }
+
+            try
+            {
+                if (!skip)
+                {
+                    var jobj = JObject.Parse(tx.Data);
+                    scUID = jobj["ContractUID"]?.ToObject<string?>();
+                    function = jobj["Function"]?.ToObject<string?>();
+                    amountVal = jobj["Amount"]?.ToObject<decimal?>();
+                }
+            }
+            catch { }
+
+            if (amountVal.HasValue)
+            {
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+
+                if(scStateTreiRec != null)
+                {
+                    List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                    {
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = amountVal.Value,
+                            FromAddress = "+",
+                            ToAddress = tx.ToAddress
+                        },
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = amountVal.Value * -1.0M,
+                            FromAddress = tx.FromAddress,
+                            ToAddress = "-"
+                        }
+                    };
+
+                    if(scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                    {
+                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                    }
+                    else
+                    {
+                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                    }
+
+                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                }
+            }
+        }
+
+        private static void TransferVBTCMulti(Transaction tx)
+        {
+            var txData = tx.Data;
+            var jobj = JObject.Parse(txData);
+
+            var function = (string?)jobj["Function"];
+
+            var signatureInput = jobj["SignatureInput"]?.ToObject<string?>();
+            var amount = jobj["Amount"]?.ToObject<decimal?>();
+            var inputs = jobj["Inputs"]?.ToObject<List<VBTCTransferInput>?>();
+
+            if(inputs != null)
+            {
+                foreach(var input in inputs)
+                {
+                    var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(input.SCUID);
+
+                    if (scStateTreiRec != null)
+                    {
+                        List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                        {
+                            new SmartContractStateTreiTokenizationTX
+                            {
+                                Amount = input.Amount,
+                                FromAddress = "+",
+                                ToAddress = tx.ToAddress
+                            },
+                            new SmartContractStateTreiTokenizationTX
+                            {
+                                Amount = input.Amount * -1.0M,
+                                FromAddress = input.FromAddress,
+                                ToAddress = "-"
+                            }
+                        };
 
                         if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
                         {

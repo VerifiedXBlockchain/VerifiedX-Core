@@ -6,12 +6,13 @@
         public object FeatureFeatures { get; set; }
     }
 
+    //Do not change order.
     public enum FeatureName
     { 
         Evolving, //returns a list of EvolvingFeatures
         Royalty, // returns a class of RoyaltyFeatures
         MultiAsset,
-        Tokenization,//class
+        Tokenization,//class - vBTC v1 (arbiter-based)
         Music, //Class with a list of songs
         MultiOwner, //List of MultiOwnerFeatures
         SelfDestruct,//class
@@ -21,6 +22,7 @@
         Wrapped,//class
         Soulbound,//class
         Ticket,//class
-        Token //class
+        Token, //Tokens
+        TokenizationV2 //class - vBTC v2 (MPC-based)
     }
 }

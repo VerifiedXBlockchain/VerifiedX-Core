@@ -36,7 +36,7 @@ namespace ReserveBlockCore.Models
         public int VoteNo { get; set; }  //system defined
 
         public decimal TotalVotes { get { return VoteYes + VoteNo;  } }  //system defined
-        public decimal PercentVotesYes { get { try { return TotalVotes != 0M ? Math.Round(((Convert.ToDecimal(VoteYes) / TotalVotes) * 100M), 2) : 0M; } catch { return 0M; } } }  //system defined
+        public decimal PercentVotesYes { get { try { return TotalVotes != 0M ? Math.Round(((Convert.ToDecimal(VoteYes) / TotalVotes) * 100M), 2) : 0M; } catch { return 0M; } } }  //system defined - much reach 80% to pass
         public decimal PercentVotesNo { get { try { return TotalVotes != 0M ? Math.Round(((Convert.ToDecimal(VoteNo) / TotalVotes) * 100M), 2) : 0M; } catch { return 0M; } } }   //system defined
         public decimal PercentInFavor { get { try { return Math.Round(((Convert.ToDecimal(VoteYes) / Convert.ToDecimal(ValidatorCount)) * 100M), 2); } catch { return 0M; } } }   //system defined 
         public decimal PercentAgainst { get { try { return Math.Round(((Convert.ToDecimal(VoteNo) / Convert.ToDecimal(ValidatorCount)) * 100M), 2); } catch { return 0M; } } }   //system defined
