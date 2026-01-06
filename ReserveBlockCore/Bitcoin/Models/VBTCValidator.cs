@@ -25,7 +25,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         #region Database Methods
         public static ILiteCollection<VBTCValidator> GetDb()
         {
-            var db = DbContext.DB_Assets.GetCollection<VBTCValidator>(DbContext.RSRV_VBTC_V2_VALIDATORS);
+            var db = DbContext.DB_vBTC.GetCollection<VBTCValidator>(DbContext.RSRV_VBTC_V2_VALIDATORS);
             return db;
         }
 
