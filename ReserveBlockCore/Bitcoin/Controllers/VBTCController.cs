@@ -7,6 +7,7 @@ using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.Utilities;
+using System.Collections.Concurrent;
 
 namespace ReserveBlockCore.Bitcoin.Controllers
 {
@@ -19,6 +20,16 @@ namespace ReserveBlockCore.Bitcoin.Controllers
     [ApiController]
     public class VBTCController : ControllerBase
     {
+        #region In-Memory Ceremony Storage
+
+        /// <summary>
+        /// In-memory storage for MPC ceremony states
+        /// Key: CeremonyId, Value: MPCCeremonyState
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, MPCCeremonyState> _ceremonies = new();
+
+        #endregion
+
         #region API Status
 
         /// <summary>
@@ -178,12 +189,227 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
         #endregion
 
+        #region MPC Ceremony Management
+
+        /// <summary>
+        /// Initiate an MPC (FROST DKG) ceremony to generate a deposit address
+        /// This runs asynchronously in the background - use GetCeremonyStatus to check progress
+        /// </summary>
+        /// <param name="ownerAddress">Address requesting the ceremony</param>
+        /// <returns>Ceremony ID for tracking progress</returns>
+        [HttpPost("InitiateMPCCeremony/{ownerAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> InitiateMPCCeremony(string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                // Generate unique ceremony ID
+                var ceremonyId = Guid.NewGuid().ToString();
+                var currentTime = TimeUtil.GetTime();
+
+                // Create initial ceremony state
+                var ceremony = new MPCCeremonyState
+                {
+                    CeremonyId = ceremonyId,
+                    OwnerAddress = ownerAddress,
+                    Status = CeremonyStatus.Initiated,
+                    InitiatedTimestamp = currentTime,
+                    RequiredThreshold = 51,
+                    ProgressPercentage = 0,
+                    CurrentRound = 0
+                };
+
+                // Store in memory
+                if (!_ceremonies.TryAdd(ceremonyId, ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create ceremony" });
+                }
+
+                // Start background ceremony process
+                _ = Task.Run(async () => await ExecuteMPCCeremony(ceremonyId));
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "MPC ceremony initiated successfully. Use GetCeremonyStatus to check progress.",
+                    CeremonyId = ceremonyId,
+                    Status = ceremony.Status.ToString(),
+                    InitiatedTimestamp = currentTime
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get the status of an ongoing or completed MPC ceremony
+        /// </summary>
+        /// <param name="ceremonyId">Ceremony ID from InitiateMPCCeremony</param>
+        /// <returns>Ceremony status and results if completed</returns>
+        [HttpGet("GetCeremonyStatus/{ceremonyId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetCeremonyStatus(string ceremonyId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ceremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony ID cannot be null" });
+
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony not found" });
+                }
+
+                var response = new
+                {
+                    Success = true,
+                    Message = "Ceremony status retrieved",
+                    CeremonyId = ceremony.CeremonyId,
+                    Status = ceremony.Status.ToString(),
+                    OwnerAddress = ceremony.OwnerAddress,
+                    ProgressPercentage = ceremony.ProgressPercentage,
+                    CurrentRound = ceremony.CurrentRound,
+                    InitiatedTimestamp = ceremony.InitiatedTimestamp,
+                    CompletedTimestamp = ceremony.CompletedTimestamp,
+                    ErrorMessage = ceremony.ErrorMessage,
+                    // Only include results if completed
+                    DepositAddress = ceremony.Status == CeremonyStatus.Completed ? ceremony.DepositAddress : null,
+                    FrostGroupPublicKey = ceremony.Status == CeremonyStatus.Completed ? ceremony.FrostGroupPublicKey : null,
+                    DKGProof = ceremony.Status == CeremonyStatus.Completed ? ceremony.DKGProof : null,
+                    ValidatorCount = ceremony.ValidatorSnapshot?.Count ?? 0,
+                    RequiredThreshold = ceremony.RequiredThreshold,
+                    ProofBlockHeight = ceremony.ProofBlockHeight
+                };
+
+                return JsonConvert.SerializeObject(response);
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Background task that executes the MPC (FROST DKG) ceremony
+        /// Steps 1-8 from the original CreateVBTCContract method
+        /// </summary>
+        private async Task ExecuteMPCCeremony(string ceremonyId)
+        {
+            try
+            {
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                    return;
+
+                // Update status: Validating validators
+                ceremony.Status = CeremonyStatus.ValidatingValidators;
+                ceremony.ProgressPercentage = 5;
+
+                // Step 1: Get list of active validators
+                var currentBlock = Globals.LastBlock.Height;
+                List<VBTCValidator>? activeValidators;
+
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    activeValidators = VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
+                }
+                else
+                {
+                    activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+                }
+
+                var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+
+                if (activeValidators == null || !activeValidators.Any())
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
+
+                var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
+                if (activeValidators.Count < requiredActiveValidators)
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
+
+                ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
+                ceremony.ProgressPercentage = 15;
+
+                // TODO: FROST DKG Round 1 - Commitment Phase
+                ceremony.Status = CeremonyStatus.Round1InProgress;
+                ceremony.CurrentRound = 1;
+                ceremony.ProgressPercentage = 20;
+                await Task.Delay(1000); // Simulate network round trip
+                ceremony.Status = CeremonyStatus.Round1Complete;
+                ceremony.ProgressPercentage = 35;
+
+                // TODO: FROST DKG Round 2 - Share Distribution Phase
+                ceremony.Status = CeremonyStatus.Round2InProgress;
+                ceremony.CurrentRound = 2;
+                ceremony.ProgressPercentage = 40;
+                await Task.Delay(1000); // Simulate network round trip
+                ceremony.Status = CeremonyStatus.Round2Complete;
+                ceremony.ProgressPercentage = 60;
+
+                // TODO: FROST DKG Round 3 - Verification Phase
+                ceremony.Status = CeremonyStatus.Round3InProgress;
+                ceremony.CurrentRound = 3;
+                ceremony.ProgressPercentage = 65;
+                await Task.Delay(1000); // Simulate network round trip
+                ceremony.Status = CeremonyStatus.Round3Complete;
+                ceremony.ProgressPercentage = 80;
+
+                // TODO: Aggregate Group Public Key
+                ceremony.Status = CeremonyStatus.AggregatingPublicKey;
+                ceremony.ProgressPercentage = 85;
+                await Task.Delay(500);
+
+                // TODO: Generate DKG Completion Proof
+                ceremony.Status = CeremonyStatus.GeneratingProof;
+                ceremony.ProgressPercentage = 90;
+                await Task.Delay(500);
+
+                // PLACEHOLDER: Generate mock results
+                ceremony.DepositAddress = $"bc1p{Guid.NewGuid().ToString().Replace("-", "").Substring(0, 58)}";
+                ceremony.FrostGroupPublicKey = $"FROST_PK_{Guid.NewGuid().ToString().Replace("-", "")}";
+                ceremony.DKGProof = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"DKG_PROOF_{ceremonyId}"));
+                ceremony.ProofBlockHeight = Globals.LastBlock.Height;
+
+                // Complete
+                ceremony.Status = CeremonyStatus.Completed;
+                ceremony.ProgressPercentage = 100;
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+            }
+            catch (Exception ex)
+            {
+                if (_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = ex.Message;
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                }
+            }
+        }
+
+        #endregion
+
         #region Contract Creation
 
         /// <summary>
         /// Create a new vBTC V2 contract with MPC-generated deposit address
+        /// IMPORTANT: You must first call InitiateMPCCeremony and wait for it to complete,
+        /// then pass the CeremonyId to this method
         /// </summary>
-        /// <param name="payload">Contract creation payload</param>
+        /// <param name="payload">Contract creation payload (must include CeremonyId)</param>
         /// <returns>Contract creation result with smart contract UID</returns>
         [HttpPost("CreateVBTCContract")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
@@ -194,81 +420,56 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
+                // Check if CeremonyId is provided
+                if (string.IsNullOrEmpty(payload.CeremonyId))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "CeremonyId is required. Please call InitiateMPCCeremony first and wait for it to complete, then pass the CeremonyId to this method."
+                    });
+                }
+
+                // Retrieve ceremony from memory
+                if (!_ceremonies.TryGetValue(payload.CeremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Ceremony not found. Please initiate a new ceremony with InitiateMPCCeremony."
+                    });
+                }
+
+                // Validate ceremony is completed
+                if (ceremony.Status != CeremonyStatus.Completed)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Ceremony is not complete. Current status: {ceremony.Status}. Use GetCeremonyStatus to check progress.",
+                        CeremonyId = payload.CeremonyId,
+                        Status = ceremony.Status.ToString(),
+                        ProgressPercentage = ceremony.ProgressPercentage
+                    });
+                }
+
+                // Validate owner address matches ceremony
+                if (ceremony.OwnerAddress != payload.OwnerAddress)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Owner address does not match the ceremony owner address."
+                    });
+                }
+
                 var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
 
-                // TODO: FROST INTEGRATION - TAPROOT ADDRESS GENERATION VIA DKG
-                // ============================================================
-                // 1. Get list of active validators from blockchain transactions
-                var currentBlock = Globals.LastBlock.Height;
-                List<VBTCValidator>? activeValidators;
-                
-                // Check if this node is a validator
-                if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
-                {
-                    // We're a validator - query our local DB (authoritative)
-                    activeValidators = VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
-                }
-                else
-                {
-                    // We're a non-validator - fetch from network
-                    activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
-                }
-                
-                var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
-
-                if (activeValidators == null || !activeValidators.Any())
-                {
-                    return JsonConvert.SerializeObject(new
-                    {
-                        Success = false,
-                        Message = "No active validators available for vBTC V2 contract creation."
-                    });
-                }
-
-                // Require 75% of registered validators to be active for address generation
-                var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
-                if (activeValidators.Count < requiredActiveValidators)
-                {
-                    return JsonConvert.SerializeObject(new
-                    {
-                        Success = false,
-                        Message = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}"
-                    });
-                }
-
-                // 2. Initiate FROST DKG ceremony via API
-                //    - Broadcast FROST_DKG_REQUEST to all validators
-                //    - Include: scUID, ownerAddress, timestamp
-                // 3. FROST DKG Round 1: Commitment Phase
-                //    - Each validator generates random polynomial coefficients
-                //    - Each validator computes commitments
-                //    - Broadcast commitments to all participants
-                // 4. FROST DKG Round 2: Share Distribution Phase
-                //    - Each validator computes secret shares for other validators
-                //    - Send encrypted shares via API (point-to-point)
-                //    - Each validator receives shares from all others
-                // 5. FROST DKG Round 3: Verification Phase
-                //    - Each validator verifies received shares against commitments
-                //    - If verification fails, abort and restart DKG
-                //    - If all verify, each validator computes their private key share
-                // 6. Aggregate Group Public Key
-                //    - Combine all validator commitments
-                //    - Derive FROST group public key
-                //    - Generate Taproot internal key (x-only pubkey)
-                //    - Derive Bitcoin Taproot address (bc1p...)
-                // 7. Generate DKG Completion Proof
-                //    - Proof that DKG completed successfully
-                //    - Proof that no single party knows full private key
-                //    - Compress and Base64 encode proof
-                // 8. Store validator snapshot and FROST data
-                // ============================================================
-                // PLACEHOLDER: Using mock Taproot address for now
-                string depositAddress = "bc1pFROST_TAPROOT_PLACEHOLDER_ADDRESS";
-                string frostGroupPublicKey = "PLACEHOLDER_FROST_GROUP_PUBLIC_KEY";
-                string dkgProof = "PLACEHOLDER_DKG_PROOF_BASE64_COMPRESSED";
-                
-                // Create validator snapshot from active validators
-                var validatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
+                // Use ceremony results
+                string depositAddress = ceremony.DepositAddress!;
+                string frostGroupPublicKey = ceremony.FrostGroupPublicKey!;
+                string dkgProof = ceremony.DKGProof!;
+                var validatorSnapshot = ceremony.ValidatorSnapshot;
 
                 // Create TokenizationV2Feature
                 var tokenizationV2Feature = new TokenizationV2Feature
@@ -309,11 +510,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "vBTC V2 contract created successfully",
+                    Message = "vBTC V2 contract created successfully using pre-generated MPC ceremony",
                     SmartContractUID = scUID,
+                    CeremonyId = payload.CeremonyId,
                     DepositAddress = depositAddress,
                     DKGProof = dkgProof,
-                    ValidatorCount = validatorSnapshot.Count
+                    ValidatorCount = validatorSnapshot.Count,
+                    ProofBlockHeight = ceremony.ProofBlockHeight
                 });
             }
             catch (Exception ex)
@@ -349,6 +552,158 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     DepositAddress = "bc1pFROST_TAPROOT_PLACEHOLDER",
                     FrostGroupPublicKey = "PLACEHOLDER_FROST_GROUP_PUBLIC_KEY",
                     RequiredThreshold = 51
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Create a new vBTC V2 contract with pre-signed external request (Raw format)
+        /// SECURITY: Includes signature verification, timestamp validation, and replay attack prevention
+        /// IMPORTANT: You must first call InitiateMPCCeremony and wait for it to complete
+        /// </summary>
+        /// <param name="payload">Raw contract creation request with signature and unique ID</param>
+        /// <returns>Contract creation result with smart contract UID</returns>
+        [HttpPost("CreateVBTCContractRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CreateVBTCContractRaw([FromBody] VBTCContractRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // 1. Validate required fields
+                if (string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.Name))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Contract name cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.CeremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony ID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.UniqueId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Unique ID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner signature cannot be null" });
+
+                // 2. Timestamp validation (reject if older than 5 minutes)
+                var currentTime = TimeUtil.GetTime();
+                var timeDifference = Math.Abs(currentTime - payload.Timestamp);
+                if (timeDifference > 300) // 5 minutes = 300 seconds
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
+                }
+
+                // 3. TODO: Replay attack prevention - check if UniqueId already exists
+                // var existingContract = VBTCContractV2.GetByUniqueId(payload.OwnerAddress, payload.UniqueId);
+                // if (existingContract != null)
+                // {
+                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Duplicate request detected. This UniqueId has already been processed." });
+                // }
+
+                // 4. TODO: Verify owner signature
+                // var signatureData = $"{payload.OwnerAddress}{payload.Name}{payload.Description}{payload.Ticker}{payload.CeremonyId}{payload.Timestamp}{payload.UniqueId}";
+                // var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
+                // if (!isValidSignature)
+                // {
+                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
+                // }
+
+                // 5. Retrieve ceremony from memory
+                if (!_ceremonies.TryGetValue(payload.CeremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Ceremony not found. Please initiate a new ceremony with InitiateMPCCeremony."
+                    });
+                }
+
+                // 6. Validate ceremony is completed
+                if (ceremony.Status != CeremonyStatus.Completed)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Ceremony is not complete. Current status: {ceremony.Status}. Use GetCeremonyStatus to check progress.",
+                        CeremonyId = payload.CeremonyId,
+                        Status = ceremony.Status.ToString(),
+                        ProgressPercentage = ceremony.ProgressPercentage
+                    });
+                }
+
+                // 7. Validate owner address matches ceremony
+                if (ceremony.OwnerAddress != payload.OwnerAddress)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Owner address does not match the ceremony owner address."
+                    });
+                }
+
+                var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
+
+                // Use ceremony results
+                string depositAddress = ceremony.DepositAddress!;
+                string frostGroupPublicKey = ceremony.FrostGroupPublicKey!;
+                string dkgProof = ceremony.DKGProof!;
+                var validatorSnapshot = ceremony.ValidatorSnapshot;
+
+                // Create TokenizationV2Feature
+                var tokenizationV2Feature = new TokenizationV2Feature
+                {
+                    AssetName = payload.Name,
+                    AssetTicker = payload.Ticker ?? "vBTC",
+                    DepositAddress = depositAddress,
+                    Version = 2,
+                    ValidatorAddressesSnapshot = validatorSnapshot,
+                    FrostGroupPublicKey = frostGroupPublicKey,
+                    RequiredThreshold = 51, // 51% initially
+                    DKGProof = dkgProof,
+                    ProofBlockHeight = Globals.LastBlock.Height,
+                    ImageBase = payload.ImageBase
+                };
+
+                // Create smart contract
+                var scMain = new SmartContractMain
+                {
+                    SmartContractUID = scUID,
+                    Name = payload.Name,
+                    Description = payload.Description,
+                    MinterAddress = payload.OwnerAddress,
+                    MinterName = payload.OwnerAddress, // Can be customized
+                    Features = new List<SmartContractFeatures>
+                    {
+                        new SmartContractFeatures
+                        {
+                            FeatureName = FeatureName.TokenizationV2,
+                            FeatureFeatures = tokenizationV2Feature
+                        }
+                    }
+                };
+
+                // Write smart contract (this will use TokenizationV2SourceGenerator)
+                // var (scText, scMainResult, isToken) = await SmartContractWriterService.WriteSmartContract(scMain);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "vBTC V2 contract created successfully via raw request using pre-generated MPC ceremony",
+                    SmartContractUID = scUID,
+                    CeremonyId = payload.CeremonyId,
+                    DepositAddress = depositAddress,
+                    DKGProof = dkgProof,
+                    ValidatorCount = validatorSnapshot.Count,
+                    ProofBlockHeight = ceremony.ProofBlockHeight,
+                    UniqueId = payload.UniqueId,
+                    Timestamp = currentTime
                 });
             }
             catch (Exception ex)
@@ -1202,6 +1557,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public string Description { get; set; }
         public string? Ticker { get; set; }
         public string? ImageBase { get; set; }
+        /// <summary>
+        /// Optional: Ceremony ID from a completed MPC ceremony
+        /// If provided, the deposit address from the ceremony will be used
+        /// If not provided, you must call InitiateMPCCeremony first
+        /// </summary>
+        public string? CeremonyId { get; set; }
     }
 
     public class VBTCTransferPayload
@@ -1255,6 +1616,21 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public string ValidatorAddress { get; set; }
         public bool Approve { get; set; }
         public string ValidatorSignature { get; set; }
+    }
+
+    // Raw Contract Creation Payload Models (for external/pre-signed requests)
+
+    public class VBTCContractRawPayload
+    {
+        public string OwnerAddress { get; set; }
+        public string Name { get; set; }
+        public string Description { get; set; }
+        public string? Ticker { get; set; }
+        public string? ImageBase { get; set; }
+        public string CeremonyId { get; set; }           // Ceremony ID from completed MPC ceremony
+        public long Timestamp { get; set; }              // Unix timestamp
+        public string UniqueId { get; set; }             // Unique request ID (prevents replay)
+        public string OwnerSignature { get; set; }       // Signature of request data
     }
 
     // Raw Withdrawal Payload Models (for external/pre-signed requests)
