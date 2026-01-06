@@ -31,7 +31,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         #region Database Methods
         public static ILiteCollection<VBTCWithdrawalCancellation> GetDb()
         {
-            var db = DbContext.DB_Assets.GetCollection<VBTCWithdrawalCancellation>(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
+            var db = DbContext.DB_vBTC.GetCollection<VBTCWithdrawalCancellation>(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             return db;
         }
 

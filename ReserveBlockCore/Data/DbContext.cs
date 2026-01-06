@@ -41,6 +41,8 @@ namespace ReserveBlockCore.Data
         public static LiteDatabase DB_Reserve { set; get; }
         public static LiteDatabase DB_Bitcoin { set; get; }
         public static LiteDatabase DB_TokenizedWithdrawals { set; get; }
+        public static LiteDatabase DB_VBTCWithdrawalRequests { set; get; }
+        public static LiteDatabase DB_vBTC { set; get; } // stores vBTC V2 data (validators, contracts, cancellations)
         public static LiteDatabase DB_Shares { set; get; }
 
 
@@ -69,6 +71,8 @@ namespace ReserveBlockCore.Data
         public const string RSRV_DB_RESERVE = @"rsrvreserve.db";
         public const string RSRV_DB_BITCOIN = @"rsrvbitcoin.db";
         public const string RSRV_DB_TOKENIZED_WITHDRAWALS = @"rsrvtokenizedwithdrawals.db";
+        public const string RSRV_DB_VBTC_WITHDRAWAL_REQUESTS = @"rsrvvbtcwithdrawalrequests.db";
+        public const string RSRV_DB_VBTC = @"rsrvvbtc.db";
         public const string RSRV_DB_SHARES = @"rsrvshares.db";
 
         //Database tables
@@ -125,6 +129,7 @@ namespace ReserveBlockCore.Data
         public const string RSRV_BITCOIN_ADNR = "rsrv_bitcoin_adnr";
         public const string RSRV_BITCOIN_TOKENS = "rsrv_bitcoin_tokens";
         public const string RSRV_TOKENIZED_WITHDRAWALS = "rsrv_tokenized_withdrawals";
+        public const string RSRV_VBTC_WITHDRAWAL_REQUESTS = "rsrv_vbtc_withdrawal_requests";
         public const string RSRV_SHARES = "rsrv_shares";
         public const string RSRV_VBTC_V2_VALIDATORS = "rsrv_vbtc_v2_validators";
         public const string RSRV_VBTC_V2_CONTRACTS = "rsrv_vbtc_v2_contracts";
@@ -166,6 +171,8 @@ namespace ReserveBlockCore.Data
             DB_Blockchain = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BLOCKCHAIN, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Bitcoin = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BITCOIN, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
 
             var blocks = DB.GetCollection<Block>(RSRV_BLOCKS);
@@ -253,6 +260,8 @@ namespace ReserveBlockCore.Data
             DB_Blockchain.Commit();
             DB_Bitcoin.Commit();
             DB_TokenizedWithdrawals.Commit();
+            DB_VBTCWithdrawalRequests.Commit();
+            DB_vBTC.Commit();
             DB_Shares.Commit();
         }
 
@@ -333,6 +342,8 @@ namespace ReserveBlockCore.Data
             DB_Blockchain.Commit();
             DB_Bitcoin.Commit();
             DB_TokenizedWithdrawals.Commit();
+            DB_VBTCWithdrawalRequests.Commit();
+            DB_vBTC.Commit();
             DB_Shares.Commit();
 
             //dispose connection to DB
@@ -381,6 +392,8 @@ namespace ReserveBlockCore.Data
             File.Delete(path + RSRV_DB_BLOCKCHAIN);
             File.Delete(path + RSRV_DB_BITCOIN);
             File.Delete(path + RSRV_DB_TOKENIZED_WITHDRAWALS);
+            File.Delete(path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS);
+            File.Delete(path + RSRV_DB_VBTC);
             File.Delete(path + RSRV_DB_SHARES);
 
             var mapper = new BsonMapper();
@@ -416,6 +429,8 @@ namespace ReserveBlockCore.Data
             DB_Blockchain = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BLOCKCHAIN, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Bitcoin = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BITCOIN, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
 
             DB_Assets.Pragma("UTC_DATE", true);
@@ -451,6 +466,8 @@ namespace ReserveBlockCore.Data
             DB_Blockchain.Dispose();
             DB_Bitcoin.Dispose();
             DB_TokenizedWithdrawals.Dispose();
+            DB_VBTCWithdrawalRequests.Dispose();
+            DB_vBTC.Dispose();
             DB_Shares.Dispose();
         }
 
@@ -569,6 +586,16 @@ namespace ReserveBlockCore.Data
             try
             {
                 DB_TokenizedWithdrawals.Checkpoint();
+            }
+            catch { }
+            try
+            {
+                DB_VBTCWithdrawalRequests.Checkpoint();
+            }
+            catch { }
+            try
+            {
+                DB_vBTC.Checkpoint();
             }
             catch { }
             try

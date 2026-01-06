@@ -42,7 +42,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         #region Database Methods
         public static ILiteCollection<VBTCContractV2> GetDb()
         {
-            var db = DbContext.DB_Assets.GetCollection<VBTCContractV2>(DbContext.RSRV_VBTC_V2_CONTRACTS);
+            var db = DbContext.DB_vBTC.GetCollection<VBTCContractV2>(DbContext.RSRV_VBTC_V2_CONTRACTS);
             return db;
         }
 
