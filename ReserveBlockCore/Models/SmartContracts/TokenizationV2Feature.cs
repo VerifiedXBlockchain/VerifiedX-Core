@@ -7,18 +7,18 @@ namespace ReserveBlockCore.Models.SmartContracts
         #region Basic Info
         public string AssetName { get; set; }
         public string AssetTicker { get; set; }
-        public string DepositAddress { get; set; }  // MPC-generated BTC address
+        public string DepositAddress { get; set; }  // FROST-generated BTC Taproot address (bc1p...)
         public int Version { get; set; } = 2;
         #endregion
 
-        #region MPC Data
+        #region FROST Data
         public List<string> ValidatorAddressesSnapshot { get; set; }
-        public string MPCPublicKeyData { get; set; }
+        public string FrostGroupPublicKey { get; set; }  // Aggregated FROST group public key
         public int RequiredThreshold { get; set; }
         #endregion
 
-        #region ZK Proof
-        public string AddressCreationProof { get; set; }
+        #region DKG Proof
+        public string DKGProof { get; set; }  // Distributed Key Generation completion proof
         public long ProofBlockHeight { get; set; }
         #endregion
 

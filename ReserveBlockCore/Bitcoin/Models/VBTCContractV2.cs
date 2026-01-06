@@ -16,16 +16,16 @@ namespace ReserveBlockCore.Bitcoin.Models
         public long Id { get; set; }
         public string SmartContractUID { get; set; }
         public string OwnerAddress { get; set; }
-        public string DepositAddress { get; set; }        // BTC address from MPC
+        public string DepositAddress { get; set; }        // BTC Taproot address from FROST
         public decimal Balance { get; set; }
         
-        // MPC Data
+        // FROST Data
         public List<string> ValidatorAddressesSnapshot { get; set; }
-        public string MPCPublicKeyData { get; set; }      // Aggregated MPC public key
+        public string FrostGroupPublicKey { get; set; }   // Aggregated FROST group public key
         public int RequiredThreshold { get; set; }        // Initially 51
         
-        // ZK Proof Data
-        public string AddressCreationProof { get; set; }  // Base64 + compressed
+        // DKG Proof Data
+        public string DKGProof { get; set; }              // Base64 + compressed
         public long ProofBlockHeight { get; set; }
         
         // Withdrawal State
@@ -143,9 +143,9 @@ namespace ReserveBlockCore.Bitcoin.Models
                                 DepositAddress = tknz.DepositAddress,
                                 Balance = 0, // Initial balance is 0, calculated from state trei
                                 ValidatorAddressesSnapshot = tknz.ValidatorAddressesSnapshot ?? new List<string>(),
-                                MPCPublicKeyData = tknz.MPCPublicKeyData,
+                                FrostGroupPublicKey = tknz.FrostGroupPublicKey,
                                 RequiredThreshold = tknz.RequiredThreshold,
-                                AddressCreationProof = tknz.AddressCreationProof,
+                                DKGProof = tknz.DKGProof,
                                 ProofBlockHeight = tknz.ProofBlockHeight,
                                 WithdrawalStatus = VBTCWithdrawalStatus.None,
                                 WithdrawalHistory = new List<VBTCWithdrawalRecord>()
@@ -211,9 +211,9 @@ namespace ReserveBlockCore.Bitcoin.Models
                                 DepositAddress = tknz.DepositAddress,
                                 Balance = balance,
                                 ValidatorAddressesSnapshot = tknz.ValidatorAddressesSnapshot ?? new List<string>(),
-                                MPCPublicKeyData = tknz.MPCPublicKeyData,
+                                FrostGroupPublicKey = tknz.FrostGroupPublicKey,
                                 RequiredThreshold = tknz.RequiredThreshold,
-                                AddressCreationProof = tknz.AddressCreationProof,
+                                DKGProof = tknz.DKGProof,
                                 ProofBlockHeight = tknz.ProofBlockHeight,
                                 WithdrawalStatus = VBTCWithdrawalStatus.None,
                                 WithdrawalHistory = new List<VBTCWithdrawalRecord>()

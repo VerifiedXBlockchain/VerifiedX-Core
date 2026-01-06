@@ -684,7 +684,6 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
-
         #region Get Height of Nodes for Timed Events
 
         public static async Task<(long, DateTime, int)> GetNodeHeight(HubConnection conn)

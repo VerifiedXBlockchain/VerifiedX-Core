@@ -302,6 +302,7 @@ namespace ReserveBlockCore.Config
                 Globals.Port = 13338;
                 Globals.APIPort = 17292;
                 Globals.ValAPIPort = 17294;
+                Globals.FrostValidatorPort = 17295;
                 Globals.APIPortSSL = 17777;
                 Globals.AddressPrefix = 0x89; //address prefix 'x'
                 Globals.V1ValHeight = 200;
@@ -356,6 +357,7 @@ namespace ReserveBlockCore.Config
                     Globals.Port = 23338;
                     Globals.APIPort = 27292;
                     Globals.ValAPIPort = 27294;
+                    Globals.FrostValidatorPort = 27295;
                     Globals.APIPortSSL = 27777;
                     Globals.AddressPrefix = 0x89; //address prefix 'x'
                     Globals.V1ValHeight = 200;

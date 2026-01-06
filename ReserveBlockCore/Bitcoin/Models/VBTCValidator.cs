@@ -14,11 +14,12 @@ namespace ReserveBlockCore.Bitcoin.Models
         public long Id { get; set; }
         public string ValidatorAddress { get; set; }      // VFX address
         public string IPAddress { get; set; }
-        public string BTCPublicKeyShare { get; set; }     // BTC public key for MPC
+        public string FrostKeyShare { get; set; }         // Encrypted FROST private key share
+        public string FrostPublicKey { get; set; }        // Validator's FROST public key
         public long RegistrationBlockHeight { get; set; }
         public long LastHeartbeatBlock { get; set; }
         public bool IsActive { get; set; }
-        public string MPCSignature { get; set; }          // Proof of address ownership
+        public string RegistrationSignature { get; set; } // Proof of address ownership
         #endregion
 
         #region Database Methods

@@ -153,6 +153,7 @@ namespace ReserveBlockCore
         public static int SelfSTUNPort = 3340;
         public static int DSTClientPort = 3341;
         public static int ArbiterPort = 3342;
+        public static int FrostValidatorPort = 7295;
         public static int APIPort = 7292;
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
@@ -247,17 +248,21 @@ namespace ReserveBlockCore
         public static bool TimeInSync = true;
         public static bool TimeSyncError = false;
         public static bool BasicCLI = false;
-        public static bool MemoryOverload = false;
-        public static bool SelfSTUNServer = false;
         public static bool ShowSTUNMessagesInConsole = false;
         public static bool STUNServerRunning = false;
+        public static bool MemoryOverload = false;
+        public static bool SelfSTUNServer = false;
         public static bool LogMemory = false;
         public static bool BlockSeedCalls = false;
         public static bool UseV2BlockDownload = false;
         public static bool IsArbiter = false;
         public static bool IsBlockCaster = false;
         public static bool IsWardenMonitoring = false;
-        
+        public static bool IsFrostValidator = false;
+        public static bool IsValidatorPortOpen = false;
+        public static bool IsValidatorAPIPortOpen = false;
+        public static bool IsFROSTAPIPortOpen = false;
+
         // HAL-17 Fix: Configurable timeout values
         public static int SignalRShortTimeoutMs = 2000;
         public static int SignalRLongTimeoutMs = 6000;

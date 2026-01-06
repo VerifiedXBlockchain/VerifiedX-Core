@@ -16,10 +16,10 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strBuild.AppendLine("let DepositAddress = \"" + tknzV2.DepositAddress + "\"");
             strBuild.AppendLine("let TokenizationVersion = " + tknzV2.Version.ToString());
             
-            // MPC Data
+            // FROST Data
             strBuild.AppendLine("let RequiredThreshold = " + tknzV2.RequiredThreshold.ToString());
             
-            // ZK Proof Data
+            // DKG Proof Data
             strBuild.AppendLine("let ProofBlockHeight = " + tknzV2.ProofBlockHeight.ToString());
 
             // Function: Get Asset Info
@@ -28,11 +28,11 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("   return AssetName + " + appendChar + " + AssetTicker + " + appendChar + " + DepositAddress");
             strTknzV2Bld.AppendLine("}");
 
-            // Function: Get MPC Public Key Data
-            strTknzV2Bld.AppendLine("function GetMPCPublicKeyData() : string");
+            // Function: Get FROST Group Public Key
+            strTknzV2Bld.AppendLine("function GetFrostGroupPublicKey() : string");
             strTknzV2Bld.AppendLine("{");
-            strTknzV2Bld.AppendLine("   var mpcKey = \"" + tknzV2.MPCPublicKeyData + "\"");
-            strTknzV2Bld.AppendLine("   return (mpcKey)");
+            strTknzV2Bld.AppendLine("   var frostGroupKey = \"" + tknzV2.FrostGroupPublicKey + "\"");
+            strTknzV2Bld.AppendLine("   return (frostGroupKey)");
             strTknzV2Bld.AppendLine("}");
 
             // Function: Get Validator Snapshot
@@ -56,10 +56,10 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("   return RequiredThreshold.ToString()");
             strTknzV2Bld.AppendLine("}");
 
-            // Function: Get Address Creation Proof
-            strTknzV2Bld.AppendLine("function GetAddressCreationProof() : string");
+            // Function: Get DKG Proof
+            strTknzV2Bld.AppendLine("function GetDKGProof() : string");
             strTknzV2Bld.AppendLine("{");
-            strTknzV2Bld.AppendLine("   var proof = \"" + tknzV2.AddressCreationProof + "\"");
+            strTknzV2Bld.AppendLine("   var proof = \"" + tknzV2.DKGProof + "\"");
             strTknzV2Bld.AppendLine("   var blockHeight = " + tknzV2.ProofBlockHeight.ToString());
             strTknzV2Bld.AppendLine("   return (proof + " + appendChar + " + blockHeight.ToString())");
             strTknzV2Bld.AppendLine("}");

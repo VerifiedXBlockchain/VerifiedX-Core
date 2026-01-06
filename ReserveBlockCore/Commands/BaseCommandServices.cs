@@ -985,17 +985,18 @@ namespace ReserveBlockCore.Commands
                     AnsiConsole.MarkupLine($"Validator Sending? {isValidatingSending}");
                     AnsiConsole.MarkupLine($"Validator Receiving? {isValidatingReceiving}");
 
+                    var myIP = Globals.ReportedIP;
 
-                    foreach (var node in Globals.AdjNodes.Values)
-                    {
-                        if(node.IsConnected)
-                        {
-                            AnsiConsole.MarkupLine($"Last Task Received Time: [yellow]{node.LastTaskResultTime}[/] from [purple]{node.Address}[/]");
-                            AnsiConsole.MarkupLine($"Last Task Sent Time: [yellow]{node.LastTaskSentTime}[/] from [purple]{node.Address}[/]");
-                        }
-                        
-                    }
+                    AnsiConsole.MarkupLine($"---Checking Validator Ports---");
 
+                    Globals.IsValidatorPortOpen = PortUtility.IsPortOpen(myIP, Globals.ValPort);
+                    Globals.IsValidatorAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.ValAPIPort);
+                    Globals.IsFROSTAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.FrostValidatorPort);
+                    
+                    AnsiConsole.WriteLine("Validator Port (" + Globals.ValPort + "): " + (Globals.IsValidatorPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
+                    AnsiConsole.WriteLine("Validator API Port (" + Globals.ValAPIPort + "): " + (Globals.IsValidatorAPIPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
+                    AnsiConsole.WriteLine("Frost API Port (" + Globals.FrostValidatorPort + "): " + (Globals.IsFROSTAPIPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
+                     
                     var lastBlockWon = Globals.LastWonBlock;
                     if(lastBlockWon != null)
                     {

@@ -47,10 +47,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // TODO: MPC/ZENGO INTEGRATION
+                // TODO: FROST INTEGRATION
                 // 1. Verify validator address ownership via signature
-                // 2. Generate validator's BTC public key share using MPC
-                // 3. Create MPCSignature proof
+                // 2. Generate validator's FROST key share and public key
+                // 3. Create RegistrationSignature proof
                 // PLACEHOLDER: Basic validation for now
 
                 //if(string.IsNullOrEmpty(Globals.ReportedIP))
@@ -71,8 +71,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     RegistrationBlockHeight = Globals.LastBlock.Height,
                     LastHeartbeatBlock = Globals.LastBlock.Height,
                     IsActive = true,
-                    BTCPublicKeyShare = "PLACEHOLDER_MPC_PUBLIC_KEY_SHARE",
-                    MPCSignature = "PLACEHOLDER_MPC_SIGNATURE"
+                    FrostKeyShare = "PLACEHOLDER_FROST_KEY_SHARE",
+                    FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",
+                    RegistrationSignature = "PLACEHOLDER_FROST_SIGNATURE"
                 };
 
                 // Save to database
@@ -224,29 +225,39 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
 
-                // TODO: MPC/ZENGO INTEGRATION - DEPOSIT ADDRESS GENERATION
+                // TODO: FROST INTEGRATION - TAPROOT ADDRESS GENERATION VIA DKG
                 // ============================================================
                 // 1. Get list of active validators (require 75% for address generation)
-                // 2. Initiate MPC key generation ceremony via SignalR
-                //    - Broadcast MPC_ADDRESS_GEN_REQUEST to all validators
+                // 2. Initiate FROST DKG ceremony via SignalR
+                //    - Broadcast FROST_DKG_REQUEST to all validators
                 //    - Include: scUID, ownerAddress, timestamp
-                // 3. Validators respond with their public key shares
-                // 4. Coordinate key generation ceremony:
-                //    - Phase 1: Commitment phase
-                //    - Phase 2: Share phase
-                //    - Phase 3: Verification phase
-                // 5. Generate aggregated MPC public key from shares
-                // 6. Derive Bitcoin deposit address from aggregated key
-                // 7. Generate ZK proof of address creation:
-                //    - Proof that address was created via MPC
+                // 3. FROST DKG Round 1: Commitment Phase
+                //    - Each validator generates random polynomial coefficients
+                //    - Each validator computes commitments
+                //    - Broadcast commitments to all participants
+                // 4. FROST DKG Round 2: Share Distribution Phase
+                //    - Each validator computes secret shares for other validators
+                //    - Send encrypted shares via SignalR (point-to-point)
+                //    - Each validator receives shares from all others
+                // 5. FROST DKG Round 3: Verification Phase
+                //    - Each validator verifies received shares against commitments
+                //    - If verification fails, abort and restart DKG
+                //    - If all verify, each validator computes their private key share
+                // 6. Aggregate Group Public Key
+                //    - Combine all validator commitments
+                //    - Derive FROST group public key
+                //    - Generate Taproot internal key (x-only pubkey)
+                //    - Derive Bitcoin Taproot address (bc1p...)
+                // 7. Generate DKG Completion Proof
+                //    - Proof that DKG completed successfully
                 //    - Proof that no single party knows full private key
                 //    - Compress and Base64 encode proof
-                // 8. Store validator snapshot and MPC data
+                // 8. Store validator snapshot and FROST data
                 // ============================================================
-                // PLACEHOLDER: Using mock address for now
-                string depositAddress = "bc1qMPC_PLACEHOLDER_ADDRESS_WILL_BE_GENERATED_HERE";
-                string mpcPublicKey = "PLACEHOLDER_MPC_AGGREGATED_PUBLIC_KEY";
-                string zkProof = "PLACEHOLDER_ZK_PROOF_BASE64_COMPRESSED";
+                // PLACEHOLDER: Using mock Taproot address for now
+                string depositAddress = "bc1pFROST_TAPROOT_PLACEHOLDER_ADDRESS";
+                string frostGroupPublicKey = "PLACEHOLDER_FROST_GROUP_PUBLIC_KEY";
+                string dkgProof = "PLACEHOLDER_DKG_PROOF_BASE64_COMPRESSED";
                 var validatorSnapshot = new List<string> { "VALIDATOR1", "VALIDATOR2", "VALIDATOR3" };
 
                 // Create TokenizationV2Feature
@@ -257,9 +268,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     DepositAddress = depositAddress,
                     Version = 2,
                     ValidatorAddressesSnapshot = validatorSnapshot,
-                    MPCPublicKeyData = mpcPublicKey,
+                    FrostGroupPublicKey = frostGroupPublicKey,
                     RequiredThreshold = 51, // 51% initially
-                    AddressCreationProof = zkProof,
+                    DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     ImageBase = payload.ImageBase
                 };
@@ -291,7 +302,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     Message = "vBTC V2 contract created successfully",
                     SmartContractUID = scUID,
                     DepositAddress = depositAddress,
-                    ZKProof = zkProof,
+                    DKGProof = dkgProof,
                     ValidatorCount = validatorSnapshot.Count
                 });
             }
@@ -316,8 +327,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 // var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
                 // var tokenizationV2 = sc.Features.FirstOrDefault(x => x.FeatureName == FeatureName.TokenizationV2);
 
-                // TODO: MPC/ZENGO INTEGRATION
-                // Retrieve aggregated MPC public key and deposit address
+                // TODO: FROST INTEGRATION
+                // Retrieve FROST group public key and Taproot deposit address
                 // PLACEHOLDER: Mock data
 
                 return JsonConvert.SerializeObject(new
@@ -325,8 +336,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     Success = true,
                     Message = "Deposit address retrieved",
                     SmartContractUID = scUID,
-                    DepositAddress = "bc1qMPC_PLACEHOLDER",
-                    MPCPublicKey = "PLACEHOLDER_MPC_PUBLIC_KEY",
+                    DepositAddress = "bc1pFROST_TAPROOT_PLACEHOLDER",
+                    FrostGroupPublicKey = "PLACEHOLDER_FROST_GROUP_PUBLIC_KEY",
                     RequiredThreshold = 51
                 });
             }
@@ -471,32 +482,42 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // TODO: MPC/ZENGO INTEGRATION - TRANSACTION SIGNING
+                // TODO: FROST INTEGRATION - 2-ROUND SIGNING CEREMONY
                 // ============================================================
                 // 1. Retrieve withdrawal request from contract state
                 // 2. Validate request is in "Requested" status
                 // 3. Calculate BTC transaction fee
-                // 4. Create unsigned Bitcoin transaction:
-                //    - Input: MPC-controlled UTXO(s) from deposit address
+                // 4. Create unsigned Bitcoin Taproot transaction:
+                //    - Input: Taproot UTXO(s) from deposit address
                 //    - Output 1: Amount to destination address
                 //    - Output 2: Change back to deposit address (if any)
-                // 5. Get active validators (require 51% for withdrawal)
-                // 6. Initiate MPC signing ceremony via SignalR:
-                //    - Broadcast MPC_SIGN_REQUEST to validators
-                //    - Include: unsigned TX, scUID, withdrawal request hash
-                // 7. Coordinate signing ceremony:
-                //    - Phase 1: Presigning (R value generation)
-                //    - Phase 2: Signature share generation
-                //    - Phase 3: Signature aggregation
-                // 8. Combine signature shares into valid ECDSA signature
-                // 9. Attach signature to transaction
-                // 10. Broadcast signed transaction to Bitcoin network
-                // 11. Monitor for 1 confirmation via Electrum
-                // 12. Update contract state to "Pending_BTC"
-                // 13. After confirmation, update to "Completed"
+                //    - Witness program: Taproot key path spend
+                // 5. Get active validators (require 51% for signing)
+                // 6. Compute transaction sighash (BIP 341)
+                // 7. FROST Signing Round 1: Nonce Generation
+                //    - Each validator generates random nonce
+                //    - Each validator computes nonce commitment
+                //    - Broadcast FROST_SIGN_R1 with commitments via SignalR
+                //    - Coordinator aggregates all commitments
+                // 8. FROST Signing Round 2: Signature Share Generation
+                //    - Each validator receives aggregated commitments
+                //    - Each validator computes partial Schnorr signature
+                //    - Broadcast FROST_SIGN_R2 with signature shares via SignalR
+                // 9. Signature Aggregation
+                //    - Coordinator receives all signature shares
+                //    - Aggregate into final Schnorr signature
+                //    - Validate signature against group public key
+                // 10. Complete Transaction
+                //     - Attach Schnorr signature to transaction witness
+                //     - Transaction now spends via Taproot key path
+                //     - Broadcast to Bitcoin network via Electrum
+                // 11. Monitor Confirmation
+                //     - Wait for 1 confirmation
+                //     - Update contract state to "Pending_BTC"
+                //     - After confirmation, update to "Completed"
                 // ============================================================
                 // PLACEHOLDER: Mock BTC transaction
-                string btcTxHash = "PLACEHOLDER_BTC_TX_HASH_AFTER_MPC_SIGNING";
+                string btcTxHash = "PLACEHOLDER_BTC_TX_HASH_AFTER_FROST_SIGNING";
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -527,7 +548,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // TODO: MPC/ZENGO INTEGRATION
+                // TODO: FROST INTEGRATION
                 // Verify failure proof (e.g., BTC TX rejected, timeout, etc.)
                 // PLACEHOLDER: Basic validation
 
@@ -581,9 +602,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // TODO: MPC/ZENGO INTEGRATION
-                // Verify validator signature using their MPC public key share
+                // TODO: FROST INTEGRATION
+                // Verify validator signature using their FROST public key
                 // Ensure validator is active and eligible to vote
+                // Use Schnorr signature verification
                 // PLACEHOLDER: Basic validation
 
                 // Get cancellation record

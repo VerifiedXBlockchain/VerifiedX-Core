@@ -14,6 +14,8 @@ using ReserveBlockCore.Beacon;
 using System.Text;
 using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
+using Spectre.Console;
+using ReserveBlockCore.Bitcoin.FROST;
 
 namespace ReserveBlockCore.Services
 {
@@ -133,7 +135,7 @@ namespace ReserveBlockCore.Services
                 
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
-                //_ = ValidatorService.StartValidatorServer();
+                _ = FrostServer.Start();
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
             }
@@ -146,6 +148,30 @@ namespace ReserveBlockCore.Services
             {
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
                     return;
+
+                var myIP = Globals.ReportedIP;
+
+                if(string.IsNullOrEmpty(myIP) || myIP == "")
+                {
+                    Console.WriteLine("Validator IP not yet reported. Retrying in 10 seconds...");
+                    await Task.Delay(new TimeSpan(0, 0, 10));
+                    continue;
+                }
+
+                Globals.IsValidatorPortOpen = PortUtility.IsPortOpen(myIP, Globals.ValPort);
+                Globals.IsValidatorAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.ValAPIPort);
+                Globals.IsFROSTAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.FrostValidatorPort);
+
+                if(!Globals.IsFROSTAPIPortOpen || !Globals.IsValidatorAPIPortOpen || !Globals.IsValidatorPortOpen)
+                {
+                    Console.WriteLine("Validator Ports Not Open Please open ports and try again. Retrying in 30 seconds...");
+                    Console.WriteLine("Current Port Status");
+                    AnsiConsole.WriteLine("Validator Port (" + Globals.ValPort + "): " + (Globals.IsValidatorPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
+                    AnsiConsole.WriteLine("Validator API Port (" + Globals.ValAPIPort + "): " + (Globals.IsValidatorAPIPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
+                    AnsiConsole.WriteLine("Frost API Port (" + Globals.FrostValidatorPort + "): " + (Globals.IsFROSTAPIPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
+                    await Task.Delay(new TimeSpan(0, 0, 30));
+                    continue;
+                }
 
                 var startupCount = Globals.ValidatorNodes.Count / 2 + 1;
                 var delay = new TimeSpan(0,0,15);
@@ -330,6 +356,22 @@ namespace ReserveBlockCore.Services
                     else
                     {
 
+                        var myIP = Globals.ReportedIP;
+
+                        if (string.IsNullOrEmpty(myIP) || myIP == "")
+                        {
+                            return "Validator IP not yet reported. Please try again in 10 seconds.";
+                        }
+
+                        Globals.IsValidatorPortOpen = PortUtility.IsPortOpen(myIP, Globals.ValPort);
+                        Globals.IsValidatorAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.ValAPIPort);
+                        Globals.IsFROSTAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.FrostValidatorPort);
+
+                        if (!Globals.IsFROSTAPIPortOpen || !Globals.IsValidatorAPIPortOpen || !Globals.IsValidatorPortOpen)
+                        {
+                            return $"Port Status: Main Port Open: {Globals.IsValidatorPortOpen} | Validator API Port Open: {!Globals.IsValidatorAPIPortOpen} | FROST Port Open: {Globals.IsFROSTAPIPortOpen}";
+                        }
+
                         //add total num of validators to block
                         validator.NodeIP = "SELF"; //this is as new as other users will fill this in once connected
                         validator.Amount = account.Balance;
@@ -374,9 +416,7 @@ namespace ReserveBlockCore.Services
 
                         if (!argsPassed)
                         {
-                            _ = StartCasterAPIServer();
-                            _ = StartValidatorServer();
-                            _ = StartupValidators();
+                            _ = StartupValidatorProcess();
                         }
 
                         //TODO: start performing some looped actions
@@ -978,9 +1018,7 @@ namespace ReserveBlockCore.Services
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 
-                        _ = StartCasterAPIServer();
-                        _ = StartValidatorServer();
-                        _ = StartupValidators();
+                        _ = StartupValidatorProcess();
 
                     }
                 }
@@ -1042,17 +1080,17 @@ namespace ReserveBlockCore.Services
 
         #endregion
 
-        #region vBTC V2 MPC Pool Registration
+        #region vBTC V2 FROST MPC Pool Registration
 
         /// <summary>
-        /// Register validator for vBTC V2 MPC pool
+        /// Register validator for vBTC V2 FROST MPC pool
         /// </summary>
         private static async Task<bool> RegisterForMPCPool(string validatorAddress, string ipAddress)
         {
             try
             {
-                // TODO: MPC/ZENGO INTEGRATION
-                // This will be replaced with actual MPC key generation when ZenGo is integrated
+                // TODO: FROST INTEGRATION
+                // This will be replaced with actual FROST key generation when integrated
                 // For now, create placeholder VBTCValidator record
                 
                 var vbtcValidator = new Bitcoin.Models.VBTCValidator
@@ -1062,8 +1100,9 @@ namespace ReserveBlockCore.Services
                     RegistrationBlockHeight = Globals.LastBlock.Height,
                     LastHeartbeatBlock = Globals.LastBlock.Height,
                     IsActive = true,
-                    BTCPublicKeyShare = "PLACEHOLDER_MPC_PUBLIC_KEY_SHARE",
-                    MPCSignature = "PLACEHOLDER_MPC_SIGNATURE"
+                    FrostKeyShare = "PLACEHOLDER_FROST_KEY_SHARE",
+                    FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",
+                    RegistrationSignature = "PLACEHOLDER_FROST_SIGNATURE"
                 };
                 
                 // Save to vBTC validator database
@@ -1071,14 +1110,14 @@ namespace ReserveBlockCore.Services
                 // var db = VBTCValidator.GetVBTCValidatorDb();
                 // db.InsertSafe(vbtcValidator);
                 
-                LogUtility.Log($"Validator {validatorAddress} registered for vBTC V2 MPC pool (PLACEHOLDER)", 
+                LogUtility.Log($"Validator {validatorAddress} registered for vBTC V2 FROST MPC pool (PLACEHOLDER)", 
                     "ValidatorService.RegisterForMPCPool()");
                 
                 return true;
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Error registering for MPC pool: {ex}", 
+                ErrorLogUtility.LogError($"Error registering for FROST MPC pool: {ex}", 
                     "ValidatorService.RegisterForMPCPool()");
                 return false;
             }
