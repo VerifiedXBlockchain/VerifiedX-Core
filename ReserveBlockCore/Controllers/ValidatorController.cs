@@ -297,5 +297,36 @@ namespace ReserveBlockCore.Controllers
         {
             return Ok($"{Globals.ValidatorAddress},{Globals.ValidatorPublicKey}");
         }
+
+        /// <summary>
+        /// Get list of currently active vBTC V2 validators (based on heartbeat)
+        /// Used by non-validators to fetch the latest validator list from the network
+        /// </summary>
+        /// <returns>Active validators</returns>
+        [HttpGet]
+        [Route("GetActiveValidators")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetActiveValidators()
+        {
+            try
+            {
+                // Get validators with recent heartbeat (within 1000 blocks)
+                var currentBlock = Globals.LastBlock.Height;
+                var activeValidators = Bitcoin.Models.VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Active validators retrieved",
+                    CurrentBlock = currentBlock,
+                    TotalValidators = activeValidators?.Count ?? 0,
+                    ActiveValidators = activeValidators ?? new List<Bitcoin.Models.VBTCValidator>()
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
     }
 }

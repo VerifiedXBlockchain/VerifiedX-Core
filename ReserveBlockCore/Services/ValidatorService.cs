@@ -1,21 +1,22 @@
-﻿using ReserveBlockCore.Data;
+﻿using LiteDB;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR.Client;
+using Newtonsoft.Json;
+using ReserveBlockCore.Beacon;
+using ReserveBlockCore.Bitcoin.FROST;
+using ReserveBlockCore.Data;
+using ReserveBlockCore.EllipticCurve;
+using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.P2P;
-using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Utilities;
-using System.Numerics;
-using ReserveBlockCore.EllipticCurve;
-using System.Globalization;
-using Microsoft.AspNetCore.SignalR.Client;
-using System.Net;
-using LiteDB;
-using System.Linq;
-using ReserveBlockCore.Beacon;
-using System.Text;
-using Microsoft.AspNetCore.SignalR;
-using Newtonsoft.Json;
 using Spectre.Console;
-using ReserveBlockCore.Bitcoin.FROST;
+using System.Globalization;
+using System.Linq;
+using System.Net;
+using System.Numerics;
+using System.Security.Principal;
+using System.Text;
 
 namespace ReserveBlockCore.Services
 {
@@ -130,14 +131,115 @@ namespace ReserveBlockCore.Services
                     await Task.Delay(1000);
                 }
                 
-                // Ensure validator is registered for vBTC V2 MPC pool
-                await EnsureValidatorMPCRegistration(Globals.ValidatorAddress);
+                // Migration check: Send VBTC V2 validator registration if not in database
+                // This handles validators that were running before this feature was added
+                try
+                {
+                    var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(Globals.ValidatorAddress);
+                    if (existingValidator == null)
+                    {
+                        LogUtility.Log($"Validator {Globals.ValidatorAddress} not found in vBTC V2 database. Sending registration transaction...", 
+                            "ValidatorService.StartupValidatorProcess()");
+                        
+                        var validator = AccountData.GetSingleAccount(Globals.ValidatorAddress);
+                        if (validator != null)
+                        {
+                            var sTreiAcct = StateData.GetSpecificAccountStateTrei(validator.Address);
+                            if (sTreiAcct != null)
+                            {
+                                var ipAddress = Globals.ReportedIP;
+
+                                var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
+
+                                var verifySig = SignatureService.VerifySignature(validator.Address, validator.Address, signature);
+
+                                if (!string.IsNullOrEmpty(ipAddress))
+                                {
+                                    // Create VBTC_V2_VALIDATOR_REGISTER transaction
+                                    var registerTx = new Transaction
+                                    {
+                                        Timestamp = TimeUtil.GetTime(),
+                                        FromAddress = validator.Address,
+                                        ToAddress = validator.Address,  // Self transaction
+                                        Amount = 0M,
+                                        Fee = 0M,  // FREE transaction
+                                        Nonce = sTreiAcct.Nonce,
+                                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER,
+                                        Data = JsonConvert.SerializeObject(new
+                                        {
+                                            ValidatorAddress = validator.Address,
+                                            IPAddress = ipAddress,
+                                            FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",  // TODO: Replace with actual FROST key generation
+                                            RegistrationBlockHeight = Globals.LastBlock.Height,
+                                            Signature = signature
+                                        })
+                                    };
+
+                                    registerTx.Build();
+                                    // Sign the transaction
+                                    var privateKey = AccountData.GetPrivateKey(validator);
+
+                                    var txHash = registerTx.Hash;
+                                    var valTxSignature = SignatureService.CreateSignature(txHash, privateKey, validator.PublicKey);
+
+                                    registerTx.Signature = valTxSignature;
+
+                                    try
+                                    {
+                                        registerTx.ToAddress = registerTx.ToAddress.ToAddressNormalize();
+                                        registerTx.Amount = registerTx.Amount.ToNormalizeDecimal();
+                                        var result = await TransactionValidatorService.VerifyTX(registerTx);
+
+                                        if (result.Item1 == true)
+                                        {
+                                            if (registerTx.TransactionRating == null)
+                                            {
+                                                var rating = await TransactionRatingService.GetTransactionRating(registerTx);
+                                                registerTx.TransactionRating = rating;
+                                            }
+
+                                            TransactionData.AddToPool(registerTx);
+                                            await P2PClient.SendTXMempool(registerTx);//send out to mempool
+                                        }
+                                        else
+                                        {
+                                            ErrorLogUtility.LogError($"Transaction was not verified. Reason: {result.Item2}", "ValidatorService.StartupValidatorProcess()");
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine("Error: {0}", ex.ToString());
+                                    }
+                                    
+                                    LogUtility.Log($"Migration: vBTC V2 validator registration transaction created for {validator.Address}: {registerTx.Hash}", 
+                                        "ValidatorService.StartupValidatorProcess()");
+                                }
+                                else
+                                {
+                                    LogUtility.Log($"Migration: Cannot send vBTC V2 registration - IP address not reported yet", 
+                                        "ValidatorService.StartupValidatorProcess()");
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        LogUtility.Log($"Validator {Globals.ValidatorAddress} already registered in vBTC V2 database", 
+                            "ValidatorService.StartupValidatorProcess()");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Error checking vBTC V2 validator registration: {ex}", 
+                        "ValidatorService.StartupValidatorProcess()");
+                }
                 
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
                 _ = FrostServer.Start();
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
+                _ = VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop();  // Start vBTC V2 validator heartbeat loop
             }
         }
         internal static async Task StartupValidators()
@@ -395,20 +497,74 @@ namespace ReserveBlockCore.Services
                         Globals.ValidatorAddress = validator.Address;
                         Globals.ValidatorPublicKey = account.PublicKey;
 
-                        // Register for vBTC V2 MPC pool
+                        // Register for vBTC V2 MPC pool via blockchain transaction
                         try
                         {
                             var ipAddress = Globals.ReportedIP;
-                            var mpcRegResult = await RegisterForMPCPool(validator.Address, ipAddress);
-                            if (!mpcRegResult)
+                            
+                            // Create VBTC_V2_VALIDATOR_REGISTER transaction
+                            var registerTx = new Transaction
                             {
-                                ErrorLogUtility.LogError($"Failed to register validator {validator.Address} for vBTC V2 MPC pool", 
-                                    "ValidatorService.StartValidating()");
+                                Timestamp = TimeUtil.GetTime(),
+                                FromAddress = validator.Address,
+                                ToAddress = validator.Address,  // Self transaction
+                                Amount = 0M,
+                                Fee = 0M,  // FREE transaction
+                                Nonce = sTreiAcct.Nonce,
+                                TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER,
+                                Data = JsonConvert.SerializeObject(new
+                                {
+                                    ValidatorAddress = validator.Address,
+                                    IPAddress = ipAddress,
+                                    FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",  // TODO: Replace with actual FROST key generation
+                                    RegistrationBlockHeight = Globals.LastBlock.Height,
+                                    Signature = validator.Signature
+                                })
+                            };
+
+                            registerTx.Build();
+                            // Sign the transaction
+                            var privateKey = AccountData.GetPrivateKey(account);
+
+                            var txHash = registerTx.Hash;
+                            var valTxSignature = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
+
+                            registerTx.Signature = valTxSignature;
+
+                            try
+                            {
+                                registerTx.ToAddress = registerTx.ToAddress.ToAddressNormalize();
+                                registerTx.Amount = registerTx.Amount.ToNormalizeDecimal();
+                                var result = await TransactionValidatorService.VerifyTX(registerTx);
+
+                                if (result.Item1 == true)
+                                {
+                                    if (registerTx.TransactionRating == null)
+                                    {
+                                        var rating = await TransactionRatingService.GetTransactionRating(registerTx);
+                                        registerTx.TransactionRating = rating;
+                                    }
+
+                                    TransactionData.AddToPool(registerTx);
+                                    await P2PClient.SendTXMempool(registerTx);//send out to mempool
+                                }
+                                else
+                                {
+                                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not verified. Reason: {result.Item2}" });
+                                }
                             }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine("Error: {0}", ex.ToString());
+                            }
+
+                            
+                            LogUtility.Log($"Validator {validator.Address} join transaction created: {registerTx.Hash}", 
+                                "ValidatorService.StartValidating()");
                         }
                         catch (Exception ex)
                         {
-                            ErrorLogUtility.LogError($"Error registering for MPC pool: {ex}", 
+                            ErrorLogUtility.LogError($"Error creating validator join transaction: {ex}", 
                                 "ValidatorService.StartValidating()");
                         }
 
@@ -418,8 +574,6 @@ namespace ReserveBlockCore.Services
                         {
                             _ = StartupValidatorProcess();
                         }
-
-                        //TODO: start performing some looped actions
                     }
                 }
                 else
@@ -601,19 +755,76 @@ namespace ReserveBlockCore.Services
         }
 
         public static async void StopValidating(Validators validator)
-        {           
-            var accounts = AccountData.GetAccounts();
-            var myAccount = accounts.FindOne(x => x.Address == validator.Address);
+        {
+            try
+            {
+                var accounts = AccountData.GetAccounts();
+                var myAccount = accounts.FindOne(x => x.Address == validator.Address);
 
-            myAccount.IsValidating = false;
-            accounts.UpdateSafe(myAccount);
+                if (myAccount == null)
+                {
+                    ErrorLogUtility.LogError($"Account not found for validator {validator.Address}", 
+                        "ValidatorService.StopValidating()");
+                    return;
+                }
 
-            var validators = Validators.Validator.GetAll();
-            validators.Delete(validator.Id);
+                var from = StateData.GetSpecificAccountStateTrei(validator.Address);
+                if (from == null)
+                {
+                    ErrorLogUtility.LogError($"State account not found for validator {validator.Address}", 
+                        "ValidatorService.StopValidating()");
+                    return;
+                }
 
-            await P2PValidatorClient.DisconnectValidators();
+                // Create VBTC_V2_VALIDATOR_EXIT transaction
+                var exitTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = validator.Address,
+                    ToAddress = validator.Address,  // Self transaction
+                    Amount = 0M,
+                    Fee = 0M,  // FREE transaction
+                    Nonce = from.Nonce,
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_EXIT,
+                    Data = JsonConvert.SerializeObject(new
+                    {
+                        ValidatorAddress = validator.Address,
+                        ExitBlockHeight = Globals.LastBlock.Height,
+                        Signature = validator.Signature
+                    })
+                };
 
-            ValidatorLogUtility.Log($"Validating has stopped.", "ValidatorService.StopValidating()");
+                exitTx.Build();
+
+                // Sign the transaction
+                var privateKey = AccountData.GetPrivateKey(myAccount);
+                exitTx.Signature = SignatureService.CreateSignature(
+                    exitTx.Hash, 
+                    privateKey, 
+                    myAccount.PublicKey
+                );
+
+                // Add to mempool
+                TransactionData.AddToPool(exitTx);
+
+                LogUtility.Log($"Validator {validator.Address} exit transaction created: {exitTx.Hash}", 
+                    "ValidatorService.StopValidating()");
+
+                // Update local state
+                myAccount.IsValidating = false;
+                accounts.UpdateSafe(myAccount);
+
+                var validators = Validators.Validator.GetAll();
+                validators.Delete(validator.Id);
+
+                await P2PValidatorClient.DisconnectValidators();
+
+                ValidatorLogUtility.Log($"Validating has stopped.", "ValidatorService.StopValidating()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error stopping validator: {ex}", "ValidatorService.StopValidating()");
+            }
         }
 
         public static decimal ValidatorRequiredAmount()
@@ -1075,87 +1286,6 @@ namespace ReserveBlockCore.Services
                 catch { }
 
                 await Task.Delay(10000);
-            }
-        }
-
-        #endregion
-
-        #region vBTC V2 FROST MPC Pool Registration
-
-        /// <summary>
-        /// Register validator for vBTC V2 FROST MPC pool
-        /// </summary>
-        private static async Task<bool> RegisterForMPCPool(string validatorAddress, string ipAddress)
-        {
-            try
-            {
-                // TODO: FROST INTEGRATION
-                // This will be replaced with actual FROST key generation when integrated
-                // For now, create placeholder VBTCValidator record
-                
-                var vbtcValidator = new Bitcoin.Models.VBTCValidator
-                {
-                    ValidatorAddress = validatorAddress,
-                    IPAddress = ipAddress,
-                    RegistrationBlockHeight = Globals.LastBlock.Height,
-                    LastHeartbeatBlock = Globals.LastBlock.Height,
-                    IsActive = true,
-                    FrostKeyShare = "PLACEHOLDER_FROST_KEY_SHARE",
-                    FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",
-                    RegistrationSignature = "PLACEHOLDER_FROST_SIGNATURE"
-                };
-                
-                // Save to vBTC validator database
-                // TODO: Implement VBTCValidator.GetVBTCValidatorDb() and save methods
-                // var db = VBTCValidator.GetVBTCValidatorDb();
-                // db.InsertSafe(vbtcValidator);
-                
-                LogUtility.Log($"Validator {validatorAddress} registered for vBTC V2 FROST MPC pool (PLACEHOLDER)", 
-                    "ValidatorService.RegisterForMPCPool()");
-                
-                return true;
-            }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Error registering for FROST MPC pool: {ex}", 
-                    "ValidatorService.RegisterForMPCPool()");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Ensure validator is registered for vBTC V2 MPC pool on startup
-        /// </summary>
-        private static async Task EnsureValidatorMPCRegistration(string validatorAddress)
-        {
-            try
-            {
-                // Check if already registered for MPC
-                // TODO: Implement check against VBTCValidator database
-                // var vbtcValidatorDb = VBTCValidator.GetVBTCValidatorDb();
-                // var existingReg = vbtcValidatorDb.FindOne(x => x.ValidatorAddress == validatorAddress);
-                
-                // if (existingReg == null)
-                // {
-                    // Not registered - auto-register
-                    var ipAddress = Globals.ReportedIP;
-                    var result = await RegisterForMPCPool(validatorAddress, ipAddress);
-                    if (result)
-                    {
-                        LogUtility.Log($"Validator {validatorAddress} auto-registered for vBTC V2 MPC pool on startup", 
-                            "ValidatorService.EnsureValidatorMPCRegistration()");
-                    }
-                // }
-                // else
-                // {
-                //     LogUtility.Log($"Validator {validatorAddress} already registered for vBTC V2 MPC pool", 
-                //         "ValidatorService.EnsureValidatorMPCRegistration()");
-                // }
-            }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Error during MPC registration check: {ex}", 
-                    "ValidatorService.EnsureValidatorMPCRegistration()");
             }
         }
 

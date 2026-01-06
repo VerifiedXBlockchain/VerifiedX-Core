@@ -85,6 +85,7 @@ namespace ReserveBlockCore.Models
         TKNZ_WD_OWNER,
         VBTC_V2_VALIDATOR_REGISTER,      // Validator registers for vBTC v2
         VBTC_V2_VALIDATOR_HEARTBEAT,     // Validator heartbeat
+        VBTC_V2_VALIDATOR_EXIT,          // Validator exits vBTC v2 pool
         VBTC_V2_CONTRACT_CREATE,         // Create vBTC v2 contract
         VBTC_V2_TRANSFER,                // Transfer vBTC v2 tokens
         VBTC_V2_WITHDRAWAL_REQUEST,      // Request withdrawal to BTC

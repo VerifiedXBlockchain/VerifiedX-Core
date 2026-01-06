@@ -2159,6 +2159,99 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+            // VBTC V2 Validator Registration
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
+                        var ipAddress = jobj["IPAddress"]?.ToObject<string>();
+                        
+                        if (string.IsNullOrEmpty(validatorAddress) || string.IsNullOrEmpty(ipAddress))
+                            return (txResult, "Validator address and IP address cannot be null.");
+                        
+                        if (txRequest.FromAddress != validatorAddress)
+                            return (txResult, "From address must match validator address.");
+                        
+                        if (txRequest.ToAddress != validatorAddress)
+                            return (txResult, "To address must match validator address (self-transaction).");
+                        
+                        if (txRequest.Fee != 0M)
+                            return (txResult, "Validator registration must be a free transaction (Fee = 0).");
+                        
+                        if (txRequest.Amount != 0M)
+                            return (txResult, "Validator registration cannot have an amount.");
+                        
+                        // Anti-spam check: Ensure validator doesn't already have an active record
+                        var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(validatorAddress);
+                        if (existingValidator != null && existingValidator.IsActive)
+                            return (txResult, "Validator already has an active registration. Cannot register again.");
+                        
+                        // Ensure validator has minimum balance (5000 VFX)
+                        if (from != null && from.Balance < ValidatorService.ValidatorRequiredAmount())
+                            return (txResult, $"Insufficient balance for validator registration. Minimum required: {ValidatorService.ValidatorRequiredAmount()} VFX");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_VALIDATOR_REGISTER transaction: {ex}", 
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate validator registration transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for validator registration.");
+                }
+            }
+
+            // VBTC V2 Validator Exit
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_VALIDATOR_EXIT)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
+                        
+                        if (string.IsNullOrEmpty(validatorAddress))
+                            return (txResult, "Validator address cannot be null.");
+                        
+                        if (txRequest.FromAddress != validatorAddress)
+                            return (txResult, "From address must match validator address.");
+                        
+                        if (txRequest.ToAddress != validatorAddress)
+                            return (txResult, "To address must match validator address (self-transaction).");
+                        
+                        if (txRequest.Fee != 0M)
+                            return (txResult, "Validator exit must be a free transaction (Fee = 0).");
+                        
+                        if (txRequest.Amount != 0M)
+                            return (txResult, "Validator exit cannot have an amount.");
+                        
+                        // Ensure validator actually has an active registration
+                        var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(validatorAddress);
+                        if (existingValidator == null || !existingValidator.IsActive)
+                            return (txResult, "Validator does not have an active registration. Cannot exit.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_VALIDATOR_EXIT transaction: {ex}", 
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate validator exit transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for validator exit.");
+                }
+            }
+
             if (txRequest.FromAddress.StartsWith("xRBX") && runReserveCheck)
             {
                 if (txRequest.TransactionType != TransactionType.TX && 

@@ -71,8 +71,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     RegistrationBlockHeight = Globals.LastBlock.Height,
                     LastHeartbeatBlock = Globals.LastBlock.Height,
                     IsActive = true,
-                    FrostKeyShare = "PLACEHOLDER_FROST_KEY_SHARE",
-                    FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",
+                    FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",  // Public key only (key share stays private)
                     RegistrationSignature = "PLACEHOLDER_FROST_SIGNATURE"
                 };
 
@@ -177,34 +176,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             }
         }
 
-        /// <summary>
-        /// Get list of currently active validators (based on heartbeat)
-        /// </summary>
-        /// <returns>Active validators</returns>
-        [HttpGet("GetActiveValidators")]
-        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> GetActiveValidators()
-        {
-            try
-            {
-                // Get validators with recent heartbeat (within 1000 blocks)
-                var currentBlock = Globals.LastBlock.Height;
-                // var activeValidators = VBTCValidator.GetActiveValidators(currentBlock);
-
-                return JsonConvert.SerializeObject(new
-                {
-                    Success = true,
-                    Message = "Active validators retrieved",
-                    CurrentBlock = currentBlock,
-                    ActiveValidators = new List<VBTCValidator>() // PLACEHOLDER
-                });
-            }
-            catch (Exception ex)
-            {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
-            }
-        }
-
         #endregion
 
         #region Contract Creation
@@ -227,8 +198,45 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 // TODO: FROST INTEGRATION - TAPROOT ADDRESS GENERATION VIA DKG
                 // ============================================================
-                // 1. Get list of active validators (require 75% for address generation)
-                // 2. Initiate FROST DKG ceremony via SignalR
+                // 1. Get list of active validators from blockchain transactions
+                var currentBlock = Globals.LastBlock.Height;
+                List<VBTCValidator>? activeValidators;
+                
+                // Check if this node is a validator
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    // We're a validator - query our local DB (authoritative)
+                    activeValidators = VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
+                }
+                else
+                {
+                    // We're a non-validator - fetch from network
+                    activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+                }
+                
+                var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+
+                if (activeValidators == null || !activeValidators.Any())
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "No active validators available for vBTC V2 contract creation."
+                    });
+                }
+
+                // Require 75% of registered validators to be active for address generation
+                var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
+                if (activeValidators.Count < requiredActiveValidators)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}"
+                    });
+                }
+
+                // 2. Initiate FROST DKG ceremony via API
                 //    - Broadcast FROST_DKG_REQUEST to all validators
                 //    - Include: scUID, ownerAddress, timestamp
                 // 3. FROST DKG Round 1: Commitment Phase
@@ -237,7 +245,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 //    - Broadcast commitments to all participants
                 // 4. FROST DKG Round 2: Share Distribution Phase
                 //    - Each validator computes secret shares for other validators
-                //    - Send encrypted shares via SignalR (point-to-point)
+                //    - Send encrypted shares via API (point-to-point)
                 //    - Each validator receives shares from all others
                 // 5. FROST DKG Round 3: Verification Phase
                 //    - Each validator verifies received shares against commitments
@@ -258,7 +266,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 string depositAddress = "bc1pFROST_TAPROOT_PLACEHOLDER_ADDRESS";
                 string frostGroupPublicKey = "PLACEHOLDER_FROST_GROUP_PUBLIC_KEY";
                 string dkgProof = "PLACEHOLDER_DKG_PROOF_BASE64_COMPRESSED";
-                var validatorSnapshot = new List<string> { "VALIDATOR1", "VALIDATOR2", "VALIDATOR3" };
+                
+                // Create validator snapshot from active validators
+                var validatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
 
                 // Create TokenizationV2Feature
                 var tokenizationV2Feature = new TokenizationV2Feature

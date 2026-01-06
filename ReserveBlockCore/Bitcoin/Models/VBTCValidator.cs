@@ -14,12 +14,14 @@ namespace ReserveBlockCore.Bitcoin.Models
         public long Id { get; set; }
         public string ValidatorAddress { get; set; }      // VFX address
         public string IPAddress { get; set; }
-        public string FrostKeyShare { get; set; }         // Encrypted FROST private key share
-        public string FrostPublicKey { get; set; }        // Validator's FROST public key
+        public string FrostPublicKey { get; set; }        // Validator's FROST public key (public, shareable)
         public long RegistrationBlockHeight { get; set; }
         public long LastHeartbeatBlock { get; set; }
         public bool IsActive { get; set; }
         public string RegistrationSignature { get; set; } // Proof of address ownership
+        public string RegisterTransactionHash { get; set; }  // TX hash of join transaction
+        public string ExitTransactionHash { get; set; }      // TX hash of exit transaction (if exited)
+        public long? ExitBlockHeight { get; set; }           // Block height when exited (if exited)
         #endregion
 
         #region Database Methods
@@ -150,6 +152,27 @@ namespace ReserveBlockCore.Bitcoin.Models
             }
         }
 
+        public static void SetInactive(string validatorAddress, string exitTxHash, long exitBlockHeight)
+        {
+            try
+            {
+                var validators = GetDb();
+                var validator = validators.FindOne(x => x.ValidatorAddress == validatorAddress);
+
+                if (validator != null)
+                {
+                    validator.IsActive = false;
+                    validator.ExitTransactionHash = exitTxHash;
+                    validator.ExitBlockHeight = exitBlockHeight;
+                    validators.UpdateSafe(validator);
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(ex.ToString(), "VBTCValidator.SetInactive()");
+            }
+        }
+
         public static int GetActiveValidatorCount()
         {
             var validators = GetDb();
@@ -171,6 +194,108 @@ namespace ReserveBlockCore.Bitcoin.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCValidator.DeleteValidator()");
+            }
+        }
+
+        /// <summary>
+        /// Fetches the active validator list from the network (for non-validators)
+        /// Loops through known validators in local DB until one responds
+        /// Updates local DB with fresh data from network
+        /// </summary>
+        public static async Task<List<VBTCValidator>?> FetchActiveValidatorsFromNetwork()
+        {
+            var httpClient = new System.Net.Http.HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(5)
+            };
+
+            try
+            {
+                var currentBlock = Globals.LastBlock.Height;
+                
+                // Get last known active validators from local DB
+                var knownValidators = GetActiveValidators();
+                
+                if (knownValidators == null || !knownValidators.Any())
+                {
+                    LogUtility.Log("No known validators in local DB to query", 
+                        "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                    return null;
+                }
+
+                // Loop through known validators until one responds
+                foreach (var validator in knownValidators)
+                {
+                    try
+                    {
+                        var url = $"http://{validator.IPAddress}:{Globals.ValAPIPort}/valapi/ValidatorController/GetActiveValidators";
+                        
+                        LogUtility.Log($"Fetching validator list from {validator.ValidatorAddress} ({validator.IPAddress})", 
+                            "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                        
+                        var response = await httpClient.GetAsync(url);
+                        
+                        if (response.IsSuccessStatusCode)
+                        {
+                            var json = await response.Content.ReadAsStringAsync();
+                            var result = Newtonsoft.Json.JsonConvert.DeserializeObject<dynamic>(json);
+                            
+                            if (result?.Success == true)
+                            {
+                                var validatorsList = result.ActiveValidators.ToObject<List<VBTCValidator>>();
+                                
+                                if (validatorsList != null && validatorsList.Any())
+                                {
+                                    // Update local DB cache with fresh data
+                                    foreach (var fetchedValidator in validatorsList)
+                                    {
+                                        SaveValidator(fetchedValidator);
+                                    }
+                                    
+                                    LogUtility.Log($"Successfully fetched {validatorsList.Count} validators from {validator.ValidatorAddress}", 
+                                        "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                                    
+                                    return validatorsList;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            LogUtility.Log($"Failed to fetch from {validator.ValidatorAddress} - HTTP {response.StatusCode}", 
+                                "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                        }
+                    }
+                    catch (System.Net.Http.HttpRequestException ex)
+                    {
+                        LogUtility.Log($"Network error fetching from {validator.ValidatorAddress}: {ex.Message}", 
+                            "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        LogUtility.Log($"Timeout fetching from {validator.ValidatorAddress}", 
+                            "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Error fetching from {validator.ValidatorAddress}: {ex}", 
+                            "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                    }
+                }
+                
+                // If we get here, none of the validators responded - fall back to local DB
+                LogUtility.Log("No validators responded - falling back to local DB (may be stale)", 
+                    "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                return knownValidators;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error in FetchActiveValidatorsFromNetwork: {ex}", 
+                    "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                return null;
+            }
+            finally
+            {
+                httpClient?.Dispose();
             }
         }
         #endregion

@@ -730,6 +730,70 @@ namespace ReserveBlockCore.Services
                         await StateData.UpdateTreis(block); //update treis
                         await ReserveService.Run(); //updates treis for reserve pending txs
 
+                        // Process vBTC V2 validator registration/exit transactions
+                        if (block.Transactions.Count() > 0)
+                        {
+                            foreach (var tx in block.Transactions)
+                            {
+                                // Process VBTC V2 Validator Registration
+                                if (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER)
+                                {
+                                    try
+                                    {
+                                        var jobj = JObject.Parse(tx.Data);
+                                        var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
+                                        var ipAddress = jobj["IPAddress"]?.ToObject<string>();
+                                        var frostPublicKey = jobj["FrostPublicKey"]?.ToObject<string>();
+                                        var registrationBlockHeight = jobj["RegistrationBlockHeight"]?.ToObject<long>();
+                                        var signature = jobj["Signature"]?.ToObject<string>();
+                                        
+                                        var vbtcValidator = new Bitcoin.Models.VBTCValidator
+                                        {
+                                            ValidatorAddress = validatorAddress,
+                                            IPAddress = ipAddress,
+                                            RegistrationBlockHeight = registrationBlockHeight ?? block.Height,
+                                            LastHeartbeatBlock = block.Height,
+                                            IsActive = true,
+                                            FrostPublicKey = frostPublicKey ?? "PLACEHOLDER_FROST_PUBLIC_KEY",  // Public key only (key share stays private)
+                                            RegistrationSignature = signature,
+                                            RegisterTransactionHash = tx.Hash
+                                        };
+                                        
+                                        Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
+                                        
+                                        LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", 
+                                            "BlockValidatorService");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        ErrorLogUtility.LogError($"Error processing VBTC_V2_VALIDATOR_REGISTER transaction: {ex}", 
+                                            "BlockValidatorService");
+                                    }
+                                }
+
+                                // Process VBTC V2 Validator Exit
+                                if (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_EXIT)
+                                {
+                                    try
+                                    {
+                                        var jobj = JObject.Parse(tx.Data);
+                                        var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
+                                        var exitBlockHeight = jobj["ExitBlockHeight"]?.ToObject<long>();
+                                        
+                                        Bitcoin.Models.VBTCValidator.SetInactive(validatorAddress, tx.Hash, exitBlockHeight ?? block.Height);
+                                        
+                                        LogUtility.Log($"Processed VBTC V2 validator exit for {validatorAddress} at block {block.Height}", 
+                                            "BlockValidatorService");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        ErrorLogUtility.LogError($"Error processing VBTC_V2_VALIDATOR_EXIT transaction: {ex}", 
+                                            "BlockValidatorService");
+                                    }
+                                }
+                            }
+                        }
+
                         var mempool = TransactionData.GetPool();
 
                         if (block.Transactions.Count() > 0)
