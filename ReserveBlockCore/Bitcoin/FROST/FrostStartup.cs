@@ -84,23 +84,58 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // TODO: FROST INTEGRATION
                             // Validate leader signature
-                            // Store DKG session in memory
-                            // Prepare for Round 1
+                            // TODO: When FROST native library integrated, verify signature
+                            if (string.IsNullOrEmpty(request.LeaderSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Leader signature required"
+                                }));
+                                return;
+                            }
+
+                            // Create DKG session in memory
+                            var session = new DKGSession
+                            {
+                                SessionId = request.SessionId,
+                                SmartContractUID = request.SmartContractUID,
+                                LeaderAddress = request.LeaderAddress,
+                                ParticipantAddresses = request.ParticipantAddresses,
+                                RequiredThreshold = request.RequiredThreshold,
+                                StartTimestamp = TimeUtil.GetTime()
+                            };
+
+                            if (!FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Session already exists"
+                                }));
+                                return;
+                            }
+
+                            LogUtility.Log($"[FROST] DKG ceremony started. Session: {request.SessionId}, Participants: {request.ParticipantAddresses.Count}", "FrostStartup.DKGStart");
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                             {
                                 Success = true,
-                                Message = "DKG ceremony started",
+                                Message = "DKG ceremony started - proceed to Round 1",
                                 SessionId = request.SessionId,
-                                SmartContractUID = request.SmartContractUID
+                                SmartContractUID = request.SmartContractUID,
+                                ParticipantCount = request.ParticipantAddresses.Count,
+                                Threshold = request.RequiredThreshold
                             }, Formatting.Indented));
                         }
                     }
                     catch (Exception ex)
                     {
+                        ErrorLogUtility.LogError($"DKG start error: {ex.Message}", "FrostStartup.DKGStart");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
@@ -111,7 +146,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 });
 
                 /// <summary>
-                /// POST /frost/dkg/round1 - Collect Round 1 commitments
+                /// POST /frost/dkg/round1 - Submit Round 1 commitment
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round1", async context =>
                 {
@@ -122,7 +157,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             var body = await reader.ReadToEndAsync();
                             var commitment = JsonConvert.DeserializeObject<FrostDKGRound1Message>(body);
 
-                            if (commitment == null)
+                            if (commitment == null || string.IsNullOrEmpty(commitment.CommitmentData))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -133,11 +168,38 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // TODO: FROST INTEGRATION
+                            // Get session
+                            if (!FrostSessionStorage.DKGSessions.TryGetValue(commitment.SessionId, out var session))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Session not found"
+                                }));
+                                return;
+                            }
+
                             // Validate validator signature
+                            // TODO: When FROST native library integrated, verify signature
+                            if (string.IsNullOrEmpty(commitment.ValidatorSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Validator signature required"
+                                }));
+                                return;
+                            }
+
                             // Store commitment
-                            // Check if we have enough commitments (threshold reached)
-                            // If threshold reached, aggregate and broadcast to Round 2
+                            session.Round1Commitments[commitment.ValidatorAddress] = commitment.CommitmentData;
+
+                            var commitmentCount = session.Round1Commitments.Count;
+                            var requiredCount = (int)Math.Ceiling(session.ParticipantAddresses.Count * (session.RequiredThreshold / 100.0));
+
+                            LogUtility.Log($"[FROST] DKG Round 1 commitment received from {commitment.ValidatorAddress}. Count: {commitmentCount}/{requiredCount}", "FrostStartup.DKGRound1");
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -145,12 +207,76 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 Success = true,
                                 Message = "Round 1 commitment received",
                                 SessionId = commitment.SessionId,
-                                ValidatorAddress = commitment.ValidatorAddress
+                                ValidatorAddress = commitment.ValidatorAddress,
+                                CommitmentCount = commitmentCount,
+                                RequiredCount = requiredCount,
+                                ThresholdReached = commitmentCount >= requiredCount
                             }, Formatting.Indented));
                         }
                     }
                     catch (Exception ex)
                     {
+                        ErrorLogUtility.LogError($"DKG Round 1 error: {ex.Message}", "FrostStartup.DKGRound1");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = $"Error: {ex.Message}"
+                        }));
+                    }
+                });
+
+                /// <summary>
+                /// GET /frost/dkg/round1/{sessionId} - Get Round 1 commitments for coordinator polling
+                /// </summary>
+                endpoints.MapGet("/frost/dkg/round1/{sessionId}", async context =>
+                {
+                    try
+                    {
+                        var sessionId = context.Request.RouteValues["sessionId"] as string;
+
+                        if (string.IsNullOrEmpty(sessionId))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Session ID required"
+                            }));
+                            return;
+                        }
+
+                        // Get session
+                        if (!FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Session not found"
+                            }));
+                            return;
+                        }
+
+                        // Return all commitments collected so far
+                        var commitments = session.Round1Commitments.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+                        var requiredCount = (int)Math.Ceiling(session.ParticipantAddresses.Count * (session.RequiredThreshold / 100.0));
+
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = true,
+                            Message = "Round 1 commitments retrieved",
+                            SessionId = sessionId,
+                            Commitments = commitments,
+                            CommitmentCount = commitments.Count,
+                            RequiredCount = requiredCount,
+                            ThresholdReached = commitments.Count >= requiredCount
+                        }, Formatting.Indented));
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"DKG Round 1 GET error: {ex.Message}", "FrostStartup.DKGRound1Get");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
@@ -210,7 +336,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 });
 
                 /// <summary>
-                /// POST /frost/dkg/round3 - Collect Round 3 verification results
+                /// POST /frost/dkg/round3 - Submit Round 3 verification result
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round3", async context =>
                 {
@@ -232,12 +358,52 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // TODO: FROST INTEGRATION
+                            // Get session
+                            if (!FrostSessionStorage.DKGSessions.TryGetValue(verification.SessionId, out var session))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Session not found"
+                                }));
+                                return;
+                            }
+
                             // Validate validator signature
+                            // TODO: When FROST native library integrated, verify signature
+                            if (string.IsNullOrEmpty(verification.ValidatorSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Validator signature required"
+                                }));
+                                return;
+                            }
+
                             // Record verification result
-                            // If all validators verified successfully, compute group public key
-                            // Derive Taproot address
-                            // Broadcast final result
+                            session.Round3Verifications[verification.ValidatorAddress] = verification.Verified;
+
+                            var verificationCount = session.Round3Verifications.Count;
+                            var verifiedCount = session.Round3Verifications.Count(v => v.Value);
+                            var requiredCount = (int)Math.Ceiling(session.ParticipantAddresses.Count * (session.RequiredThreshold / 100.0));
+
+                            LogUtility.Log($"[FROST] DKG Round 3 verification from {verification.ValidatorAddress}: {verification.Verified}. Verified: {verifiedCount}/{requiredCount}", "FrostStartup.DKGRound3");
+
+                            // If threshold reached and all verified, compute final result
+                            if (verifiedCount >= requiredCount && !session.IsCompleted)
+                            {
+                                // Aggregate DKG result with placeholder crypto
+                                // TODO: Replace with real FROST aggregation when native library integrated
+                                session.GroupPublicKey = GeneratePlaceholderGroupPublicKey(session.Round1Commitments);
+                                session.TaprootAddress = GeneratePlaceholderTaprootAddress(session.GroupPublicKey);
+                                session.DKGProof = GeneratePlaceholderDKGProof(session.SessionId, session.GroupPublicKey);
+                                session.IsCompleted = true;
+
+                                LogUtility.Log($"[FROST] DKG ceremony completed! Address: {session.TaprootAddress}", "FrostStartup.DKGRound3");
+                            }
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -246,12 +412,80 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 Message = "Verification received",
                                 SessionId = verification.SessionId,
                                 ValidatorAddress = verification.ValidatorAddress,
-                                Verified = verification.Verified
+                                Verified = verification.Verified,
+                                VerificationCount = verificationCount,
+                                VerifiedCount = verifiedCount,
+                                RequiredCount = requiredCount,
+                                CeremonyCompleted = session.IsCompleted
                             }, Formatting.Indented));
                         }
                     }
                     catch (Exception ex)
                     {
+                        ErrorLogUtility.LogError($"DKG Round 3 error: {ex.Message}", "FrostStartup.DKGRound3");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = $"Error: {ex.Message}"
+                        }));
+                    }
+                });
+
+                /// <summary>
+                /// GET /frost/dkg/round3/{sessionId} - Get Round 3 verifications for coordinator polling
+                /// </summary>
+                endpoints.MapGet("/frost/dkg/round3/{sessionId}", async context =>
+                {
+                    try
+                    {
+                        var sessionId = context.Request.RouteValues["sessionId"] as string;
+
+                        if (string.IsNullOrEmpty(sessionId))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Session ID required"
+                            }));
+                            return;
+                        }
+
+                        // Get session
+                        if (!FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Session not found"
+                            }));
+                            return;
+                        }
+
+                        // Return all verifications collected so far
+                        var verifications = session.Round3Verifications.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+                        var verifiedCount = verifications.Count(v => v.Value);
+                        var requiredCount = (int)Math.Ceiling(session.ParticipantAddresses.Count * (session.RequiredThreshold / 100.0));
+
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = true,
+                            Message = "Round 3 verifications retrieved",
+                            SessionId = sessionId,
+                            Verifications = verifications,
+                            VerificationCount = verifications.Count,
+                            VerifiedCount = verifiedCount,
+                            RequiredCount = requiredCount,
+                            ThresholdReached = verifiedCount >= requiredCount,
+                            CeremonyCompleted = session.IsCompleted
+                        }, Formatting.Indented));
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"DKG Round 3 GET error: {ex.Message}", "FrostStartup.DKGRound3Get");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
@@ -281,23 +515,48 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             return;
                         }
 
-                        // TODO: FROST INTEGRATION
-                        // Retrieve DKG result from storage
-                        // Return group public key and Taproot address
+                        // Get session
+                        if (!FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Session not found"
+                            }));
+                            return;
+                        }
 
+                        // Check if ceremony is completed
+                        if (!session.IsCompleted)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status202Accepted;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "DKG ceremony not yet completed",
+                                SessionId = sessionId,
+                                IsCompleted = false
+                            }));
+                            return;
+                        }
+
+                        // Return final result
                         context.Response.StatusCode = StatusCodes.Status200OK;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = true,
                             Message = "DKG result retrieved",
                             SessionId = sessionId,
-                            GroupPublicKey = "PLACEHOLDER_GROUP_PUBLIC_KEY",
-                            TaprootAddress = "bc1pPLACEHOLDER_TAPROOT_ADDRESS",
-                            DKGProof = "PLACEHOLDER_DKG_PROOF"
+                            GroupPublicKey = session.GroupPublicKey,
+                            TaprootAddress = session.TaprootAddress,
+                            DKGProof = session.DKGProof,
+                            IsCompleted = session.IsCompleted
                         }, Formatting.Indented));
                     }
                     catch (Exception ex)
                     {
+                        ErrorLogUtility.LogError($"DKG result GET error: {ex.Message}", "FrostStartup.DKGResult");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
@@ -510,5 +769,42 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 #endregion
             });
         }
+
+        #region Placeholder Cryptographic Operations (TODO: Replace with FROST native library)
+
+        /// <summary>
+        /// PLACEHOLDER: Generate mock group public key from commitments
+        /// TODO: Replace with actual FROST aggregation when native library integrated
+        /// </summary>
+        private static string GeneratePlaceholderGroupPublicKey(System.Collections.Concurrent.ConcurrentDictionary<string, string> commitments)
+        {
+            var combined = string.Join("", commitments.Values);
+            var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(combined));
+            return Convert.ToHexString(hash);
+        }
+
+        /// <summary>
+        /// PLACEHOLDER: Generate mock Taproot address from group public key
+        /// TODO: Replace with actual Taproot address derivation when native library integrated
+        /// </summary>
+        private static string GeneratePlaceholderTaprootAddress(string groupPublicKey)
+        {
+            // Taproot addresses start with bc1p (mainnet) or tb1p (testnet)
+            var prefix = Globals.IsTestNet ? "tb1p" : "bc1p";
+            var random = Guid.NewGuid().ToString("N").Substring(0, 58);
+            return $"{prefix}{random}";
+        }
+
+        /// <summary>
+        /// PLACEHOLDER: Generate mock DKG proof
+        /// TODO: Replace with actual cryptographic proof when native library integrated
+        /// </summary>
+        private static string GeneratePlaceholderDKGProof(string sessionId, string groupPublicKey)
+        {
+            var proofData = $"DKG_PROOF_{sessionId}_{groupPublicKey}_{TimeUtil.GetTime()}";
+            return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(proofData));
+        }
+
+        #endregion
     }
 }
