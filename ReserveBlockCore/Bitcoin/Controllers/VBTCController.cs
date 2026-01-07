@@ -64,17 +64,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 // 3. Create RegistrationSignature proof
                 // PLACEHOLDER: Basic validation for now
 
-                //if(string.IsNullOrEmpty(Globals.ReportedIP))
-                //{
-                //    return JsonConvert.SerializeObject(new
-                //    {
-                //        Success = false,
-                //        Message = "IP Address has not been reported. Please try again.",
-                //        ValidatorAddress = validatorAddress,
-                //        RegistrationBlock = -1
-                //    });
-                //}
-
                 var validator = new VBTCValidator
                 {
                     ValidatorAddress = validatorAddress,
@@ -344,44 +333,42 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
                 ceremony.ProgressPercentage = 15;
 
-                // TODO: FROST DKG Round 1 - Commitment Phase
+                // Execute FROST DKG Ceremony via FrostMPCService with progress callback
                 ceremony.Status = CeremonyStatus.Round1InProgress;
-                ceremony.CurrentRound = 1;
-                ceremony.ProgressPercentage = 20;
-                await Task.Delay(1000); // Simulate network round trip
-                ceremony.Status = CeremonyStatus.Round1Complete;
-                ceremony.ProgressPercentage = 35;
+                
+                var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                    ceremonyId,
+                    ceremony.OwnerAddress,
+                    activeValidators,
+                    ceremony.RequiredThreshold,
+                    (round, percentage) =>
+                    {
+                        // Update ceremony progress from callback
+                        ceremony.CurrentRound = round;
+                        ceremony.ProgressPercentage = percentage;
+                        
+                        // Update status based on round
+                        if (round == 1 && ceremony.Status != CeremonyStatus.Round1InProgress)
+                            ceremony.Status = CeremonyStatus.Round1InProgress;
+                        else if (round == 2 && ceremony.Status != CeremonyStatus.Round2InProgress)
+                            ceremony.Status = CeremonyStatus.Round2InProgress;
+                        else if (round == 3 && ceremony.Status != CeremonyStatus.Round3InProgress)
+                            ceremony.Status = CeremonyStatus.Round3InProgress;
+                    }
+                );
 
-                // TODO: FROST DKG Round 2 - Share Distribution Phase
-                ceremony.Status = CeremonyStatus.Round2InProgress;
-                ceremony.CurrentRound = 2;
-                ceremony.ProgressPercentage = 40;
-                await Task.Delay(1000); // Simulate network round trip
-                ceremony.Status = CeremonyStatus.Round2Complete;
-                ceremony.ProgressPercentage = 60;
+                if (dkgResult == null)
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = "FROST DKG ceremony failed - unable to generate Taproot address";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
 
-                // TODO: FROST DKG Round 3 - Verification Phase
-                ceremony.Status = CeremonyStatus.Round3InProgress;
-                ceremony.CurrentRound = 3;
-                ceremony.ProgressPercentage = 65;
-                await Task.Delay(1000); // Simulate network round trip
-                ceremony.Status = CeremonyStatus.Round3Complete;
-                ceremony.ProgressPercentage = 80;
-
-                // TODO: Aggregate Group Public Key
-                ceremony.Status = CeremonyStatus.AggregatingPublicKey;
-                ceremony.ProgressPercentage = 85;
-                await Task.Delay(500);
-
-                // TODO: Generate DKG Completion Proof
-                ceremony.Status = CeremonyStatus.GeneratingProof;
-                ceremony.ProgressPercentage = 90;
-                await Task.Delay(500);
-
-                // PLACEHOLDER: Generate mock results
-                ceremony.DepositAddress = $"bc1p{Guid.NewGuid().ToString().Replace("-", "").Substring(0, 58)}";
-                ceremony.FrostGroupPublicKey = $"FROST_PK_{Guid.NewGuid().ToString().Replace("-", "")}";
-                ceremony.DKGProof = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"DKG_PROOF_{ceremonyId}"));
+                // DKG ceremony completed successfully
+                ceremony.DepositAddress = dkgResult.TaprootAddress;
+                ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
+                ceremony.DKGProof = dkgResult.DKGProof;
                 ceremony.ProofBlockHeight = Globals.LastBlock.Height;
 
                 // Complete

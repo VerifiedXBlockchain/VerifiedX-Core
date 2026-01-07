@@ -2,9 +2,10 @@
 
 **Project**: Decentralized vBTC with MPC-based Address Generation  
 **Version**: 2.0  
-**Date**: January 5, 2026  
-**Status**: Planning Complete - Ready for Implementation  
-**MPC Protocol**: FROST (Flexible Round-Optimized Schnorr Threshold Signatures)
+**Date**: January 7, 2026  
+**Status**: MPC Ceremony Wrapper Completed - FROST Native Integration Pending  
+**MPC Protocol**: FROST (Flexible Round-Optimized Schnorr Threshold Signatures)  
+**Network Abbreviation**: VFX (VerifiedX) - used for addresses and system references (not RBX)
 
 ---
 
@@ -848,14 +849,33 @@ private static string GetLocalIPAddress()
 - ✅ Updated SmartContractReaderService
 - ✅ Added TokenizationV2 to FeatureName enum
 
-### Phase 1: FROST Foundation (Weeks 1-2)
-- Create Rust FFI wrapper for FROST (frost_ffi crate)
-- Compile FROST native libraries (.dll, .so, .dylib)
-- Create C# P/Invoke bindings (FrostNative.cs)
-- Create VBTCValidator model & registration
-- Update VBTCContractV2 model for FROST/Taproot
-- Add new transaction types
-- Create FrostMPCService.cs skeleton
+### Phase 0.5: MPC Ceremony Wrapper (✅ COMPLETED - January 7, 2026)
+- ✅ Created FrostMPCService.cs - C# orchestration layer for MPC ceremonies
+- ✅ Implemented CoordinateDKGCeremony() - Full 3-round DKG ceremony coordination
+- ✅ Implemented CoordinateSigningCeremony() - 2-round signing ceremony coordination
+- ✅ Integrated with VBTCController.ExecuteMPCCeremony()
+- ✅ Created comprehensive unit tests (FrostMPCServiceTests.cs)
+- ✅ HTTP/REST communication framework for validator coordination
+- ✅ Placeholder cryptographic operations (ready for FROST native library integration)
+- ✅ Taproot address generation placeholder
+- ✅ Schnorr signature aggregation placeholder
+- ✅ Threshold calculation and validator management
+- ✅ Error handling and logging
+
+**Notes**:
+- The MPC ceremony wrapper is fully functional with placeholder cryptographic operations
+- All ceremony flows, state management, and validator communication are implemented
+- Ready for Phase 1: FROST native library integration to replace placeholders
+- Unit tests validate ceremony coordination logic and flows
+
+### Phase 1: FROST Foundation (NEXT - Weeks 1-2)
+- ⏳ Create Rust FFI wrapper for FROST (frost_ffi crate)
+- ⏳ Compile FROST native libraries (.dll, .so, .dylib)
+- ⏳ Create C# P/Invoke bindings (FrostNative.cs)
+- ✅ Created VBTCValidator model & registration (COMPLETED)
+- ✅ Updated VBTCContractV2 model for FROST/Taproot (COMPLETED)
+- ⏳ Add new transaction types
+- ✅ Created FrostMPCService.cs (COMPLETED)
 
 ### Phase 2: DKG Implementation (Weeks 3-4)
 - Implement FROST DKG coordination via HTTP/REST API
