@@ -106,6 +106,27 @@
     <None Update="BIP39\wordlist\spanish.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="Frost\win\frost_ffi.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>frost_ffi.dll</Link>
+    </None>
+    <None Update="Frost\linux\libfrost_ffi.so" Condition="Exists('Frost\linux\libfrost_ffi.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>libfrost_ffi.so</Link>
+    </None>
+    <None Update="Frost\mac\libfrost_ffi.dylib" Condition="Exists('Frost\mac\libfrost_ffi.dylib')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>libfrost_ffi.dylib</Link>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Frost\linux\" />
+    <Folder Include="Frost\mac\" />
+    <Folder Include="Frost\win\" />
   </ItemGroup>
 
 </Project>
