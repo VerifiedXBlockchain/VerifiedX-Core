@@ -31,12 +31,14 @@ namespace ReserveBlockCore.Bitcoin.Models
         // Withdrawal State
         public VBTCWithdrawalStatus WithdrawalStatus { get; set; }
         public string? ActiveWithdrawalBTCDestination { get; set; }
-        public decimal? ActiveWithdrawalAmount { get; set; }
+        public decimal ActiveWithdrawalAmount { get; set; }
         public string? ActiveWithdrawalRequestHash { get; set; }
         public long? WithdrawalRequestBlock { get; set; }
+        public int ActiveWithdrawalFeeRate { get; set; }
+        public long ActiveWithdrawalRequestTime { get; set; }
         
         // Historical Withdrawals
-        public List<VBTCWithdrawalRecord> WithdrawalHistory { get; set; }
+        public List<VBTCWithdrawalHistory> WithdrawalHistory { get; set; }
         #endregion
 
         #region Database Methods
@@ -148,7 +150,7 @@ namespace ReserveBlockCore.Bitcoin.Models
                                 DKGProof = tknz.DKGProof,
                                 ProofBlockHeight = tknz.ProofBlockHeight,
                                 WithdrawalStatus = VBTCWithdrawalStatus.None,
-                                WithdrawalHistory = new List<VBTCWithdrawalRecord>()
+                                WithdrawalHistory = new List<VBTCWithdrawalHistory>()
                             };
                             contracts.InsertSafe(contract);
                         }
@@ -216,7 +218,7 @@ namespace ReserveBlockCore.Bitcoin.Models
                                 DKGProof = tknz.DKGProof,
                                 ProofBlockHeight = tknz.ProofBlockHeight,
                                 WithdrawalStatus = VBTCWithdrawalStatus.None,
-                                WithdrawalHistory = new List<VBTCWithdrawalRecord>()
+                                WithdrawalHistory = new List<VBTCWithdrawalHistory>()
                             };
                             contracts.InsertSafe(contract);
                         }
@@ -293,7 +295,7 @@ namespace ReserveBlockCore.Bitcoin.Models
             }
         }
 
-        public static void AddWithdrawalRecord(string smartContractUID, VBTCWithdrawalRecord record)
+        public static void AddWithdrawalRecord(string smartContractUID, VBTCWithdrawalHistory record)
         {
             try
             {
@@ -304,7 +306,7 @@ namespace ReserveBlockCore.Bitcoin.Models
                 {
                     if (contract.WithdrawalHistory == null)
                     {
-                        contract.WithdrawalHistory = new List<VBTCWithdrawalRecord>();
+                        contract.WithdrawalHistory = new List<VBTCWithdrawalHistory>();
                     }
 
                     contract.WithdrawalHistory.Add(record);
@@ -340,6 +342,19 @@ namespace ReserveBlockCore.Bitcoin.Models
             }
             return false;
         }
+
+        public static void UpdateContract(VBTCContractV2 contract)
+        {
+            try
+            {
+                var contracts = GetDb();
+                contracts.UpdateSafe(contract);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(ex.ToString(), "VBTCContractV2.UpdateContract()");
+            }
+        }
         #endregion
     }
 
@@ -362,5 +377,17 @@ namespace ReserveBlockCore.Bitcoin.Models
         public long RequestBlock { get; set; }
         public long? CompletionBlock { get; set; }
         public VBTCWithdrawalStatus Status { get; set; }
+    }
+
+    public class VBTCWithdrawalHistory
+    {
+        public string RequestHash { get; set; }
+        public string CompletionHash { get; set; }
+        public string BTCTransactionHash { get; set; }
+        public decimal Amount { get; set; }
+        public string BTCDestination { get; set; }
+        public long RequestTime { get; set; }
+        public long CompletionTime { get; set; }
+        public int FeeRate { get; set; }
     }
 }

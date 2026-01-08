@@ -294,6 +294,9 @@ namespace ReserveBlockCore.Data
                                     case "TransferCoinMulti()":
                                         TransferCoinMulti(tx);
                                         break;
+                                    case "TransferVBTCV2()":
+                                        TransferVBTCV2(tx);
+                                        break;
                                     case "TransferVBTC()":
                                         TransferVBTC(tx);
                                         break;
@@ -463,6 +466,17 @@ namespace ReserveBlockCore.Data
                                     }
                                 }
                             }
+                        }
+
+                        // vBTC V2 Withdrawal Request/Complete Handling
+                        if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                        {
+                            RequestVBTCV2Withdrawal(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
+                        {
+                            CompleteVBTCV2Withdrawal(tx);
                         }
 
                         if(tx.TransactionType == TransactionType.RESERVE)
@@ -2534,6 +2548,210 @@ namespace ReserveBlockCore.Data
                         SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
                     }
                 }
+            }
+        }
+
+        private static void TransferVBTCV2(Transaction tx)
+        {
+            try
+            {
+                // Parse transaction data
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
+                var toAddress = jobj["ToAddress"]?.ToObject<string?>();
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+
+                if (string.IsNullOrEmpty(scUID) || !amount.HasValue)
+                {
+                    ErrorLogUtility.LogError($"TransferVBTCV2 failed: Missing required fields", "StateData.TransferVBTCV2()");
+                    return;
+                }
+
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+
+                if (scStateTreiRec != null)
+                {
+                    // Create credit/debit pair for the transfer
+                    // Credit: Add tokens to recipient
+                    // Debit: Subtract tokens from sender
+                    List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                    {
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = amount.Value,
+                            FromAddress = "+",
+                            ToAddress = toAddress
+                        },
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = amount.Value * -1.0M,
+                            FromAddress = fromAddress,
+                            ToAddress = "-"
+                        }
+                    };
+
+                    if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                    {
+                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                    }
+                    else
+                    {
+                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                    }
+
+                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                    SCLogUtility.Log($"TransferVBTCV2 completed: {amount.Value} vBTC from {fromAddress} to {toAddress} in contract {scUID}", 
+                        "StateData.TransferVBTCV2()");
+                }
+                else
+                {
+                    ErrorLogUtility.LogError($"TransferVBTCV2 failed: Contract not found - {scUID}", "StateData.TransferVBTCV2()");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"TransferVBTCV2 error: {ex.Message}", "StateData.TransferVBTCV2()");
+            }
+        }
+
+        private static void RequestVBTCV2Withdrawal(Transaction tx)
+        {
+            try
+            {
+                // Parse transaction data
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var ownerAddress = jobj["OwnerAddress"]?.ToObject<string?>();
+                var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+
+                if (string.IsNullOrEmpty(scUID) || !amount.HasValue || !feeRate.HasValue)
+                {
+                    ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal failed: Missing required fields", "StateData.RequestVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Get the contract
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal failed: Contract not found - {scUID}", "StateData.RequestVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Update contract with withdrawal request details
+                contract.WithdrawalStatus = VBTCWithdrawalStatus.Requested;
+                contract.ActiveWithdrawalRequestHash = tx.Hash;
+                contract.ActiveWithdrawalAmount = amount.Value;
+                contract.ActiveWithdrawalBTCDestination = btcAddress;
+                contract.ActiveWithdrawalFeeRate = feeRate.Value;
+                contract.ActiveWithdrawalRequestTime = tx.Timestamp;
+
+                // Save updated contract
+                VBTCContractV2.UpdateContract(contract);
+
+                SCLogUtility.Log($"RequestVBTCV2Withdrawal completed: SCUID={scUID}, Amount={amount.Value} BTC, Destination={btcAddress}, TxHash={tx.Hash}", 
+                    "StateData.RequestVBTCV2Withdrawal()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal error: {ex.Message}", "StateData.RequestVBTCV2Withdrawal()");
+            }
+        }
+
+        private static void CompleteVBTCV2Withdrawal(Transaction tx)
+        {
+            try
+            {
+                // Parse transaction data
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
+                var btcTxHash = jobj["BTCTransactionHash"]?.ToObject<string?>();
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                var destination = jobj["Destination"]?.ToObject<string?>();
+
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcTxHash))
+                {
+                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Missing required fields", "StateData.CompleteVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Get the contract
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Contract not found - {scUID}", "StateData.CompleteVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Create withdrawal history entry
+                var historyEntry = new VBTCWithdrawalHistory
+                {
+                    RequestHash = contract.ActiveWithdrawalRequestHash,
+                    CompletionHash = tx.Hash,
+                    BTCTransactionHash = btcTxHash,
+                    Amount = contract.ActiveWithdrawalAmount,
+                    BTCDestination = contract.ActiveWithdrawalBTCDestination,
+                    RequestTime = contract.ActiveWithdrawalRequestTime,
+                    CompletionTime = tx.Timestamp,
+                    FeeRate = contract.ActiveWithdrawalFeeRate
+                };
+
+                // Add to history
+                if (contract.WithdrawalHistory == null)
+                {
+                    contract.WithdrawalHistory = new List<VBTCWithdrawalHistory>();
+                }
+                contract.WithdrawalHistory.Add(historyEntry);
+
+                // Update contract status to Completed and clear active withdrawal fields
+                contract.WithdrawalStatus = VBTCWithdrawalStatus.Completed;
+                contract.ActiveWithdrawalRequestHash = null;
+                contract.ActiveWithdrawalAmount = 0;
+                contract.ActiveWithdrawalBTCDestination = null;
+                contract.ActiveWithdrawalFeeRate = 0;
+                contract.ActiveWithdrawalRequestTime = 0;
+
+                // Save updated contract
+                VBTCContractV2.UpdateContract(contract);
+
+                // CRITICAL: Burn the withdrawn tokens in state trei
+                // Create debit entry to remove the withdrawn amount from circulation
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTreiRec != null && amount.HasValue)
+                {
+                    List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                    {
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = amount.Value * -1.0M,  // Negative amount = burn
+                            FromAddress = contract.OwnerAddress,
+                            ToAddress = "-"  // "-" indicates burn/withdrawal
+                        }
+                    };
+
+                    if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                    {
+                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                    }
+                    else
+                    {
+                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                    }
+
+                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                }
+
+                SCLogUtility.Log($"CompleteVBTCV2Withdrawal completed: SCUID={scUID}, BTCTxHash={btcTxHash}, Amount={amount} BTC, TxHash={tx.Hash}", 
+                    "StateData.CompleteVBTCV2Withdrawal()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal error: {ex.Message}", "StateData.CompleteVBTCV2Withdrawal()");
             }
         }
 
