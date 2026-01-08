@@ -434,9 +434,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// </summary>
         /// <param name="scUID">Smart contract UID</param>
         /// <param name="withdrawalRequestHash">Hash of withdrawal request transaction</param>
-        /// <param name="btcTxHash">Bitcoin transaction hash (from FROST signing)</param>
-        /// <returns>Completion transaction hash</returns>
-        public static async Task<(bool, string)> CompleteWithdrawal(string scUID, string withdrawalRequestHash, string btcTxHash)
+        /// <returns>Completion transaction hash and Bitcoin transaction hash</returns>
+        public static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage)> CompleteWithdrawal(string scUID, string withdrawalRequestHash)
         {
             try
             {
@@ -445,41 +444,103 @@ namespace ReserveBlockCore.Bitcoin.Services
                 if (vbtcContract == null)
                 {
                     SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.CompleteWithdrawal()");
-                    return (false, $"vBTC V2 contract not found: {scUID}");
+                    return (false, string.Empty, string.Empty, $"vBTC V2 contract not found: {scUID}");
                 }
 
                 // Validate withdrawal status
                 if (vbtcContract.WithdrawalStatus != VBTCWithdrawalStatus.Requested)
                 {
                     SCLogUtility.Log($"No active withdrawal request. Status: {vbtcContract.WithdrawalStatus}", "VBTCService.CompleteWithdrawal()");
-                    return (false, $"No active withdrawal request. Status: {vbtcContract.WithdrawalStatus}");
+                    return (false, string.Empty, string.Empty, $"No active withdrawal request. Status: {vbtcContract.WithdrawalStatus}");
                 }
 
                 // Validate withdrawal request hash matches
                 if (vbtcContract.ActiveWithdrawalRequestHash != withdrawalRequestHash)
                 {
                     SCLogUtility.Log($"Withdrawal request hash mismatch", "VBTCService.CompleteWithdrawal()");
-                    return (false, "Withdrawal request hash mismatch");
+                    return (false, string.Empty, string.Empty, "Withdrawal request hash mismatch");
                 }
+
+                // ============================================================
+                // FROST INTEGRATION: Execute Bitcoin Withdrawal Transaction
+                // ============================================================
+                
+                SCLogUtility.Log($"Starting FROST withdrawal for contract {scUID}", "VBTCService.CompleteWithdrawal()");
+
+                // Get active validators for FROST signing
+                var validators = VBTCValidator.GetActiveValidators();
+                if (validators == null || !validators.Any())
+                {
+                    SCLogUtility.Log($"No active validators available for FROST signing", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, "No active validators available for FROST signing");
+                }
+
+                // Get threshold from contract
+                int threshold = vbtcContract.RequiredThreshold;
+                
+                // Calculate required validators (51% = threshold)
+                int requiredValidators = (int)Math.Ceiling(validators.Count * (threshold / 100.0));
+                if (validators.Count < requiredValidators)
+                {
+                    SCLogUtility.Log($"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators}", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators}");
+                }
+
+                // Get withdrawal details from contract
+                if (!vbtcContract.ActiveWithdrawalAmount.HasValue || string.IsNullOrEmpty(vbtcContract.ActiveWithdrawalBTCDestination))
+                {
+                    SCLogUtility.Log($"Invalid withdrawal details in contract", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, "Invalid withdrawal details in contract");
+                }
+
+                decimal withdrawalAmount = vbtcContract.ActiveWithdrawalAmount.Value;
+                string btcDestination = vbtcContract.ActiveWithdrawalBTCDestination;
+                long feeRate = 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
+
+                // Execute FROST withdrawal (build, sign, broadcast)
+                SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination}", "VBTCService.CompleteWithdrawal()");
+                
+                var btcResult = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
+                    vbtcContract.DepositAddress,
+                    btcDestination,
+                    withdrawalAmount,
+                    feeRate,
+                    scUID,
+                    validators,
+                    threshold
+                );
+
+                if (!btcResult.Success)
+                {
+                    SCLogUtility.Log($"Bitcoin transaction failed: {btcResult.ErrorMessage}", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"Bitcoin transaction failed: {btcResult.ErrorMessage}");
+                }
+
+                string btcTxHash = btcResult.TxHash;
+                SCLogUtility.Log($"Bitcoin transaction successful. TxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
+
+                // ============================================================
+                // End FROST Integration - Continue with VFX transaction
+                // ============================================================
 
                 // Use validator address or first available account for transaction creation
                 string fromAddress = !string.IsNullOrEmpty(Globals.ValidatorAddress) ? Globals.ValidatorAddress : null;
                 if (string.IsNullOrEmpty(fromAddress))
                 {
                     var accounts = AccountData.GetAccounts();
-                    if (accounts == null || !accounts.Any())
+                    if (accounts == null || accounts.Count() == 0)
                     {
                         SCLogUtility.Log($"No accounts available to create completion transaction", "VBTCService.CompleteWithdrawal()");
-                        return (false, "No accounts available to create completion transaction");
+                        return (false, string.Empty, btcTxHash, "No accounts available to create completion transaction");
                     }
-                    fromAddress = accounts.First().Address;
+                    fromAddress = accounts.FindAll().First().Address;
                 }
 
                 var account = AccountData.GetSingleAccount(fromAddress);
                 if (account == null)
                 {
                     SCLogUtility.Log($"Account not found: {fromAddress}", "VBTCService.CompleteWithdrawal()");
-                    return (false, $"Account not found: {fromAddress}");
+                    return (false, string.Empty, btcTxHash, $"Account not found: {fromAddress}");
                 }
 
                 // Create transaction data
@@ -517,14 +578,14 @@ namespace ReserveBlockCore.Bitcoin.Services
                 if (privateKey == null)
                 {
                     SCLogUtility.Log($"Private key was null for account {fromAddress}", "VBTCService.CompleteWithdrawal()");
-                    return (false, $"Private key was null for account {fromAddress}");
+                    return (false, string.Empty, btcTxHash, $"Private key was null for account {fromAddress}");
                 }
 
                 var signature = SignatureService.CreateSignature(txHash, privateKey, publicKey);
                 if (signature == "ERROR")
                 {
                     SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CompleteWithdrawal()");
-                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                    return (false, string.Empty, btcTxHash, $"TX Signature Failed. SCUID: {scUID}");
                 }
 
                 completionTx.Signature = signature;
@@ -535,18 +596,18 @@ namespace ReserveBlockCore.Bitcoin.Services
                 {
                     TransactionData.AddTxToWallet(completionTx, true);
                     SCLogUtility.Log($"vBTC V2 Withdrawal Complete TX Success. SCUID: {scUID}, TxHash: {completionTx.Hash}, BTCTxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
-                    return (true, completionTx.Hash);
+                    return (true, completionTx.Hash, btcTxHash, string.Empty);
                 }
                 else
                 {
                     SCLogUtility.Log($"vBTC V2 Withdrawal Complete TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CompleteWithdrawal()");
-                    return (false, $"TX Verify Failed: {result.Item2}");
+                    return (false, string.Empty, btcTxHash, $"TX Verify Failed: {result.Item2}");
                 }
             }
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Withdrawal Complete Error: {ex.Message}", "VBTCService.CompleteWithdrawal()");
-                return (false, $"Error: {ex.Message}");
+                return (false, string.Empty, string.Empty, $"Error: {ex.Message}");
             }
         }
     }

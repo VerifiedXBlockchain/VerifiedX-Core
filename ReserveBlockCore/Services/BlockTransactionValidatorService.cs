@@ -556,6 +556,28 @@ namespace ReserveBlockCore.Services
                     txdata.InsertSafe(tx);
                 }
 
+                // vBTC V2 Transaction Processing
+                if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+                {
+                    var txdata = TransactionData.GetAll();
+                    tx.TransactionStatus = TransactionStatus.Success;
+                    txdata.InsertSafe(tx);
+                }
+
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                {
+                    var txdata = TransactionData.GetAll();
+                    tx.TransactionStatus = TransactionStatus.Success;
+                    txdata.InsertSafe(tx);
+                }
+
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
+                {
+                    var txdata = TransactionData.GetAll();
+                    tx.TransactionStatus = TransactionStatus.Success;
+                    txdata.InsertSafe(tx);
+                }
+
                 if (tx.TransactionType == TransactionType.ADNR)
                 {
                     var scData = JObject.Parse(tx.Data);
