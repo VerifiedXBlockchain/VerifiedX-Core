@@ -2688,13 +2688,25 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
+                if(!contract.ActiveWithdrawalAmount.HasValue)
+                {
+                    ErrorLogUtility.LogError($"ActiveWithdrawalAmount cannot be empty - {scUID}", "StateData.CompleteVBTCV2Withdrawal()");
+                    return;
+                }
+
+                if (contract.ActiveWithdrawalAmount.Value <= 0.0M )
+                {
+                    ErrorLogUtility.LogError($"ActiveWithdrawalAmount cannot be zero or less - {scUID}", "StateData.CompleteVBTCV2Withdrawal()");
+                    return;
+                }
+
                 // Create withdrawal history entry
                 var historyEntry = new VBTCWithdrawalHistory
                 {
                     RequestHash = contract.ActiveWithdrawalRequestHash,
                     CompletionHash = tx.Hash,
                     BTCTransactionHash = btcTxHash,
-                    Amount = contract.ActiveWithdrawalAmount,
+                    Amount = contract.ActiveWithdrawalAmount.HasValue ? contract.ActiveWithdrawalAmount.Value : 0.0M,
                     BTCDestination = contract.ActiveWithdrawalBTCDestination,
                     RequestTime = contract.ActiveWithdrawalRequestTime,
                     CompletionTime = tx.Timestamp,

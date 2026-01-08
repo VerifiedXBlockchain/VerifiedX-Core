@@ -31,7 +31,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         // Withdrawal State
         public VBTCWithdrawalStatus WithdrawalStatus { get; set; }
         public string? ActiveWithdrawalBTCDestination { get; set; }
-        public decimal ActiveWithdrawalAmount { get; set; }
+        public decimal? ActiveWithdrawalAmount { get; set; }
         public string? ActiveWithdrawalRequestHash { get; set; }
         public long? WithdrawalRequestBlock { get; set; }
         public int ActiveWithdrawalFeeRate { get; set; }

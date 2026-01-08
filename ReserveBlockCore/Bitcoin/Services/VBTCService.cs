@@ -246,7 +246,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // Build and sign transaction
                 tokenTx.Build();
                 var txHash = tokenTx.Hash;
-                tokenTx.Fee = FeeCalcService.CalculateTXFee(tokenTx);
+                tokenTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(tokenTx);
 
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
@@ -257,7 +257,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Private key was null for account {fromAddress}");
                 }
 
-                var signature = SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
                 if (signature == "ERROR")
                 {
                     SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.TransferVBTC()");
@@ -388,7 +388,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // Build and sign transaction
                 withdrawalTx.Build();
                 var txHash = withdrawalTx.Hash;
-                withdrawalTx.Fee = FeeCalcService.CalculateTXFee(withdrawalTx);
+                withdrawalTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(withdrawalTx);
 
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
@@ -399,7 +399,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Private key was null for account {ownerAddress}");
                 }
 
-                var signature = SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
                 if (signature == "ERROR")
                 {
                     SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.RequestWithdrawal()");
@@ -570,7 +570,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // Build and sign transaction
                 completionTx.Build();
                 var txHash = completionTx.Hash;
-                completionTx.Fee = FeeCalcService.CalculateTXFee(completionTx);
+                completionTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(completionTx);
 
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
@@ -581,7 +581,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, btcTxHash, $"Private key was null for account {fromAddress}");
                 }
 
-                var signature = SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
                 if (signature == "ERROR")
                 {
                     SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CompleteWithdrawal()");
