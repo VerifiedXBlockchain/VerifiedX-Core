@@ -6,6 +6,7 @@ using ReserveBlockCore.Controllers;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Collections.Concurrent;
 
@@ -478,9 +479,15 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 {
                     SmartContractUID = scUID,
                     Name = payload.Name,
-                    Description = payload.Description,
+                    Description = payload.Description ?? "vBTC V2 Token - MPC-based Tokenized Bitcoin",
                     MinterAddress = payload.OwnerAddress,
-                    MinterName = payload.OwnerAddress, // Can be customized
+                    MinterName = payload.OwnerAddress,
+                    IsPublic = true,
+                    SCVersion = Globals.SCVersion,
+                    IsMinter = true,
+                    IsPublished = false,
+                    IsToken = false,
+                    Id = 0,
                     Features = new List<SmartContractFeatures>
                     {
                         new SmartContractFeatures
@@ -491,19 +498,48 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     }
                 };
 
-                // Write smart contract (this will use TokenizationV2SourceGenerator)
-                // var (scText, scMainResult, isToken) = await SmartContractWriterService.WriteSmartContract(scMain);
+                // Write smart contract (uses TokenizationV2SourceGenerator)
+                var result = await SmartContractWriterService.WriteSmartContract(scMain);
+                if (string.IsNullOrWhiteSpace(result.Item1))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Failed to generate smart contract code"
+                    });
+                }
+
+                // Save smart contract to databases
+                SmartContractMain.SmartContractData.SaveSmartContract(result.Item2, result.Item1);
+                await VBTCContractV2.SaveSmartContract(result.Item2, result.Item1, payload.OwnerAddress);
+
+                // Create and broadcast mint transaction
+                var scTx = await SmartContractService.MintSmartContractTx(result.Item2, TransactionType.VBTC_V2_CONTRACT_CREATE);
+                if (scTx == null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Failed to create or broadcast smart contract transaction"
+                    });
+                }
+
+                // Mark contract as published (set flag in database)
+                // TODO: Implement VBTCContractV2.SetContractIsPublished() helper method
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "vBTC V2 contract created successfully using pre-generated MPC ceremony",
+                    Message = "vBTC V2 contract created and published to blockchain successfully",
                     SmartContractUID = scUID,
+                    TransactionHash = scTx.Hash,
                     CeremonyId = payload.CeremonyId,
                     DepositAddress = depositAddress,
+                    FrostGroupPublicKey = frostGroupPublicKey,
                     DKGProof = dkgProof,
                     ValidatorCount = validatorSnapshot.Count,
-                    ProofBlockHeight = ceremony.ProofBlockHeight
+                    ProofBlockHeight = ceremony.ProofBlockHeight,
+                    RequiredThreshold = 51
                 });
             }
             catch (Exception ex)
@@ -717,16 +753,38 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // Validate balance
-                // Create transfer transaction
-                // Broadcast to network
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.FromAddress) || 
+                    string.IsNullOrEmpty(payload.ToAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
-                return JsonConvert.SerializeObject(new
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                // Call service to create and broadcast transaction
+                var result = await Services.VBTCService.TransferVBTC(
+                    payload.SmartContractUID,
+                    payload.FromAddress,
+                    payload.ToAddress,
+                    payload.Amount
+                );
+
+                if (result.Item1)
                 {
-                    Success = true,
-                    Message = "Transfer successful",
-                    TransactionHash = "PLACEHOLDER_TX_HASH"
-                });
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "vBTC V2 transfer transaction created and broadcast successfully",
+                        TransactionHash = result.Item2,
+                        From = payload.FromAddress,
+                        To = payload.ToAddress,
+                        Amount = payload.Amount,
+                        SmartContractUID = payload.SmartContractUID
+                    });
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.Item2 });
+                }
             }
             catch (Exception ex)
             {
@@ -796,23 +854,43 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // Validate balance
-                // Check no active withdrawal exists
-                // Create withdrawal request
-                // Update contract state to "Requested"
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.OwnerAddress) || 
+                    string.IsNullOrEmpty(payload.BTCAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
-                var requestHash = "PLACEHOLDER_REQUEST_HASH";
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
 
-                return JsonConvert.SerializeObject(new
+                if (payload.FeeRate <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
+
+                // Call service to create and broadcast withdrawal request transaction
+                var result = await Services.VBTCService.RequestWithdrawal(
+                    payload.SmartContractUID,
+                    payload.OwnerAddress,
+                    payload.BTCAddress,
+                    payload.Amount,
+                    payload.FeeRate
+                );
+
+                if (result.Item1)
                 {
-                    Success = true,
-                    Message = "Withdrawal request created",
-                    RequestHash = requestHash,
-                    SmartContractUID = payload.SmartContractUID,
-                    Amount = payload.Amount,
-                    Destination = payload.BTCAddress,
-                    Status = "Requested"
-                });
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "vBTC V2 withdrawal request created successfully",
+                        RequestHash = result.Item2,
+                        SmartContractUID = payload.SmartContractUID,
+                        Amount = payload.Amount,
+                        Destination = payload.BTCAddress,
+                        FeeRate = payload.FeeRate,
+                        Status = "Requested"
+                    });
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.Item2 });
+                }
             }
             catch (Exception ex)
             {
@@ -834,51 +912,72 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
                 // TODO: FROST INTEGRATION - 2-ROUND SIGNING CEREMONY
                 // ============================================================
-                // 1. Retrieve withdrawal request from contract state
-                // 2. Validate request is in "Requested" status
-                // 3. Calculate BTC transaction fee
-                // 4. Create unsigned Bitcoin Taproot transaction:
+                // 1. Retrieve withdrawal request from contract state - DONE (in VBTCService)
+                // 2. Validate request is in "Requested" status - DONE (in VBTCService)
+                // 3. Calculate BTC transaction fee - TODO
+                // 4. Create unsigned Bitcoin Taproot transaction - TODO
                 //    - Input: Taproot UTXO(s) from deposit address
                 //    - Output 1: Amount to destination address
                 //    - Output 2: Change back to deposit address (if any)
                 //    - Witness program: Taproot key path spend
-                // 5. Get active validators (require 51% for signing)
-                // 6. Compute transaction sighash (BIP 341)
-                // 7. FROST Signing Round 1: Nonce Generation
+                // 5. Get active validators (require 51% for signing) - TODO
+                // 6. Compute transaction sighash (BIP 341) - TODO
+                // 7. FROST Signing Round 1: Nonce Generation - TODO
                 //    - Each validator generates random nonce
                 //    - Each validator computes nonce commitment
                 //    - Broadcast FROST_SIGN_R1 with commitments via SignalR
                 //    - Coordinator aggregates all commitments
-                // 8. FROST Signing Round 2: Signature Share Generation
+                // 8. FROST Signing Round 2: Signature Share Generation - TODO
                 //    - Each validator receives aggregated commitments
                 //    - Each validator computes partial Schnorr signature
                 //    - Broadcast FROST_SIGN_R2 with signature shares via SignalR
-                // 9. Signature Aggregation
+                // 9. Signature Aggregation - TODO
                 //    - Coordinator receives all signature shares
                 //    - Aggregate into final Schnorr signature
                 //    - Validate signature against group public key
-                // 10. Complete Transaction
+                // 10. Complete Transaction - TODO
                 //     - Attach Schnorr signature to transaction witness
                 //     - Transaction now spends via Taproot key path
                 //     - Broadcast to Bitcoin network via Electrum
-                // 11. Monitor Confirmation
+                // 11. Monitor Confirmation - TODO
                 //     - Wait for 1 confirmation
                 //     - Update contract state to "Pending_BTC"
                 //     - After confirmation, update to "Completed"
                 // ============================================================
-                // PLACEHOLDER: Mock BTC transaction
-                string btcTxHash = "PLACEHOLDER_BTC_TX_HASH_AFTER_FROST_SIGNING";
+                
+                // PLACEHOLDER: For now, we'll use a mock BTC transaction hash
+                // In production, steps 3-10 above should be implemented via FrostMPCService
+                string btcTxHash = $"MOCK_BTC_TX_{Guid.NewGuid().ToString().Substring(0, 16)}";
 
-                return JsonConvert.SerializeObject(new
+                // Call service to create and broadcast completion transaction
+                var result = await Services.VBTCService.CompleteWithdrawal(
+                    payload.SmartContractUID,
+                    payload.WithdrawalRequestHash,
+                    btcTxHash
+                );
+
+                if (result.Item1)
                 {
-                    Success = true,
-                    Message = "Withdrawal completed successfully",
-                    BTCTransactionHash = btcTxHash,
-                    Status = "Pending_BTC",
-                    SmartContractUID = payload.SmartContractUID
-                });
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "vBTC V2 withdrawal completion transaction created successfully",
+                        VFXTransactionHash = result.Item2,
+                        BTCTransactionHash = btcTxHash,
+                        Status = "Pending_BTC",
+                        SmartContractUID = payload.SmartContractUID,
+                        Note = "FROST signing ceremony integration pending"
+                    });
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.Item2 });
+                }
             }
             catch (Exception ex)
             {

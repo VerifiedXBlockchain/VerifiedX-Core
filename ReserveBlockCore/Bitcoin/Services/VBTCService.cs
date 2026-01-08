@@ -160,5 +160,394 @@ namespace ReserveBlockCore.Bitcoin.Services
                 return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "VBTCService.TransferOwnership()", false);
             }
         }
+
+        /// <summary>
+        /// Transfer vBTC V2 tokens from one address to another
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <param name="fromAddress">Sender address</param>
+        /// <param name="toAddress">Recipient address</param>
+        /// <param name="amount">Amount to transfer</param>
+        /// <returns>Transaction hash if successful</returns>
+        public static async Task<(bool, string)> TransferVBTC(string scUID, string fromAddress, string toAddress, decimal amount)
+        {
+            try
+            {
+                // Get account and validate
+                var account = AccountData.GetSingleAccount(fromAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {fromAddress}", "VBTCService.TransferVBTC()");
+                    return (false, $"Account not found: {fromAddress}");
+                }
+
+                // Get contract and validate
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract == null)
+                {
+                    SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.TransferVBTC()");
+                    return (false, $"vBTC V2 contract not found: {scUID}");
+                }
+
+                // Get smart contract state
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState == null)
+                {
+                    SCLogUtility.Log($"Smart contract state not found: {scUID}", "VBTCService.TransferVBTC()");
+                    return (false, $"Smart contract state not found: {scUID}");
+                }
+
+                // Calculate balance
+                decimal balance = 0M;
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var transactions = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                        .ToList();
+
+                    if (transactions.Any())
+                    {
+                        var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
+                        var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
+                        balance = received - sent;
+                    }
+                }
+
+                // Check sufficient balance
+                if (balance < amount)
+                {
+                    SCLogUtility.Log($"Insufficient balance. Available: {balance}, Requested: {amount}", "VBTCService.TransferVBTC()");
+                    return (false, $"Insufficient balance. Available: {balance}, Requested: {amount}");
+                }
+
+                // Create transaction data
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCTransfer()",
+                    ContractUID = scUID,
+                    FromAddress = fromAddress,
+                    ToAddress = toAddress,
+                    Amount = amount
+                });
+
+                // Build transaction
+                var tokenTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = fromAddress,
+                    ToAddress = toAddress,
+                    Amount = 0.0M, // No VFX transferred, only vBTC
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(fromAddress),
+                    TransactionType = TransactionType.VBTC_V2_TRANSFER,
+                    Data = txData
+                };
+
+                // Build and sign transaction
+                tokenTx.Build();
+                var txHash = tokenTx.Hash;
+                tokenTx.Fee = FeeCalcService.CalculateTXFee(tokenTx);
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {fromAddress}", "VBTCService.TransferVBTC()");
+                    return (false, $"Private key was null for account {fromAddress}");
+                }
+
+                var signature = SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.TransferVBTC()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                }
+
+                tokenTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(tokenTx);
+                if (result.Item1)
+                {
+                    TransactionData.AddTxToWallet(tokenTx, true);
+                    SCLogUtility.Log($"vBTC V2 Transfer TX Success. SCUID: {scUID}, TxHash: {tokenTx.Hash}", "VBTCService.TransferVBTC()");
+                    return (true, tokenTx.Hash);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Transfer TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.TransferVBTC()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Transfer Error: {ex.Message}", "VBTCService.TransferVBTC()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Request withdrawal of vBTC to Bitcoin address
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <param name="ownerAddress">Owner address</param>
+        /// <param name="btcAddress">Bitcoin destination address</param>
+        /// <param name="amount">Amount to withdraw</param>
+        /// <param name="feeRate">Bitcoin fee rate (sats/vB)</param>
+        /// <returns>Withdrawal request transaction hash</returns>
+        public static async Task<(bool, string)> RequestWithdrawal(string scUID, string ownerAddress, string btcAddress, decimal amount, int feeRate)
+        {
+            try
+            {
+                // Get account and validate
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {ownerAddress}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Account not found: {ownerAddress}");
+                }
+
+                // Get contract and validate
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract == null)
+                {
+                    SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"vBTC V2 contract not found: {scUID}");
+                }
+
+                // Validate owner
+                if (vbtcContract.OwnerAddress != ownerAddress)
+                {
+                    SCLogUtility.Log($"Only contract owner can request withdrawal. Owner: {vbtcContract.OwnerAddress}", "VBTCService.RequestWithdrawal()");
+                    return (false, "Only contract owner can request withdrawal");
+                }
+
+                // Check no active withdrawal exists
+                if (vbtcContract.WithdrawalStatus != VBTCWithdrawalStatus.None)
+                {
+                    SCLogUtility.Log($"Active withdrawal already exists. Status: {vbtcContract.WithdrawalStatus}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Active withdrawal already exists. Status: {vbtcContract.WithdrawalStatus}");
+                }
+
+                // Get smart contract state and validate balance
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState == null)
+                {
+                    SCLogUtility.Log($"Smart contract state not found: {scUID}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Smart contract state not found: {scUID}");
+                }
+
+                // Calculate balance
+                decimal balance = 0M;
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var transactions = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == ownerAddress || x.ToAddress == ownerAddress)
+                        .ToList();
+
+                    if (transactions.Any())
+                    {
+                        var received = transactions.Where(x => x.ToAddress == ownerAddress).Sum(x => x.Amount);
+                        var sent = transactions.Where(x => x.FromAddress == ownerAddress).Sum(x => x.Amount);
+                        balance = received - sent;
+                    }
+                }
+
+                // Check sufficient balance
+                if (balance < amount)
+                {
+                    SCLogUtility.Log($"Insufficient balance. Available: {balance}, Requested: {amount}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Insufficient balance. Available: {balance}, Requested: {amount}");
+                }
+
+                // Create transaction data
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalRequest()",
+                    ContractUID = scUID,
+                    OwnerAddress = ownerAddress,
+                    BTCAddress = btcAddress,
+                    Amount = amount,
+                    FeeRate = feeRate
+                });
+
+                // Build transaction
+                var withdrawalTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = scUID, // Withdrawal target is the contract itself
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                    Data = txData
+                };
+
+                // Build and sign transaction
+                withdrawalTx.Build();
+                var txHash = withdrawalTx.Hash;
+                withdrawalTx.Fee = FeeCalcService.CalculateTXFee(withdrawalTx);
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {ownerAddress}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Private key was null for account {ownerAddress}");
+                }
+
+                var signature = SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                }
+
+                withdrawalTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(withdrawalTx);
+                if (result.Item1)
+                {
+                    TransactionData.AddTxToWallet(withdrawalTx, true);
+                    SCLogUtility.Log($"vBTC V2 Withdrawal Request TX Success. SCUID: {scUID}, TxHash: {withdrawalTx.Hash}", "VBTCService.RequestWithdrawal()");
+                    return (true, withdrawalTx.Hash);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Withdrawal Request TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Withdrawal Request Error: {ex.Message}", "VBTCService.RequestWithdrawal()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Complete withdrawal by coordinating FROST signing and broadcasting Bitcoin transaction
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <param name="withdrawalRequestHash">Hash of withdrawal request transaction</param>
+        /// <param name="btcTxHash">Bitcoin transaction hash (from FROST signing)</param>
+        /// <returns>Completion transaction hash</returns>
+        public static async Task<(bool, string)> CompleteWithdrawal(string scUID, string withdrawalRequestHash, string btcTxHash)
+        {
+            try
+            {
+                // Get contract and validate
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract == null)
+                {
+                    SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.CompleteWithdrawal()");
+                    return (false, $"vBTC V2 contract not found: {scUID}");
+                }
+
+                // Validate withdrawal status
+                if (vbtcContract.WithdrawalStatus != VBTCWithdrawalStatus.Requested)
+                {
+                    SCLogUtility.Log($"No active withdrawal request. Status: {vbtcContract.WithdrawalStatus}", "VBTCService.CompleteWithdrawal()");
+                    return (false, $"No active withdrawal request. Status: {vbtcContract.WithdrawalStatus}");
+                }
+
+                // Validate withdrawal request hash matches
+                if (vbtcContract.ActiveWithdrawalRequestHash != withdrawalRequestHash)
+                {
+                    SCLogUtility.Log($"Withdrawal request hash mismatch", "VBTCService.CompleteWithdrawal()");
+                    return (false, "Withdrawal request hash mismatch");
+                }
+
+                // Use validator address or first available account for transaction creation
+                string fromAddress = !string.IsNullOrEmpty(Globals.ValidatorAddress) ? Globals.ValidatorAddress : null;
+                if (string.IsNullOrEmpty(fromAddress))
+                {
+                    var accounts = AccountData.GetAccounts();
+                    if (accounts == null || !accounts.Any())
+                    {
+                        SCLogUtility.Log($"No accounts available to create completion transaction", "VBTCService.CompleteWithdrawal()");
+                        return (false, "No accounts available to create completion transaction");
+                    }
+                    fromAddress = accounts.First().Address;
+                }
+
+                var account = AccountData.GetSingleAccount(fromAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {fromAddress}", "VBTCService.CompleteWithdrawal()");
+                    return (false, $"Account not found: {fromAddress}");
+                }
+
+                // Create transaction data
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalComplete()",
+                    ContractUID = scUID,
+                    WithdrawalRequestHash = withdrawalRequestHash,
+                    BTCTransactionHash = btcTxHash,
+                    Amount = vbtcContract.ActiveWithdrawalAmount,
+                    Destination = vbtcContract.ActiveWithdrawalBTCDestination
+                });
+
+                // Build transaction
+                var completionTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = fromAddress,
+                    ToAddress = scUID,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(fromAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
+                    Data = txData
+                };
+
+                // Build and sign transaction
+                completionTx.Build();
+                var txHash = completionTx.Hash;
+                completionTx.Fee = FeeCalcService.CalculateTXFee(completionTx);
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {fromAddress}", "VBTCService.CompleteWithdrawal()");
+                    return (false, $"Private key was null for account {fromAddress}");
+                }
+
+                var signature = SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CompleteWithdrawal()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                }
+
+                completionTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(completionTx);
+                if (result.Item1)
+                {
+                    TransactionData.AddTxToWallet(completionTx, true);
+                    SCLogUtility.Log($"vBTC V2 Withdrawal Complete TX Success. SCUID: {scUID}, TxHash: {completionTx.Hash}, BTCTxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
+                    return (true, completionTx.Hash);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Withdrawal Complete TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CompleteWithdrawal()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Withdrawal Complete Error: {ex.Message}", "VBTCService.CompleteWithdrawal()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
     }
 }
