@@ -1335,24 +1335,61 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Get contract state
-                // var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(scUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Address and Smart Contract UID are required" });
 
-                // Calculate balance from state trei transactions
-                // If owner, add BTC chain balance from deposit address
+                // Get contract state from State Trei
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract not found or no state available" });
+                }
+
+                decimal balance = 0.0M;
+                bool isOwner = false;
+
+                // Calculate balance from State Trei tokenization transactions
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var transactions = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == address || x.ToAddress == address)
+                        .ToList();
+
+                    if (transactions.Any())
+                    {
+                        // Calculate net balance: sum of received - sum of sent
+                        var received = transactions.Where(x => x.ToAddress == address).Sum(x => x.Amount);
+                        var sent = transactions.Where(x => x.FromAddress == address).Sum(x => x.Amount);
+                        balance = received - sent;
+                    }
+                }
+
+                // Check if this address is the contract owner
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract != null && contract.OwnerAddress == address)
+                {
+                    isOwner = true;
+                }
+
+                // Get pending withdrawal amount (locked funds)
+                var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, scUID);
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Balance retrieved",
+                    Message = "Balance retrieved successfully",
                     Address = address,
                     SmartContractUID = scUID,
-                    Balance = 0.0M, // PLACEHOLDER
-                    IsOwner = false
+                    Balance = balance,
+                    AvailableBalance = balance - pendingWithdrawals,
+                    PendingWithdrawals = pendingWithdrawals,
+                    IsOwner = isOwner,
+                    TransactionCount = scState.SCStateTreiTokenizationTXes?.Count(x => x.FromAddress == address || x.ToAddress == address) ?? 0
                 });
             }
             catch (Exception ex)
             {
+                ErrorLogUtility.LogError($"GetVBTCBalance error: {ex.Message}", "VBTCController.GetVBTCBalance");
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
             }
         }
@@ -1368,20 +1405,69 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Get all vBTC V2 contracts for this address
-                // Calculate balances for each
+                if (string.IsNullOrEmpty(address))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Address is required" });
+
+                var contractBalances = new List<object>();
+                decimal totalBalance = 0.0M;
+
+                // Get all vBTC V2 contracts for this address from database
+                var contracts = VBTCContractV2.GetContractsByOwner(address);
+                if (contracts != null && contracts.Any())
+                {
+                    foreach (var contract in contracts)
+                    {
+                        // Get contract state from State Trei to calculate current balance
+                        var scState = SmartContractStateTrei.GetSmartContractState(contract.SmartContractUID);
+                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        {
+                            var transactions = scState.SCStateTreiTokenizationTXes
+                                .Where(x => x.FromAddress == address || x.ToAddress == address)
+                                .ToList();
+
+                            if (transactions.Any())
+                            {
+                                // Calculate balance
+                                var received = transactions.Where(x => x.ToAddress == address).Sum(x => x.Amount);
+                                var sent = transactions.Where(x => x.FromAddress == address).Sum(x => x.Amount);
+                                var contractBalance = received - sent;
+
+                                if (contractBalance > 0)
+                                {
+                                    var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, contract.SmartContractUID);
+
+                                    contractBalances.Add(new
+                                    {
+                                        SmartContractUID = contract.SmartContractUID,
+                                        DepositAddress = contract.DepositAddress,
+                                        Balance = contractBalance,
+                                        AvailableBalance = contractBalance - pendingWithdrawals,
+                                        PendingWithdrawals = pendingWithdrawals,
+                                        TransactionCount = transactions.Count,
+                                        IsOwner = contract.OwnerAddress == address,
+                                        WithdrawalStatus = contract.WithdrawalStatus.ToString()
+                                    });
+
+                                    totalBalance += contractBalance;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Balances retrieved",
+                    Message = $"Retrieved balances for {contractBalances.Count} contracts",
                     Address = address,
-                    TotalBalance = 0.0M, // PLACEHOLDER
-                    Contracts = new List<object>() // PLACEHOLDER
+                    TotalBalance = totalBalance,
+                    ContractCount = contractBalances.Count,
+                    Contracts = contractBalances
                 });
             }
             catch (Exception ex)
             {
+                ErrorLogUtility.LogError($"GetAllVBTCBalances error: {ex.Message}", "VBTCController.GetAllVBTCBalances");
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
             }
         }
