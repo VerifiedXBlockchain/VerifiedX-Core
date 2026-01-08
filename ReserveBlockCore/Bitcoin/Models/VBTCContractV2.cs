@@ -28,6 +28,11 @@ namespace ReserveBlockCore.Bitcoin.Models
         public string DKGProof { get; set; }              // Base64 + compressed
         public long ProofBlockHeight { get; set; }
         
+        // Threshold Adjustment Tracking (Phase 5: Recovery & Hardening)
+        public long LastValidatorActivityBlock { get; set; }  // Last successful validator operation
+        public int TotalRegisteredValidators { get; set; }    // Count at DKG time
+        public int OriginalThreshold { get; set; }            // Always 51
+        
         // Withdrawal State
         public VBTCWithdrawalStatus WithdrawalStatus { get; set; }
         public string? ActiveWithdrawalBTCDestination { get; set; }
@@ -149,6 +154,10 @@ namespace ReserveBlockCore.Bitcoin.Models
                                 RequiredThreshold = tknz.RequiredThreshold,
                                 DKGProof = tknz.DKGProof,
                                 ProofBlockHeight = tknz.ProofBlockHeight,
+                                // Phase 5: Initialize threshold tracking
+                                LastValidatorActivityBlock = tknz.ProofBlockHeight, // DKG completion is first activity
+                                TotalRegisteredValidators = tknz.ValidatorAddressesSnapshot?.Count ?? 0,
+                                OriginalThreshold = 51,
                                 WithdrawalStatus = VBTCWithdrawalStatus.None,
                                 WithdrawalHistory = new List<VBTCWithdrawalHistory>()
                             };

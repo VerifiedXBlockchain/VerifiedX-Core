@@ -475,15 +475,30 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, string.Empty, "No active validators available for FROST signing");
                 }
 
-                // Get threshold from contract
-                int threshold = vbtcContract.RequiredThreshold;
+                // Phase 5: Calculate DYNAMIC adjusted threshold based on validator availability
+                int adjustedThreshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(
+                    vbtcContract.TotalRegisteredValidators,
+                    validators.Count,
+                    vbtcContract.LastValidatorActivityBlock,
+                    Globals.LastBlock.Height
+                );
                 
-                // Calculate required validators (51% = threshold)
-                int requiredValidators = (int)Math.Ceiling(validators.Count * (threshold / 100.0));
+                // Calculate required validators based on adjusted threshold
+                int requiredValidators = VBTCThresholdCalculator.CalculateRequiredValidators(adjustedThreshold, validators.Count);
+                
+                // Log threshold information
+                string thresholdInfo = VBTCThresholdCalculator.GetThresholdExplanation(
+                    vbtcContract.TotalRegisteredValidators,
+                    validators.Count,
+                    vbtcContract.LastValidatorActivityBlock,
+                    Globals.LastBlock.Height
+                );
+                SCLogUtility.Log($"Threshold calculation: {thresholdInfo}", "VBTCService.CompleteWithdrawal()");
+                
                 if (validators.Count < requiredValidators)
                 {
-                    SCLogUtility.Log($"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators}");
+                    SCLogUtility.Log($"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)");
                 }
 
                 // Get withdrawal details from contract
@@ -507,7 +522,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     feeRate,
                     scUID,
                     validators,
-                    threshold
+                    adjustedThreshold
                 );
 
                 if (!btcResult.Success)
@@ -595,6 +610,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                 if (result.Item1)
                 {
                     TransactionData.AddTxToWallet(completionTx, true);
+                    
+                    // Phase 5: Update activity tracking after successful withdrawal
+                    vbtcContract.LastValidatorActivityBlock = Globals.LastBlock.Height;
+                    VBTCContractV2.UpdateContract(vbtcContract);
+                    SCLogUtility.Log($"Updated LastValidatorActivityBlock to {Globals.LastBlock.Height}", "VBTCService.CompleteWithdrawal()");
+                    
                     SCLogUtility.Log($"vBTC V2 Withdrawal Complete TX Success. SCUID: {scUID}, TxHash: {completionTx.Hash}, BTCTxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
                     return (true, completionTx.Hash, btcTxHash, string.Empty);
                 }
