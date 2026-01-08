@@ -899,10 +899,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Complete withdrawal by coordinating MPC signing and broadcasting BTC transaction
+        /// Complete withdrawal by coordinating FROST MPC signing and broadcasting Bitcoin transaction
         /// </summary>
         /// <param name="payload">Withdrawal completion details</param>
-        /// <returns>Bitcoin transaction hash if successful</returns>
+        /// <returns>Both VFX and Bitcoin transaction hashes if successful</returns>
         [HttpPost("CompleteWithdrawal")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         public async Task<string> CompleteWithdrawal([FromBody] VBTCWithdrawalCompletePayload payload)
@@ -915,68 +915,28 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
-                // TODO: FROST INTEGRATION - 2-ROUND SIGNING CEREMONY
-                // ============================================================
-                // 1. Retrieve withdrawal request from contract state - DONE (in VBTCService)
-                // 2. Validate request is in "Requested" status - DONE (in VBTCService)
-                // 3. Calculate BTC transaction fee - TODO
-                // 4. Create unsigned Bitcoin Taproot transaction - TODO
-                //    - Input: Taproot UTXO(s) from deposit address
-                //    - Output 1: Amount to destination address
-                //    - Output 2: Change back to deposit address (if any)
-                //    - Witness program: Taproot key path spend
-                // 5. Get active validators (require 51% for signing) - TODO
-                // 6. Compute transaction sighash (BIP 341) - TODO
-                // 7. FROST Signing Round 1: Nonce Generation - TODO
-                //    - Each validator generates random nonce
-                //    - Each validator computes nonce commitment
-                //    - Broadcast FROST_SIGN_R1 with commitments via SignalR
-                //    - Coordinator aggregates all commitments
-                // 8. FROST Signing Round 2: Signature Share Generation - TODO
-                //    - Each validator receives aggregated commitments
-                //    - Each validator computes partial Schnorr signature
-                //    - Broadcast FROST_SIGN_R2 with signature shares via SignalR
-                // 9. Signature Aggregation - TODO
-                //    - Coordinator receives all signature shares
-                //    - Aggregate into final Schnorr signature
-                //    - Validate signature against group public key
-                // 10. Complete Transaction - TODO
-                //     - Attach Schnorr signature to transaction witness
-                //     - Transaction now spends via Taproot key path
-                //     - Broadcast to Bitcoin network via Electrum
-                // 11. Monitor Confirmation - TODO
-                //     - Wait for 1 confirmation
-                //     - Update contract state to "Pending_BTC"
-                //     - After confirmation, update to "Completed"
-                // ============================================================
-                
-                // PLACEHOLDER: For now, we'll use a mock BTC transaction hash
-                // In production, steps 3-10 above should be implemented via FrostMPCService
-                string btcTxHash = $"MOCK_BTC_TX_{Guid.NewGuid().ToString().Substring(0, 16)}";
-
-                // Call service to create and broadcast completion transaction
+                // Call service to execute FROST withdrawal (builds, signs, broadcasts BTC TX) 
+                // and create VFX completion transaction
                 var result = await Services.VBTCService.CompleteWithdrawal(
                     payload.SmartContractUID,
-                    payload.WithdrawalRequestHash,
-                    btcTxHash
+                    payload.WithdrawalRequestHash
                 );
 
-                if (result.Item1)
+                if (result.Success)
                 {
                     return JsonConvert.SerializeObject(new
                     {
                         Success = true,
-                        Message = "vBTC V2 withdrawal completion transaction created successfully",
-                        VFXTransactionHash = result.Item2,
-                        BTCTransactionHash = btcTxHash,
+                        Message = "vBTC V2 withdrawal completed successfully with FROST signing",
+                        VFXTransactionHash = result.VFXTxHash,
+                        BTCTransactionHash = result.BTCTxHash,
                         Status = "Pending_BTC",
-                        SmartContractUID = payload.SmartContractUID,
-                        Note = "FROST signing ceremony integration pending"
+                        SmartContractUID = payload.SmartContractUID
                     });
                 }
                 else
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = result.Item2 });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.ErrorMessage });
                 }
             }
             catch (Exception ex)
@@ -1844,3 +1804,4 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
     #endregion
 }
+
