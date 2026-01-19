@@ -15,8 +15,8 @@
 ![GitHub last commit (branch)](https://img.shields.io/github/last-commit/VerifiedXBlockchain/VerifiedX-Core/testnet) 
 
 ## Dev Branch
-![GitHub commit activity (branch)](https://img.shields.io/github/commit-activity/m/VerifiedXBlockchain/VerifiedX-Core/dev)
-![GitHub last commit (branch)](https://img.shields.io/github/last-commit/VerifiedXBlockchain/VerifiedX-Core/dev) 
+![GitHub commit activity (branch)](https://img.shields.io/github/commit-activity/m/VerifiedXBlockchain/VerifiedX-Core/devnet)
+![GitHub last commit (branch)](https://img.shields.io/github/last-commit/VerifiedXBlockchain/VerifiedX-Core/devnet) 
 
 ##  Main Branch 
 ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/VerifiedXBlockchain/VerifiedX-Core)
