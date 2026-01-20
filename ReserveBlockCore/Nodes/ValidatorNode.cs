@@ -815,7 +815,7 @@ namespace ReserveBlockCore.Nodes
 
             foreach (var val in valNodeList)
             {
-                var source = new CancellationTokenSource(2000);
+                using var source = new CancellationTokenSource(2000);
                 await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
             }
         }

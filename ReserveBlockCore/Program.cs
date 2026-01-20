@@ -528,6 +528,9 @@ namespace ReserveBlockCore
             // HAL-071 Fix: Start mempool cleanup service to prevent unbounded growth
             MempoolCleanupService.Start();
 
+            MessageLocksCleanupService.Start();
+            BroadcastTrackingCleanupService.Start();
+
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL
