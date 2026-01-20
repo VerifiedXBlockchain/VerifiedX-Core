@@ -761,7 +761,39 @@ namespace ReserveBlockCore.P2P
                                 if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
                                     mempool.InsertSafe(txReceived);
-                                    _ = ValidatorNode.Broadcast("7777", txReceived, "SendTxToMempoolVals");
+                                    
+                                    // Broadcast guard: Only broadcast if we haven't broadcast this TX recently
+                                    var now = TimeUtil.GetTime();
+                                    var shouldBroadcast = false;
+                                    
+                                    if (Globals.TxLastBroadcastTime.TryGetValue(txReceived.Hash, out var lastBroadcastTime))
+                                    {
+                                        // Allow rebroadcast only if it's been > 30 seconds
+                                        if (now - lastBroadcastTime > 30)
+                                        {
+                                            shouldBroadcast = true;
+                                            Globals.TxLastBroadcastTime[txReceived.Hash] = now;
+                                        }
+                                        else
+                                        {
+                                            if (Globals.OptionalLogging)
+                                            {
+                                                LogUtility.Log($"TX {txReceived.Hash.Substring(0, 8)}... skip broadcast (last: {now - lastBroadcastTime}s ago)", 
+                                                    "BroadcastThrottle");
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // First time, broadcast it
+                                        shouldBroadcast = true;
+                                        Globals.TxLastBroadcastTime.TryAdd(txReceived.Hash, now);
+                                    }
+                                    
+                                    if (shouldBroadcast)
+                                    {
+                                        _ = ValidatorNode.Broadcast("7777", txReceived, "SendTxToMempoolVals");
+                                    }
 
                                     return "ATMP";//added to mempool
                                 }
@@ -839,9 +871,41 @@ namespace ReserveBlockCore.P2P
                             if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                             {
                                 mempool.InsertSafe(txReceived);
+                                
+                                // Broadcast guard: Only broadcast if we haven't broadcast this TX recently
                                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                 {
-                                    _ = ValidatorNode.Broadcast("7777", txReceived, "SendTxToMempoolVals");
+                                    var now = TimeUtil.GetTime();
+                                    var shouldBroadcast = false;
+                                    
+                                    if (Globals.TxLastBroadcastTime.TryGetValue(txReceived.Hash, out var lastBroadcastTime))
+                                    {
+                                        // Allow rebroadcast only if it's been > 30 seconds
+                                        if (now - lastBroadcastTime > 30)
+                                        {
+                                            shouldBroadcast = true;
+                                            Globals.TxLastBroadcastTime[txReceived.Hash] = now;
+                                        }
+                                        else
+                                        {
+                                            if (Globals.OptionalLogging)
+                                            {
+                                                LogUtility.Log($"TX {txReceived.Hash.Substring(0, 8)}... skip broadcast (last: {now - lastBroadcastTime}s ago)", 
+                                                    "BroadcastThrottle");
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // First time, broadcast it
+                                        shouldBroadcast = true;
+                                        Globals.TxLastBroadcastTime.TryAdd(txReceived.Hash, now);
+                                    }
+                                    
+                                    if (shouldBroadcast)
+                                    {
+                                        _ = ValidatorNode.Broadcast("7777", txReceived, "SendTxToMempoolVals");
+                                    }
                                 } //sends tx to connected peers
                                 return "ATMP";//added to mempool
                             }

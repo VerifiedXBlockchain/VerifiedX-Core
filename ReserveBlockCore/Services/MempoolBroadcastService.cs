@@ -14,7 +14,7 @@ namespace ReserveBlockCore.Services
         {
             while(true)
             {
-                var delay = Task.Delay(1000);
+                var delay = Task.Delay(5000); // Changed from 1000ms to 5000ms to reduce broadcast frequency
                 if (Globals.StopAllTimers && !Globals.IsChainSynced)
                 {
                     await delay;
@@ -43,6 +43,9 @@ namespace ReserveBlockCore.Services
                                     {
                                         RebroadcastDict[mempoolEntry.Hash] += 1;
                                         
+                                        // Update last broadcast time before rebroadcasting
+                                        Globals.TxLastBroadcastTime[mempoolEntry.Hash] = TimeUtil.GetTime();
+                                        
                                         if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                         {
                                             await P2PValidatorClient.SendTXMempool(mempoolEntry);//send directly to adjs
@@ -54,6 +57,9 @@ namespace ReserveBlockCore.Services
                                 else
                                 {
                                     RebroadcastDict.TryAdd(mempoolEntry.Hash, 1);
+                                    
+                                    // Update last broadcast time before rebroadcasting
+                                    Globals.TxLastBroadcastTime[mempoolEntry.Hash] = TimeUtil.GetTime();
                                     
                                     if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                     {
@@ -70,6 +76,7 @@ namespace ReserveBlockCore.Services
                 finally
                 {
                     MempoolBroadcastServiceLock.Release();
+                    
                     //clear old cache
                     var rebroadcastList = RebroadcastDict.Keys.ToList();
                     if(rebroadcastList.Any())
@@ -90,6 +97,42 @@ namespace ReserveBlockCore.Services
                                 catch
                                 { }
                             }
+                        }
+                    }
+                    
+                    // Cleanup TxLastBroadcastTime for TXs no longer in mempool or very old
+                    var broadcastList = Globals.TxLastBroadcastTime.Keys.ToList();
+                    if(broadcastList.Any())
+                    {
+                        var mempoolList = TransactionData.GetMempool();
+                        var currentTime = TimeUtil.GetTime();
+                        
+                        foreach(var hash in broadcastList)
+                        {
+                            try
+                            {
+                                // Remove if no longer in mempool
+                                if(mempoolList != null)
+                                {
+                                    var mempoolTx = mempoolList.Where(x => x.Hash == hash).FirstOrDefault();
+                                    if (mempoolTx == null)
+                                    {
+                                        Globals.TxLastBroadcastTime.TryRemove(hash, out _);
+                                        continue;
+                                    }
+                                }
+                                
+                                // Remove if older than 10 minutes (600 seconds)
+                                if (Globals.TxLastBroadcastTime.TryGetValue(hash, out var lastTime))
+                                {
+                                    if (currentTime - lastTime > 600)
+                                    {
+                                        Globals.TxLastBroadcastTime.TryRemove(hash, out _);
+                                    }
+                                }
+                            }
+                            catch
+                            { }
                         }
                     }
                 }

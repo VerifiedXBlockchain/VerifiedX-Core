@@ -618,7 +618,39 @@ namespace ReserveBlockCore.Nodes
                                 if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
                                     mempool.InsertSafe(transaction);
-                                    _ = Broadcast("7777", transaction, "SendTxToMempoolVals");
+                                    
+                                    // Broadcast guard: Only broadcast if we haven't broadcast this TX recently
+                                    var now = TimeUtil.GetTime();
+                                    var shouldBroadcast = false;
+                                    
+                                    if (Globals.TxLastBroadcastTime.TryGetValue(transaction.Hash, out var lastBroadcastTime))
+                                    {
+                                        // Allow rebroadcast only if it's been > 30 seconds
+                                        if (now - lastBroadcastTime > 30)
+                                        {
+                                            shouldBroadcast = true;
+                                            Globals.TxLastBroadcastTime[transaction.Hash] = now;
+                                        }
+                                        else
+                                        {
+                                            if (Globals.OptionalLogging)
+                                            {
+                                                LogUtility.Log($"TX {transaction.Hash.Substring(0, 8)}... skip broadcast (last: {now - lastBroadcastTime}s ago)", 
+                                                    "BroadcastThrottle");
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // First time, broadcast it
+                                        shouldBroadcast = true;
+                                        Globals.TxLastBroadcastTime.TryAdd(transaction.Hash, now);
+                                    }
+                                    
+                                    if (shouldBroadcast)
+                                    {
+                                        _ = Broadcast("7777", transaction, "SendTxToMempoolVals");
+                                    }
 
                                 }
                             }

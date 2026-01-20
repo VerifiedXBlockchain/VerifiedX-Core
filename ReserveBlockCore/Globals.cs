@@ -378,6 +378,7 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, Transaction> BroadcastedTrxDict = new ConcurrentDictionary<string, Transaction>(); // TX Hash
         public static ConcurrentDictionary<string, TransactionBroadcast> ConsensusBroadcastedTrxDict = new ConcurrentDictionary<string, TransactionBroadcast>(); //TX Hash
         public static ConcurrentDictionary<string, DuplicateValidators> DuplicatesBroadcastedDict= new ConcurrentDictionary<string, DuplicateValidators>();
+        public static ConcurrentDictionary<string, long> TxLastBroadcastTime = new ConcurrentDictionary<string, long>(); // TX Hash -> Unix timestamp of last broadcast
 
         #endregion        
 
