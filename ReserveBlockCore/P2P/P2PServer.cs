@@ -486,11 +486,12 @@ namespace ReserveBlockCore.P2P
 
                                 mempool.InsertSafe(txReceived);
                                 
-                                // Broadcast guard: Only broadcast if we haven't broadcast this TX recently
+                                // HAL-16 Fix: Broadcast guard - check if we should broadcast
+                                // Store broadcast decision but DON'T execute yet (release semaphore first)
+                                bool shouldBroadcast = false;
                                 if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                 {
                                     var now = TimeUtil.GetTime();
-                                    var shouldBroadcast = false;
                                     
                                     if (Globals.TxLastBroadcastTime.TryGetValue(txReceived.Hash, out var lastBroadcastTime))
                                     {
@@ -515,11 +516,14 @@ namespace ReserveBlockCore.P2P
                                         shouldBroadcast = true;
                                         Globals.TxLastBroadcastTime.TryAdd(txReceived.Hash, now);
                                     }
-                                    
-                                    if (shouldBroadcast)
-                                    {
-                                        _ = ValidatorNode.Broadcast("7777", txReceived, "SendTxToMempoolVals");
-                                    }
+                                }
+                                
+                                // HAL-16 Fix: Schedule broadcast AFTER semaphore release (fire-and-forget)
+                                // This prevents broadcasts from blocking TX processing or block reception
+                                if (shouldBroadcast)
+                                {
+                                    var txToBroadcast = txReceived; // Capture for closure
+                                    _ = Task.Run(() => ValidatorNode.Broadcast("7777", txToBroadcast, "SendTxToMempoolVals"));
                                 }
                                 
                                 return "ATMP";//added to mempool
@@ -627,11 +631,12 @@ namespace ReserveBlockCore.P2P
 
                                 mempool.InsertSafe(txReceived);
                                 
-                                // Broadcast guard: Only broadcast if we haven't broadcast this TX recently
+                                // HAL-16 Fix: Broadcast guard - check if we should broadcast
+                                // Store broadcast decision but DON'T execute yet (release semaphore first)
+                                bool shouldBroadcast = false;
                                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                 {
                                     var now = TimeUtil.GetTime();
-                                    var shouldBroadcast = false;
                                     
                                     if (Globals.TxLastBroadcastTime.TryGetValue(txReceived.Hash, out var lastBroadcastTime))
                                     {
@@ -656,12 +661,16 @@ namespace ReserveBlockCore.P2P
                                         shouldBroadcast = true;
                                         Globals.TxLastBroadcastTime.TryAdd(txReceived.Hash, now);
                                     }
-                                    
-                                    if (shouldBroadcast)
-                                    {
-                                        _ = ValidatorNode.Broadcast("7777", txReceived, "SendTxToMempoolVals");
-                                    }
-                                } //sends tx to connected peers
+                                }
+                                
+                                // HAL-16 Fix: Schedule broadcast AFTER semaphore release (fire-and-forget)
+                                // This prevents broadcasts from blocking TX processing or block reception
+                                if (shouldBroadcast)
+                                {
+                                    var txToBroadcast = txReceived; // Capture for closure
+                                    _ = Task.Run(() => ValidatorNode.Broadcast("7777", txToBroadcast, "SendTxToMempoolVals"));
+                                }
+                                
                                 return "ATMP";//added to mempool
                             }
                             else

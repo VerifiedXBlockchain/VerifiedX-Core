@@ -28,6 +28,11 @@ namespace ReserveBlockCore.Nodes
         private static bool ActiveValidatorRequestDone = false;
         private static bool AlertValidatorsOfStatusDone = false;
         static SemaphoreSlim NotifyExplorerLock = new SemaphoreSlim(1, 1);
+        
+        // HAL-16 Fix: Throttle concurrent broadcasts to prevent thread pool exhaustion
+        // Limits to 5 concurrent broadcasts (50 max SignalR connections if 10 validators)
+        private static SemaphoreSlim BroadcastSemaphore = new SemaphoreSlim(5, 5);
+        
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
         const int PROOF_COLLECTION_TIME = 7000; // 7 seconds
         const int APPROVAL_WINDOW = 12000;      // 12 seconds
@@ -813,10 +818,35 @@ namespace ReserveBlockCore.Nodes
 
             if (valNodeList == null || valNodeList.Count() == 0) return;
 
-            foreach (var val in valNodeList)
+            // HAL-16 Fix: Throttle broadcasts to prevent thread pool exhaustion
+            await BroadcastSemaphore.WaitAsync();
+            try
             {
-                using var source = new CancellationTokenSource(2000);
-                await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
+                // HAL-16 Fix: Parallel broadcasts instead of sequential
+                // Reduces broadcast time from 20s (10 validators × 2s) to 2s (all in parallel)
+                var broadcastTasks = valNodeList.Select(async val =>
+                {
+                    try
+                    {
+                        using var source = new CancellationTokenSource(2000);
+                        await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log but don't fail entire broadcast if one validator fails
+                        if (Globals.OptionalLogging)
+                        {
+                            LogUtility.Log($"Failed to broadcast to validator: {ex.Message}", "Broadcast");
+                        }
+                    }
+                }).ToList();
+
+                // Wait for all broadcasts to complete in parallel
+                await Task.WhenAll(broadcastTasks);
+            }
+            finally
+            {
+                BroadcastSemaphore.Release();
             }
         }
 
