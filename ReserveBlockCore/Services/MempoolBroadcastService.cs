@@ -27,12 +27,14 @@ namespace ReserveBlockCore.Services
                 {
                     await StartupService.ClearStaleMempool();
 
-                    var currentTimeMinusFiveMins = TimeUtil.GetTime(-20);
+                    var timeCheckForStartBroadcast = TimeUtil.GetTime(-20);
+                    var currentTimeMinusTwoMins = TimeUtil.GetTime(0,-2);
 
                     var mempoolList = TransactionData.GetMempool();
                     if (mempoolList != null)
                     {
-                        var mempool = mempoolList.Where(x => x.Timestamp <= currentTimeMinusFiveMins).ToList();
+                        var mempool = mempoolList.Where(x => x.Timestamp <= timeCheckForStartBroadcast).ToList();
+                        var rebroadcastMempool = mempoolList.Where(x => x.Timestamp <= currentTimeMinusTwoMins).ToList();
                         if (mempool.Count() > 0)
                         {
                             foreach (var mempoolEntry in mempool)
@@ -45,11 +47,7 @@ namespace ReserveBlockCore.Services
                                         
                                         // Update last broadcast time before rebroadcasting
                                         Globals.TxLastBroadcastTime[mempoolEntry.Hash] = TimeUtil.GetTime();
-                                        
-                                        if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
-                                        {
-                                            await P2PValidatorClient.SendTXMempool(mempoolEntry);//send directly to adjs
-                                        }
+
                                         await P2PClient.SendTXMempool(mempoolEntry);//send out to mempool
                                         
                                     }
@@ -60,15 +58,45 @@ namespace ReserveBlockCore.Services
                                     
                                     // Update last broadcast time before rebroadcasting
                                     Globals.TxLastBroadcastTime[mempoolEntry.Hash] = TimeUtil.GetTime();
-                                    
-                                    if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
-                                    {
-                                        await P2PValidatorClient.SendTXMempool(mempoolEntry);//send directly to adjs
-                                    }
-                                        
+   
                                     await P2PClient.SendTXMempool(mempoolEntry);//send out to mempool
 
                                 }
+
+                                await Task.Delay(100); // Slight delay to prevent network flooding;
+                            }
+                        }
+
+                        //rebroadcast
+                        if (rebroadcastMempool.Count() > 0)
+                        {
+                            foreach (var mempoolEntry in rebroadcastMempool)
+                            {
+                                if (RebroadcastDict.TryGetValue(mempoolEntry.Hash, out var rebr))
+                                {
+                                    if (rebr <= 6)
+                                    {
+                                        RebroadcastDict[mempoolEntry.Hash] += 1;
+
+                                        // Update last broadcast time before rebroadcasting
+                                        Globals.TxLastBroadcastTime[mempoolEntry.Hash] = TimeUtil.GetTime();
+
+                                        await P2PClient.SendTXMempool(mempoolEntry);//send out to mempool
+
+                                    }
+                                }
+                                else
+                                {
+                                    RebroadcastDict.TryAdd(mempoolEntry.Hash, 1);
+
+                                    // Update last broadcast time before rebroadcasting
+                                    Globals.TxLastBroadcastTime[mempoolEntry.Hash] = TimeUtil.GetTime();
+
+                                    await P2PClient.SendTXMempool(mempoolEntry);//send out to mempool
+
+                                }
+
+                                await Task.Delay(100); // Slight delay to prevent network flooding;
                             }
                         }
                     }

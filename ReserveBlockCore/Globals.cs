@@ -355,7 +355,7 @@ namespace ReserveBlockCore
         public static long GlobalBufferCost = 0;
         public const int MaxGlobalConnections = 500; // Maximum concurrent connections across all IPs
         public const long MaxGlobalBufferCost = 100000000; // 100MB total buffer across all IPs
-        public const int MaxConnectionsPerIP = 20; // Per-IP connection limit
+        public const int MaxConnectionsPerIP = 200; // Per-IP connection limit
         public const int MaxBufferCostPerIP = 5000000; // 5MB per-IP buffer limit
 
         #endregion

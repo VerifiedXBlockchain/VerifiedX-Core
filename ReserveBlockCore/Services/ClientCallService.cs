@@ -92,12 +92,12 @@ namespace ReserveBlockCore.Services
             {
                 try
                 {
-                    var source = new CancellationTokenSource(2000);
+                    var source = new CancellationTokenSource(10000);
                     await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
                 }
                 catch(Exception ex) 
                 {
-                    ErrorLogUtility.LogError($"Error sending tx: {ex}", "ClientCallService.Broadcast");
+                    ErrorLogUtility.LogError($"Method Failure: {method} | Error: {ex}", "ClientCallService.Broadcast");
                 }
                 
             }
