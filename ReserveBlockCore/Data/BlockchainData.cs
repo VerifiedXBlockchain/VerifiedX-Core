@@ -51,7 +51,7 @@ namespace ReserveBlockCore.Data
                 StateData.CreateGenesisWorldTrei(block);
 
                 // clear mempool
-                trxPool.DeleteAllSafe();
+                await trxPool.DeleteAllSafeAsync();
 
                 DbContext.Commit();
             }
@@ -737,7 +737,7 @@ namespace ReserveBlockCore.Data
                     _ = ValidatorService.UpdateActiveValidators(block);
 
                     //insert block to db
-                    blocks.InsertSafe(block);
+                    await blocks.InsertSafeAsync(block);
 
                     if (notifyCLI)
                     {

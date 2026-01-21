@@ -210,7 +210,7 @@ namespace ReserveBlockCore.Data
                                         if (token != null)
                                         {
                                             token.Balance = balance;
-                                            tokenDb.UpdateSafe(token);
+                                            await tokenDb.UpdateSafeAsync(token);
                                         }
                                     }
                                 }
@@ -371,7 +371,7 @@ namespace ReserveBlockCore.Data
 			//This is checking in the event the user is restoring an account, and not creating a brand new one.
 			if(accountCheck == null)
             {
-				accountList.InsertSafe(account);
+				await accountList.InsertSafeAsync(account);
      //           if (Globals.IsWalletEncrypted == true)
      //           {
 					//var result = await WalletEncryptionService.EncryptWallet(account, true);
@@ -382,7 +382,7 @@ namespace ReserveBlockCore.Data
 				//do nothing as account is already in table. They are attempting to restore a key that already exist.
             }
 		}
-	public static void UpdateLocalBalance(string address, decimal amount)
+	public static async Task UpdateLocalBalance(string address, decimal amount)
         {
 		var accountList = GetAccounts();
 		var localAccount = accountList.FindOne(x => x.Address == address);
@@ -400,9 +400,9 @@ namespace ReserveBlockCore.Data
 
             localAccount.Balance -= amount;
 
-		accountList.UpdateSafe(localAccount);
+		await accountList.UpdateSafeAsync(localAccount);
 	}
-	public static void UpdateLocalBalanceSub(string address, decimal amount)
+	public static async Task UpdateLocalBalanceSub(string address, decimal amount)
 	{
 		var accountList = GetAccounts();
 		var localAccount = accountList.FindOne(x => x.Address == address);
@@ -417,11 +417,11 @@ namespace ReserveBlockCore.Data
 		
 		localAccount.Balance += amount;
 
-		accountList.UpdateSafe(localAccount);
-		accountList.UpdateSafe(localAccount);
+		await accountList.UpdateSafeAsync(localAccount);
+		await accountList.UpdateSafeAsync(localAccount);
 	}
 
-	public static void UpdateLocalBalanceAdd(string address, decimal amount, bool isReserveSend = false)
+	public static async Task UpdateLocalBalanceAdd(string address, decimal amount, bool isReserveSend = false)
 	{
 		var accountList = GetAccounts();
 		var localAccount = accountList.FindOne(x => x.Address == address);
@@ -447,7 +447,7 @@ namespace ReserveBlockCore.Data
             }
 		
 
-		accountList.UpdateSafe(localAccount);
+		await accountList.UpdateSafeAsync(localAccount);
 	}
 		public static LiteDB.ILiteCollection<Account> GetAccounts()
 		{

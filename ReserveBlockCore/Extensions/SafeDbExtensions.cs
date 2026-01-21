@@ -21,6 +21,7 @@ namespace ReserveBlockCore.Extensions
             return DbSemaphore;
         }
 
+        // HAL-16 Deadlock Fix: Original synchronous methods kept for backward compatibility
         public static S Command<S, T>(this ILiteCollection<T> col, Func<S> cmd)
         {
             SemaphoreSlim slim = null;
@@ -55,6 +56,44 @@ namespace ReserveBlockCore.Extensions
             }
 
             try { slim.Release(); } catch { }            
+        }
+
+        // HAL-16 Deadlock Fix: New async methods that use WaitAsync() instead of Wait()
+        // This prevents thread pool starvation and allows blocks to process during TX load
+        public static async Task<S> CommandAsync<S, T>(this ILiteCollection<T> col, Func<S> cmd)
+        {
+            SemaphoreSlim slim = null;
+            S Result = default;
+            try
+            {
+                slim = col.GetSlim();
+                await slim.WaitAsync();  // ✅ Returns thread to pool while waiting
+                Result = cmd();
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-1");                
+            }
+
+            try { slim?.Release(); } catch { }            
+            return Result;
+        }
+
+        public static async Task CommandAsync<T>(this ILiteCollection<T> col, Action cmd)
+        {
+            SemaphoreSlim slim = null;
+            try
+            {
+                slim = col.GetSlim();
+                await slim.WaitAsync();  // ✅ Returns thread to pool while waiting
+                cmd();
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-2");
+            }
+
+            try { slim?.Release(); } catch { }            
         }
 
         //
@@ -308,6 +347,99 @@ namespace ReserveBlockCore.Extensions
         public static int DeleteManySafe<T>(this ILiteCollection<T> col, Expression<Func<T, bool>> predicate)
         {
             return Command(col, () => col.DeleteMany(predicate));
-        }  
+        }
+
+        // HAL-16 Deadlock Fix: Async variants of all Safe methods
+        // These use CommandAsync internally to prevent thread pool starvation
+
+        public static async Task<bool> UpsertSafeAsync<T>(this ILiteCollection<T> col, T entity)
+        {
+            return await CommandAsync(col, () => col.Upsert(entity));
+        }
+
+        public static async Task<int> UpsertSafeAsync<T>(this ILiteCollection<T> col, IEnumerable<T> entities)
+        {
+            return await CommandAsync(col, () => col.Upsert(entities));
+        }
+
+        public static async Task<bool> UpsertSafeAsync<T>(this ILiteCollection<T> col, BsonValue id, T entity)
+        {
+            return await CommandAsync(col, () => col.Upsert(id, entity));
+        }
+
+        public static async Task<bool> UpdateSafeAsync<T>(this ILiteCollection<T> col, T entity)
+        {
+            return await CommandAsync(col, () => col.Update(entity));
+        }
+
+        public static async Task<bool> UpdateSafeAsync<T>(this ILiteCollection<T> col, BsonValue id, T entity)
+        {
+            return await CommandAsync(col, () => col.Update(id, entity));
+        }
+
+        public static async Task<int> UpdateSafeAsync<T>(this ILiteCollection<T> col, IEnumerable<T> entities)
+        {
+            return await CommandAsync(col, () => col.Update(entities));
+        }
+
+        public static async Task<int> UpdateManySafeAsync<T>(this ILiteCollection<T> col, BsonExpression transform, BsonExpression predicate)
+        {
+            return await CommandAsync(col, () => col.UpdateMany(transform, predicate));
+        }
+
+        public static async Task<int> UpdateManySafeAsync<T>(this ILiteCollection<T> col, Expression<Func<T, T>> extend, Expression<Func<T, bool>> predicate)
+        {
+            return await CommandAsync(col, () => col.UpdateMany(extend, predicate));
+        }
+
+        public static async Task<BsonValue> InsertSafeAsync<T>(this ILiteCollection<T> col, T entity)
+        {
+            return await CommandAsync(col, () => col.Insert(entity));
+        }
+
+        public static async Task InsertSafeAsync<T>(this ILiteCollection<T> col, BsonValue id, T entity)
+        {
+            await CommandAsync(col, () => col.Insert(id, entity));
+        }
+
+        public static async Task<int> InsertSafeAsync<T>(this ILiteCollection<T> col, IEnumerable<T> entities)
+        {
+            return await CommandAsync(col, () => col.Insert(entities));
+        }
+
+        public static async Task<int> InsertBulkSafeAsync<T>(this ILiteCollection<T> col, IEnumerable<T> entities, int batchSize = 5000)
+        {
+            return await CommandAsync(col, () => col.InsertBulk(entities, batchSize));
+        }
+
+        public static async Task<bool> DeleteSafeAsync<T>(this ILiteCollection<T> col, BsonValue id)
+        {
+            return await CommandAsync(col, () => col.Delete(id));
+        }
+
+        public static async Task<int> DeleteAllSafeAsync<T>(this ILiteCollection<T> col)
+        {
+            return await CommandAsync(col, () => col.DeleteAll());
+        }
+
+        public static async Task<int> DeleteManySafeAsync<T>(this ILiteCollection<T> col, BsonExpression predicate)
+        {
+            return await CommandAsync(col, () => col.DeleteMany(predicate));
+        }
+
+        public static async Task<int> DeleteManySafeAsync<T>(this ILiteCollection<T> col, string predicate, BsonDocument parameters)
+        {
+            return await CommandAsync(col, () => col.DeleteMany(predicate, parameters));
+        }
+
+        public static async Task<int> DeleteManySafeAsync<T>(this ILiteCollection<T> col, string predicate, params BsonValue[] args)
+        {
+            return await CommandAsync(col, () => col.DeleteMany(predicate, args));
+        }
+
+        public static async Task<int> DeleteManySafeAsync<T>(this ILiteCollection<T> col, Expression<Func<T, bool>> predicate)
+        {
+            return await CommandAsync(col, () => col.DeleteMany(predicate));
+        }
     }
 }
