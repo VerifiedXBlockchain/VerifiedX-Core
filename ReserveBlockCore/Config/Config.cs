@@ -577,7 +577,7 @@ namespace ReserveBlockCore.Config
 
 			if(!fileExist)
             {
-				if (Globals.IsTestNet == false)
+				if (Globals.IsTestNet == false) //mainnet
 				{
 					File.AppendAllText(path + "config.txt", "Port=3338");
 					File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=7292");
@@ -586,12 +586,22 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                 }
-                else
+                else if(Globals.IsCustomTestNet) //devnet
                 {
-					File.AppendAllText(path + "config.txt", "Port=13338");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=17292");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=true");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
+                    File.AppendAllText(path + "config.txt", "Port=23338");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=27292");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNetName=marigold");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                }
+                else //testnet
+                {
+                    File.AppendAllText(path + "config.txt", "Port=13338");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=17292");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                 }

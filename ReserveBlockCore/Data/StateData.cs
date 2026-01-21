@@ -20,7 +20,7 @@ namespace ReserveBlockCore.Data
     public class StateData
     {
         
-        public static void CreateGenesisWorldTrei(Block block)
+        public static async Task CreateGenesisWorldTrei(Block block)
         {
             var trxList = block.Transactions.ToList();
             var accStTrei = new List<AccountStateTrei>();
@@ -44,9 +44,9 @@ namespace ReserveBlockCore.Data
             };
 
             var wTrei = DbContext.DB_WorldStateTrei.GetCollection<WorldTrei>(DbContext.RSRV_WSTATE_TREI);
-            wTrei.InsertSafe(worldTrei);
+            await wTrei.InsertSafeAsync(worldTrei);
             var aTrei = DbContext.DB_AccountStateTrei.GetCollection<AccountStateTrei>(DbContext.RSRV_ASTATE_TREI);
-            aTrei.InsertBulkSafe(accStTrei);
+            await aTrei.InsertBulkSafeAsync(accStTrei);
         }
 
         public static async Task UpdateTreis(Block block)
@@ -74,7 +74,7 @@ namespace ReserveBlockCore.Data
                             StateRoot = block.StateRoot
                         };
 
-                        accStTrei.InsertSafe(acctStateTreiFrom);
+                        await accStTrei.InsertSafeAsync(acctStateTreiFrom);
                     }
                     else
                     {
@@ -92,7 +92,7 @@ namespace ReserveBlockCore.Data
                                     StateRoot = block.StateRoot
                                 };
 
-                                accStTrei.InsertSafe(acctStateTreiFrom);
+                                await accStTrei.InsertSafeAsync(acctStateTreiFrom);
 
                                 from = GetSpecificAccountStateTrei(tx.FromAddress);
 
@@ -106,7 +106,7 @@ namespace ReserveBlockCore.Data
                                 from.StateRoot = block.StateRoot;
                                 from.Balance -= (tx.Amount + tx.Fee);
 
-                                accStTrei.UpdateSafe(from);
+                                await accStTrei.UpdateSafeAsync(from);
                             }
                             else
                             {
@@ -139,7 +139,7 @@ namespace ReserveBlockCore.Data
                                 if(tx.TransactionType == TransactionType.TX)
                                     from.LockedBalance += tx.Amount;
 
-                                accStTrei.UpdateSafe(from);
+                                await accStTrei.UpdateSafeAsync(from);
                             }
                             
                         }
@@ -174,7 +174,7 @@ namespace ReserveBlockCore.Data
                                     acctStateTreiTo.LockedBalance += tx.Amount;
                                 }
 
-                                accStTrei.InsertSafe(acctStateTreiTo);
+                                await accStTrei.InsertSafeAsync(acctStateTreiTo);
                             }
                             else
                             {
@@ -188,7 +188,7 @@ namespace ReserveBlockCore.Data
                                     to.LockedBalance += tx.Amount;
                                 }
                                 
-                                accStTrei.UpdateSafe(to);
+                                await accStTrei.UpdateSafeAsync(to);
                             }
                         }
                     }
@@ -511,7 +511,7 @@ namespace ReserveBlockCore.Data
             Globals.TreisUpdating = false;
         }
 
-        public static void UpdateTreiFromReserve(List<ReserveTransactions> txList)
+        public static async Task UpdateTreiFromReserve(List<ReserveTransactions> txList)
         {
             var accStTrei = GetAccountStateTrei();
             var rtxDb = ReserveTransactions.GetReserveTransactionsDb();
@@ -545,7 +545,7 @@ namespace ReserveBlockCore.Data
                                     ErrorLogUtility.LogError($"UpdateTreiFromReserve clamping LockedBalance to 0 for {from.Key} - attempted to subtract {rtx.Amount} from {from.LockedBalance}", "StateData.UpdateTreiFromReserve()");
                                     from.LockedBalance = 0;
                                 }
-                                accStTrei.UpdateSafe(from);
+                                await accStTrei.UpdateSafeAsync(from);
                             }
 
                         }
@@ -576,7 +576,7 @@ namespace ReserveBlockCore.Data
                                             to.LockedBalance = 0;
                                         }
 
-                                        accStTrei.UpdateSafe(to);
+                                        await accStTrei.UpdateSafeAsync(to);
                                     }
                                 }
                             }
@@ -633,14 +633,14 @@ namespace ReserveBlockCore.Data
                     if (rtxRec != null)
                     {
                         rtx.ReserveTransactionStatus = ReserveTransactionStatus.Confirmed;
-                        rtxDb.UpdateSafe(rtx);
+                        await rtxDb.UpdateSafeAsync(rtx);
                     }
 
                     var txRec = TransactionData.GetTxByHash(hash);
                     if (txRec != null)
                     {
                         txRec.TransactionStatus = TransactionStatus.Success;
-                        txDb.UpdateSafe(txRec);
+                        await txDb.UpdateSafeAsync(txRec);
                     }
                 }
                 catch {  }
@@ -681,7 +681,7 @@ namespace ReserveBlockCore.Data
                 return account;
             }
         }
-        private static void RegisterReserveAccount(Transaction tx)
+        private static async Task RegisterReserveAccount(Transaction tx)
         {
             try
             {
@@ -698,7 +698,7 @@ namespace ReserveBlockCore.Data
                             if (reserveAccountLeaf != null)
                             {
                                 reserveAccountLeaf.RecoveryAccount = recoveryAddress;
-                                stateDB.UpdateSafe(reserveAccountLeaf);
+                                await stateDB.UpdateSafeAsync(reserveAccountLeaf);
                             }
                         }
                     }
@@ -707,7 +707,7 @@ namespace ReserveBlockCore.Data
             catch { }
         }
 
-        private static void CallBackReserveAccountTx(string? callBackHash)
+        private static async Task CallBackReserveAccountTx(string? callBackHash)
         {
             try
             {
@@ -746,7 +746,7 @@ namespace ReserveBlockCore.Data
                                 }
                                 stateTreiFrom.Balance += rTX.Amount;
                                 if (stDb != null)
-                                    stDb.UpdateSafe(stateTreiFrom);
+                                    await stDb.UpdateSafeAsync(stateTreiFrom);
 
                                 var rLocalAccount = ReserveAccount.GetReserveAccountSingle(stateTreiFrom.Key);
                                 if (rLocalAccount != null)
@@ -764,7 +764,7 @@ namespace ReserveBlockCore.Data
                                     }
                                     rLocalAccount.AvailableBalance += rTX.Amount;
                                     if (rDb != null)
-                                        rDb.UpdateSafe(rLocalAccount);
+                                        await rDb.UpdateSafeAsync(rLocalAccount);
                                 }
                             }
                             if (stateTreiTo != null)
@@ -781,7 +781,7 @@ namespace ReserveBlockCore.Data
                                     stateTreiTo.LockedBalance = 0;
                                 }
                                 if (stDb != null)
-                                    stDb.UpdateSafe(stateTreiTo);
+                                    await stDb.UpdateSafeAsync(stateTreiTo);
 
                                 var localAccount = AccountData.GetSingleAccount(stateTreiTo.Key);
                                 if (localAccount != null)
@@ -798,7 +798,7 @@ namespace ReserveBlockCore.Data
                                         localAccount.LockedBalance = 0;
                                     }
                                     if (accountDB != null)
-                                        accountDB.UpdateSafe(localAccount);
+                                        await accountDB.UpdateSafeAsync(localAccount);
                                 }
 
                                 var rLocalAccount = ReserveAccount.GetReserveAccountSingle(stateTreiTo.Key);
@@ -816,7 +816,7 @@ namespace ReserveBlockCore.Data
                                         rLocalAccount.LockedBalance = 0;
                                     }
                                     if (rDb != null)
-                                        rDb.UpdateSafe(rLocalAccount);
+                                        await rDb.UpdateSafeAsync(rLocalAccount);
                                 }
                             }
                         }
@@ -838,7 +838,7 @@ namespace ReserveBlockCore.Data
                                     {
                                         scStateTrei.NextOwner = null;
                                         scStateTrei.IsLocked = false;
-                                        scDb.UpdateSafe(scStateTrei);
+                                        await scDb.UpdateSafeAsync(scStateTrei);
                                     }
                                 }
                             }
@@ -853,17 +853,17 @@ namespace ReserveBlockCore.Data
                             localTx.TransactionStatus = TransactionStatus.CalledBack;
                             rTX.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
                             if (txDB != null)
-                                txDB.UpdateSafe(localTx);
+                                await txDB.UpdateSafeAsync(localTx);
                         }
 
                         if (rtxDb != null)
-                            rtxDb.UpdateSafe(rTX);
+                            await rtxDb.UpdateSafeAsync(rTX);
                     }
                 }
             }
             catch { }
         }
-        private static void RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot)
+        private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot)
         {
             try
             {
@@ -899,7 +899,7 @@ namespace ReserveBlockCore.Data
                                         stateTreiFrom.LockedBalance = 0;
                                     }
                                     if (stDb != null)
-                                        stDb.UpdateSafe(stateTreiFrom);
+                                        await stDb.UpdateSafeAsync(stateTreiFrom);
 
                                     var rLocalAccount = ReserveAccount.GetReserveAccountSingle(stateTreiFrom.Key);
                                     if (rLocalAccount != null)
@@ -916,7 +916,7 @@ namespace ReserveBlockCore.Data
                                             rLocalAccount.LockedBalance = 0;
                                         }
                                         if (rDb != null)
-                                            rDb.UpdateSafe(rLocalAccount);
+                                            await rDb.UpdateSafeAsync(rLocalAccount);
                                     }
 
                                     var stateTreiRecovery = GetSpecificAccountStateTrei(recoveryAddress);
@@ -924,7 +924,7 @@ namespace ReserveBlockCore.Data
                                     {
                                         stateTreiRecovery.Balance += rTX.Amount;
                                         if (stDb != null)
-                                            stDb.UpdateSafe(stateTreiRecovery);
+                                            await stDb.UpdateSafeAsync(stateTreiRecovery);
                                     }
                                     else
                                     {
@@ -937,7 +937,7 @@ namespace ReserveBlockCore.Data
                                         };
 
                                         if (stDb != null)
-                                            stDb.InsertSafe(acctStateTreiTo);
+                                            await stDb.InsertSafeAsync(acctStateTreiTo);
 
                                     }
 
@@ -947,7 +947,7 @@ namespace ReserveBlockCore.Data
                                         var accountDB = AccountData.GetAccounts();
                                         localAccount.Balance += rTX.Amount;
                                         if (accountDB != null)
-                                            accountDB.UpdateSafe(localAccount);
+                                            await accountDB.UpdateSafeAsync(localAccount);
                                     }
                                 }
                             }
@@ -965,7 +965,7 @@ namespace ReserveBlockCore.Data
                                     stateTreiTo.LockedBalance = 0;
                                 }
                                 if (stDb != null)
-                                    stDb.UpdateSafe(stateTreiTo);
+                                    await stDb.UpdateSafeAsync(stateTreiTo);
                             }
                         }
 
@@ -990,7 +990,7 @@ namespace ReserveBlockCore.Data
                                             scStateTrei.OwnerAddress = recoveryAddress;
                                             scStateTrei.NextOwner = null;
                                             scStateTrei.IsLocked = false;
-                                            scDb.UpdateSafe(scStateTrei);
+                                            await scDb.UpdateSafeAsync(scStateTrei);
                                         }
 
                                     }
@@ -1006,11 +1006,11 @@ namespace ReserveBlockCore.Data
                             localTx.TransactionStatus = TransactionStatus.Recovered;
                             rTX.ReserveTransactionStatus = ReserveTransactionStatus.Recovered;
                             if (txDB != null)
-                                txDB.UpdateSafe(localTx);
+                                await txDB.UpdateSafeAsync(localTx);
                         }
 
                         if (rtxDb != null)
-                            rtxDb.UpdateSafe(rTX);
+                            await rtxDb.UpdateSafeAsync(rTX);
                     }
                 }
 
@@ -1023,7 +1023,7 @@ namespace ReserveBlockCore.Data
                 {
                     _stateTreiRecovery.Balance += rsrvAccount.Balance;
                     if (stDb != null)
-                        stDb.UpdateSafe(_stateTreiRecovery);
+                        await stDb.UpdateSafeAsync(_stateTreiRecovery);
                 }
                 else
                 {
@@ -1036,13 +1036,13 @@ namespace ReserveBlockCore.Data
                     };
 
                     if (stDb != null)
-                        stDb.InsertSafe(acctStateTreiTo);
+                        await stDb.InsertSafeAsync(acctStateTreiTo);
                 }
 
                 rsrvAccount.Balance = 0.0M;
                 rsrvAccount.LockedBalance = 0.0M;
 
-                stDb.UpdateSafe(rsrvAccount);
+                await stDb.UpdateSafeAsync(rsrvAccount);
 
                 var _scDb = SmartContractStateTrei.GetSCST();
 
@@ -1056,7 +1056,7 @@ namespace ReserveBlockCore.Data
                             sc.OwnerAddress = _recoveryAddress;
                             sc.NextOwner = null;
                             sc.IsLocked = false;
-                            _scDb.UpdateSafe(sc);
+                            await _scDb.UpdateSafeAsync(sc);
                         }
                     }
                 }
@@ -1114,7 +1114,7 @@ namespace ReserveBlockCore.Data
             catch { }
         }
 
-        private static void DeleteDecShop(Transaction tx)
+        private static async Task DeleteDecShop(Transaction tx)
         {
             try
             {
@@ -1132,7 +1132,7 @@ namespace ReserveBlockCore.Data
                             {
                                 if(decShop != null)
                                 {
-                                    db.DeleteSafe(decShop.Id);
+                                    await db.DeleteSafeAsync(decShop.Id);
                                 }
                             }
                         }
@@ -1169,7 +1169,7 @@ namespace ReserveBlockCore.Data
             }
         }
 
-        private static void TransferBTCAdnr(Transaction tx)
+        private static async Task TransferBTCAdnr(Transaction tx)
         {
             bool complete = false;
             try
@@ -1191,7 +1191,7 @@ namespace ReserveBlockCore.Data
                                 adnr.BTCAddress = BTCToAddress;
                                 adnr.RBXAddress = tx.ToAddress;
                                 adnr.TxHash = tx.Hash;
-                                adnrs.UpdateSafe(adnr);
+                                await adnrs.UpdateSafeAsync(adnr);
                                 complete = true;
                             }
                         }
@@ -1245,7 +1245,7 @@ namespace ReserveBlockCore.Data
                 ErrorLogUtility.LogError("Failed to add ADNR at state level!", "StateData.AddNewAdnr()");
             }
         }
-        private static void TransferAdnr(Transaction tx)
+        private static async Task TransferAdnr(Transaction tx)
         {
             bool complete = false;
             while(!complete)
@@ -1258,7 +1258,7 @@ namespace ReserveBlockCore.Data
                     {
                         adnr.Address = tx.ToAddress;
                         adnr.TxHash = tx.Hash;
-                        adnrs.UpdateSafe(adnr);
+                        await adnrs.UpdateSafeAsync(adnr);
                         complete = true;
                     }
                 }
@@ -1490,7 +1490,7 @@ namespace ReserveBlockCore.Data
             }
         }
 
-        private static void DeployTokenContract(Transaction tx, Block block)
+        private static async Task DeployTokenContract(Transaction tx, Block block)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
@@ -1548,7 +1548,7 @@ namespace ReserveBlockCore.Data
                                             toAddress.TokenAccounts = tokenAccounts;
                                         }
 
-                                        stDb.UpdateSafe(toAddress);
+                                        await stDb.UpdateSafeAsync(toAddress);
                                     }
                                     else
                                     {
@@ -1570,7 +1570,7 @@ namespace ReserveBlockCore.Data
                                             TokenAccounts = tokenAccounts
                                         };
 
-                                        stDb.InsertSafe(acctStateTreiTo);
+                                        await stDb.InsertSafeAsync(acctStateTreiTo);
                                     }
 
 
@@ -1706,7 +1706,7 @@ namespace ReserveBlockCore.Data
                 }
             }
         }
-        private static void TokenBanAddress(Transaction tx)
+        private static async Task TokenBanAddress(Transaction tx)
         {
             var txData = tx.Data;
             var jobj = JObject.Parse(txData);
@@ -1762,7 +1762,7 @@ namespace ReserveBlockCore.Data
             }
 
         }
-        private static void TokenMint(Transaction tx)
+        private static async Task TokenMint(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
@@ -1787,7 +1787,7 @@ namespace ReserveBlockCore.Data
                         tokenAccountFrom.Balance += amount.Value;
                         int fromIndex = fromAccount.TokenAccounts.FindIndex(a => a.SmartContractUID == scUID);
                         fromAccount.TokenAccounts[fromIndex] = tokenAccountFrom;
-                        stDB.UpdateSafe(fromAccount);
+                        await stDB.UpdateSafeAsync(fromAccount);
                     }
                     else
                     {
@@ -1802,12 +1802,12 @@ namespace ReserveBlockCore.Data
                             };
 
                             fromAccount.TokenAccounts = tokenAccounts;
-                            stDB.UpdateSafe(fromAccount);
+                            await stDB.UpdateSafeAsync(fromAccount);
                         }
                         else
                         {
                             fromAccount.TokenAccounts.Add(nTokenAccountT0);
-                            stDB.UpdateSafe(fromAccount);
+                            await stDB.UpdateSafeAsync(fromAccount);
                         }
                     }
                     scStateTreiRec.TokenDetails.CurrentSupply += amount.Value;
@@ -1816,7 +1816,7 @@ namespace ReserveBlockCore.Data
             }
 
         }
-        private static void TokenTransfer(Transaction tx, Block block)
+        private static async Task TokenTransfer(Transaction tx, Block block)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
@@ -1858,7 +1858,7 @@ namespace ReserveBlockCore.Data
                         {
                             acctStateTreiTo.LockedBalance += tx.Amount;
                         }
-                        accStTrei.InsertSafe(acctStateTreiTo);
+                        await accStTrei.InsertSafeAsync(acctStateTreiTo);
                         toAccount = acctStateTreiTo;
                     }
 
@@ -1868,7 +1868,7 @@ namespace ReserveBlockCore.Data
                         tokenAccountFrom.Balance -= amount.Value;
                         int fromIndex = fromAccount.TokenAccounts.FindIndex(a => a.SmartContractUID == scUID);
                         fromAccount.TokenAccounts[fromIndex] = tokenAccountFrom;
-                        stDB.UpdateSafe(fromAccount);
+                        await stDB.UpdateSafeAsync(fromAccount);
                     }
 
                     var tokenAccountTo = toAccount.TokenAccounts?.Where(x => x.SmartContractUID == scUID).FirstOrDefault();
@@ -1889,7 +1889,7 @@ namespace ReserveBlockCore.Data
                         else
                         {
                             toAccount.TokenAccounts.Add(nTokenAccountT0);
-                            stDB.UpdateSafe(toAccount);
+                            await stDB.UpdateSafeAsync(toAccount);
                         }
                     }
                     else
@@ -1898,7 +1898,7 @@ namespace ReserveBlockCore.Data
                         int toIndex = toAccount.TokenAccounts.FindIndex(a => a.SmartContractUID == scUID);
                         toAccount.TokenAccounts[toIndex] = tokenAccountTo;
                     }
-                    stDB.UpdateSafe(toAccount);
+                    await stDB.UpdateSafeAsync(toAccount);
                 }
                 
 
@@ -1921,7 +1921,7 @@ namespace ReserveBlockCore.Data
 
         }
 
-        private static void TokenBurn(Transaction tx)
+        private static async Task TokenBurn(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
@@ -1948,7 +1948,7 @@ namespace ReserveBlockCore.Data
                         tokenAccountFrom.Balance -= amount.Value;
                         int fromIndex = fromAccount.TokenAccounts.FindIndex(a => a.SmartContractUID == scUID);
                         fromAccount.TokenAccounts[fromIndex] = tokenAccountFrom;
-                        stDB.UpdateSafe(fromAccount);
+                        await stDB.UpdateSafeAsync(fromAccount);
                     }
 
                     scStateTreiRec.TokenDetails.CurrentSupply -= amount.Value;
@@ -2084,7 +2084,7 @@ namespace ReserveBlockCore.Data
 
         }
 
-        private static void CompleteSaleSmartContract(Transaction tx, Block block)
+        private static async Task CompleteSaleSmartContract(Transaction tx, Block block)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var accStTrei = GetAccountStateTrei();
@@ -2145,21 +2145,21 @@ namespace ReserveBlockCore.Data
                                 };
 
                                 acctStateTreiTo.Balance += txToSeller.Amount;
-                                accStTrei.InsertSafe(acctStateTreiTo);
+                                await accStTrei.InsertSafeAsync(acctStateTreiTo);
                             }
                             else
                             {
                                 toSeller.StateRoot = block.StateRoot;
                                 toSeller.Balance += txToSeller.Amount;
                                 
-                                accStTrei.UpdateSafe(toSeller);
+                                await accStTrei.UpdateSafeAsync(toSeller);
                             }
 
                             from.Nonce += 1;
                             from.StateRoot = block.StateRoot;
                             from.Balance -= (txToSeller.Amount + txToSeller.Fee);
 
-                            accStTrei.UpdateSafe(from);
+                            await accStTrei.UpdateSafeAsync(from);
                         }
                         if (txToRoyaltyPayee != null)
                         {
@@ -2175,21 +2175,21 @@ namespace ReserveBlockCore.Data
                                 };
 
                                 acctStateTreiTo.Balance += txToRoyaltyPayee.Amount;
-                                accStTrei.InsertSafe(acctStateTreiTo);
+                                await accStTrei.InsertSafeAsync(acctStateTreiTo);
                             }
                             else
                             {
                                 toRoyalty.StateRoot = block.StateRoot;
                                 toRoyalty.Balance += txToRoyaltyPayee.Amount;
 
-                                accStTrei.UpdateSafe(toRoyalty);
+                                await accStTrei.UpdateSafeAsync(toRoyalty);
                             }
 
                             from.Nonce += 1;
                             from.StateRoot = block.StateRoot;
                             from.Balance -= (txToRoyaltyPayee.Amount + txToRoyaltyPayee.Fee);
 
-                            accStTrei.UpdateSafe(from);
+                            await accStTrei.UpdateSafeAsync(from);
                         }
 
                     }
@@ -2213,21 +2213,21 @@ namespace ReserveBlockCore.Data
                                 };
 
                                 acctStateTreiTo.Balance += txToSeller.Amount;
-                                accStTrei.InsertSafe(acctStateTreiTo);
+                                await accStTrei.InsertSafeAsync(acctStateTreiTo);
                             }
                             else
                             {
                                 toSeller.StateRoot = block.StateRoot;
                                 toSeller.Balance += txToSeller.Amount;
 
-                                accStTrei.UpdateSafe(toSeller);
+                                await accStTrei.UpdateSafeAsync(toSeller);
                             }
 
                             from.Nonce += 1;
                             from.StateRoot = block.StateRoot;
                             from.Balance -= (txToSeller.Amount + txToSeller.Fee);
 
-                            accStTrei.UpdateSafe(from);
+                            await accStTrei.UpdateSafeAsync(from);
                         }
 
                     }
@@ -2252,21 +2252,21 @@ namespace ReserveBlockCore.Data
                             };
 
                             acctStateTreiTo.Balance += txToSeller.Amount;
-                            accStTrei.InsertSafe(acctStateTreiTo);
+                            await accStTrei.InsertSafeAsync(acctStateTreiTo);
                         }
                         else
                         {
                             toSeller.StateRoot = block.StateRoot;
                             toSeller.Balance += txToSeller.Amount;
 
-                            accStTrei.UpdateSafe(toSeller);
+                            await accStTrei.UpdateSafeAsync(toSeller);
                         }
 
                         from.Nonce += 1;
                         from.StateRoot = block.StateRoot;
                         from.Balance -= (txToSeller.Amount + txToSeller.Fee);
 
-                        accStTrei.UpdateSafe(from);
+                        await accStTrei.UpdateSafeAsync(from);
                     }
                 }
             }
