@@ -395,7 +395,8 @@ namespace ReserveBlockCore.P2P
             try
             {
                 // HAL-19 Fix: Add SignalRQueue protection with block size-based cost calculation
-                return await SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, async () =>
+                // HAL-16 Fix: Use Block message type to ensure blocks NEVER blocked by TXs
+                return await SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, SignalRMessageType.Block, async () =>
                 {
                     // HAL-18 Fix: Validate caller is an authenticated validator
                     var callerIP = GetIP(Context);
@@ -716,7 +717,8 @@ namespace ReserveBlockCore.P2P
         {
             try
             {
-                return await SignalRQueue(Context, (txReceived.Data?.Length ?? 0) + 1024, async () =>
+                // HAL-16 Fix: Use Transaction semaphore (allows 3 concurrent TXs, never blocks blocks)
+                return await SignalRQueue(Context, (txReceived.Data?.Length ?? 0) + 1024, SignalRMessageType.Transaction, async () =>
                 {
                     var result = "";
 

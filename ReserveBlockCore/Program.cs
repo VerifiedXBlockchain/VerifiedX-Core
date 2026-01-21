@@ -872,7 +872,17 @@ namespace ReserveBlockCore
                     }
 
                     await Settings.InitiateShutdownUpdate();
-                    Environment.Exit(0);
+                    
+                    // Use exit code 99 to signal intentional user exit to warden
+                    if (Globals.IsWardenMonitoring)
+                    {
+                        Console.WriteLine("Signaling warden to stop...");
+                        Environment.Exit(99);
+                    }
+                    else
+                    {
+                        Environment.Exit(0);
+                    }
                 }
 
                 Console.WriteLine(commandResult);
