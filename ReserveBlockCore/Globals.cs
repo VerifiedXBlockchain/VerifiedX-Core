@@ -157,8 +157,8 @@ namespace ReserveBlockCore
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
-        public static int MinorVer = 2;
-        public static int RevisionVer = 1;
+        public static int MinorVer = 3;
+        public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;

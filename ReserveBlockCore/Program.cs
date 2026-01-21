@@ -109,7 +109,7 @@ namespace ReserveBlockCore
                 LogUtility.Log("Warden monitoring service started", "Program.Main()");
             }
             //Forced Testnet
-            Globals.IsTestNet = true;
+            //Globals.IsTestNet = true;
             //Globals.IsCustomTestNet = true;
             Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
             Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
