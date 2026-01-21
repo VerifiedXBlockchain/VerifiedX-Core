@@ -14,8 +14,8 @@
         // Block processing has highest priority - never wait for TXs
         public readonly SemaphoreSlim BlockSemaphore = new SemaphoreSlim(1, 1);
         
-        // Allow 3 concurrent TX validations for better throughput
-        public readonly SemaphoreSlim TxSemaphore = new SemaphoreSlim(3, 3);
+        // Allow 25 concurrent TX validations for better throughput (increased from 3 to handle batch broadcasts)
+        public readonly SemaphoreSlim TxSemaphore = new SemaphoreSlim(25, 25);
         
         // General queries and other operations
         public readonly SemaphoreSlim QuerySemaphore = new SemaphoreSlim(2, 2);

@@ -41,6 +41,9 @@ namespace ReserveBlockCore.Services
         private static bool StateSyncLock = false;
         private static bool AssetLock = false;
         private static bool BroadcastLock = false;
+        
+        // Rate limiting semaphore for broadcasts to prevent connection saturation
+        private static readonly SemaphoreSlim BroadcastSemaphore = new SemaphoreSlim(1, 1);
 
         public ClientCallService(IHubContext<P2PAdjServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -84,22 +87,44 @@ namespace ReserveBlockCore.Services
 
             if (!Globals.Nodes.Any()) return;
 
-            var valNodeList = Globals.Nodes.Values.Where(x => x.IsConnected).ToList();
+            // Filter to only healthy, connected nodes with proper connection state
+            var valNodeList = Globals.Nodes.Values
+                .Where(x => x.IsConnected && 
+                            x.Connection != null && 
+                            x.Connection.State == HubConnectionState.Connected)
+                .ToList();
 
             if (valNodeList == null || valNodeList.Count() == 0) return;
 
-            foreach (var val in valNodeList)
+            // Rate limiting: Wait for previous broadcast to complete
+            await BroadcastSemaphore.WaitAsync();
+            try
             {
-                try
+                // Parallel broadcasting with connection health tracking
+                var tasks = valNodeList.Select(async val =>
                 {
-                    var source = new CancellationTokenSource(10000);
-                    await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
-                }
-                catch(Exception ex) 
-                {
-                    ErrorLogUtility.LogError($"Method Failure: {method} | Error: {ex}", "ClientCallService.Broadcast");
-                }
-                
+                    try
+                    {
+                        var source = new CancellationTokenSource(10000);
+                        await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
+                    }
+                    catch(TaskCanceledException ex) 
+                    {
+                        // Connection timed out - likely unhealthy connection
+                        ErrorLogUtility.LogError($"Method Failure: {method} to {val.NodeIP} | Timeout - connection may be unhealthy", "ClientCallService.Broadcast");
+                    }
+                    catch(Exception ex) 
+                    {
+                        ErrorLogUtility.LogError($"Method Failure: {method} to {val.NodeIP} | Error: {ex}", "ClientCallService.Broadcast");
+                    }
+                });
+
+                await Task.WhenAll(tasks);
+            }
+            finally
+            {
+                // Release after a small delay to rate limit broadcasts (100ms between broadcasts)
+                _ = Task.Delay(100).ContinueWith(_ => BroadcastSemaphore.Release());
             }
         }
 
