@@ -112,7 +112,7 @@ namespace ReserveBlockCore.Services
                 }
             }
 
-            Console.WriteLine("Warden service stopped. Exiting Now.");)
+            Console.WriteLine("Warden service stopped. Exiting Now.");
             Environment.Exit(99);
         }
 
