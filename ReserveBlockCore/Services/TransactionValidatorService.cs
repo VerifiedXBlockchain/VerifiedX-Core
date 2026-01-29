@@ -83,14 +83,22 @@ namespace ReserveBlockCore.Services
             if(txRequest.TransactionType == TransactionType.TKNZ_WD_ARB && txRequest.Amount > 0.00M)
                 return (txResult, "This transaction type cannot have a send amount.");
 
-            if (txRequest.Fee <= 0 && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
+            // FIND-004 FIX: Exempt vBTC V2 validator transactions from fee requirements (they must be free)
+            if (txRequest.Fee <= 0 
+                && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
+                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
+                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT)
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
             }
 
             if(Globals.LastBlock.Height > Globals.TXHeightRule2) //around April 7, 2023 at 18:30 UTC
             {
-                if (txRequest.Fee <= 0.000003M && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
+                // FIND-004 FIX: Exempt vBTC V2 validator transactions from minimum fee requirements
+                if (txRequest.Fee <= 0.000003M 
+                    && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT)
                 {
                     return (txResult, "Fee cannot be less than 0.000003 VFX");
                 }
