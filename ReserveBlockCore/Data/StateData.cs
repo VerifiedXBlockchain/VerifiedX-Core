@@ -208,7 +208,8 @@ namespace ReserveBlockCore.Data
                             || tx.TransactionType == TransactionType.SC_TX
                             || tx.TransactionType == TransactionType.SC_BURN
                             || tx.TransactionType == TransactionType.TKNZ_WD_ARB
-                            || tx.TransactionType == TransactionType.TKNZ_WD_OWNER)
+                            || tx.TransactionType == TransactionType.TKNZ_WD_OWNER
+                            || tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
                         {
                             string scUID = "";
                             string function = "";

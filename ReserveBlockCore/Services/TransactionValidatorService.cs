@@ -1074,6 +1074,57 @@ namespace ReserveBlockCore.Services
                                             break;
                                         }
 
+                                    case "TransferVBTCV2()":
+                                        {
+                                            // FIND-006 FIX: Validate vBTC V2 transfers when called through function dispatcher
+                                            var jobj = JObject.Parse(txData);
+                                            var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
+                                            var toAddress = jobj["ToAddress"]?.ToObject<string?>();
+                                            var amount = jobj["Amount"]?.ToObject<decimal?>();
+
+                                            if (string.IsNullOrEmpty(scUID))
+                                                return (txResult, "ContractUID cannot be null.");
+
+                                            if (string.IsNullOrEmpty(fromAddress))
+                                                return (txResult, "FromAddress cannot be null.");
+
+                                            if (string.IsNullOrEmpty(toAddress))
+                                                return (txResult, "ToAddress cannot be null.");
+
+                                            // FIND-006 FIX #1: Bind sender - tx.Data.FromAddress MUST match tx.FromAddress
+                                            if (txRequest.FromAddress != fromAddress)
+                                                return (txResult, "From address in data must match transaction FromAddress.");
+
+                                            // FIND-006 FIX #2: Validate amount is positive
+                                            if (!amount.HasValue || amount.Value <= 0)
+                                                return (txResult, "Amount must be greater than zero.");
+
+                                            // Validate balance for the sender
+                                            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                                            if (scStateTreiRec != null)
+                                            {
+                                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                                {
+                                                    var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
+                                                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                                                        .ToList();
+
+                                                    decimal balance = 0M;
+                                                    if (transactions.Any())
+                                                    {
+                                                        var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
+                                                        var sent = transactions.Where(x => x.FromAddress == fromAddress && x.ToAddress == "-").Sum(x => Math.Abs(x.Amount));
+                                                        balance = received - sent;
+                                                    }
+
+                                                    if (balance < amount.Value)
+                                                        return (txResult, $"Insufficient vBTC balance. Available: {balance}, Requested: {amount.Value}");
+                                                }
+                                            }
+
+                                            break;
+                                        }
+
                                     default:
                                         break;
                                 }
