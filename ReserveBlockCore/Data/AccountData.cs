@@ -222,19 +222,14 @@ namespace ReserveBlockCore.Data
                                     }
                                     
                                     // vBTC V2 balance restoration
+                                    // FIND-001 FIX: Only ensure the canonical contract record exists.
+                                    // Token balances are tracked in SmartContractStateTrei.SCStateTreiTokenizationTXes,
+                                    // not in holder-specific VBTCContractV2 records.
                                     var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
                                     if (tokenizedBitcoinV2Feature != null)
                                     {
                                         await VBTCContractV2.SaveSmartContractTransfer(scMain, account.Address, null);
-                                        
-                                        // Update the balance for the restored vBTC V2 token
-                                        var contractDb = VBTCContractV2.GetDb();
-                                        var contract = contractDb.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.OwnerAddress == account.Address);
-                                        if (contract != null && balance > 0)
-                                        {
-                                            contract.Balance = balance;
-                                            contractDb.UpdateSafe(contract);
-                                        }
+                                        // Note: Balance is not updated here as it's tracked in SmartContractStateTrei
                                     }
                                 }
                             }

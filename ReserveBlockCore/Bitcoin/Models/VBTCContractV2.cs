@@ -181,71 +181,28 @@ namespace ReserveBlockCore.Bitcoin.Models
         }
 
         /// <summary>
-        /// Save vBTC V2 smart contract for balance holders (when someone receives vBTC V2 tokens)
+        /// Save vBTC V2 smart contract for balance holders (when someone receives vBTC V2 tokens).
+        /// FIND-001 FIX: This no longer creates separate holder records. Instead, it ensures a single
+        /// canonical contract record exists per SmartContractUID. Token balances are tracked in
+        /// SmartContractStateTrei.SCStateTreiTokenizationTXes, not in separate VBTCContractV2 records.
         /// </summary>
         public static async Task SaveSmartContractTransfer(SmartContractMain scMain, string vfxAddress, string? scText = null)
         {
             var contracts = GetDb();
 
-            // Check if contract already exists for this specific address
-            var exist = contracts.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.OwnerAddress == vfxAddress);
+            // FIND-001 FIX: Check if contract already exists for this SmartContractUID (regardless of OwnerAddress)
+            // Only ONE record should exist per SmartContractUID - the canonical contract record
+            var existingContract = contracts.FindOne(x => x.SmartContractUID == scMain.SmartContractUID);
 
-            if (exist == null)
+            if (existingContract == null)
             {
-                if (scMain.Features != null)
-                {
-                    var tknzV2Feature = scMain.Features
-                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                        .Select(x => x.FeatureFeatures)
-                        .FirstOrDefault();
-
-                    if (tknzV2Feature != null)
-                    {
-                        var tknz = (TokenizationV2Feature)tknzV2Feature;
-                        if (tknz != null)
-                        {
-                            // Calculate balance from state trei
-                            decimal balance = 0.0M;
-                            var scState = SmartContractStateTrei.GetSmartContractState(scMain.SmartContractUID);
-                            if (scState?.SCStateTreiTokenizationTXes != null)
-                            {
-                                var transactions = scState.SCStateTreiTokenizationTXes
-                                    .Where(x => x.FromAddress == vfxAddress || x.ToAddress == vfxAddress)
-                                    .ToList();
-                                balance = transactions.Sum(x => x.Amount);
-                            }
-
-                            VBTCContractV2 contract = new VBTCContractV2
-                            {
-                                SmartContractUID = scMain.SmartContractUID,
-                                OwnerAddress = vfxAddress, // This user is a holder, not the original owner
-                                DepositAddress = tknz.DepositAddress,
-                                Balance = balance,
-                                ValidatorAddressesSnapshot = tknz.ValidatorAddressesSnapshot ?? new List<string>(),
-                                FrostGroupPublicKey = tknz.FrostGroupPublicKey,
-                                RequiredThreshold = tknz.RequiredThreshold,
-                                DKGProof = tknz.DKGProof,
-                                ProofBlockHeight = tknz.ProofBlockHeight,
-                                WithdrawalStatus = VBTCWithdrawalStatus.None,
-                                WithdrawalHistory = new List<VBTCWithdrawalHistory>()
-                            };
-                            contracts.InsertSafe(contract);
-                        }
-                        else
-                        {
-                            ErrorLogUtility.LogError("Failed to cast TokenizationV2Feature", "VBTCContractV2.SaveSmartContractTransfer()");
-                        }
-                    }
-                    else
-                    {
-                        ErrorLogUtility.LogError($"No TokenizationV2 feature found on SC: {scMain.SmartContractUID}", "VBTCContractV2.SaveSmartContractTransfer()");
-                    }
-                }
-                else
-                {
-                    ErrorLogUtility.LogError($"No features found on SC: {scMain.SmartContractUID}", "VBTCContractV2.SaveSmartContractTransfer()");
-                }
+                // No contract record exists - create the canonical record using SaveSmartContract
+                // This ensures consistent contract data (FROST keys, deposit address, etc.)
+                // Note: The OwnerAddress will be the contract minter, not the token holder
+                // Token holder balances are tracked in SmartContractStateTrei.SCStateTreiTokenizationTXes
+                await SaveSmartContract(scMain, scText, null);
             }
+            // If contract already exists, no action needed - balances are tracked in SmartContractStateTrei
         }
 
         public static void UpdateBalance(string smartContractUID, decimal newBalance)
