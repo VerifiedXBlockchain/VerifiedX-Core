@@ -120,6 +120,8 @@ namespace ReserveBlockCore.Bitcoin.Models
         #region Save Withdrawal Request
         /// <summary>
         /// Save or update a withdrawal request
+        /// FIND-005 FIX: Use composite key (RequestorAddress, OriginalUniqueId, SmartContractUID) for uniqueness
+        /// Also supports lookup by TransactionHash for FIND-002 multi-user tracking
         /// </summary>
         public static bool Save(VBTCWithdrawalRequest request, bool update = false)
         {
@@ -130,7 +132,23 @@ namespace ReserveBlockCore.Bitcoin.Models
                 return false;
             }
 
-            var existingRequest = vwrDb.FindOne(x => x.OriginalUniqueId == request.OriginalUniqueId);
+            VBTCWithdrawalRequest? existingRequest = null;
+            
+            // FIND-002: First try to find by TransactionHash (for multi-user tracking updates)
+            if (!string.IsNullOrEmpty(request.TransactionHash))
+            {
+                existingRequest = vwrDb.FindOne(x => x.TransactionHash == request.TransactionHash);
+            }
+            
+            // FIND-005: If not found by TxHash, try composite key (for raw withdrawal flow)
+            if (existingRequest == null && !string.IsNullOrEmpty(request.OriginalUniqueId))
+            {
+                existingRequest = vwrDb.FindOne(x => 
+                    x.RequestorAddress == request.RequestorAddress && 
+                    x.OriginalUniqueId == request.OriginalUniqueId && 
+                    x.SmartContractUID == request.SmartContractUID);
+            }
+
             if (existingRequest != null)
             {
                 if (!update)
