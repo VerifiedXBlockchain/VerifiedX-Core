@@ -643,13 +643,15 @@ namespace ReserveBlockCore.Services
                         // Parse transaction data
                         var jobj = JObject.Parse(tx.Data);
                         var scUID = jobj["ContractUID"]?.ToObject<string?>();
-                        var ownerAddress = jobj["OwnerAddress"]?.ToObject<string?>();
                         var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
                         var amount = jobj["Amount"]?.ToObject<decimal?>();
                         var feeRate = jobj["FeeRate"]?.ToObject<int?>();
 
-                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(ownerAddress) || 
-                            string.IsNullOrEmpty(btcAddress) || !amount.HasValue || !feeRate.HasValue)
+                        // FIND-002 FIX: Use tx.FromAddress as the requester, NOT tx.Data.OwnerAddress
+                        var requesterAddress = tx.FromAddress;
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) || 
+                            !amount.HasValue || !feeRate.HasValue)
                         {
                             SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Missing required fields", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
@@ -671,10 +673,12 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // Validate owner
-                        if (contract.OwnerAddress != ownerAddress)
+                        // FIND-002 FIX: Check if THIS USER already has an active withdrawal request for this contract
+                        // (Per-user tracking, not contract-level)
+                        var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
+                        if (existingRequest != null)
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Only contract owner can request withdrawal. Owner: {contract.OwnerAddress}, Requester: {ownerAddress}", 
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: User {requesterAddress} already has an active withdrawal request for contract {scUID}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;
@@ -682,36 +686,25 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // Check no active withdrawal exists
-                        if (contract.WithdrawalStatus != VBTCWithdrawalStatus.None)
-                        {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Active withdrawal already exists. Status: {contract.WithdrawalStatus}", 
-                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
-                        }
-
-                        // Validate balance in state trei
+                        // FIND-002 FIX: Validate balance for requesterAddress (tx.FromAddress), not ownerAddress
                         var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                         if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                         {
                             var transactions = scState.SCStateTreiTokenizationTXes
-                                .Where(x => x.FromAddress == ownerAddress || x.ToAddress == ownerAddress)
+                                .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
                                 .ToList();
 
                             decimal balance = 0M;
                             if (transactions.Any())
                             {
-                                var received = transactions.Where(x => x.ToAddress == ownerAddress).Sum(x => x.Amount);
-                                var sent = transactions.Where(x => x.FromAddress == ownerAddress).Sum(x => x.Amount);
+                                var received = transactions.Where(x => x.ToAddress == requesterAddress).Sum(x => x.Amount);
+                                var sent = transactions.Where(x => x.FromAddress == requesterAddress).Sum(x => x.Amount);
                                 balance = received - sent;
                             }
 
                             if (balance < amount.Value)
                             {
-                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Insufficient balance. Available: {balance}, Requested: {amount.Value}", 
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Insufficient balance. Requester: {requesterAddress}, Available: {balance}, Requested: {amount.Value}", 
                                     "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                                 var txdata = TransactionData.GetAll();
                                 tx.TransactionStatus = TransactionStatus.Invalid;
@@ -722,7 +715,7 @@ namespace ReserveBlockCore.Services
                         else
                         {
                             // No transactions mean no balance
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: No balance available for withdrawal", 
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: No balance available for withdrawal. Requester: {requesterAddress}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;
@@ -735,7 +728,7 @@ namespace ReserveBlockCore.Services
                         tx.TransactionStatus = TransactionStatus.Success;
                         txdataSuccess.InsertSafe(tx);
 
-                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validated successfully. Owner: {ownerAddress}, Amount: {amount.Value} BTC, Destination: {btcAddress}, SCUID: {scUID}", 
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validated successfully. Requester: {requesterAddress}, Amount: {amount.Value} BTC, Destination: {btcAddress}, SCUID: {scUID}", 
                             "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                     }
                     catch (Exception ex)
@@ -757,8 +750,6 @@ namespace ReserveBlockCore.Services
                         var scUID = jobj["ContractUID"]?.ToObject<string?>();
                         var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
                         var btcTxHash = jobj["BTCTransactionHash"]?.ToObject<string?>();
-                        var amount = jobj["Amount"]?.ToObject<decimal?>();
-                        var destination = jobj["Destination"]?.ToObject<string?>();
 
                         if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash) || 
                             string.IsNullOrEmpty(btcTxHash))
@@ -783,10 +774,11 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // Validate withdrawal is in progress
-                        if (contract.WithdrawalStatus != VBTCWithdrawalStatus.Requested)
+                        // FIND-002 FIX: Look up the withdrawal request by transaction hash and validate requester
+                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                        if (withdrawalRequest == null)
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: No active withdrawal request. Status: {contract.WithdrawalStatus}", 
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Withdrawal request not found for hash - {withdrawalRequestHash}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;
@@ -794,10 +786,21 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // Validate withdrawal request hash matches
-                        if (contract.ActiveWithdrawalRequestHash != withdrawalRequestHash)
+                        // FIND-002 FIX: Validate that the person completing is the original requester
+                        if (withdrawalRequest.RequestorAddress != tx.FromAddress)
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Withdrawal request hash mismatch. Expected: {contract.ActiveWithdrawalRequestHash}, Got: {withdrawalRequestHash}", 
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: tx.FromAddress ({tx.FromAddress}) does not match original requester ({withdrawalRequest.RequestorAddress})", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // Validate the request is not already completed
+                        if (withdrawalRequest.IsCompleted)
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Withdrawal request already completed - {withdrawalRequestHash}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;
@@ -821,7 +824,7 @@ namespace ReserveBlockCore.Services
                         tx.TransactionStatus = TransactionStatus.Success;
                         txdataSuccess.InsertSafe(tx);
 
-                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validated successfully. SCUID: {scUID}, BTCTxHash: {btcTxHash}, RequestHash: {withdrawalRequestHash}", 
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validated successfully. Requester: {withdrawalRequest.RequestorAddress}, SCUID: {scUID}, BTCTxHash: {btcTxHash}, RequestHash: {withdrawalRequestHash}", 
                             "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                     }
                     catch (Exception ex)

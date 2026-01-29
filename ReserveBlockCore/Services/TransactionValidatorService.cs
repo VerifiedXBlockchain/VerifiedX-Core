@@ -2252,6 +2252,148 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+            // FIND-002 FIX: VBTC V2 Withdrawal Request - Consensus-level validation
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var scUID = jobj["ContractUID"]?.ToObject<string>();
+                        var btcAddress = jobj["BTCAddress"]?.ToObject<string>();
+                        var amount = jobj["Amount"]?.ToObject<decimal?>();
+                        var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+
+                        // FIND-002 FIX: Use tx.FromAddress as the requester (IGNORE tx.Data.OwnerAddress)
+                        var requesterAddress = txRequest.FromAddress;
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) || 
+                            !amount.HasValue || !feeRate.HasValue)
+                            return (txResult, "Missing required fields for withdrawal request (ContractUID, BTCAddress, Amount, FeeRate).");
+
+                        // Validate contract exists
+                        var contract = VBTCContractV2.GetContract(scUID);
+                        if (contract == null)
+                            return (txResult, $"vBTC V2 contract not found: {scUID}");
+
+                        // FIND-002 FIX: Check if this user already has an active withdrawal request in database
+                        var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
+                        if (existingRequest != null)
+                            return (txResult, $"User {requesterAddress} already has an active withdrawal request for contract {scUID}. Complete or wait for existing request.");
+
+                        // FIND-002 FIX: Check mempool for duplicate requests from this user for this contract
+                        var mempool = TransactionData.GetPool();
+                        var duplicateInMempool = mempool.Query().Where(x =>
+                            x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
+                            x.FromAddress == requesterAddress &&
+                            x.Hash != txRequest.Hash
+                        ).ToList();
+
+                        foreach (var existingTx in duplicateInMempool)
+                        {
+                            try
+                            {
+                                var existingData = JObject.Parse(existingTx.Data);
+                                var existingScUID = existingData["ContractUID"]?.ToObject<string>();
+                                if (existingScUID == scUID)
+                                {
+                                    return (txResult, $"Duplicate withdrawal request already exists in mempool from {requesterAddress} for contract {scUID}.");
+                                }
+                            }
+                            catch { }
+                        }
+
+                        // Validate balance for requesterAddress (tx.FromAddress)
+                        var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        {
+                            var transactions = scState.SCStateTreiTokenizationTXes
+                                .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
+                                .ToList();
+
+                            decimal balance = 0M;
+                            if (transactions.Any())
+                            {
+                                var received = transactions.Where(x => x.ToAddress == requesterAddress).Sum(x => x.Amount);
+                                var sent = transactions.Where(x => x.FromAddress == requesterAddress).Sum(x => x.Amount);
+                                balance = received - sent;
+                            }
+
+                            if (balance < amount.Value)
+                                return (txResult, $"Insufficient vBTC balance. Available: {balance}, Requested: {amount.Value}");
+                        }
+                        else
+                        {
+                            return (txResult, $"No vBTC balance found for requester {requesterAddress} in contract {scUID}.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_WITHDRAWAL_REQUEST transaction: {ex}", 
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 withdrawal request transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 withdrawal request.");
+                }
+            }
+
+            // FIND-002 FIX: VBTC V2 Withdrawal Complete - Consensus-level validation
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var scUID = jobj["ContractUID"]?.ToObject<string>();
+                        var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string>();
+                        var btcTxHash = jobj["BTCTransactionHash"]?.ToObject<string>();
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash) || 
+                            string.IsNullOrEmpty(btcTxHash))
+                            return (txResult, "Missing required fields for withdrawal complete (ContractUID, WithdrawalRequestHash, BTCTransactionHash).");
+
+                        // Validate contract exists
+                        var contract = VBTCContractV2.GetContract(scUID);
+                        if (contract == null)
+                            return (txResult, $"vBTC V2 contract not found: {scUID}");
+
+                        // FIND-002 FIX: Look up the withdrawal request by transaction hash
+                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                        if (withdrawalRequest == null)
+                            return (txResult, $"Withdrawal request not found for hash: {withdrawalRequestHash}");
+
+                        // FIND-002 FIX: Validate that the person completing is the original requester
+                        if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
+                            return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) can complete this withdrawal. Received from: {txRequest.FromAddress}");
+
+                        // Validate the request is not already completed
+                        if (withdrawalRequest.IsCompleted)
+                            return (txResult, $"Withdrawal request already completed: {withdrawalRequestHash}");
+
+                        // Validate Bitcoin transaction hash format (64 hex chars)
+                        if (btcTxHash.Length != 64 || !System.Text.RegularExpressions.Regex.IsMatch(btcTxHash, "^[0-9a-fA-F]{64}$"))
+                            return (txResult, $"Invalid Bitcoin transaction hash format: {btcTxHash}");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_WITHDRAWAL_COMPLETE transaction: {ex}", 
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 withdrawal complete transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 withdrawal complete.");
+                }
+            }
+
             if (txRequest.FromAddress.StartsWith("xRBX") && runReserveCheck)
             {
                 if (txRequest.TransactionType != TransactionType.TX && 

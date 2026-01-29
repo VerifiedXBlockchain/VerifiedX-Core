@@ -191,5 +191,51 @@ namespace ReserveBlockCore.Bitcoin.Models
             return result;
         }
         #endregion
+
+        #region Get Active Request by Transaction Hash
+        /// <summary>
+        /// FIND-002 FIX: Get active withdrawal request by transaction hash
+        /// Used during withdrawal completion to validate requester
+        /// </summary>
+        public static VBTCWithdrawalRequest? GetByTransactionHash(string txHash)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+            {
+                ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.GetByTransactionHash()");
+                return null;
+            }
+
+            var request = vwrDb.Query()
+                .Where(x => x.TransactionHash == txHash)
+                .FirstOrDefault();
+
+            return request;
+        }
+        #endregion
+
+        #region Get Active Request for User and Contract
+        /// <summary>
+        /// FIND-002 FIX: Get active (incomplete) withdrawal request for a specific user and contract
+        /// Used during validation to check if user already has an active request
+        /// </summary>
+        public static VBTCWithdrawalRequest? GetActiveRequest(string address, string scUID)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+            {
+                ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.GetActiveRequest()");
+                return null;
+            }
+
+            var request = vwrDb.Query()
+                .Where(x => x.RequestorAddress == address && 
+                            x.SmartContractUID == scUID && 
+                            !x.IsCompleted)
+                .FirstOrDefault();
+
+            return request;
+        }
+        #endregion
     }
 }

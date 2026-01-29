@@ -2623,12 +2623,17 @@ namespace ReserveBlockCore.Data
                 // Parse transaction data
                 var jobj = JObject.Parse(tx.Data);
                 var scUID = jobj["ContractUID"]?.ToObject<string?>();
-                var ownerAddress = jobj["OwnerAddress"]?.ToObject<string?>();
                 var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
                 var amount = jobj["Amount"]?.ToObject<decimal?>();
                 var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+                var uniqueId = jobj["UniqueId"]?.ToObject<string?>() ?? tx.Hash; // Use tx.Hash as fallback for uniqueId
+                var originalRequestTime = jobj["OriginalRequestTime"]?.ToObject<long?>() ?? tx.Timestamp;
+                var originalSignature = jobj["OriginalSignature"]?.ToObject<string?>() ?? "";
 
-                if (string.IsNullOrEmpty(scUID) || !amount.HasValue || !feeRate.HasValue)
+                // FIND-002 FIX: Bind requester to tx.FromAddress - DO NOT trust tx.Data.OwnerAddress
+                var requesterAddress = tx.FromAddress;
+
+                if (string.IsNullOrEmpty(scUID) || !amount.HasValue || !feeRate.HasValue || string.IsNullOrEmpty(btcAddress))
                 {
                     ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal failed: Missing required fields", "StateData.RequestVBTCV2Withdrawal()");
                     return;
@@ -2642,7 +2647,35 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Update contract with withdrawal request details
+                // FIND-002 FIX: Create per-user withdrawal request record
+                // This allows tracking of who requested the withdrawal and prevents
+                // unauthorized parties from completing another user's withdrawal
+                var withdrawalRequest = new VBTCWithdrawalRequest
+                {
+                    RequestorAddress = requesterAddress, // BOUND to tx.FromAddress
+                    SmartContractUID = scUID,
+                    Amount = amount.Value,
+                    BTCDestination = btcAddress,
+                    FeeRate = feeRate.Value,
+                    OriginalUniqueId = uniqueId,
+                    OriginalRequestTime = originalRequestTime,
+                    OriginalSignature = originalSignature,
+                    Timestamp = tx.Timestamp,
+                    TransactionHash = tx.Hash,
+                    Status = VBTCWithdrawalStatus.Requested,
+                    IsCompleted = false
+                };
+
+                // Save the withdrawal request to the per-user tracking database
+                var saved = VBTCWithdrawalRequest.Save(withdrawalRequest);
+                if (!saved)
+                {
+                    ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal failed: Could not save withdrawal request", "StateData.RequestVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Also update contract-level tracking for backward compatibility
+                // Note: Contract-level tracking is informational; per-user tracking is authoritative
                 contract.WithdrawalStatus = VBTCWithdrawalStatus.Requested;
                 contract.ActiveWithdrawalRequestHash = tx.Hash;
                 contract.ActiveWithdrawalAmount = amount.Value;
@@ -2653,7 +2686,7 @@ namespace ReserveBlockCore.Data
                 // Save updated contract
                 VBTCContractV2.UpdateContract(contract);
 
-                SCLogUtility.Log($"RequestVBTCV2Withdrawal completed: SCUID={scUID}, Amount={amount.Value} BTC, Destination={btcAddress}, TxHash={tx.Hash}", 
+                SCLogUtility.Log($"RequestVBTCV2Withdrawal completed: SCUID={scUID}, Requester={requesterAddress}, Amount={amount.Value} BTC, Destination={btcAddress}, TxHash={tx.Hash}", 
                     "StateData.RequestVBTCV2Withdrawal()");
             }
             catch (Exception ex)
@@ -2671,12 +2704,43 @@ namespace ReserveBlockCore.Data
                 var scUID = jobj["ContractUID"]?.ToObject<string?>();
                 var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
                 var btcTxHash = jobj["BTCTransactionHash"]?.ToObject<string?>();
-                var amount = jobj["Amount"]?.ToObject<decimal?>();
-                var destination = jobj["Destination"]?.ToObject<string?>();
 
-                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcTxHash))
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcTxHash) || string.IsNullOrEmpty(withdrawalRequestHash))
                 {
                     ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Missing required fields", "StateData.CompleteVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // FIND-002 FIX: Look up the withdrawal request by transaction hash
+                // This ensures we use the stored request data, not untrusted tx.Data
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (withdrawalRequest == null)
+                {
+                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Withdrawal request not found for hash - {withdrawalRequestHash}", "StateData.CompleteVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // FIND-002 FIX: Validate that the person completing is the original requester
+                if (withdrawalRequest.RequestorAddress != tx.FromAddress)
+                {
+                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: tx.FromAddress ({tx.FromAddress}) does not match original requester ({withdrawalRequest.RequestorAddress})", "StateData.CompleteVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Validate the request is not already completed
+                if (withdrawalRequest.IsCompleted)
+                {
+                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Withdrawal request already completed - {withdrawalRequestHash}", "StateData.CompleteVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // FIND-002 FIX: Use the stored Amount from the request, NOT from tx.Data
+                // This prevents an attacker from specifying a different burn amount
+                var storedAmount = withdrawalRequest.Amount;
+
+                if (storedAmount <= 0.0M)
+                {
+                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Stored amount is zero or less - {scUID}", "StateData.CompleteVBTCV2Withdrawal()");
                     return;
                 }
 
@@ -2688,29 +2752,23 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                if(!contract.ActiveWithdrawalAmount.HasValue)
-                {
-                    ErrorLogUtility.LogError($"ActiveWithdrawalAmount cannot be empty - {scUID}", "StateData.CompleteVBTCV2Withdrawal()");
-                    return;
-                }
-
-                if (contract.ActiveWithdrawalAmount.Value <= 0.0M )
-                {
-                    ErrorLogUtility.LogError($"ActiveWithdrawalAmount cannot be zero or less - {scUID}", "StateData.CompleteVBTCV2Withdrawal()");
-                    return;
-                }
+                // Mark the withdrawal request as completed
+                withdrawalRequest.Status = VBTCWithdrawalStatus.Completed;
+                withdrawalRequest.IsCompleted = true;
+                withdrawalRequest.BTCTxHash = btcTxHash;
+                VBTCWithdrawalRequest.Save(withdrawalRequest, true);
 
                 // Create withdrawal history entry
                 var historyEntry = new VBTCWithdrawalHistory
                 {
-                    RequestHash = contract.ActiveWithdrawalRequestHash,
+                    RequestHash = withdrawalRequestHash,
                     CompletionHash = tx.Hash,
                     BTCTransactionHash = btcTxHash,
-                    Amount = contract.ActiveWithdrawalAmount.HasValue ? contract.ActiveWithdrawalAmount.Value : 0.0M,
-                    BTCDestination = contract.ActiveWithdrawalBTCDestination,
-                    RequestTime = contract.ActiveWithdrawalRequestTime,
+                    Amount = storedAmount,  // FIND-002 FIX: Use stored amount
+                    BTCDestination = withdrawalRequest.BTCDestination,
+                    RequestTime = withdrawalRequest.Timestamp,
                     CompletionTime = tx.Timestamp,
-                    FeeRate = contract.ActiveWithdrawalFeeRate
+                    FeeRate = withdrawalRequest.FeeRate
                 };
 
                 // Add to history
@@ -2732,16 +2790,16 @@ namespace ReserveBlockCore.Data
                 VBTCContractV2.UpdateContract(contract);
 
                 // CRITICAL: Burn the withdrawn tokens in state trei
-                // Create debit entry to remove the withdrawn amount from circulation
+                // FIND-002 FIX: Use storedAmount (from request record), NOT tx.Data.Amount
                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                if (scStateTreiRec != null && amount.HasValue)
+                if (scStateTreiRec != null)
                 {
                     List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
                     {
                         new SmartContractStateTreiTokenizationTX
                         {
-                            Amount = amount.Value * -1.0M,  // Negative amount = burn
-                            FromAddress = contract.OwnerAddress,
+                            Amount = storedAmount * -1.0M,  // Negative amount = burn (USING STORED AMOUNT)
+                            FromAddress = withdrawalRequest.RequestorAddress,  // FIND-002 FIX: Burn from requester's balance
                             ToAddress = "-"  // "-" indicates burn/withdrawal
                         }
                     };
@@ -2758,7 +2816,7 @@ namespace ReserveBlockCore.Data
                     SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
                 }
 
-                SCLogUtility.Log($"CompleteVBTCV2Withdrawal completed: SCUID={scUID}, BTCTxHash={btcTxHash}, Amount={amount} BTC, TxHash={tx.Hash}", 
+                SCLogUtility.Log($"CompleteVBTCV2Withdrawal completed: SCUID={scUID}, Requester={withdrawalRequest.RequestorAddress}, BTCTxHash={btcTxHash}, Amount={storedAmount} BTC, TxHash={tx.Hash}", 
                     "StateData.CompleteVBTCV2Withdrawal()");
             }
             catch (Exception ex)
