@@ -123,7 +123,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         /// <summary>
         /// Save vBTC V2 smart contract to local database (for contract owners)
         /// </summary>
-        public static async Task SaveSmartContract(SmartContractMain scMain, string? scText = null, string? rbxAddress = null)
+        public static async Task SaveSmartContract(SmartContractMain scMain, string? scText = null, string? vfxAddress = null)
         {
             var contracts = GetDb();
 
@@ -146,7 +146,7 @@ namespace ReserveBlockCore.Bitcoin.Models
                             VBTCContractV2 contract = new VBTCContractV2
                             {
                                 SmartContractUID = scMain.SmartContractUID,
-                                OwnerAddress = rbxAddress ?? scMain.MinterAddress,
+                                OwnerAddress = vfxAddress ?? scMain.MinterAddress,
                                 DepositAddress = tknz.DepositAddress,
                                 Balance = 0, // Initial balance is 0, calculated from state trei
                                 ValidatorAddressesSnapshot = tknz.ValidatorAddressesSnapshot ?? new List<string>(),
@@ -183,12 +183,12 @@ namespace ReserveBlockCore.Bitcoin.Models
         /// <summary>
         /// Save vBTC V2 smart contract for balance holders (when someone receives vBTC V2 tokens)
         /// </summary>
-        public static async Task SaveSmartContractTransfer(SmartContractMain scMain, string rbxAddress, string? scText = null)
+        public static async Task SaveSmartContractTransfer(SmartContractMain scMain, string vfxAddress, string? scText = null)
         {
             var contracts = GetDb();
 
             // Check if contract already exists for this specific address
-            var exist = contracts.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.OwnerAddress == rbxAddress);
+            var exist = contracts.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.OwnerAddress == vfxAddress);
 
             if (exist == null)
             {
@@ -210,7 +210,7 @@ namespace ReserveBlockCore.Bitcoin.Models
                             if (scState?.SCStateTreiTokenizationTXes != null)
                             {
                                 var transactions = scState.SCStateTreiTokenizationTXes
-                                    .Where(x => x.FromAddress == rbxAddress || x.ToAddress == rbxAddress)
+                                    .Where(x => x.FromAddress == vfxAddress || x.ToAddress == vfxAddress)
                                     .ToList();
                                 balance = transactions.Sum(x => x.Amount);
                             }
@@ -218,7 +218,7 @@ namespace ReserveBlockCore.Bitcoin.Models
                             VBTCContractV2 contract = new VBTCContractV2
                             {
                                 SmartContractUID = scMain.SmartContractUID,
-                                OwnerAddress = rbxAddress, // This user is a holder, not the original owner
+                                OwnerAddress = vfxAddress, // This user is a holder, not the original owner
                                 DepositAddress = tknz.DepositAddress,
                                 Balance = balance,
                                 ValidatorAddressesSnapshot = tknz.ValidatorAddressesSnapshot ?? new List<string>(),

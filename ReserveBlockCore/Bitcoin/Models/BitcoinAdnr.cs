@@ -119,15 +119,15 @@ namespace ReserveBlockCore.Bitcoin.Models
         #endregion
 
         #region BTCCreateAdnrTx(string address, string name, string btcAddress)
-        public static async Task<(Transaction?, string)> CreateAdnrTx(string rbxAddress, string name, string btcAddress)
+        public static async Task<(Transaction?, string)> CreateAdnrTx(string vfxAddress, string name, string btcAddress)
         {
             Transaction? adnrTx = null;
 
-            var account = AccountData.GetSingleAccount(rbxAddress);
+            var account = AccountData.GetSingleAccount(vfxAddress);
             if (account == null)
             {
-                ErrorLogUtility.LogError($"VFX Address is not found for : {rbxAddress}", "BitcoinAdnr.CreateAdnrTx()");
-                return (null, $"VFX Address is not found for : {rbxAddress}");
+                ErrorLogUtility.LogError($"VFX Address is not found for : {vfxAddress}", "BitcoinAdnr.CreateAdnrTx()");
+                return (null, $"VFX Address is not found for : {vfxAddress}");
             }
 
             if(name.ToLower().Contains(".btc"))
@@ -169,11 +169,11 @@ namespace ReserveBlockCore.Bitcoin.Models
             adnrTx = new Transaction
             {
                 Timestamp = timestamp,
-                FromAddress = rbxAddress,
+                FromAddress = vfxAddress,
                 ToAddress = "Adnr_Base",
                 Amount = Globals.ADNRRequiredRBX,
                 Fee = 0,
-                Nonce = AccountStateTrei.GetNextNonce(rbxAddress),
+                Nonce = AccountStateTrei.GetNextNonce(vfxAddress),
                 TransactionType = TransactionType.ADNR,
                 Data = txData
             };
@@ -186,8 +186,8 @@ namespace ReserveBlockCore.Bitcoin.Models
             var sig = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
             if (sig == "ERROR")
             {
-                ErrorLogUtility.LogError($"Signing TX failed for ADNR Request on address {rbxAddress} for name {name}", "Adnr.CreateAdnrTx(string address, string name)");
-                return (null, $"Signing TX failed for ADNR Request on address {rbxAddress} for name {name}");
+                ErrorLogUtility.LogError($"Signing TX failed for ADNR Request on address {vfxAddress} for name {name}", "Adnr.CreateAdnrTx(string address, string name)");
+                return (null, $"Signing TX failed for ADNR Request on address {vfxAddress} for name {name}");
             }
 
             adnrTx.Signature = sig;

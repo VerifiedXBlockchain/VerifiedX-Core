@@ -2094,13 +2094,13 @@ namespace ReserveBlockCore.Controllers
         /// Gets a specific chat messages for shop, not a client/buyer
         /// </summary>
         /// <returns></returns>
-        [HttpGet("GetDetailedSpecificShopChatMessages/{rbxAddress}")]
-        public async Task<string> GetDetailedSpecificShopChatMessages(string rbxAddress)
+        [HttpGet("GetDetailedSpecificShopChatMessages/{vfxAddress}")]
+        public async Task<string> GetDetailedSpecificShopChatMessages(string vfxAddress)
         {
-            if(Globals.ChatMessageDict.ContainsKey(rbxAddress))
+            if(Globals.ChatMessageDict.ContainsKey(vfxAddress))
             {
-                var chat = Globals.ChatMessageDict[rbxAddress];
-                return JsonConvert.SerializeObject(new { Success = true, Message = $"Messages Found for {rbxAddress}.", ChatMessages = chat });
+                var chat = Globals.ChatMessageDict[vfxAddress];
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"Messages Found for {vfxAddress}.", ChatMessages = chat });
             }
             else
             {
@@ -2112,14 +2112,14 @@ namespace ReserveBlockCore.Controllers
         /// Gets simple specific chat messages for shop, not a client/buyer
         /// </summary>
         /// <returns></returns>
-        [HttpGet("GetSimpleSpecificShopChatMessages/{rbxAddress}")]
-        public async Task<string> GetSimpleSpecificShopChatMessages(string rbxAddress)
+        [HttpGet("GetSimpleSpecificShopChatMessages/{vfxAddress}")]
+        public async Task<string> GetSimpleSpecificShopChatMessages(string vfxAddress)
         {
-            if (Globals.ChatMessageDict.ContainsKey(rbxAddress))
+            if (Globals.ChatMessageDict.ContainsKey(vfxAddress))
             {
-                var chat = Globals.ChatMessageDict[rbxAddress];
+                var chat = Globals.ChatMessageDict[vfxAddress];
                 var chatSimple = chat.Select(x => new { x.Message, x.TimeStamp, x.FromAddress, x.ToAddress, x.IsShopSentMessage });
-                return JsonConvert.SerializeObject(new { Success = true, Message = $"Messages Found for {rbxAddress}.", ChatMessages = chatSimple });
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"Messages Found for {vfxAddress}.", ChatMessages = chatSimple });
             }
             else
             {

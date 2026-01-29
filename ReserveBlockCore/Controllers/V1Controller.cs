@@ -825,16 +825,16 @@ namespace ReserveBlockCore.Controllers
         /// <summary>
         /// Returns the balance for a specific network address **For exchanges**
         /// </summary>
-        /// <param name="rbxAddress"></param>
+        /// <param name="vfxAddress"></param>
         /// <returns></returns>
-        [HttpGet("GetChainBalance/{rbxAddress}")]
-        public async Task<string> GetChainBalance(string rbxAddress)
+        [HttpGet("GetChainBalance/{vfxAddress}")]
+        public async Task<string> GetChainBalance(string vfxAddress)
         {
             //use Id to get specific commands
             var output = "Command not recognized."; // this will only display if command not recognized.
-            var balance = AccountStateTrei.GetAccountBalance(rbxAddress);
+            var balance = AccountStateTrei.GetAccountBalance(vfxAddress);
 
-            output = JsonConvert.SerializeObject(new { Account = rbxAddress, Balance = balance });
+            output = JsonConvert.SerializeObject(new { Account = vfxAddress, Balance = balance });
 
             return output;
         }
