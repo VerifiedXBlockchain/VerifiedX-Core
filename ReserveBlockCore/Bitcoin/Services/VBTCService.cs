@@ -316,18 +316,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"vBTC V2 contract not found: {scUID}");
                 }
 
-                // Validate owner
-                if (vbtcContract.OwnerAddress != ownerAddress)
+                // FIND-003 FIX: Check if THIS USER already has an active withdrawal request (per-user tracking)
+                var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(ownerAddress, scUID);
+                if (existingRequest != null)
                 {
-                    SCLogUtility.Log($"Only contract owner can request withdrawal. Owner: {vbtcContract.OwnerAddress}", "VBTCService.RequestWithdrawal()");
-                    return (false, "Only contract owner can request withdrawal");
-                }
-
-                // Check no active withdrawal exists
-                if (vbtcContract.WithdrawalStatus != VBTCWithdrawalStatus.None)
-                {
-                    SCLogUtility.Log($"Active withdrawal already exists. Status: {vbtcContract.WithdrawalStatus}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"Active withdrawal already exists. Status: {vbtcContract.WithdrawalStatus}");
+                    SCLogUtility.Log($"Active withdrawal already exists for user {ownerAddress}. Request Hash: {existingRequest.TransactionHash}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"You already have an active withdrawal request. Complete it before starting a new one. Request Hash: {existingRequest.TransactionHash}");
                 }
 
                 // Get smart contract state and validate balance
@@ -447,18 +441,19 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, string.Empty, $"vBTC V2 contract not found: {scUID}");
                 }
 
-                // Validate withdrawal status
-                if (vbtcContract.WithdrawalStatus != VBTCWithdrawalStatus.Requested)
+                // FIND-003 FIX: Look up withdrawal request using per-user tracking
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (withdrawalRequest == null)
                 {
-                    SCLogUtility.Log($"No active withdrawal request. Status: {vbtcContract.WithdrawalStatus}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"No active withdrawal request. Status: {vbtcContract.WithdrawalStatus}");
+                    SCLogUtility.Log($"Withdrawal request not found for hash: {withdrawalRequestHash}", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"Withdrawal request not found for hash: {withdrawalRequestHash}");
                 }
 
-                // Validate withdrawal request hash matches
-                if (vbtcContract.ActiveWithdrawalRequestHash != withdrawalRequestHash)
+                // Validate the request is not already completed
+                if (withdrawalRequest.IsCompleted)
                 {
-                    SCLogUtility.Log($"Withdrawal request hash mismatch", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, "Withdrawal request hash mismatch");
+                    SCLogUtility.Log($"Withdrawal request already completed: {withdrawalRequestHash}", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"Withdrawal request already completed: {withdrawalRequestHash}");
                 }
 
                 // ============================================================
