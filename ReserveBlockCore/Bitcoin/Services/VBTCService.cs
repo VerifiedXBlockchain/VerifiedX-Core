@@ -223,7 +223,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // Create transaction data
                 var txData = JsonConvert.SerializeObject(new
                 {
-                    Function = "VBTCTransfer()",
+                    Function = "TransferVBTCV2()",
                     ContractUID = scUID,
                     FromAddress = fromAddress,
                     ToAddress = toAddress,
