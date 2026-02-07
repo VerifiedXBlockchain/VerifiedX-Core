@@ -497,13 +497,18 @@ namespace ReserveBlockCore.Services
                                 }
                                 rejectBlock = txResult.Item1 == false ? rejectBlock = true : false;
                                 //check for duplicate tx
+                                // FIND-009 FIX: Exempt vBTC V2 validator lifecycle transactions from smart-contract parsing
+                                // These transactions don't have ContractUID/Function fields and should not be validated as SC TXs
                                 if (blkTransaction.TransactionType != TransactionType.TX &&
                                     blkTransaction.TransactionType != TransactionType.ADNR &&
                                     blkTransaction.TransactionType != TransactionType.VOTE &&
                                     blkTransaction.TransactionType != TransactionType.VOTE_TOPIC &&
                                     blkTransaction.TransactionType != TransactionType.DSTR &&
                                     blkTransaction.TransactionType != TransactionType.RESERVE && 
-                                    blkTransaction.TransactionType != TransactionType.NFT_SALE)
+                                    blkTransaction.TransactionType != TransactionType.NFT_SALE &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
                                 {
                                     if (blkTransaction.Data != null)
                                     {
