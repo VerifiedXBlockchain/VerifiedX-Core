@@ -747,6 +747,16 @@ namespace ReserveBlockCore.Services
                                         var registrationBlockHeight = jobj["RegistrationBlockHeight"]?.ToObject<long>();
                                         var signature = jobj["Signature"]?.ToObject<string>();
                                         
+                                        // FIND-007 Fix: Defense-in-depth IP validation during block processing
+                                        // This should never fail if consensus validation passed, but extra safety
+                                        if (!InputValidationHelper.ValidateValidatorIPAddress(ipAddress, out string ipValidationError))
+                                        {
+                                            ErrorLogUtility.LogError($"FIND-007 Security (Block Processing): Invalid validator IP rejected in block {block.Height}. Address: {validatorAddress}, IP: {ipAddress}, Error: {ipValidationError}", 
+                                                "BlockValidatorService");
+                                            // Skip saving this validator - transaction already in block, but don't register validator
+                                            continue;
+                                        }
+                                        
                                         var vbtcValidator = new Bitcoin.Models.VBTCValidator
                                         {
                                             ValidatorAddress = validatorAddress,

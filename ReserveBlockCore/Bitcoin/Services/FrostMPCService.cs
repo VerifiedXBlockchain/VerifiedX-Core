@@ -129,6 +129,14 @@ namespace ReserveBlockCore.Bitcoin.Services
                 {
                     try
                     {
+                        // FIND-007 Fix: Defensive IP validation before HTTP call (last resort)
+                        if (!InputValidationHelper.ValidateValidatorIPAddress(validator.IPAddress, out string ipError))
+                        {
+                            ErrorLogUtility.LogError($"FIND-007 Security (HTTP Client): Blocked HTTP call to invalid validator IP. Address: {validator.ValidatorAddress}, IP: {validator.IPAddress}, Error: {ipError}", 
+                                "FrostMPCService.BroadcastDKGStart");
+                            return false;
+                        }
+                        
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/start";
                         var response = await _httpClient.PostAsJsonAsync(url, startRequest);
                         return response.IsSuccessStatusCode;

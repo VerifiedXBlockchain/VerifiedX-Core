@@ -2233,6 +2233,14 @@ namespace ReserveBlockCore.Services
                         if (string.IsNullOrEmpty(validatorAddress) || string.IsNullOrEmpty(ipAddress))
                             return (txResult, "Validator address and IP address cannot be null.");
                         
+                        // FIND-007 Fix: Validate IP address to prevent SSRF attacks
+                        if (!InputValidationHelper.ValidateValidatorIPAddress(ipAddress, out string ipValidationError))
+                        {
+                            ErrorLogUtility.LogError($"FIND-007 Security: Invalid validator IP address rejected. Address: {validatorAddress}, IP: {ipAddress}, Error: {ipValidationError}", 
+                                "TransactionValidatorService.VerifyTX()");
+                            return (txResult, $"Invalid validator IP address: {ipValidationError}");
+                        }
+                        
                         if (txRequest.FromAddress != validatorAddress)
                             return (txResult, "From address must match validator address.");
                         

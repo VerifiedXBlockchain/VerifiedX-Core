@@ -510,7 +510,8 @@ namespace ReserveBlockCore.Utilities
         #region Utility Methods
 
         /// <summary>
-        /// Validates IP address format - basic length and character check
+        /// FIND-007 Fix: Validates IP address format - basic length and character check
+        /// NOTE: This is the OLD validation method - use ValidateValidatorIPAddress for vBTC validators
         /// </summary>
         private static bool ValidateIPAddress(string ipAddress, List<string> errors)
         {
@@ -534,6 +535,126 @@ namespace ReserveBlockCore.Utilities
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// FIND-007 Fix: Validates vBTC V2 validator IP addresses with strict SSRF protection
+        /// Only allows public IPv4/IPv6 addresses - rejects loopback, link-local, private ranges, and DNS names
+        /// </summary>
+        /// <param name="ipAddress">The IP address string to validate</param>
+        /// <param name="errorMessage">Output error message if validation fails</param>
+        /// <returns>True if valid public IP, false otherwise</returns>
+        public static bool ValidateValidatorIPAddress(string ipAddress, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+
+            // 1. Null/empty check
+            if (string.IsNullOrWhiteSpace(ipAddress))
+            {
+                errorMessage = "IP address cannot be null or empty";
+                return false;
+            }
+
+            // 2. Length check
+            if (ipAddress.Length > MAX_IP_ADDRESS_LENGTH)
+            {
+                errorMessage = $"IP address length ({ipAddress.Length}) exceeds maximum ({MAX_IP_ADDRESS_LENGTH})";
+                return false;
+            }
+
+            // 3. Parse as IP address (rejects DNS names, malformed IPs)
+            if (!System.Net.IPAddress.TryParse(ipAddress, out var parsedIP))
+            {
+                errorMessage = "Invalid IP address format. Must be a valid IPv4 or IPv6 address literal (DNS names not allowed)";
+                return false;
+            }
+
+            // 4. Reject IPv6 (optional - for simplicity, only allow IPv4 for now)
+            // If you want to support IPv6, remove this check
+            if (parsedIP.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+            {
+                errorMessage = "IPv6 addresses are not supported for validators. Please use IPv4";
+                return false;
+            }
+
+            // 5. Get byte representation for range checks
+            byte[] ipBytes = parsedIP.GetAddressBytes();
+
+            // 6. Reject loopback (127.0.0.0/8 for IPv4, ::1 for IPv6)
+            if (System.Net.IPAddress.IsLoopback(parsedIP))
+            {
+                errorMessage = "Loopback addresses (127.x.x.x) are not allowed";
+                return false;
+            }
+
+            // 7. Reject link-local addresses (169.254.0.0/16 for IPv4, fe80::/10 for IPv6)
+            if (IsLinkLocal(parsedIP, ipBytes))
+            {
+                errorMessage = "Link-local addresses (169.254.x.x) are not allowed";
+                return false;
+            }
+
+            // 8. Reject private IP ranges (RFC 1918)
+            if (IsPrivateIPRange(ipBytes))
+            {
+                errorMessage = "Private IP addresses (10.x.x.x, 172.16-31.x.x, 192.168.x.x) are not allowed. Validators must use public IPs";
+                return false;
+            }
+
+            // 9. Reject multicast (224.0.0.0/4)
+            if (ipBytes[0] >= 224 && ipBytes[0] <= 239)
+            {
+                errorMessage = "Multicast addresses (224.x.x.x - 239.x.x.x) are not allowed";
+                return false;
+            }
+
+            // 10. Reject broadcast and reserved ranges
+            if (ipBytes[0] == 0 || ipBytes[0] >= 240)
+            {
+                errorMessage = "Reserved IP address ranges are not allowed";
+                return false;
+            }
+
+            // All checks passed - this is a valid public IP
+            return true;
+        }
+
+        /// <summary>
+        /// FIND-007 Fix: Checks if IP is in link-local range
+        /// </summary>
+        private static bool IsLinkLocal(System.Net.IPAddress ip, byte[] ipBytes)
+        {
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                // IPv4: 169.254.0.0/16
+                return ipBytes[0] == 169 && ipBytes[1] == 254;
+            }
+            else if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+            {
+                // IPv6: fe80::/10
+                return ipBytes[0] == 0xfe && (ipBytes[1] & 0xc0) == 0x80;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// FIND-007 Fix: Checks if IPv4 address is in private ranges (RFC 1918)
+        /// </summary>
+        private static bool IsPrivateIPRange(byte[] ipBytes)
+        {
+            // 10.0.0.0/8
+            if (ipBytes[0] == 10)
+                return true;
+
+            // 172.16.0.0/12 (172.16.0.0 - 172.31.255.255)
+            if (ipBytes[0] == 172 && ipBytes[1] >= 16 && ipBytes[1] <= 31)
+                return true;
+
+            // 192.168.0.0/16
+            if (ipBytes[0] == 192 && ipBytes[1] == 168)
+                return true;
+
+            return false;
         }
 
         /// <summary>

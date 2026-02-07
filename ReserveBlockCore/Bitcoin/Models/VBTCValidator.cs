@@ -228,6 +228,14 @@ namespace ReserveBlockCore.Bitcoin.Models
                 {
                     try
                     {
+                        // FIND-007 Fix: Defensive IP validation before HTTP call (last resort)
+                        if (!InputValidationHelper.ValidateValidatorIPAddress(validator.IPAddress, out string ipError))
+                        {
+                            ErrorLogUtility.LogError($"FIND-007 Security (HTTP Client): Blocked HTTP call to invalid validator IP. Address: {validator.ValidatorAddress}, IP: {validator.IPAddress}, Error: {ipError}", 
+                                "VBTCValidator.FetchActiveValidatorsFromNetwork()");
+                            continue; // Skip this validator
+                        }
+                        
                         var url = $"http://{validator.IPAddress}:{Globals.ValAPIPort}/valapi/ValidatorController/GetActiveValidators";
                         
                         LogUtility.Log($"Fetching validator list from {validator.ValidatorAddress} ({validator.IPAddress})", 
