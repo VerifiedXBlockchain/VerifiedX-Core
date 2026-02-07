@@ -74,7 +74,7 @@ namespace ReserveBlockCore.Services
                         try
                         {
                             // Ping validator's ValAPI
-                            var url = $"http://{validator.IPAddress}:{Globals.ValAPIPort}/validatorapi/ValidatorController/Ping";
+                            var url = $"http://{validator.IPAddress}:{Globals.ValAPIPort}/valapi/Validator/HeartBeat";
                             var response = await httpClient.GetAsync(url);
 
                             if (response.IsSuccessStatusCode)
