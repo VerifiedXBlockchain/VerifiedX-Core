@@ -208,8 +208,7 @@ namespace ReserveBlockCore.Data
                             || tx.TransactionType == TransactionType.SC_TX
                             || tx.TransactionType == TransactionType.SC_BURN
                             || tx.TransactionType == TransactionType.TKNZ_WD_ARB
-                            || tx.TransactionType == TransactionType.TKNZ_WD_OWNER
-                            || tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+                            || tx.TransactionType == TransactionType.TKNZ_WD_OWNER)
                         {
                             string scUID = "";
                             string function = "";
@@ -469,7 +468,12 @@ namespace ReserveBlockCore.Data
                             }
                         }
 
-                        // vBTC V2 Withdrawal Request/Complete Handling
+                        // vBTC V2 Transfer/Withdrawal Handling - explicit type-based dispatch
+                        if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+                        {
+                            TransferVBTCV2(tx);
+                        }
+
                         if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
                         {
                             RequestVBTCV2Withdrawal(tx);
@@ -2556,16 +2560,20 @@ namespace ReserveBlockCore.Data
         {
             try
             {
-                // Parse transaction data
+                // Parse transaction data for ContractUID and Amount only
                 var jobj = JObject.Parse(tx.Data);
                 var scUID = jobj["ContractUID"]?.ToObject<string?>();
-                var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
-                var toAddress = jobj["ToAddress"]?.ToObject<string?>();
                 var amount = jobj["Amount"]?.ToObject<decimal?>();
 
-                if (string.IsNullOrEmpty(scUID) || !amount.HasValue)
+                // CONSENSUS SAFETY: Use tx.FromAddress and tx.ToAddress as the authoritative
+                // sender/receiver - these are bound to the transaction signer and cannot be spoofed.
+                // Do NOT trust FromAddress/ToAddress embedded in tx.Data.
+                var fromAddress = tx.FromAddress;
+                var toAddress = tx.ToAddress;
+
+                if (string.IsNullOrEmpty(scUID) || !amount.HasValue || amount.Value <= 0)
                 {
-                    ErrorLogUtility.LogError($"TransferVBTCV2 failed: Missing required fields", "StateData.TransferVBTCV2()");
+                    ErrorLogUtility.LogError($"TransferVBTCV2 failed: Missing required fields or invalid amount", "StateData.TransferVBTCV2()");
                     return;
                 }
 
@@ -2574,8 +2582,8 @@ namespace ReserveBlockCore.Data
                 if (scStateTreiRec != null)
                 {
                     // Create credit/debit pair for the transfer
-                    // Credit: Add tokens to recipient
-                    // Debit: Subtract tokens from sender
+                    // Credit: Add tokens to recipient (tx.ToAddress)
+                    // Debit: Subtract tokens from sender (tx.FromAddress)
                     List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
                     {
                         new SmartContractStateTreiTokenizationTX
