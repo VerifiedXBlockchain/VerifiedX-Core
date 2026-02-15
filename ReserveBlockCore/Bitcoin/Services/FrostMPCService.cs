@@ -1,5 +1,6 @@
 using ReserveBlockCore.Bitcoin.FROST.Models;
 using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Net.Http.Json;
 using System.Text;
@@ -113,13 +114,18 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
+                // FIND-0013 Fix: Sign with leader's key using deterministic message format
+                var timestamp = TimeUtil.GetTime();
+                var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                var leaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(leaderMessage);
+
                 var startRequest = new FrostDKGStartRequest
                 {
                     SessionId = sessionId,
                     SmartContractUID = ceremonyId, // Using ceremony ID, not SC UID (that doesn't exist yet)
                     LeaderAddress = leaderAddress,
-                    Timestamp = TimeUtil.GetTime(),
-                    LeaderSignature = "PLACEHOLDER_SIGNATURE", // TODO: Sign with leader's key
+                    Timestamp = timestamp,
+                    LeaderSignature = leaderSignature,
                     ParticipantAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
                     RequiredThreshold = threshold
                 };
@@ -434,14 +440,19 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
+                // FIND-0013 Fix: Sign with leader's key using deterministic message format
+                var timestamp = TimeUtil.GetTime();
+                var signingLeaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                var signingLeaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(signingLeaderMessage);
+
                 var startRequest = new FrostSigningStartRequest
                 {
                     SessionId = sessionId,
                     MessageHash = messageHash,
                     SmartContractUID = scUID,
                     LeaderAddress = leaderAddress,
-                    Timestamp = TimeUtil.GetTime(),
-                    LeaderSignature = "PLACEHOLDER_SIGNATURE",
+                    Timestamp = timestamp,
+                    LeaderSignature = signingLeaderSignature,
                     SignerAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
                     RequiredThreshold = threshold
                 };

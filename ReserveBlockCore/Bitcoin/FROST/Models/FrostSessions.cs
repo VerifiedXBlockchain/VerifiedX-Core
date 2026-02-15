@@ -75,6 +75,24 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
     /// </summary>
     public static class FrostSessionStorage
     {
+        /// <summary>Maximum concurrent DKG sessions allowed</summary>
+        public const int MAX_DKG_SESSIONS = 50;
+        
+        /// <summary>Maximum concurrent signing sessions allowed</summary>
+        public const int MAX_SIGNING_SESSIONS = 50;
+        
+        /// <summary>Maximum number of participant addresses per session</summary>
+        public const int MAX_PARTICIPANTS = 20;
+        
+        /// <summary>Minimum required threshold percentage</summary>
+        public const int MIN_THRESHOLD = 51;
+        
+        /// <summary>Maximum required threshold percentage</summary>
+        public const int MAX_THRESHOLD = 100;
+        
+        /// <summary>Maximum session ID length</summary>
+        public const int MAX_SESSION_ID_LENGTH = 100;
+        
         public static ConcurrentDictionary<string, DKGSession> DKGSessions { get; } = new();
         public static ConcurrentDictionary<string, SigningSession> SigningSessions { get; } = new();
         

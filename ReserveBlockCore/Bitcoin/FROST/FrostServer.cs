@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using ReserveBlockCore.Bitcoin.FROST.Models;
 
 namespace ReserveBlockCore.Bitcoin.FROST
 {
@@ -30,12 +31,35 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                     _ = builder.RunConsoleAsync();
                     
+                    // FIND-0013 Fix: Start periodic session cleanup background task
+                    _ = Task.Run(async () => await SessionCleanupLoop());
+                    
                     Console.WriteLine($"FROST Validator Server started on port {Globals.FrostValidatorPort}");
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"FROST Server Error: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// FIND-0013 Fix: Background cleanup loop that periodically removes expired sessions
+        /// Runs every 5 minutes to prevent unbounded in-memory session growth
+        /// </summary>
+        private static async Task SessionCleanupLoop()
+        {
+            while (true)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(5));
+                    FrostSessionStorage.CleanupOldSessions();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[FROST] Session cleanup error: {ex.Message}");
+                }
             }
         }
 

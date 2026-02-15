@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using ReserveBlockCore.Bitcoin.FROST.Models;
+using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 
 namespace ReserveBlockCore.Bitcoin.FROST
@@ -68,6 +70,9 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 {
                     try
                     {
+                        // FIND-0013 Fix: Opportunistic cleanup to prevent unbounded session growth
+                        FrostSessionStorage.CleanupOldSessions();
+
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
@@ -84,8 +89,96 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Validate leader signature
-                            // TODO: When FROST native library integrated, verify signature
+                            // FIND-0013 Fix: Input validation bounds
+                            if (string.IsNullOrEmpty(request.SessionId) || request.SessionId.Length > FrostSessionStorage.MAX_SESSION_ID_LENGTH)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"Invalid SessionId (max {FrostSessionStorage.MAX_SESSION_ID_LENGTH} characters)"
+                                }));
+                                return;
+                            }
+
+                            if (request.ParticipantAddresses == null || request.ParticipantAddresses.Count == 0 
+                                || request.ParticipantAddresses.Count > FrostSessionStorage.MAX_PARTICIPANTS)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"ParticipantAddresses must be 1-{FrostSessionStorage.MAX_PARTICIPANTS}"
+                                }));
+                                return;
+                            }
+
+                            if (request.RequiredThreshold < FrostSessionStorage.MIN_THRESHOLD 
+                                || request.RequiredThreshold > FrostSessionStorage.MAX_THRESHOLD)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"RequiredThreshold must be {FrostSessionStorage.MIN_THRESHOLD}-{FrostSessionStorage.MAX_THRESHOLD}"
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Enforce maximum concurrent session cap
+                            if (FrostSessionStorage.DKGSessions.Count >= FrostSessionStorage.MAX_DKG_SESSIONS)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Maximum concurrent DKG sessions reached. Try again later."
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Verify leader is a registered active vBTC validator
+                            if (string.IsNullOrEmpty(request.LeaderAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "LeaderAddress required"
+                                }));
+                                return;
+                            }
+
+                            var leaderValidator = VBTCValidator.GetValidator(request.LeaderAddress);
+                            if (leaderValidator == null || !leaderValidator.IsActive)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Leader is not a registered active vBTC validator"
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Verify all participants are registered active validators
+                            foreach (var participantAddr in request.ParticipantAddresses)
+                            {
+                                var participantValidator = VBTCValidator.GetValidator(participantAddr);
+                                if (participantValidator == null || !participantValidator.IsActive)
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = $"Participant {participantAddr} is not a registered active vBTC validator"
+                                    }));
+                                    return;
+                                }
+                            }
+
+                            // FIND-0013 Fix: Cryptographic signature verification using existing SignatureService
+                            // Verify leader actually signed this request (message = SessionId.LeaderAddress.Timestamp)
                             if (string.IsNullOrEmpty(request.LeaderSignature))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -93,6 +186,20 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 {
                                     Success = false,
                                     Message = "Leader signature required"
+                                }));
+                                return;
+                            }
+
+                            var leaderMessage = $"{request.SessionId}.{request.LeaderAddress}.{request.Timestamp}";
+                            var leaderSigValid = SignatureService.VerifySignature(request.LeaderAddress, leaderMessage, request.LeaderSignature);
+                            if (!leaderSigValid)
+                            {
+                                ErrorLogUtility.LogError($"FIND-0013 Security: Invalid leader signature for DKG start. Leader: {request.LeaderAddress}, Session: {request.SessionId}", "FrostStartup.DKGStart");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Invalid leader signature"
                                 }));
                                 return;
                             }
@@ -119,7 +226,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            LogUtility.Log($"[FROST] DKG ceremony started. Session: {request.SessionId}, Participants: {request.ParticipantAddresses.Count}", "FrostStartup.DKGStart");
+                            LogUtility.Log($"[FROST] DKG ceremony started. Session: {request.SessionId}, Leader: {request.LeaderAddress}, Participants: {request.ParticipantAddresses.Count}", "FrostStartup.DKGStart");
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -180,8 +287,20 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Validate validator signature
-                            // TODO: When FROST native library integrated, verify signature
+                            // FIND-0013 Fix: Verify validator is a participant in this session
+                            if (string.IsNullOrEmpty(commitment.ValidatorAddress) 
+                                || !session.ParticipantAddresses.Contains(commitment.ValidatorAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Validator is not a participant in this session"
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Cryptographic signature verification
                             if (string.IsNullOrEmpty(commitment.ValidatorSignature))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -189,6 +308,20 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 {
                                     Success = false,
                                     Message = "Validator signature required"
+                                }));
+                                return;
+                            }
+
+                            var validatorMessage = $"{commitment.SessionId}.{commitment.ValidatorAddress}.{commitment.Timestamp}";
+                            var sigValid = SignatureService.VerifySignature(commitment.ValidatorAddress, validatorMessage, commitment.ValidatorSignature);
+                            if (!sigValid)
+                            {
+                                ErrorLogUtility.LogError($"FIND-0013 Security: Invalid validator signature for DKG Round 1. Validator: {commitment.ValidatorAddress}, Session: {commitment.SessionId}", "FrostStartup.DKGRound1");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Invalid validator signature"
                                 }));
                                 return;
                             }
@@ -309,6 +442,57 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // FIND-0013 Fix: Verify session exists
+                            if (string.IsNullOrEmpty(share.SessionId) || !FrostSessionStorage.DKGSessions.TryGetValue(share.SessionId, out var session))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Session not found"
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Verify sender is a participant in this session
+                            if (string.IsNullOrEmpty(share.FromValidatorAddress) 
+                                || !session.ParticipantAddresses.Contains(share.FromValidatorAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Sender is not a participant in this session"
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Verify signature
+                            if (string.IsNullOrEmpty(share.ValidatorSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Validator signature required"
+                                }));
+                                return;
+                            }
+
+                            var shareMessage = $"{share.SessionId}.{share.FromValidatorAddress}.{share.Timestamp}";
+                            var sigValid = SignatureService.VerifySignature(share.FromValidatorAddress, shareMessage, share.ValidatorSignature);
+                            if (!sigValid)
+                            {
+                                ErrorLogUtility.LogError($"FIND-0013 Security: Invalid validator signature for DKG share. Validator: {share.FromValidatorAddress}, Session: {share.SessionId}", "FrostStartup.DKGShare");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Invalid validator signature"
+                                }));
+                                return;
+                            }
+
                             // TODO: FROST INTEGRATION
                             // Decrypt share using validator's private key
                             // Verify share against sender's commitment
@@ -370,8 +554,20 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Validate validator signature
-                            // TODO: When FROST native library integrated, verify signature
+                            // FIND-0013 Fix: Verify validator is a participant in this session
+                            if (string.IsNullOrEmpty(verification.ValidatorAddress)
+                                || !session.ParticipantAddresses.Contains(verification.ValidatorAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Validator is not a participant in this session"
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Cryptographic signature verification
                             if (string.IsNullOrEmpty(verification.ValidatorSignature))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -379,6 +575,20 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 {
                                     Success = false,
                                     Message = "Validator signature required"
+                                }));
+                                return;
+                            }
+
+                            var validatorMessage = $"{verification.SessionId}.{verification.ValidatorAddress}.{verification.Timestamp}";
+                            var sigValid = SignatureService.VerifySignature(verification.ValidatorAddress, validatorMessage, verification.ValidatorSignature);
+                            if (!sigValid)
+                            {
+                                ErrorLogUtility.LogError($"FIND-0013 Security: Invalid validator signature for DKG Round 3. Validator: {verification.ValidatorAddress}, Session: {verification.SessionId}", "FrostStartup.DKGRound3");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Invalid validator signature"
                                 }));
                                 return;
                             }
@@ -577,6 +787,9 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 {
                     try
                     {
+                        // FIND-0013 Fix: Opportunistic cleanup
+                        FrostSessionStorage.CleanupOldSessions();
+
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
@@ -593,8 +806,105 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // FIND-0013 Fix: Input validation bounds
+                            if (string.IsNullOrEmpty(request.SessionId) || request.SessionId.Length > FrostSessionStorage.MAX_SESSION_ID_LENGTH)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"Invalid SessionId (max {FrostSessionStorage.MAX_SESSION_ID_LENGTH} characters)"
+                                }));
+                                return;
+                            }
+
+                            if (request.SignerAddresses == null || request.SignerAddresses.Count == 0 
+                                || request.SignerAddresses.Count > FrostSessionStorage.MAX_PARTICIPANTS)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"SignerAddresses must be 1-{FrostSessionStorage.MAX_PARTICIPANTS}"
+                                }));
+                                return;
+                            }
+
+                            if (request.RequiredThreshold < FrostSessionStorage.MIN_THRESHOLD 
+                                || request.RequiredThreshold > FrostSessionStorage.MAX_THRESHOLD)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"RequiredThreshold must be {FrostSessionStorage.MIN_THRESHOLD}-{FrostSessionStorage.MAX_THRESHOLD}"
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Enforce maximum concurrent session cap
+                            if (FrostSessionStorage.SigningSessions.Count >= FrostSessionStorage.MAX_SIGNING_SESSIONS)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Maximum concurrent signing sessions reached. Try again later."
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Verify leader is a registered active vBTC validator
+                            if (string.IsNullOrEmpty(request.LeaderAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "LeaderAddress required"
+                                }));
+                                return;
+                            }
+
+                            var leaderValidator = VBTCValidator.GetValidator(request.LeaderAddress);
+                            if (leaderValidator == null || !leaderValidator.IsActive)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Leader is not a registered active vBTC validator"
+                                }));
+                                return;
+                            }
+
+                            // FIND-0013 Fix: Cryptographic signature verification
+                            if (string.IsNullOrEmpty(request.LeaderSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Leader signature required"
+                                }));
+                                return;
+                            }
+
+                            var leaderMessage = $"{request.SessionId}.{request.LeaderAddress}.{request.Timestamp}";
+                            var leaderSigValid = SignatureService.VerifySignature(request.LeaderAddress, leaderMessage, request.LeaderSignature);
+                            if (!leaderSigValid)
+                            {
+                                ErrorLogUtility.LogError($"FIND-0013 Security: Invalid leader signature for signing start. Leader: {request.LeaderAddress}, Session: {request.SessionId}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Invalid leader signature"
+                                }));
+                                return;
+                            }
+
                             // TODO: FROST INTEGRATION
-                            // Validate leader signature
                             // Store signing session in memory
                             // Prepare for Round 1 nonce generation
 
