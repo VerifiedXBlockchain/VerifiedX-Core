@@ -338,8 +338,17 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Store commitment
-                            session.Round1Commitments[commitment.ValidatorAddress] = commitment.CommitmentData;
+                            // FIND-016 Fix: Prevent overwrite - each participant can only submit once per round
+                            if (!session.Round1Commitments.TryAdd(commitment.ValidatorAddress, commitment.CommitmentData))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Commitment already submitted for this validator in this session"
+                                }));
+                                return;
+                            }
 
                             var commitmentCount = session.Round1Commitments.Count;
                             var requiredCount = (int)Math.Ceiling(session.ParticipantAddresses.Count * (session.RequiredThreshold / 100.0));
@@ -666,8 +675,17 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Record verification result
-                            session.Round3Verifications[verification.ValidatorAddress] = verification.Verified;
+                            // FIND-016 Fix: Prevent overwrite - each participant can only submit once per round
+                            if (!session.Round3Verifications.TryAdd(verification.ValidatorAddress, verification.Verified))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Verification already submitted for this validator in this session"
+                                }));
+                                return;
+                            }
 
                             var verificationCount = session.Round3Verifications.Count;
                             var verifiedCount = session.Round3Verifications.Count(v => v.Value);
