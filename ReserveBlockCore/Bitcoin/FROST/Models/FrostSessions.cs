@@ -93,6 +93,9 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         /// <summary>Maximum session ID length</summary>
         public const int MAX_SESSION_ID_LENGTH = 100;
         
+        /// <summary>Maximum commitment/share data length in characters (FIND-014: bound data before FFI)</summary>
+        public const int MAX_COMMITMENT_DATA_LENGTH = 4096;
+        
         public static ConcurrentDictionary<string, DKGSession> DKGSessions { get; } = new();
         public static ConcurrentDictionary<string, SigningSession> SigningSessions { get; } = new();
         
