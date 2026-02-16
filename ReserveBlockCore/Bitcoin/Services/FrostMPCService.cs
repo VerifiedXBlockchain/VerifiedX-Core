@@ -5,6 +5,7 @@ using ReserveBlockCore.Utilities;
 using System.Net.Http.Json;
 using System.Text;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
@@ -187,7 +188,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // For now, simulate commitment collection
                 await Task.Delay(2000); // Simulate network round trip
 
-                // Collect commitments from each validator
+                // FIND-015 Fix: Collect commitments from each validator using actual server response format
+                // Server GET /frost/dkg/round1/{sessionId} returns {Success, SessionId, Commitments: {addr:data}, ...}
                 foreach (var validator in validators)
                 {
                     try
@@ -197,10 +199,22 @@ namespace ReserveBlockCore.Bitcoin.Services
                         
                         if (response.IsSuccessStatusCode)
                         {
-                            var message = await response.Content.ReadFromJsonAsync<FrostDKGRound1Message>();
-                            if (message != null && message.SessionId == sessionId)
+                            var responseBody = await response.Content.ReadAsStringAsync();
+                            var json = JObject.Parse(responseBody);
+                            
+                            if (json["Success"]?.Value<bool>() == true 
+                                && json["SessionId"]?.Value<string>() == sessionId
+                                && json["Commitments"] is JObject commitmentsObj)
                             {
-                                commitments[validator.ValidatorAddress] = message.CommitmentData;
+                                foreach (var kvp in commitmentsObj)
+                                {
+                                    var addr = kvp.Key;
+                                    var data = kvp.Value?.Value<string>();
+                                    if (!string.IsNullOrEmpty(data))
+                                    {
+                                        commitments[addr] = data;
+                                    }
+                                }
                             }
                         }
                     }
@@ -282,6 +296,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 LogUtility.Log($"[FROST MPC] Collecting Round 3 verifications...", "FrostMPCService.CollectDKGRound3Verifications");
                 await Task.Delay(2000); // Simulate verification time
 
+                // FIND-015 Fix: Deserialize actual server response format
+                // Server GET /frost/dkg/round3/{sessionId} returns {Success, SessionId, Verifications: {addr:bool}, ...}
                 foreach (var validator in validators)
                 {
                     try
@@ -291,10 +307,19 @@ namespace ReserveBlockCore.Bitcoin.Services
                         
                         if (response.IsSuccessStatusCode)
                         {
-                            var message = await response.Content.ReadFromJsonAsync<FrostDKGRound3Message>();
-                            if (message != null && message.SessionId == sessionId)
+                            var responseBody = await response.Content.ReadAsStringAsync();
+                            var json = JObject.Parse(responseBody);
+                            
+                            if (json["Success"]?.Value<bool>() == true 
+                                && json["SessionId"]?.Value<string>() == sessionId
+                                && json["Verifications"] is JObject verificationsObj)
                             {
-                                verifications[validator.ValidatorAddress] = message.Verified;
+                                foreach (var kvp in verificationsObj)
+                                {
+                                    var addr = kvp.Key;
+                                    var verified = kvp.Value?.Value<bool>() ?? false;
+                                    verifications[addr] = verified;
+                                }
                             }
                         }
                     }
@@ -499,6 +524,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 LogUtility.Log($"[FROST MPC] Collecting Round 1 nonces...", "FrostMPCService.CollectSigningRound1Nonces");
                 await Task.Delay(1500);
 
+                // FIND-015 Fix: Use actual server response format
+                // Server GET /frost/sign/round1/{sessionId} returns {Success, SessionId, Nonces: {addr:data}, ...}
                 foreach (var validator in validators)
                 {
                     try
@@ -508,10 +535,22 @@ namespace ReserveBlockCore.Bitcoin.Services
                         
                         if (response.IsSuccessStatusCode)
                         {
-                            var message = await response.Content.ReadFromJsonAsync<FrostSigningRound1Message>();
-                            if (message != null && message.SessionId == sessionId)
+                            var responseBody = await response.Content.ReadAsStringAsync();
+                            var json = JObject.Parse(responseBody);
+                            
+                            if (json["Success"]?.Value<bool>() == true 
+                                && json["SessionId"]?.Value<string>() == sessionId
+                                && json["Nonces"] is JObject noncesObj)
                             {
-                                nonces[validator.ValidatorAddress] = message.NonceCommitment;
+                                foreach (var kvp in noncesObj)
+                                {
+                                    var addr = kvp.Key;
+                                    var data = kvp.Value?.Value<string>();
+                                    if (!string.IsNullOrEmpty(data))
+                                    {
+                                        nonces[addr] = data;
+                                    }
+                                }
                             }
                         }
                     }
@@ -561,7 +600,8 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 await Task.Delay(2000);
 
-                // Collect signature shares
+                // FIND-015 Fix: Collect signature shares using actual server response format
+                // Server GET /frost/sign/share/{sessionId} returns {Success, SessionId, Shares: {addr:data}, ...}
                 foreach (var validator in validators)
                 {
                     try
@@ -571,10 +611,22 @@ namespace ReserveBlockCore.Bitcoin.Services
                         
                         if (response.IsSuccessStatusCode)
                         {
-                            var message = await response.Content.ReadFromJsonAsync<FrostSigningRound2Message>();
-                            if (message != null && message.SessionId == sessionId)
+                            var responseBody = await response.Content.ReadAsStringAsync();
+                            var json = JObject.Parse(responseBody);
+                            
+                            if (json["Success"]?.Value<bool>() == true 
+                                && json["SessionId"]?.Value<string>() == sessionId
+                                && json["Shares"] is JObject sharesObj)
                             {
-                                shares[validator.ValidatorAddress] = message.SignatureShare;
+                                foreach (var kvp in sharesObj)
+                                {
+                                    var addr = kvp.Key;
+                                    var data = kvp.Value?.Value<string>();
+                                    if (!string.IsNullOrEmpty(data))
+                                    {
+                                        shares[addr] = data;
+                                    }
+                                }
                             }
                         }
                     }
