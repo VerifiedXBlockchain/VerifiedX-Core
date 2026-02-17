@@ -829,7 +829,132 @@ namespace ReserveBlockCore.Services
                     }
                     catch (Exception ex)
                     {
-                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation error: {ex.Message}", 
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation error: {ex.Message}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                }
+
+                // FIND-018 Fix: vBTC V2 Withdrawal Cancellation - Block-level validation
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(tx.Data);
+                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: Missing required fields",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                        }
+                        else
+                        {
+                            var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                            if (withdrawalRequest == null)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: Withdrawal request not found - {withdrawalRequestHash}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else if (withdrawalRequest.RequestorAddress != tx.FromAddress)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: tx.FromAddress ({tx.FromAddress}) does not match requestor ({withdrawalRequest.RequestorAddress})",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else if (withdrawalRequest.IsCompleted)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: Withdrawal already completed/cancelled - {withdrawalRequestHash}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validated successfully. Requester: {tx.FromAddress}, SCUID: {scUID}, WithdrawalHash: {withdrawalRequestHash}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation error: {ex.Message}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                }
+
+                // FIND-018 Fix: vBTC V2 Withdrawal Vote - Block-level validation
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(tx.Data);
+                        var cancellationUID = jobj["CancellationUID"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(cancellationUID))
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: Missing CancellationUID",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                        }
+                        else
+                        {
+                            var cancellation = VBTCWithdrawalCancellation.GetCancellation(cancellationUID);
+                            if (cancellation == null)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: Cancellation not found - {cancellationUID}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else if (cancellation.IsProcessed)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: Cancellation already processed - {cancellationUID}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else
+                            {
+                                var validator = VBTCValidator.GetValidator(tx.FromAddress);
+                                if (validator == null || !validator.IsActive)
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: {tx.FromAddress} is not an active vBTC validator",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdata = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdata.InsertSafe(tx);
+                                }
+                                else
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validated successfully. Voter: {tx.FromAddress}, CancellationUID: {cancellationUID}",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation error: {ex.Message}",
                             "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         var txdata = TransactionData.GetAll();
                         tx.TransactionStatus = TransactionStatus.Invalid;

@@ -485,6 +485,17 @@ namespace ReserveBlockCore.Data
                             CompleteVBTCV2Withdrawal(tx);
                         }
 
+                        // FIND-018 Fix: vBTC V2 Withdrawal Cancellation/Vote governance handlers
+                        if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                        {
+                            CancelVBTCV2Withdrawal(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                        {
+                            VoteOnVBTCV2Cancellation(tx);
+                        }
+
                         if(tx.TransactionType == TransactionType.RESERVE)
                         {
                             var txData = tx.Data;
@@ -2832,6 +2843,202 @@ namespace ReserveBlockCore.Data
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal error: {ex.Message}", "StateData.CompleteVBTCV2Withdrawal()");
+            }
+        }
+
+        /// <summary>
+        /// FIND-018 Fix: Handle VBTC_V2_WITHDRAWAL_CANCEL transaction
+        /// Creates a cancellation request record and updates contract withdrawal status to Cancellation_Requested.
+        /// Only the original withdrawal requestor (tx.FromAddress) can initiate cancellation.
+        /// </summary>
+        private static void CancelVBTCV2Withdrawal(Transaction tx)
+        {
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
+                var failureProof = jobj["FailureProof"]?.ToObject<string?>() ?? "";
+
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                {
+                    ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal failed: Missing required fields", "StateData.CancelVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Look up the withdrawal request
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (withdrawalRequest == null)
+                {
+                    ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal failed: Withdrawal request not found - {withdrawalRequestHash}", "StateData.CancelVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Only the original requestor can cancel (bound to tx.FromAddress)
+                if (withdrawalRequest.RequestorAddress != tx.FromAddress)
+                {
+                    ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal failed: tx.FromAddress ({tx.FromAddress}) does not match requestor ({withdrawalRequest.RequestorAddress})", "StateData.CancelVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Must be in Requested state (not already completed/cancelled)
+                if (withdrawalRequest.IsCompleted)
+                {
+                    ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal failed: Withdrawal already completed/cancelled - {withdrawalRequestHash}", "StateData.CancelVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Check for duplicate cancellation
+                var existingCancellation = VBTCWithdrawalCancellation.GetCancellationByWithdrawalHash(withdrawalRequestHash);
+                if (existingCancellation != null)
+                {
+                    ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal failed: Cancellation already exists for withdrawal - {withdrawalRequestHash}", "StateData.CancelVBTCV2Withdrawal()");
+                    return;
+                }
+
+                // Create cancellation request
+                var cancellationUID = $"CANCEL_{tx.Hash}";
+                var cancellation = new VBTCWithdrawalCancellation
+                {
+                    CancellationUID = cancellationUID,
+                    SmartContractUID = scUID,
+                    OwnerAddress = tx.FromAddress,
+                    WithdrawalRequestHash = withdrawalRequestHash,
+                    BTCTxHash = "",
+                    FailureProof = failureProof,
+                    RequestTime = tx.Timestamp,
+                    ValidatorVotes = new Dictionary<string, bool>(),
+                    ApproveCount = 0,
+                    RejectCount = 0,
+                    IsApproved = false,
+                    IsProcessed = false
+                };
+
+                VBTCWithdrawalCancellation.SaveCancellation(cancellation);
+
+                // Update contract status to Cancellation_Requested
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract != null)
+                {
+                    contract.WithdrawalStatus = VBTCWithdrawalStatus.Cancellation_Requested;
+                    VBTCContractV2.UpdateContract(contract);
+                }
+
+                SCLogUtility.Log($"CancelVBTCV2Withdrawal: Cancellation request created. CancellationUID={cancellationUID}, SCUID={scUID}, Requester={tx.FromAddress}, WithdrawalHash={withdrawalRequestHash}", 
+                    "StateData.CancelVBTCV2Withdrawal()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal error: {ex.Message}", "StateData.CancelVBTCV2Withdrawal()");
+            }
+        }
+
+        /// <summary>
+        /// FIND-018 Fix: Handle VBTC_V2_WITHDRAWAL_VOTE transaction
+        /// Records a validator vote on a cancellation request.
+        /// When 75% approval threshold is reached, the withdrawal is cancelled and funds are unlocked.
+        /// Only active vBTC validators (tx.FromAddress) can vote.
+        /// </summary>
+        private static void VoteOnVBTCV2Cancellation(Transaction tx)
+        {
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                var cancellationUID = jobj["CancellationUID"]?.ToObject<string?>();
+                var approve = jobj["Approve"]?.ToObject<bool?>() ?? false;
+
+                if (string.IsNullOrEmpty(cancellationUID))
+                {
+                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: Missing CancellationUID", "StateData.VoteOnVBTCV2Cancellation()");
+                    return;
+                }
+
+                // Look up the cancellation request
+                var cancellation = VBTCWithdrawalCancellation.GetCancellation(cancellationUID);
+                if (cancellation == null)
+                {
+                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: Cancellation not found - {cancellationUID}", "StateData.VoteOnVBTCV2Cancellation()");
+                    return;
+                }
+
+                // Cannot vote on already processed cancellations
+                if (cancellation.IsProcessed)
+                {
+                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: Cancellation already processed - {cancellationUID}", "StateData.VoteOnVBTCV2Cancellation()");
+                    return;
+                }
+
+                // Verify voter is an active vBTC validator (tx.FromAddress is authoritative)
+                var validator = VBTCValidator.GetValidator(tx.FromAddress);
+                if (validator == null || !validator.IsActive)
+                {
+                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: {tx.FromAddress} is not an active vBTC validator", "StateData.VoteOnVBTCV2Cancellation()");
+                    return;
+                }
+
+                // Prevent duplicate votes (first vote only, no overwrite)
+                if (VBTCWithdrawalCancellation.HasValidatorVoted(cancellationUID, tx.FromAddress))
+                {
+                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: Validator {tx.FromAddress} already voted on {cancellationUID}", "StateData.VoteOnVBTCV2Cancellation()");
+                    return;
+                }
+
+                // Record the vote
+                VBTCWithdrawalCancellation.AddVote(cancellationUID, tx.FromAddress, approve);
+
+                // Check if 75% approval threshold reached
+                var activeValidators = VBTCValidator.GetActiveValidators();
+                var totalValidatorCount = activeValidators?.Count ?? 0;
+                
+                if (totalValidatorCount > 0)
+                {
+                    // Re-read cancellation after vote was added
+                    cancellation = VBTCWithdrawalCancellation.GetCancellation(cancellationUID);
+                    if (cancellation != null)
+                    {
+                        var approvalPercentage = (int)((double)cancellation.ApproveCount / totalValidatorCount * 100);
+
+                        if (approvalPercentage >= 75 && !cancellation.IsProcessed)
+                        {
+                            // Threshold reached - approve the cancellation
+                            VBTCWithdrawalCancellation.MarkAsProcessed(cancellationUID, true);
+
+                            // Cancel the original withdrawal request (unlock funds)
+                            var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash);
+                            if (withdrawalRequest != null)
+                            {
+                                withdrawalRequest.Status = VBTCWithdrawalStatus.Cancelled;
+                                withdrawalRequest.IsCompleted = true;
+                                VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+                            }
+
+                            // Reset contract withdrawal status back to None (funds unlocked)
+                            var contract = VBTCContractV2.GetContract(cancellation.SmartContractUID);
+                            if (contract != null)
+                            {
+                                contract.WithdrawalStatus = VBTCWithdrawalStatus.None;
+                                contract.ActiveWithdrawalRequestHash = null;
+                                contract.ActiveWithdrawalAmount = 0;
+                                contract.ActiveWithdrawalBTCDestination = null;
+                                contract.ActiveWithdrawalFeeRate = 0;
+                                contract.ActiveWithdrawalRequestTime = 0;
+                                VBTCContractV2.UpdateContract(contract);
+                            }
+
+                            SCLogUtility.Log($"VoteOnVBTCV2Cancellation: Cancellation APPROVED (75% threshold reached). CancellationUID={cancellationUID}, Approvals={cancellation.ApproveCount}/{totalValidatorCount}", 
+                                "StateData.VoteOnVBTCV2Cancellation()");
+                        }
+                        else
+                        {
+                            SCLogUtility.Log($"VoteOnVBTCV2Cancellation: Vote recorded. CancellationUID={cancellationUID}, Voter={tx.FromAddress}, Approve={approve}, Progress={cancellation.ApproveCount}/{totalValidatorCount} ({approvalPercentage}%)", 
+                                "StateData.VoteOnVBTCV2Cancellation()");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation error: {ex.Message}", "StateData.VoteOnVBTCV2Cancellation()");
             }
         }
 

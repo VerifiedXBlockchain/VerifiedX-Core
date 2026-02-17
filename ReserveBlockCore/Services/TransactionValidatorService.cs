@@ -2461,6 +2461,91 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+            // FIND-018 Fix: VBTC V2 Withdrawal Cancel - Consensus-level validation
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+            {
+                if (!string.IsNullOrWhiteSpace(txRequest.Data))
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txRequest.Data);
+                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(scUID))
+                            return (txResult, "ContractUID is required for vBTC V2 withdrawal cancel.");
+                        if (string.IsNullOrEmpty(withdrawalRequestHash))
+                            return (txResult, "WithdrawalRequestHash is required for vBTC V2 withdrawal cancel.");
+
+                        // Validate the withdrawal request exists and belongs to the sender
+                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                        if (withdrawalRequest == null)
+                            return (txResult, $"Withdrawal request not found: {withdrawalRequestHash}");
+                        if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
+                            return (txResult, "Only the original withdrawal requestor can submit a cancellation.");
+                        if (withdrawalRequest.IsCompleted)
+                            return (txResult, "Cannot cancel an already completed/cancelled withdrawal.");
+
+                        // Check for duplicate cancellation
+                        var existingCancel = VBTCWithdrawalCancellation.GetCancellationByWithdrawalHash(withdrawalRequestHash);
+                        if (existingCancel != null)
+                            return (txResult, "A cancellation request already exists for this withdrawal.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_WITHDRAWAL_CANCEL transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 withdrawal cancel transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 withdrawal cancel.");
+                }
+            }
+
+            // FIND-018 Fix: VBTC V2 Withdrawal Vote - Consensus-level validation
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+            {
+                if (!string.IsNullOrWhiteSpace(txRequest.Data))
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txRequest.Data);
+                        var cancellationUID = jobj["CancellationUID"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(cancellationUID))
+                            return (txResult, "CancellationUID is required for vBTC V2 withdrawal vote.");
+
+                        // Validate the cancellation exists and is not processed
+                        var cancellation = VBTCWithdrawalCancellation.GetCancellation(cancellationUID);
+                        if (cancellation == null)
+                            return (txResult, $"Cancellation request not found: {cancellationUID}");
+                        if (cancellation.IsProcessed)
+                            return (txResult, "Cannot vote on an already processed cancellation.");
+
+                        // Validate the voter is an active vBTC validator
+                        var validator = VBTCValidator.GetValidator(txRequest.FromAddress);
+                        if (validator == null || !validator.IsActive)
+                            return (txResult, "Only active vBTC validators can vote on cancellations.");
+
+                        // Prevent duplicate votes
+                        if (VBTCWithdrawalCancellation.HasValidatorVoted(cancellationUID, txRequest.FromAddress))
+                            return (txResult, "Validator has already voted on this cancellation.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_WITHDRAWAL_VOTE transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 withdrawal vote transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 withdrawal vote.");
+                }
+            }
+
             if (txRequest.FromAddress.StartsWith("xRBX") && runReserveCheck)
             {
                 if (txRequest.TransactionType != TransactionType.TX && 

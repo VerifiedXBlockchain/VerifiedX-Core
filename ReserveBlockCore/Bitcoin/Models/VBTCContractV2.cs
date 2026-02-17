@@ -330,7 +330,8 @@ namespace ReserveBlockCore.Bitcoin.Models
         Requested,
         Pending_BTC,
         Completed,
-        Cancelled
+        Cancelled,
+        Cancellation_Requested  // FIND-018: Withdrawal has an active cancellation vote in progress
     }
 
     public class VBTCWithdrawalRecord
