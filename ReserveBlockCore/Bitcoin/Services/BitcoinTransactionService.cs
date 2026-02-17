@@ -68,7 +68,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// <summary>
         /// Builds an unsigned Taproot transaction
         /// </summary>
-        public static async Task<(bool Success, NBitcoin.Transaction? UnsignedTx, ulong Fee, List<BlockchainScripthashListunspentResult> UsedUtxos, string ErrorMessage)> 
+        public static async Task<(bool Success, NBitcoin.Transaction? UnsignedTx, ulong Fee, List<Coin> SpentCoins, List<BlockchainScripthashListunspentResult> UsedUtxos, string ErrorMessage)> 
             BuildUnsignedTaprootTransaction(
                 string taprootAddress, 
                 string destinationAddress, 
@@ -88,14 +88,14 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
                 catch (Exception ex)
                 {
-                    return (false, null, 0, new List<BlockchainScripthashListunspentResult>(), $"Invalid address: {ex.Message}");
+                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), $"Invalid address: {ex.Message}");
                 }
 
                 // Get UTXOs
                 var utxos = await GetTaprootUTXOs(taprootAddress);
                 if (!utxos.Any())
                 {
-                    return (false, null, 0, new List<BlockchainScripthashListunspentResult>(), "No UTXOs found for Taproot address");
+                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), "No UTXOs found for Taproot address");
                 }
 
                 ulong amountToSend = Convert.ToUInt64(amountBTC * BTCMultiplier);
@@ -166,7 +166,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                     if (!sufficientInputsFound && totalInputAmount == previousTotalInputAmount)
                     {
-                        return (false, null, 0, new List<BlockchainScripthashListunspentResult>(), 
+                        return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), 
                             $"Insufficient funds. Required: {(amountToSend + feeEstimate) * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC");
                     }
                 }
@@ -181,21 +181,25 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 var unsignedTx = txBuilder.BuildTransaction(false);
 
-                return (true, unsignedTx, feeEstimate, selectedUtxos, string.Empty);
+                return (true, unsignedTx, feeEstimate, unspentCoins, selectedUtxos, string.Empty);
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error building unsigned Taproot transaction: {ex}", "BitcoinTransactionService.BuildUnsignedTaprootTransaction()");
-                return (false, null, 0, new List<BlockchainScripthashListunspentResult>(), $"Error: {ex.Message}");
+                return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), $"Error: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Signs a transaction using FROST threshold signatures via validator coordination
+        /// Signs a transaction using FROST threshold signatures via validator coordination.
+        /// FIND-020 Fix: Computes BIP341 Taproot sighash per input (not txid) and runs
+        /// a separate FROST signing ceremony for each input, since each input's sighash
+        /// commits to the input index and differs per-input.
         /// </summary>
         public static async Task<(bool Success, string SignedTxHex, string TxHash, string ErrorMessage)> 
             SignTransactionWithFROST(
                 NBitcoin.Transaction unsignedTx,
+                List<Coin> spentCoins,
                 string scUID,
                 List<VBTCValidator> validators,
                 int threshold)
@@ -214,39 +218,83 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, string.Empty, "FROST group public key not found in contract");
                 }
 
-                // Prepare the message to sign (transaction sighash)
-                // For Taproot, we use BIP 341 signature hash
-                // Use the transaction ID as the message to sign (simplified for now)
-                string messageToSign = unsignedTx.GetHash().ToString();
-
-                // Coordinate FROST signing ceremony
-                var signingResult = await FrostMPCService.CoordinateSigningCeremony(
-                    messageToSign,
-                    scUID,
-                    validators,
-                    threshold);
-
-                if (signingResult == null || !signingResult.SignatureValid)
-                {
-                    return (false, string.Empty, string.Empty, "FROST signing failed");
-                }
-
-                // The aggregate signature from FROST is a Schnorr signature
-                // Convert it to Bitcoin witness format for Taproot
-                var aggregateSignatureBytes = Convert.FromHexString(signingResult.SchnorrSignature);
-                
-                // Create witness for Taproot key path spend
-                // Taproot witness is just the signature (64 bytes for Schnorr)
-                var witness = new WitScript(Op.GetPushOp(aggregateSignatureBytes));
-
-                // Attach witness to all inputs (they all spend from same Taproot address)
+                // FIND-020 Fix: Build the spent outputs array in input order for BIP341 sighash.
+                // BIP341 requires ALL prevouts to compute the sighash (prevouts commitment).
+                var spentOutputs = new TxOut[unsignedTx.Inputs.Count];
                 for (int i = 0; i < unsignedTx.Inputs.Count; i++)
                 {
+                    var prevOut = unsignedTx.Inputs[i].PrevOut;
+                    var matchingCoin = spentCoins.FirstOrDefault(c => c.Outpoint == prevOut);
+                    if (matchingCoin == null)
+                    {
+                        return (false, string.Empty, string.Empty, 
+                            $"Missing prevout data for input {i} (txid: {prevOut.Hash}, vout: {prevOut.N}). Cannot compute BIP341 sighash.");
+                    }
+                    spentOutputs[i] = matchingCoin.TxOut;
+                }
+
+                // Precompute shared transaction data for BIP341 sighash (prevouts hash, amounts hash, etc.)
+                var precomputedData = unsignedTx.PrecomputeTransactionData(spentOutputs);
+
+                // FIND-020 Fix: Sign each input individually with its own BIP341 sighash.
+                // Each input has a unique sighash because the input index is part of the BIP341 preimage.
+                for (int i = 0; i < unsignedTx.Inputs.Count; i++)
+                {
+                    // Compute BIP341 signature hash for this specific input (key-path spend, SIGHASH_DEFAULT)
+                    var execData = new TaprootExecutionData(i) { SigHash = TaprootSigHash.Default };
+                    uint256 sighash = unsignedTx.GetSignatureHashTaproot(precomputedData, execData);
+                    string sighashHex = sighash.ToString();
+
+                    LogUtility.Log($"[FROST] Computing BIP341 sighash for input {i}/{unsignedTx.Inputs.Count}: {sighashHex}", 
+                        "BitcoinTransactionService.SignTransactionWithFROST()");
+
+                    // Coordinate FROST signing ceremony for this input's sighash
+                    var signingResult = await FrostMPCService.CoordinateSigningCeremony(
+                        sighashHex,
+                        scUID,
+                        validators,
+                        threshold);
+
+                    if (signingResult == null || !signingResult.SignatureValid)
+                    {
+                        return (false, string.Empty, string.Empty, $"FROST signing failed for input {i}");
+                    }
+
+                    // The aggregate signature from FROST is a 64-byte Schnorr signature
+                    var aggregateSignatureBytes = Convert.FromHexString(signingResult.SchnorrSignature);
+
+                    if (aggregateSignatureBytes.Length != 64)
+                    {
+                        return (false, string.Empty, string.Empty, 
+                            $"Invalid Schnorr signature length for input {i}: expected 64 bytes, got {aggregateSignatureBytes.Length}");
+                    }
+
+                    // FIND-020 Fix: Pre-broadcast validation - verify the Schnorr signature locally
+                    // before attaching it to the transaction. This prevents broadcasting invalid transactions.
+                    var groupPubKeyBytes = Convert.FromHexString(contract.FrostGroupPublicKey);
+                    var taprootPubKey = new TaprootPubKey(groupPubKeyBytes);
+                    var schnorrSig = new SchnorrSignature(aggregateSignatureBytes);
+
+                    if (!taprootPubKey.VerifySignature(sighash, schnorrSig))
+                    {
+                        ErrorLogUtility.LogError(
+                            $"FIND-020 Pre-broadcast check FAILED: Schnorr signature verification failed for input {i}. " +
+                            $"Sighash: {sighashHex}, GroupPubKey: {contract.FrostGroupPublicKey}",
+                            "BitcoinTransactionService.SignTransactionWithFROST()");
+                        return (false, string.Empty, string.Empty, 
+                            $"Pre-broadcast signature verification failed for input {i}. Transaction would be rejected by Bitcoin network.");
+                    }
+
+                    // Create Taproot key-path witness: just the 64-byte Schnorr signature (SIGHASH_DEFAULT omits the byte)
+                    var witness = new WitScript(Op.GetPushOp(aggregateSignatureBytes));
                     unsignedTx.Inputs[i].WitScript = witness;
                 }
 
                 string signedTxHex = unsignedTx.ToHex();
                 string txHash = unsignedTx.GetHash().ToString();
+
+                LogUtility.Log($"[FROST] All {unsignedTx.Inputs.Count} inputs signed and verified successfully. TxHash: {txHash}", 
+                    "BitcoinTransactionService.SignTransactionWithFROST()");
 
                 return (true, signedTxHex, txHash, string.Empty);
             }
@@ -345,9 +393,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, $"Failed to build transaction: {buildResult.ErrorMessage}");
                 }
 
-                // Step 2: Sign with FROST
+                // Step 2: Sign with FROST (FIND-020: pass spent coins for BIP341 sighash computation)
                 var signingResult = await SignTransactionWithFROST(
-                    buildResult.UnsignedTx, 
+                    buildResult.UnsignedTx,
+                    buildResult.SpentCoins,
                     scUID, 
                     validators,
                     threshold);
