@@ -21,6 +21,8 @@ namespace ReserveBlockCore.Bitcoin.ElectrumX
         protected SslStream SslStream;
         protected NetworkStream TcpStream;
         protected const int Buffersize = ushort.MaxValue;
+        private const int MaxResponseSize = 10 * 1024 * 1024; // 10 MB max response size
+        private static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(30);
         public static Version CurrentVersion;
         protected bool IsConnected;
         protected static NBitcoin.Network Network;
@@ -83,21 +85,31 @@ namespace ReserveBlockCore.Bitcoin.ElectrumX
         }
         private async Task<string> SendMessageWithSsl(byte[] requestData)
         {
-            const int bufferSize = 8192; // Use a smaller buffer size for manageable chunks
+            const int bufferSize = 8192;
             var buffer = new byte[bufferSize];
-            await SslStream.WriteAsync(requestData, 0, requestData.Length);
+            var totalBytesRead = 0;
+
+            using var cts = new CancellationTokenSource(ReadTimeout);
+
+            await SslStream.WriteAsync(requestData, 0, requestData.Length, cts.Token);
 
             var responseBuilder = new StringBuilder();
 
             while (true)
             {
-                int read = await SslStream.ReadAsync(buffer, 0, buffer.Length);
+                int read = await SslStream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
                 if (read == 0)
-                    break; // No more data to read
+                    break;
+
+                totalBytesRead += read;
+                if (totalBytesRead > MaxResponseSize)
+                {
+                    Disconnect();
+                    return string.Empty;
+                }
 
                 responseBuilder.Append(Encoding.ASCII.GetString(buffer, 0, read));
 
-                // Check if the current response forms a complete JSON
                 if (IsCompleteJson(responseBuilder.ToString()))
                     break;
             }
@@ -128,10 +140,21 @@ namespace ReserveBlockCore.Bitcoin.ElectrumX
         {
             var response = new StringBuilder();
             var buffer = new byte[Buffersize];
-            await TcpStream.WriteAsync(requestData, 0, requestData.Length);
-            var bytes = await TcpStream.ReadAsync(buffer, 0, buffer.Length);
+            var totalBytesRead = 0;
+
+            using var cts = new CancellationTokenSource(ReadTimeout);
+
+            await TcpStream.WriteAsync(requestData, 0, requestData.Length, cts.Token);
+            var bytes = await TcpStream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
             do
             {
+                totalBytesRead += bytes;
+                if (totalBytesRead > MaxResponseSize)
+                {
+                    Disconnect();
+                    return string.Empty;
+                }
+
                 response.Append(Encoding.UTF8.GetString(buffer, 0, bytes));
             }
             while (TcpStream.DataAvailable);
