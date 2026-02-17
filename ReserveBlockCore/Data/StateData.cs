@@ -207,6 +207,7 @@ namespace ReserveBlockCore.Data
                             || tx.TransactionType == TransactionType.SC_MINT
                             || tx.TransactionType == TransactionType.SC_TX
                             || tx.TransactionType == TransactionType.SC_BURN
+                            || tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE // FIND-017 Fix: Route vBTC V2 contract creation through mint dispatcher
                             || tx.TransactionType == TransactionType.TKNZ_WD_ARB
                             || tx.TransactionType == TransactionType.TKNZ_WD_OWNER)
                         {
