@@ -236,6 +236,7 @@ namespace ReserveBlockCore.Services
                 
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
+                Globals.IsFrostValidator = true; // Enable FROST server for validator nodes
                 _ = FrostServer.Start();
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
