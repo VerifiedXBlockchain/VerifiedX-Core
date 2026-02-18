@@ -348,7 +348,7 @@ Validation: Must match 0.9998 exactly
 
 1. **Use FROST threshold Schnorr** where private key never exists in full form
 2. **Integrate MPC directly** into RBX node codebase via P/Invoke
-3. **Use HTTP/REST API** for FROST ceremony coordination between validators (port 19900)
+3. **Use HTTP/REST API** for FROST ceremony coordination between validators (`Globals.FrostValidatorPort`: 7295 mainnet / 17295 testnet / 27295 custom testnet)
 4. **Track all withdrawals** in smart contract state and history
 5. **Verify BTC transactions** using existing Electrum integration
 6. **Store validator key shares** (encrypted, single item per validator)
@@ -405,7 +405,7 @@ Validation: Must match 0.9998 exactly
      ┌────────────────┐       ┌──────────────┐  ┌─────────────┐
      │ Bitcoin Network│       │ FROST Server │  │  Electrum   │
      │   (Taproot     │       │  (HTTP/REST) │  │   Nodes     │
-     │ Mainnet/Testnet│       │  Port 19900  │  │             │
+     │ Mainnet/Testnet│       │  Port 7295*  │  │             │
      └────────────────┘       └──────────────┘  └─────────────┘
 ```
 
