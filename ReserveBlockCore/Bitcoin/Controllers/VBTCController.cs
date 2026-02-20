@@ -559,22 +559,38 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Get smart contract
-                // var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
-                // var tokenizationV2 = sc.Features.FirstOrDefault(x => x.FeatureName == FeatureName.TokenizationV2);
+                if (string.IsNullOrEmpty(scUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID is required" });
 
-                // TODO: FROST INTEGRATION
-                // Retrieve FROST group public key and Taproot deposit address
-                // PLACEHOLDER: Mock data
+                // FIND-025 Fix: Load real contract data instead of returning placeholders
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "vBTC V2 contract not found for the given scUID"
+                    });
+                }
+
+                if (string.IsNullOrEmpty(contract.DepositAddress))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Contract exists but deposit address has not been generated yet. DKG ceremony may not have completed."
+                    });
+                }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Deposit address retrieved",
                     SmartContractUID = scUID,
-                    DepositAddress = "bc1pFROST_TAPROOT_PLACEHOLDER",
-                    FrostGroupPublicKey = "PLACEHOLDER_FROST_GROUP_PUBLIC_KEY",
-                    RequiredThreshold = 51
+                    DepositAddress = contract.DepositAddress,
+                    FrostGroupPublicKey = contract.FrostGroupPublicKey ?? string.Empty,
+                    RequiredThreshold = contract.RequiredThreshold,
+                    DKGProof = contract.DKGProof ?? string.Empty
                 });
             }
             catch (Exception ex)
