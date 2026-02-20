@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Configuration;
+using NBitcoin;
 using Newtonsoft.Json;
 using ReserveBlockCore.Bitcoin.FROST.Models;
 using ReserveBlockCore.Bitcoin.Models;
@@ -204,7 +205,41 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Create DKG session in memory
+                            // FIND-024 Fix: Determine this validator's participant index (1-based)
+                            var myAddress = Globals.ValidatorAddress;
+                            var participantIndex = request.ParticipantAddresses.IndexOf(myAddress);
+                            if (participantIndex < 0)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "This validator is not in the participant list"
+                                }));
+                                return;
+                            }
+
+                            ushort myParticipantId = (ushort)(participantIndex + 1); // FROST uses 1-based IDs
+                            ushort maxSigners = (ushort)request.ParticipantAddresses.Count;
+                            ushort minSigners = (ushort)Math.Ceiling(maxSigners * (request.RequiredThreshold / 100.0));
+
+                            // FIND-024 Fix: Call FROST native library for DKG Round 1
+                            var (commitment, secretPackage, errorCode) = FrostNative.DKGRound1Generate(
+                                myParticipantId, maxSigners, minSigners);
+
+                            if (errorCode != FrostNative.SUCCESS || string.IsNullOrEmpty(commitment))
+                            {
+                                ErrorLogUtility.LogError($"FROST DKG Round 1 generate failed. Error code: {errorCode}", "FrostStartup.DKGStart");
+                                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"FROST DKG Round 1 generation failed (error: {errorCode})"
+                                }));
+                                return;
+                            }
+
+                            // Create DKG session in memory with FROST state
                             var session = new DKGSession
                             {
                                 SessionId = request.SessionId,
@@ -212,8 +247,13 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 LeaderAddress = request.LeaderAddress,
                                 ParticipantAddresses = request.ParticipantAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
-                                StartTimestamp = TimeUtil.GetTime()
+                                StartTimestamp = TimeUtil.GetTime(),
+                                MyParticipantIndex = myParticipantId,
+                                Round1SecretPackage = secretPackage
                             };
+
+                            // Auto-store this validator's commitment
+                            session.Round1Commitments.TryAdd(myAddress, commitment);
 
                             if (!FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
                             {
@@ -226,17 +266,19 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            LogUtility.Log($"[FROST] DKG ceremony started. Session: {request.SessionId}, Leader: {request.LeaderAddress}, Participants: {request.ParticipantAddresses.Count}", "FrostStartup.DKGStart");
+                            LogUtility.Log($"[FROST] DKG ceremony started with real FROST crypto. Session: {request.SessionId}, " +
+                                $"ParticipantId: {myParticipantId}/{maxSigners}, MinSigners: {minSigners}", "FrostStartup.DKGStart");
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                             {
                                 Success = true,
-                                Message = "DKG ceremony started - proceed to Round 1",
+                                Message = "DKG ceremony started with FROST Round 1 commitment generated",
                                 SessionId = request.SessionId,
                                 SmartContractUID = request.SmartContractUID,
                                 ParticipantCount = request.ParticipantAddresses.Count,
-                                Threshold = request.RequiredThreshold
+                                Threshold = request.RequiredThreshold,
+                                CommitmentGenerated = true
                             }, Formatting.Indented));
                         }
                     }
@@ -467,17 +509,41 @@ namespace ReserveBlockCore.Bitcoin.FROST
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
-                            // Body contains the aggregated Round 1 commitments dictionary from coordinator
-                            // TODO: FROST INTEGRATION - Use these commitments to generate encrypted shares for each participant
                             
-                            LogUtility.Log($"[FROST] DKG Round 2 commitments received for session {sessionId}", "FrostStartup.DKGRound2");
+                            // FIND-024 Fix: Parse all Round 1 commitments and call FROST native Round 2
+                            if (string.IsNullOrEmpty(session.Round1SecretPackage))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Round 1 secret package not found - DKG start may have failed" }));
+                                return;
+                            }
+
+                            // Call FROST native library to generate shares for other participants
+                            var (sharesJson, round2Secret, errorCode) = FrostNative.DKGRound2GenerateShares(
+                                session.Round1SecretPackage, body);
+
+                            if (errorCode != FrostNative.SUCCESS || string.IsNullOrEmpty(sharesJson))
+                            {
+                                ErrorLogUtility.LogError($"FROST DKG Round 2 share generation failed. Error code: {errorCode}", "FrostStartup.DKGRound2");
+                                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"FROST Round 2 share generation failed (error: {errorCode})" }));
+                                return;
+                            }
+
+                            // Store Round 2 state
+                            session.Round2Secret = round2Secret;
+                            session.GeneratedSharesJson = sharesJson;
+
+                            LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                             {
                                 Success = true,
-                                Message = "Round 2 commitments received - share generation initiated",
-                                SessionId = sessionId
+                                Message = "Round 2 shares generated via FROST native library",
+                                SessionId = sessionId,
+                                SharesGenerated = true,
+                                GeneratedShares = sharesJson  // Coordinator collects and redistributes
                             }, Formatting.Indented));
                         }
                     }
@@ -693,17 +759,58 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                             LogUtility.Log($"[FROST] DKG Round 3 verification from {verification.ValidatorAddress}: {verification.Verified}. Verified: {verifiedCount}/{requiredCount}", "FrostStartup.DKGRound3");
 
-                            // If threshold reached and all verified, compute final result
+                            // FIND-024 Fix: If threshold reached, finalize DKG with real FROST native library
                             if (verifiedCount >= requiredCount && !session.IsCompleted)
                             {
-                                // Aggregate DKG result with placeholder crypto
-                                // TODO: Replace with real FROST aggregation when native library integrated
-                                session.GroupPublicKey = GeneratePlaceholderGroupPublicKey(session.Round1Commitments);
-                                session.TaprootAddress = GeneratePlaceholderTaprootAddress(session.GroupPublicKey);
-                                session.DKGProof = GeneratePlaceholderDKGProof(session.SessionId, session.GroupPublicKey);
-                                session.IsCompleted = true;
+                                if (!string.IsNullOrEmpty(session.Round2Secret))
+                                {
+                                    var round1Json = JsonConvert.SerializeObject(
+                                        session.Round1Commitments.ToDictionary(k => k.Key, k => k.Value));
+                                    var receivedSharesJsonStr = JsonConvert.SerializeObject(
+                                        session.ReceivedSharesJson.ToDictionary(k => k.Key, k => k.Value));
 
-                                LogUtility.Log($"[FROST] DKG ceremony completed! Address: {session.TaprootAddress}", "FrostStartup.DKGRound3");
+                                    var (groupPubkey, keyPackage, pubkeyPackage, finalizeError) = FrostNative.DKGRound3Finalize(
+                                        session.Round2Secret, round1Json, receivedSharesJsonStr);
+
+                                    if (finalizeError == FrostNative.SUCCESS && !string.IsNullOrEmpty(groupPubkey))
+                                    {
+                                        session.GroupPublicKey = groupPubkey;
+                                        session.FinalKeyPackage = keyPackage;
+                                        session.FinalPubkeyPackage = pubkeyPackage;
+
+                                        // FIND-024 Fix: Derive Taproot address using NBitcoin (real Bech32m)
+                                        session.TaprootAddress = DeriveTaprootAddress(groupPubkey);
+
+                                        // Generate DKG proof with real data
+                                        session.DKGProof = GenerateDKGProof(session.SessionId, groupPubkey, pubkeyPackage);
+                                        session.IsCompleted = true;
+
+                                        // Persist key package for future signing
+                                        var myAddr = Globals.ValidatorAddress;
+                                        if (!string.IsNullOrEmpty(myAddr))
+                                        {
+                                            FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
+                                            {
+                                                SmartContractUID = session.SmartContractUID,
+                                                ValidatorAddress = myAddr,
+                                                KeyPackage = keyPackage,
+                                                PubkeyPackage = pubkeyPackage,
+                                                GroupPublicKey = groupPubkey,
+                                                CreatedTimestamp = TimeUtil.GetTime()
+                                            });
+                                        }
+
+                                        LogUtility.Log($"[FROST] DKG ceremony completed with real crypto! Address: {session.TaprootAddress}", "FrostStartup.DKGRound3");
+                                    }
+                                    else
+                                    {
+                                        ErrorLogUtility.LogError($"FROST DKG Round 3 finalize failed. Error: {finalizeError}", "FrostStartup.DKGRound3");
+                                    }
+                                }
+                                else
+                                {
+                                    ErrorLogUtility.LogError("DKG Round 3: Round2Secret is null - Round 2 may not have completed", "FrostStartup.DKGRound3");
+                                }
                             }
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
@@ -995,17 +1102,72 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // TODO: FROST INTEGRATION
-                            // Store signing session in memory
-                            // Prepare for Round 1 nonce generation
+                            // FIND-024 Fix: Load this validator's key package and generate nonces
+                            var myAddr = Globals.ValidatorAddress;
+                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(request.SmartContractUID, myAddr);
+                            if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "No FROST key package found for this contract. DKG may not have completed."
+                                }));
+                                return;
+                            }
+
+                            // Call FROST native library to generate nonce commitment
+                            var (nonceCommitment, nonceSecret, nonceError) = FrostNative.SignRound1Nonces(keyStore.KeyPackage);
+                            if (nonceError != FrostNative.SUCCESS || string.IsNullOrEmpty(nonceCommitment))
+                            {
+                                ErrorLogUtility.LogError($"FROST Sign Round 1 nonce generation failed. Error: {nonceError}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"FROST nonce generation failed (error: {nonceError})"
+                                }));
+                                return;
+                            }
+
+                            // Create signing session with FROST state
+                            var signingSession = new SigningSession
+                            {
+                                SessionId = request.SessionId,
+                                MessageHash = request.MessageHash,
+                                SmartContractUID = request.SmartContractUID,
+                                LeaderAddress = request.LeaderAddress,
+                                SignerAddresses = request.SignerAddresses,
+                                RequiredThreshold = request.RequiredThreshold,
+                                StartTimestamp = TimeUtil.GetTime(),
+                                MyKeyPackage = keyStore.KeyPackage,
+                                NonceSecret = nonceSecret
+                            };
+
+                            // Auto-store this validator's nonce commitment
+                            signingSession.Round1Nonces.TryAdd(myAddr, nonceCommitment);
+
+                            if (!FrostSessionStorage.SigningSessions.TryAdd(request.SessionId, signingSession))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Signing session already exists"
+                                }));
+                                return;
+                            }
+
+                            LogUtility.Log($"[FROST] Signing ceremony started with real nonce generation. Session: {request.SessionId}", "FrostStartup.SignStart");
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                             {
                                 Success = true,
-                                Message = "Signing ceremony started",
+                                Message = "Signing ceremony started with FROST nonce generated",
                                 SessionId = request.SessionId,
-                                MessageHash = request.MessageHash
+                                MessageHash = request.MessageHash,
+                                NonceGenerated = true
                             }, Formatting.Indented));
                         }
                     }
@@ -1193,17 +1355,40 @@ namespace ReserveBlockCore.Bitcoin.FROST
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
-                            // Body contains aggregated Round 1 nonces from coordinator
-                            // TODO: FROST INTEGRATION - Use nonces to generate signature shares
                             
-                            LogUtility.Log($"[FROST] Signing Round 2 nonces received for session {sessionId}", "FrostStartup.SignRound2");
+                            // FIND-024 Fix: Call FROST native library to generate signature share
+                            if (string.IsNullOrEmpty(session.MyKeyPackage) || string.IsNullOrEmpty(session.NonceSecret))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Key package or nonce secret not found" }));
+                                return;
+                            }
+
+                            var (signatureShare, sigShareError) = FrostNative.SignRound2Signature(
+                                session.MyKeyPackage, session.NonceSecret, body, session.MessageHash);
+
+                            if (sigShareError != FrostNative.SUCCESS || string.IsNullOrEmpty(signatureShare))
+                            {
+                                ErrorLogUtility.LogError($"FROST Sign Round 2 signature share generation failed. Error: {sigShareError}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Signature share generation failed (error: {sigShareError})" }));
+                                return;
+                            }
+
+                            // Store this validator's signature share
+                            var myAddr = Globals.ValidatorAddress ?? "";
+                            session.Round2Shares.TryAdd(myAddr, signatureShare);
+
+                            LogUtility.Log($"[FROST] Signing Round 2 signature share generated via native library for session {sessionId}", "FrostStartup.SignRound2");
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                             {
                                 Success = true,
-                                Message = "Round 2 nonces received - signature share generation initiated",
-                                SessionId = sessionId
+                                Message = "Signature share generated via FROST native library",
+                                SessionId = sessionId,
+                                ShareGenerated = true,
+                                SignatureShare = signatureShare
                             }, Formatting.Indented));
                         }
                     }
@@ -1308,122 +1493,72 @@ namespace ReserveBlockCore.Bitcoin.FROST
             });
         }
 
-        #region FROST Cryptographic Operations (Using Native Library)
+        #region FROST Cryptographic Operations (FIND-024 Fix: Real implementations)
 
         /// <summary>
-        /// Generate group public key from DKG commitments using FROST native library
+        /// FIND-024 Fix: Derive a real Taproot address from the FROST group public key using NBitcoin.
+        /// The group public key is a 32-byte x-only public key from FROST DKG.
+        /// We use NBitcoin's TaprootPubKey to produce a proper Bech32m-encoded address per BIP340/BIP341/BIP350.
         /// </summary>
-        private static string GeneratePlaceholderGroupPublicKey(System.Collections.Concurrent.ConcurrentDictionary<string, string> commitments)
+        private static string DeriveTaprootAddress(string groupPublicKeyHex)
         {
             try
             {
-                // Serialize commitments to JSON for FROST library
-                var commitmentsJson = JsonConvert.SerializeObject(commitments.Values.ToList());
-                
-                // Call FROST native library to aggregate commitments
-                // Note: Currently returns placeholder data until full FROST DKG is implemented in Rust
-                var (groupPubkey, keyPackage, pubkeyPackage, errorCode) = FrostNative.DKGRound3Finalize(
-                    round2SecretPackage: "{}", // Placeholder - in real impl, this comes from Round 2
-                    round1PackagesJson: commitmentsJson, // Round 1 commitments
-                    round2PackagesJson: "[]" // Placeholder - in real impl, shares from Round 2
-                );
-
-                if (errorCode != FrostNative.SUCCESS || string.IsNullOrEmpty(groupPubkey))
+                // The FROST group public key should be a 32-byte (64 hex char) x-only public key
+                var pubkeyBytes = Convert.FromHexString(groupPublicKeyHex);
+                if (pubkeyBytes.Length != 32)
                 {
-                    LogUtility.Log($"[FROST] Native DKG finalize returned error code: {errorCode}, falling back to deterministic placeholder", "FrostStartup.GenerateGroupPublicKey");
-                    // Fallback to deterministic generation
-                    var combined = string.Join("", commitments.Values);
-                    var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(combined));
-                    return Convert.ToHexString(hash);
+                    ErrorLogUtility.LogError($"FROST group public key unexpected length: {pubkeyBytes.Length} bytes (expected 32)", "FrostStartup.DeriveTaprootAddress");
+                    return string.Empty;
                 }
 
-                LogUtility.Log($"[FROST] Group public key generated via native library: {groupPubkey.Substring(0, Math.Min(16, groupPubkey.Length))}...", "FrostStartup.GenerateGroupPublicKey");
-                return groupPubkey;
+                // Create NBitcoin TaprootPubKey from 32-byte x-only key
+                var taprootPubKey = new TaprootPubKey(pubkeyBytes);
+
+                // Derive the Taproot address using proper Bech32m encoding
+                var network = Globals.IsTestNet ? Network.TestNet : Network.Main;
+                var taprootAddress = taprootPubKey.GetAddress(network);
+
+                var addressStr = taprootAddress.ToString();
+                LogUtility.Log($"[FROST] Real Taproot address derived via NBitcoin: {addressStr}", "FrostStartup.DeriveTaprootAddress");
+                return addressStr;
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"FROST native library error: {ex.Message}", "FrostStartup.GenerateGroupPublicKey");
-                // Fallback to deterministic generation
-                var combined = string.Join("", commitments.Values);
-                var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(combined));
-                return Convert.ToHexString(hash);
+                ErrorLogUtility.LogError($"Taproot address derivation error: {ex.Message}", "FrostStartup.DeriveTaprootAddress");
+                return string.Empty;
             }
         }
 
         /// <summary>
-        /// Derive Taproot address from group public key
-        /// Uses Bitcoin Taproot (BIP 340/341/342) address derivation
+        /// Generate DKG completion proof containing the real FROST artifacts.
         /// </summary>
-        private static string GeneratePlaceholderTaprootAddress(string groupPublicKey)
+        private static string GenerateDKGProof(string sessionId, string groupPublicKey, string pubkeyPackage)
         {
             try
             {
-                // Taproot addresses (Bech32m encoding):
-                // - Mainnet: bc1p... (prefix "bc", witness version 1)
-                // - Testnet: tb1p... (prefix "tb", witness version 1)
-                
-                // TODO: Full implementation requires:
-                // 1. Extract x-coordinate from group public key (32 bytes for Taproot)
-                // 2. Apply BIP340 Schnorr pubkey transformation if needed
-                // 3. Encode with Bech32m (not Bech32) per BIP350
-                
-                var prefix = Globals.IsTestNet ? "tb1p" : "bc1p";
-                
-                // For now, use deterministic placeholder based on group pubkey
-                // This ensures same group pubkey always produces same address
-                var hash = System.Security.Cryptography.SHA256.HashData(
-                    System.Text.Encoding.UTF8.GetBytes($"TAPROOT_{groupPublicKey}")
-                );
-                var addressPayload = Convert.ToHexString(hash).Substring(0, 58).ToLower();
-                
-                LogUtility.Log($"[FROST] Taproot address derived: {prefix}{addressPayload.Substring(0, 10)}...", "FrostStartup.GenerateTaprootAddress");
-                return $"{prefix}{addressPayload}";
-            }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Taproot address derivation error: {ex.Message}", "FrostStartup.GenerateTaprootAddress");
-                var prefix = Globals.IsTestNet ? "tb1p" : "bc1p";
-                var random = Guid.NewGuid().ToString("N").Substring(0, 58);
-                return $"{prefix}{random}";
-            }
-        }
-
-        /// <summary>
-        /// Generate cryptographic proof of DKG completion
-        /// Proves that DKG was executed correctly and group key is valid
-        /// </summary>
-        private static string GeneratePlaceholderDKGProof(string sessionId, string groupPublicKey)
-        {
-            try
-            {
-                // DKG proof should contain:
-                // 1. Proof that each participant contributed correctly
-                // 2. Zero-knowledge proof that group key was formed correctly
-                // 3. Signature from each validator over the final result
-                
-                // For now, create deterministic proof structure
                 var proofData = new
                 {
                     SessionId = sessionId,
                     GroupPublicKey = groupPublicKey,
+                    PubkeyPackageHash = Convert.ToHexString(
+                        System.Security.Cryptography.SHA256.HashData(
+                            System.Text.Encoding.UTF8.GetBytes(pubkeyPackage))),
                     Timestamp = TimeUtil.GetTime(),
                     FrostVersion = FrostNative.GetVersion(),
-                    ProofType = "DKG_COMPLETION",
-                    // TODO: Add actual zero-knowledge proof when FROST lib fully integrated
-                    ZKProof = "PLACEHOLDER_ZK_PROOF"
+                    ProofType = "DKG_COMPLETION_FROST_NATIVE"
                 };
 
                 var proofJson = JsonConvert.SerializeObject(proofData);
                 var proof = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(proofJson));
                 
-                LogUtility.Log($"[FROST] DKG proof generated for session {sessionId}", "FrostStartup.GenerateDKGProof");
+                LogUtility.Log($"[FROST] DKG proof generated with real FROST data for session {sessionId}", "FrostStartup.GenerateDKGProof");
                 return proof;
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"DKG proof generation error: {ex.Message}", "FrostStartup.GenerateDKGProof");
-                var proofData = $"DKG_PROOF_{sessionId}_{groupPublicKey}_{TimeUtil.GetTime()}";
-                return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(proofData));
+                return string.Empty;
             }
         }
 

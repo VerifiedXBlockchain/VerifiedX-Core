@@ -21,7 +21,8 @@ namespace ReserveBlockCore.Bitcoin.Models
         
         // FROST Data
         public List<string> ValidatorAddressesSnapshot { get; set; }
-        public string FrostGroupPublicKey { get; set; }   // Aggregated FROST group public key
+        public string FrostGroupPublicKey { get; set; }   // Aggregated FROST group public key (32-byte x-only hex)
+        public string? FrostPubkeyPackage { get; set; }   // FIND-024: FROST pubkey package (needed for signature aggregation)
         public int RequiredThreshold { get; set; }        // Initially 51
         
         // DKG Proof Data

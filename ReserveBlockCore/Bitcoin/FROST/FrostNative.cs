@@ -116,6 +116,72 @@ namespace ReserveBlockCore.Bitcoin.FROST
         }
 
         /// <summary>
+        /// Wrapper for DKG Round 2 - Generate shares from secret package and commitments
+        /// </summary>
+        public static (string sharesJson, string round2Secret, int errorCode) DKGRound2GenerateShares(
+            string secretPackage,
+            string commitmentsJson)
+        {
+            IntPtr sharesPtr = IntPtr.Zero;
+            IntPtr round2SecretPtr = IntPtr.Zero;
+
+            try
+            {
+                int result = frost_dkg_round2_generate_shares(
+                    secretPackage,
+                    commitmentsJson,
+                    out sharesPtr,
+                    out round2SecretPtr);
+
+                if (result != SUCCESS)
+                    return (string.Empty, string.Empty, result);
+
+                var shares = PtrToStringAndFree(sharesPtr);
+                var secret = PtrToStringAndFree(round2SecretPtr);
+
+                return (shares, secret, result);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"DKGRound2GenerateShares error: {ex.Message}", "FrostNative.DKGRound2GenerateShares");
+                return (string.Empty, string.Empty, ERROR_CRYPTO_ERROR);
+            }
+        }
+
+        /// <summary>
+        /// Wrapper for Signing Round 2 - Generate signature share
+        /// </summary>
+        public static (string signatureShare, int errorCode) SignRound2Signature(
+            string keyPackageJson,
+            string nonceSecret,
+            string nonceCommitmentsJson,
+            string messageHashHex)
+        {
+            IntPtr sharePtr = IntPtr.Zero;
+
+            try
+            {
+                int result = frost_sign_round2_signature(
+                    keyPackageJson,
+                    nonceSecret,
+                    nonceCommitmentsJson,
+                    messageHashHex,
+                    out sharePtr);
+
+                if (result != SUCCESS)
+                    return (string.Empty, result);
+
+                var share = PtrToStringAndFree(sharePtr);
+                return (share, result);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"SignRound2Signature error: {ex.Message}", "FrostNative.SignRound2Signature");
+                return (string.Empty, ERROR_CRYPTO_ERROR);
+            }
+        }
+
+        /// <summary>
         /// Wrapper for DKG Round 1 with automatic memory management
         /// </summary>
         public static (string commitment, string secretPackage, int errorCode) DKGRound1Generate(

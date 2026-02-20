@@ -14,25 +14,37 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public int RequiredThreshold { get; set; }
         public long StartTimestamp { get; set; }
         
-        // Round 1: Commitments
+        // FROST native library state for this validator's participation
+        public ushort MyParticipantIndex { get; set; }         // This validator's 1-based index
+        public string? Round1SecretPackage { get; set; }       // Secret from DKGRound1Generate (kept private)
+        public string? Round2Secret { get; set; }              // Secret from DKGRound2GenerateShares (kept private)
+        public string? GeneratedSharesJson { get; set; }       // Shares this validator created for others
+        
+        // Round 1: Commitments (from all validators)
         public ConcurrentDictionary<string, string> Round1Commitments { get; set; } = new();
         
-        // Round 2: Shares (per validator, from each other validator)
+        // Round 2: Received shares from other validators (keyed by sender address)
+        public ConcurrentDictionary<string, string> ReceivedSharesJson { get; set; } = new();
+        
+        // Legacy share storage (kept for compatibility)
         public ConcurrentDictionary<string, List<FrostDKGShareMessage>> ReceivedShares { get; set; } = new();
         
         // Round 3: Verifications
         public ConcurrentDictionary<string, bool> Round3Verifications { get; set; } = new();
         
-        // Final result
+        // Final result from FROST native library
         public string? GroupPublicKey { get; set; }
         public string? TaprootAddress { get; set; }
         public string? DKGProof { get; set; }
+        public string? FinalKeyPackage { get; set; }           // This validator's key package (for signing)
+        public string? FinalPubkeyPackage { get; set; }        // Group pubkey package (for signature aggregation)
         public bool IsCompleted { get; set; }
         
         public DKGSession()
         {
             ParticipantAddresses = new List<string>();
             Round1Commitments = new ConcurrentDictionary<string, string>();
+            ReceivedSharesJson = new ConcurrentDictionary<string, string>();
             ReceivedShares = new ConcurrentDictionary<string, List<FrostDKGShareMessage>>();
             Round3Verifications = new ConcurrentDictionary<string, bool>();
         }
@@ -51,10 +63,14 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public int RequiredThreshold { get; set; }
         public long StartTimestamp { get; set; }
         
-        // Round 1: Nonce commitments
+        // FROST native library state for this validator's participation
+        public string? MyKeyPackage { get; set; }              // This validator's key package (loaded from persistent store)
+        public string? NonceSecret { get; set; }               // Secret nonce from SignRound1Nonces (kept private)
+        
+        // Round 1: Nonce commitments (from all validators)
         public ConcurrentDictionary<string, string> Round1Nonces { get; set; } = new();
         
-        // Round 2: Signature shares
+        // Round 2: Signature shares (from all validators)
         public ConcurrentDictionary<string, string> Round2Shares { get; set; } = new();
         
         // Final result
