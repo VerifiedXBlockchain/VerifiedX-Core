@@ -641,18 +641,33 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // TODO: FROST INTEGRATION
-                            // Decrypt share using validator's private key
-                            // Verify share against sender's commitment
-                            // Store share for Round 3 verification
+                            // FIND-024 Fix: Persist the received share into the session
+                            if (!string.IsNullOrEmpty(share.EncryptedShare))
+                            {
+                                session.ReceivedSharesJson.TryAdd(share.FromValidatorAddress, share.EncryptedShare);
+                            }
+
+                            // FIND-024 Fix: Auto-trigger DKG finalization if all required shares received
+                            var receivedCount = session.ReceivedSharesJson.Count;
+                            var totalOtherParticipants = session.ParticipantAddresses.Count - 1;
+                            var dkgAutoFinalized = false;
+
+                            if (receivedCount >= totalOtherParticipants && !session.IsCompleted 
+                                && !string.IsNullOrEmpty(session.Round2Secret))
+                            {
+                                dkgAutoFinalized = TryFinalizeDKG(session);
+                            }
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                             {
                                 Success = true,
-                                Message = "Share received and verified",
+                                Message = "Share received and stored",
                                 SessionId = share.SessionId,
-                                FromValidator = share.FromValidatorAddress
+                                FromValidator = share.FromValidatorAddress,
+                                ReceivedShareCount = receivedCount,
+                                RequiredShareCount = totalOtherParticipants,
+                                DKGFinalized = dkgAutoFinalized
                             }, Formatting.Indented));
                         }
                     }
@@ -664,6 +679,151 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             Success = false,
                             Message = $"Error: {ex.Message}"
                         }));
+                    }
+                });
+
+                /// <summary>
+                /// FIND-024 Fix: POST /frost/dkg/shares/{sessionId} - Batch receive all Round 2 generated shares from coordinator
+                /// The coordinator collects each validator's generated shares from Round 2 and sends the full bundle
+                /// to every validator. Each validator extracts the shares meant for them (by their participant ID)
+                /// and stores them in ReceivedSharesJson. Once all required shares are received, DKG is auto-finalized
+                /// via FrostNative.DKGRound3Finalize, producing the real group key, Taproot address, and key packages.
+                /// </summary>
+                endpoints.MapPost("/frost/dkg/shares/{sessionId}", async context =>
+                {
+                    try
+                    {
+                        var sessionId = context.Request.RouteValues["sessionId"] as string;
+
+                        if (string.IsNullOrEmpty(sessionId))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Session ID required" }));
+                            return;
+                        }
+
+                        if (!FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Session not found" }));
+                            return;
+                        }
+
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var body = await reader.ReadToEndAsync();
+                            var json = Newtonsoft.Json.Linq.JObject.Parse(body);
+
+                            // Verify the leader signature
+                            var leaderAddr = json["LeaderAddress"]?.ToString();
+                            var timestamp = (long)(json["Timestamp"] ?? 0);
+                            var leaderSig = json["LeaderSignature"]?.ToString();
+
+                            if (string.IsNullOrEmpty(leaderAddr) || leaderAddr != session.LeaderAddress)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Only the session leader can distribute shares" }));
+                                return;
+                            }
+
+                            if (string.IsNullOrEmpty(leaderSig))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Leader signature required" }));
+                                return;
+                            }
+
+                            var leaderMessage = $"{sessionId}.{leaderAddr}.{timestamp}";
+                            var sigValid = SignatureService.VerifySignature(leaderAddr, leaderMessage, leaderSig);
+                            if (!sigValid)
+                            {
+                                ErrorLogUtility.LogError($"FIND-024 Security: Invalid leader signature for share distribution. Leader: {leaderAddr}, Session: {sessionId}", "FrostStartup.DKGSharesBatch");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid leader signature" }));
+                                return;
+                            }
+
+                            // Parse the bundled shares: { "senderAddr": "generatedSharesJson", ... }
+                            var allSharesToken = json["AllGeneratedShares"] as Newtonsoft.Json.Linq.JObject;
+                            if (allSharesToken == null || !allSharesToken.HasValues)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No shares data provided" }));
+                                return;
+                            }
+
+                            var myAddress = Globals.ValidatorAddress;
+                            var myParticipantId = session.MyParticipantIndex.ToString();
+                            var sharesExtracted = 0;
+
+                            // For each sender's generated shares, extract the share meant for this validator
+                            foreach (var kvp in allSharesToken)
+                            {
+                                var senderAddr = kvp.Key;
+                                if (senderAddr == myAddress) continue; // Skip our own shares
+
+                                var senderSharesStr = kvp.Value?.ToString();
+                                if (string.IsNullOrEmpty(senderSharesStr)) continue;
+
+                                // Bound data size
+                                if (senderSharesStr.Length > FrostSessionStorage.MAX_COMMITMENT_DATA_LENGTH * 10)
+                                {
+                                    LogUtility.Log($"[FROST] Share data from {senderAddr} exceeds size limit, skipping", "FrostStartup.DKGSharesBatch");
+                                    continue;
+                                }
+
+                                try
+                                {
+                                    // The generated shares JSON from FROST native is a map keyed by participant ID
+                                    // Extract just the share meant for this validator's participant ID
+                                    var senderShares = Newtonsoft.Json.Linq.JObject.Parse(senderSharesStr);
+                                    var shareForMe = senderShares[myParticipantId]?.ToString();
+
+                                    if (!string.IsNullOrEmpty(shareForMe))
+                                    {
+                                        session.ReceivedSharesJson.TryAdd(senderAddr, shareForMe);
+                                        sharesExtracted++;
+                                    }
+                                }
+                                catch (Exception parseEx)
+                                {
+                                    LogUtility.Log($"[FROST] Failed to parse shares from {senderAddr}: {parseEx.Message}", "FrostStartup.DKGSharesBatch");
+                                }
+                            }
+
+                            var receivedCount = session.ReceivedSharesJson.Count;
+                            var totalOtherParticipants = session.ParticipantAddresses.Count - 1;
+
+                            LogUtility.Log($"[FROST] Batch share distribution: extracted {sharesExtracted} new shares, total received: {receivedCount}/{totalOtherParticipants}", 
+                                "FrostStartup.DKGSharesBatch");
+
+                            // Auto-trigger DKG finalization if all required shares are now received
+                            var dkgFinalized = false;
+                            if (receivedCount >= totalOtherParticipants && !session.IsCompleted 
+                                && !string.IsNullOrEmpty(session.Round2Secret))
+                            {
+                                dkgFinalized = TryFinalizeDKG(session);
+                            }
+
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                Message = dkgFinalized ? "Shares received and DKG finalized" : "Shares received and stored",
+                                SessionId = sessionId,
+                                SharesExtracted = sharesExtracted,
+                                TotalReceivedShares = receivedCount,
+                                RequiredShares = totalOtherParticipants,
+                                DKGFinalized = dkgFinalized,
+                                TaprootAddress = session.TaprootAddress ?? ""
+                            }, Formatting.Indented));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"DKG batch share distribution error: {ex.Message}", "FrostStartup.DKGSharesBatch");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
                     }
                 });
 
@@ -1183,7 +1343,10 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 });
 
                 /// <summary>
-                /// POST /frost/sign/round1 - Collect Round 1 nonce commitments
+                /// POST /frost/sign/round1 - Receive individual Round 1 nonce commitment from a validator.
+                /// Nonce commitments are also auto-stored during /frost/sign/start, and the coordinator
+                /// polls via GET /frost/sign/round1/{sessionId}. This endpoint accepts additional nonce
+                /// submissions from validators that were not the first to start the session.
                 /// </summary>
                 endpoints.MapPost("/frost/sign/round1", async context =>
                 {
@@ -1194,7 +1357,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             var body = await reader.ReadToEndAsync();
                             var nonce = JsonConvert.DeserializeObject<FrostSigningRound1Message>(body);
 
-                            if (nonce == null)
+                            if (nonce == null || string.IsNullOrEmpty(nonce.SessionId) || string.IsNullOrEmpty(nonce.NonceCommitment))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1205,19 +1368,43 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // TODO: FROST INTEGRATION
-                            // Validate validator signature
-                            // Store nonce commitment
-                            // Check if we have enough commitments (threshold reached)
-                            // If threshold reached, aggregate and broadcast to Round 2
+                            // FIND-024 Fix: Store the nonce commitment in the signing session
+                            if (!FrostSessionStorage.SigningSessions.TryGetValue(nonce.SessionId, out var session))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Signing session not found"
+                                }));
+                                return;
+                            }
+
+                            if (string.IsNullOrEmpty(nonce.ValidatorAddress) || !session.SignerAddresses.Contains(nonce.ValidatorAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Validator is not a signer in this session"
+                                }));
+                                return;
+                            }
+
+                            session.Round1Nonces.TryAdd(nonce.ValidatorAddress, nonce.NonceCommitment);
+                            var nonceCount = session.Round1Nonces.Count;
+                            var requiredCount = (int)Math.Ceiling(session.SignerAddresses.Count * (session.RequiredThreshold / 100.0));
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                             {
                                 Success = true,
-                                Message = "Round 1 nonce commitment received",
+                                Message = "Round 1 nonce commitment received and stored",
                                 SessionId = nonce.SessionId,
-                                ValidatorAddress = nonce.ValidatorAddress
+                                ValidatorAddress = nonce.ValidatorAddress,
+                                NonceCount = nonceCount,
+                                RequiredCount = requiredCount,
+                                ThresholdReached = nonceCount >= requiredCount
                             }, Formatting.Indented));
                         }
                     }
@@ -1233,7 +1420,10 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 });
 
                 /// <summary>
-                /// POST /frost/sign/round2 - Collect Round 2 signature shares
+                /// POST /frost/sign/round2 - Receive individual Round 2 signature share from a validator.
+                /// Signature shares are also generated and stored via POST /frost/sign/round2/{sessionId},
+                /// and the coordinator polls via GET /frost/sign/share/{sessionId}. This endpoint accepts
+                /// additional share submissions from validators.
                 /// </summary>
                 endpoints.MapPost("/frost/sign/round2", async context =>
                 {
@@ -1244,7 +1434,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             var body = await reader.ReadToEndAsync();
                             var signatureShare = JsonConvert.DeserializeObject<FrostSigningRound2Message>(body);
 
-                            if (signatureShare == null)
+                            if (signatureShare == null || string.IsNullOrEmpty(signatureShare.SessionId) || string.IsNullOrEmpty(signatureShare.SignatureShare))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1255,21 +1445,43 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // TODO: FROST INTEGRATION
-                            // Validate validator signature
-                            // Store signature share
-                            // Check if we have enough shares (threshold reached)
-                            // If threshold reached, aggregate into final Schnorr signature
-                            // Validate final signature
-                            // Broadcast final result
+                            // FIND-024 Fix: Store the signature share in the signing session
+                            if (!FrostSessionStorage.SigningSessions.TryGetValue(signatureShare.SessionId, out var session))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Signing session not found"
+                                }));
+                                return;
+                            }
+
+                            if (string.IsNullOrEmpty(signatureShare.ValidatorAddress) || !session.SignerAddresses.Contains(signatureShare.ValidatorAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Validator is not a signer in this session"
+                                }));
+                                return;
+                            }
+
+                            session.Round2Shares.TryAdd(signatureShare.ValidatorAddress, signatureShare.SignatureShare);
+                            var shareCount = session.Round2Shares.Count;
+                            var requiredCount = (int)Math.Ceiling(session.SignerAddresses.Count * (session.RequiredThreshold / 100.0));
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                             {
                                 Success = true,
-                                Message = "Round 2 signature share received",
+                                Message = "Round 2 signature share received and stored",
                                 SessionId = signatureShare.SessionId,
-                                ValidatorAddress = signatureShare.ValidatorAddress
+                                ValidatorAddress = signatureShare.ValidatorAddress,
+                                ShareCount = shareCount,
+                                RequiredCount = requiredCount,
+                                ThresholdReached = shareCount >= requiredCount
                             }, Formatting.Indented));
                         }
                     }
@@ -1445,7 +1657,10 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 });
 
                 /// <summary>
-                /// GET /frost/sign/result/{sessionId} - Get signing ceremony result
+                /// GET /frost/sign/result/{sessionId} - Get signing ceremony result.
+                /// Returns the aggregated Schnorr signature and validity from the signing session.
+                /// The coordinator (FrostMPCService) aggregates signature shares via FrostNative.SignAggregate
+                /// and stores the result in the session. This endpoint retrieves that result.
                 /// </summary>
                 endpoints.MapGet("/frost/sign/result/{sessionId}", async context =>
                 {
@@ -1464,9 +1679,37 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             return;
                         }
 
-                        // TODO: FROST INTEGRATION
-                        // Retrieve signing result from storage
-                        // Return aggregated Schnorr signature
+                        // FIND-024 Fix: Retrieve real signing result from session storage
+                        if (!FrostSessionStorage.SigningSessions.TryGetValue(sessionId, out var session))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Signing session not found"
+                            }));
+                            return;
+                        }
+
+                        // Check if aggregation has been completed
+                        if (string.IsNullOrEmpty(session.SchnorrSignature))
+                        {
+                            // Not yet aggregated - return current share collection status
+                            var shareCount = session.Round2Shares.Count;
+                            var requiredCount = (int)Math.Ceiling(session.SignerAddresses.Count * (session.RequiredThreshold / 100.0));
+
+                            context.Response.StatusCode = StatusCodes.Status202Accepted;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Signing not yet complete - signature shares still being collected",
+                                SessionId = sessionId,
+                                ShareCount = shareCount,
+                                RequiredCount = requiredCount,
+                                SignatureValid = false
+                            }, Formatting.Indented));
+                            return;
+                        }
 
                         context.Response.StatusCode = StatusCodes.Status200OK;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1474,8 +1717,8 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             Success = true,
                             Message = "Signing result retrieved",
                             SessionId = sessionId,
-                            SchnorrSignature = "PLACEHOLDER_SCHNORR_SIGNATURE",
-                            SignatureValid = true
+                            SchnorrSignature = session.SchnorrSignature,
+                            SignatureValid = session.SignatureValid
                         }, Formatting.Indented));
                     }
                     catch (Exception ex)
@@ -1492,6 +1735,80 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 #endregion
             });
         }
+
+        #region DKG Finalization Helper
+
+        /// <summary>
+        /// FIND-024 Fix: Shared helper to finalize DKG when all required shares have been received.
+        /// Calls FrostNative.DKGRound3Finalize, derives the Taproot address via NBitcoin,
+        /// persists the key package, and marks the session as completed.
+        /// Returns true if finalization succeeded.
+        /// </summary>
+        private static bool TryFinalizeDKG(DKGSession session)
+        {
+            try
+            {
+                if (session.IsCompleted) return true;
+                if (string.IsNullOrEmpty(session.Round2Secret))
+                {
+                    ErrorLogUtility.LogError("DKG finalize: Round2Secret is null - Round 2 may not have completed", "FrostStartup.TryFinalizeDKG");
+                    return false;
+                }
+
+                var round1Json = JsonConvert.SerializeObject(
+                    session.Round1Commitments.ToDictionary(k => k.Key, k => k.Value));
+                var receivedSharesJsonStr = JsonConvert.SerializeObject(
+                    session.ReceivedSharesJson.ToDictionary(k => k.Key, k => k.Value));
+
+                var (groupPubkey, keyPackage, pubkeyPackage, finalizeError) = FrostNative.DKGRound3Finalize(
+                    session.Round2Secret, round1Json, receivedSharesJsonStr);
+
+                if (finalizeError != FrostNative.SUCCESS || string.IsNullOrEmpty(groupPubkey))
+                {
+                    ErrorLogUtility.LogError($"FROST DKG Round 3 finalize failed. Error: {finalizeError}", "FrostStartup.TryFinalizeDKG");
+                    return false;
+                }
+
+                session.GroupPublicKey = groupPubkey;
+                session.FinalKeyPackage = keyPackage;
+                session.FinalPubkeyPackage = pubkeyPackage;
+
+                // Derive Taproot address using NBitcoin (real Bech32m)
+                session.TaprootAddress = DeriveTaprootAddress(groupPubkey);
+
+                // Generate DKG proof with real data
+                session.DKGProof = GenerateDKGProof(session.SessionId, groupPubkey, pubkeyPackage);
+                session.IsCompleted = true;
+
+                // Auto-add this validator's verification
+                var myAddr = Globals.ValidatorAddress;
+                if (!string.IsNullOrEmpty(myAddr))
+                {
+                    session.Round3Verifications.TryAdd(myAddr, true);
+
+                    // Persist key package for future signing
+                    FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
+                    {
+                        SmartContractUID = session.SmartContractUID,
+                        ValidatorAddress = myAddr,
+                        KeyPackage = keyPackage,
+                        PubkeyPackage = pubkeyPackage,
+                        GroupPublicKey = groupPubkey,
+                        CreatedTimestamp = TimeUtil.GetTime()
+                    });
+                }
+
+                LogUtility.Log($"[FROST] DKG auto-finalized with real crypto! Address: {session.TaprootAddress}", "FrostStartup.TryFinalizeDKG");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"DKG finalize error: {ex.Message}", "FrostStartup.TryFinalizeDKG");
+                return false;
+            }
+        }
+
+        #endregion
 
         #region FROST Cryptographic Operations (FIND-024 Fix: Real implementations)
 

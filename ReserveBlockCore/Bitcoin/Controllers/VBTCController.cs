@@ -59,11 +59,16 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // TODO: FROST INTEGRATION
-                // 1. Verify validator address ownership via signature
-                // 2. Generate validator's FROST key share and public key
-                // 3. Create RegistrationSignature proof
-                // PLACEHOLDER: Basic validation for now
+                // FIND-024 Fix: Generate real registration signature and derive public key identifier
+                // Note: The validator's FROST key share is generated later during DKG ceremony.
+                // At registration time, we store the validator's VFX signing public key as their
+                // FROST identity key, and sign the registration with the existing SignatureService.
+                var registrationMessage = $"{validatorAddress}.{ipAddress}.{Globals.LastBlock.Height}";
+                var registrationSignature = SignatureService.ValidatorSignature(registrationMessage);
+                
+                // Derive the validator's public key from their address for FROST identification
+                var account = AccountData.GetSingleAccount(validatorAddress);
+                var frostPublicKey = account?.PublicKey ?? validatorAddress;
 
                 var validator = new VBTCValidator
                 {
@@ -72,8 +77,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     RegistrationBlockHeight = Globals.LastBlock.Height,
                     LastHeartbeatBlock = Globals.LastBlock.Height,
                     IsActive = true,
-                    FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",  // Public key only (key share stays private)
-                    RegistrationSignature = "PLACEHOLDER_FROST_SIGNATURE"
+                    FrostPublicKey = frostPublicKey,
+                    RegistrationSignature = registrationSignature
                 };
 
                 // Save to database
@@ -105,14 +110,15 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Get validators from database
-                // var validators = VBTCValidator.GetValidators(activeOnly);
+                var validators = activeOnly
+                    ? VBTCValidator.GetActiveValidators()
+                    : VBTCValidator.GetAllValidators();
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Validators retrieved",
-                    Validators = new List<VBTCValidator>() // PLACEHOLDER
+                    Validators = validators ?? new List<VBTCValidator>()
                 });
             }
             catch (Exception ex)
@@ -162,13 +168,17 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // var validator = VBTCValidator.GetValidator(validatorAddress);
+                var validator = VBTCValidator.GetValidator(validatorAddress);
+                if (validator == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
+                }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Validator found",
-                    Validator = new VBTCValidator() // PLACEHOLDER
+                    Validator = validator
                 });
             }
             catch (Exception ex)
@@ -828,9 +838,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 return JsonConvert.SerializeObject(new
                 {
-                    Success = true,
-                    Message = "Multi-transfer successful",
-                    TransactionHash = "PLACEHOLDER_TX_HASH"
+                    Success = false,
+                    Message = "Multi-transfer is not yet supported. Use single TransferVBTC for individual transfers."
                 });
             }
             catch (Exception ex)
@@ -975,9 +984,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // TODO: FROST INTEGRATION
-                // Verify failure proof (e.g., BTC TX rejected, timeout, etc.)
-                // PLACEHOLDER: Basic validation
+                // Validate required fields
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.OwnerAddress) ||
+                    string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
                 var cancellationUID = Guid.NewGuid().ToString();
 
@@ -998,8 +1008,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     IsProcessed = false
                 };
 
-                // Save to database
-                // VBTCWithdrawalCancellation.Save(cancellation);
+                // Save cancellation to database
+                VBTCWithdrawalCancellation.SaveCancellation(cancellation);
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -1029,42 +1039,62 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // TODO: FROST INTEGRATION
-                // Verify validator signature using their FROST public key
-                // Ensure validator is active and eligible to vote
-                // Use Schnorr signature verification
-                // PLACEHOLDER: Basic validation
+                // Validate required fields
+                if (string.IsNullOrEmpty(payload.CancellationUID) || string.IsNullOrEmpty(payload.ValidatorAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "CancellationUID and ValidatorAddress are required" });
+
+                // Verify validator is active
+                var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
+                if (validator == null || !validator.IsActive)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
+                }
 
                 // Get cancellation record
-                // var cancellation = VBTCWithdrawalCancellation.Get(payload.CancellationUID);
+                var cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
+                if (cancellation == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cancellation request not found" });
+                }
+
+                if (cancellation.IsProcessed)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cancellation has already been processed" });
+                }
+
+                // Check if validator already voted
+                if (VBTCWithdrawalCancellation.HasValidatorVoted(payload.CancellationUID, payload.ValidatorAddress))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator has already voted on this cancellation" });
+                }
 
                 // Record vote
-                // cancellation.ValidatorVotes[payload.ValidatorAddress] = payload.Approve;
+                VBTCWithdrawalCancellation.AddVote(payload.CancellationUID, payload.ValidatorAddress, payload.Approve);
 
-                // Update counts
-                // if (payload.Approve) cancellation.ApproveCount++; else cancellation.RejectCount++;
+                // Refresh cancellation data after vote
+                cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
+                int totalValidators = VBTCValidator.GetActiveValidatorCount();
+                int votePercentage = totalValidators > 0 
+                    ? VBTCWithdrawalCancellation.GetVotePercentage(payload.CancellationUID, totalValidators) 
+                    : 0;
 
                 // Check if 75% threshold reached
-                // int totalValidators = VBTCValidator.GetActiveValidatorCount();
-                // decimal approvalPercentage = (cancellation.ApproveCount / (decimal)totalValidators) * 100;
-
-                // if (approvalPercentage >= 75)
-                // {
-                //     cancellation.IsApproved = true;
-                //     cancellation.IsProcessed = true;
-                //     // Update contract state - cancel withdrawal, unlock funds
-                // }
+                if (votePercentage >= 75 && !cancellation!.IsProcessed)
+                {
+                    VBTCWithdrawalCancellation.MarkAsProcessed(payload.CancellationUID, true);
+                    cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
+                }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Vote recorded",
                     CancellationUID = payload.CancellationUID,
-                    ApproveCount = 0, // PLACEHOLDER
-                    RejectCount = 0, // PLACEHOLDER
-                    TotalValidators = 0, // PLACEHOLDER
-                    ApprovalPercentage = 0.0M, // PLACEHOLDER
-                    IsApproved = false
+                    ApproveCount = cancellation?.ApproveCount ?? 0,
+                    RejectCount = cancellation?.RejectCount ?? 0,
+                    TotalValidators = totalValidators,
+                    ApprovalPercentage = votePercentage,
+                    IsApproved = cancellation?.IsApproved ?? false
                 });
             }
             catch (Exception ex)
@@ -1258,27 +1288,29 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 //     return JsonConvert.SerializeObject(new { Success = false, Message = $"Withdrawal request is not in 'Requested' status. Current status: {withdrawalRequest.Status}" });
                 // }
 
-                // 6. TODO: FROST INTEGRATION - 2-Round Signing Ceremony
-                // var btcTxHash = await FrostService.CoordinateWithdrawalSigning(payload.SmartContractUID, payload.WithdrawalRequestHash);
-                // if (string.IsNullOrEmpty(btcTxHash))
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "FROST signing ceremony failed" });
-                // }
+                // FIND-024 Fix: Wire to real FROST signing via VBTCService.CompleteWithdrawal
+                // This uses the same path as the non-raw CompleteWithdrawal endpoint,
+                // which coordinates the FROST MPC signing ceremony and broadcasts the BTC TX.
+                var withdrawalResult = await Services.VBTCService.CompleteWithdrawal(
+                    payload.SmartContractUID,
+                    payload.WithdrawalRequestHash
+                );
 
-                // PLACEHOLDER: Mock BTC transaction
-                string btcTxHash = $"FROST_BTC_TX_{Guid.NewGuid().ToString().Substring(0, 8)}";
-
-                // 7. TODO: Update withdrawal request status
-                // VBTCWithdrawalRequest.Complete(withdrawalRequest.RequestorAddress, withdrawalRequest.OriginalUniqueId, payload.SmartContractUID, payload.WithdrawalRequestHash, btcTxHash);
-
-                // 8. TODO: Update contract state to "Pending_BTC"
-                // await VBTCService.UpdateWithdrawalStatus(payload.SmartContractUID, VBTCWithdrawalStatus.Pending_BTC, 0, "", btcTxHash);
+                if (!withdrawalResult.Success)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = withdrawalResult.ErrorMessage ?? "FROST signing ceremony failed"
+                    });
+                }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Raw withdrawal completed successfully via FROST signing",
-                    BTCTransactionHash = btcTxHash,
+                    BTCTransactionHash = withdrawalResult.BTCTxHash,
+                    VFXTransactionHash = withdrawalResult.VFXTxHash,
                     Status = "Pending_BTC",
                     SmartContractUID = payload.SmartContractUID,
                     WithdrawalRequestHash = payload.WithdrawalRequestHash
@@ -1558,15 +1590,18 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Get smart contract
-                // var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
+                }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Contract details retrieved",
                     SmartContractUID = scUID,
-                    Contract = new object() // PLACEHOLDER
+                    Contract = contract
                 });
             }
             catch (Exception ex)
@@ -1586,16 +1621,18 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Get contract
-                // var contract = VBTCContractV2.GetContract(scUID);
-                // return contract.WithdrawalHistory;
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
+                }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Withdrawal history retrieved",
                     SmartContractUID = scUID,
-                    WithdrawalHistory = new List<object>() // PLACEHOLDER
+                    WithdrawalHistory = contract.WithdrawalHistory ?? new List<VBTCWithdrawalHistory>()
                 });
             }
             catch (Exception ex)
@@ -1615,16 +1652,21 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Get contract
-                // var contract = VBTCContractV2.GetContract(scUID);
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
+                }
+
+                var hasActiveWithdrawal = VBTCContractV2.HasActiveWithdrawal(scUID);
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Withdrawal status retrieved",
                     SmartContractUID = scUID,
-                    Status = "None", // PLACEHOLDER
-                    ActiveWithdrawal = new object() // PLACEHOLDER
+                    Status = contract.WithdrawalStatus.ToString(),
+                    HasActiveWithdrawal = hasActiveWithdrawal
                 });
             }
             catch (Exception ex)
@@ -1647,9 +1689,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Return default vBTC V2 image
-                // var defaultImageLocation = NFTAssetFileUtility.GetvBTCV2DefaultLogoLocation();
-
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
@@ -1657,7 +1696,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     EncodingFormat = "base64",
                     ImageExtension = "png",
                     ImageName = "defaultvBTC_V2.png",
-                    ImageBase = "PLACEHOLDER_BASE64_IMAGE"
+                    ImageBase = string.Empty // No default image bundled; callers should provide their own
                 });
             }
             catch (Exception ex)
@@ -1677,14 +1716,15 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                // Get all vBTC V2 contracts, optionally filtered by owner
-                // var contracts = VBTCContractV2.GetContracts(address);
+                var contracts = string.IsNullOrEmpty(address)
+                    ? VBTCContractV2.GetAllContracts()
+                    : VBTCContractV2.GetContractsByOwner(address);
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Contract list retrieved",
-                    Contracts = new List<object>() // PLACEHOLDER
+                    Contracts = contracts ?? new List<VBTCContractV2>()
                 });
             }
             catch (Exception ex)

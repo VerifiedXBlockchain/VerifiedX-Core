@@ -187,8 +187,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 LogUtility.Log($"[FROST MPC] Collecting Round 1 commitments...", "FrostMPCService.CollectDKGRound1Commitments");
 
                 // In a real implementation, this would poll validators or receive via callback
-                // For now, simulate commitment collection
-                await Task.Delay(2000); // Simulate network round trip
+                // Poll each validator for their Round 1 commitment
+                await Task.Delay(2000); // Allow time for validators to process Round 2 and generate shares
 
                 // FIND-015 Fix: Collect commitments from each validator using actual server response format
                 // Server GET /frost/dkg/round1/{sessionId} returns {Success, SessionId, Commitments: {addr:data}, ...}
@@ -237,7 +237,9 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Coordinate share distribution between validators (Round 2)
+        /// FIND-024 Fix: Coordinate share distribution between validators (Round 2)
+        /// Now collects generated shares from each validator's response and redistributes them
+        /// so that DKGRound3Finalize has the data it needs to produce a real group key.
         /// </summary>
         private static async Task<bool> CoordinateShareDistribution(
             string sessionId,
@@ -248,34 +250,93 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 LogUtility.Log($"[FROST MPC] Coordinating share distribution...", "FrostMPCService.CoordinateShareDistribution");
 
-                // Broadcast all commitments to all validators
-                // Each validator will then generate and send shares to others
+                // Step 1: Send all Round 1 commitments to each validator and collect their generated Round 2 shares
                 var commitmentPayload = JsonConvert.SerializeObject(commitments);
-                
-                var tasks = validators.Select(async validator =>
+                var allGeneratedShares = new Dictionary<string, string>(); // validatorAddr → generatedSharesJson
+
+                foreach (var validator in validators)
                 {
                     try
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/round2/{sessionId}";
                         var content = new StringContent(commitmentPayload, Encoding.UTF8, "application/json");
                         var response = await _httpClient.PostAsync(url, content);
-                        return response.IsSuccessStatusCode;
+
+                        if (response.IsSuccessStatusCode)
+                        {
+                            var responseBody = await response.Content.ReadAsStringAsync();
+                            var json = JObject.Parse(responseBody);
+
+                            if (json["Success"]?.Value<bool>() == true && json["GeneratedShares"] != null)
+                            {
+                                var sharesData = json["GeneratedShares"]?.ToString();
+                                if (!string.IsNullOrEmpty(sharesData))
+                                {
+                                    allGeneratedShares[validator.ValidatorAddress] = sharesData;
+                                    LogUtility.Log($"[FROST MPC] Collected Round 2 shares from {validator.ValidatorAddress}", 
+                                        "FrostMPCService.CoordinateShareDistribution");
+                                }
+                            }
+                        }
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        return false;
+                        LogUtility.Log($"[FROST MPC] Failed to collect Round 2 shares from {validator.ValidatorAddress}: {ex.Message}", 
+                            "FrostMPCService.CoordinateShareDistribution");
                     }
+                }
+
+                var requiredCount = (validators.Count * 2 / 3);
+                if (allGeneratedShares.Count < requiredCount)
+                {
+                    ErrorLogUtility.LogError($"FROST DKG: Only {allGeneratedShares.Count}/{validators.Count} validators generated Round 2 shares (need {requiredCount})", 
+                        "FrostMPCService.CoordinateShareDistribution");
+                    return false;
+                }
+
+                LogUtility.Log($"[FROST MPC] Collected Round 2 shares from {allGeneratedShares.Count}/{validators.Count} validators. Redistributing...", 
+                    "FrostMPCService.CoordinateShareDistribution");
+
+                // Step 2: Redistribute all shares to each validator via batch endpoint
+                // Each validator will extract the shares meant for them and auto-finalize DKG
+                var leaderAddress = Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
+                var timestamp = TimeUtil.GetTime();
+                var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                var leaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(leaderMessage);
+
+                var redistributePayload = JsonConvert.SerializeObject(new
+                {
+                    LeaderAddress = leaderAddress,
+                    Timestamp = timestamp,
+                    LeaderSignature = leaderSignature,
+                    AllGeneratedShares = allGeneratedShares
                 });
 
-                var results = await Task.WhenAll(tasks);
-                var successCount = results.Count(r => r);
+                var distributeSuccessCount = 0;
+                foreach (var validator in validators)
+                {
+                    try
+                    {
+                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/shares/{sessionId}";
+                        var content = new StringContent(redistributePayload, Encoding.UTF8, "application/json");
+                        var response = await _httpClient.PostAsync(url, content);
 
-                LogUtility.Log($"[FROST MPC] Share distribution: {successCount}/{validators.Count} validators", "FrostMPCService.CoordinateShareDistribution");
-                
-                // Wait for validators to exchange shares
-                await Task.Delay(3000);
+                        if (response.IsSuccessStatusCode)
+                        {
+                            distributeSuccessCount++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogUtility.Log($"[FROST MPC] Failed to distribute shares to {validator.ValidatorAddress}: {ex.Message}", 
+                            "FrostMPCService.CoordinateShareDistribution");
+                    }
+                }
 
-                return successCount >= (validators.Count * 2 / 3); // Require 2/3 for share distribution
+                LogUtility.Log($"[FROST MPC] Share redistribution complete: {distributeSuccessCount}/{validators.Count} validators received shares", 
+                    "FrostMPCService.CoordinateShareDistribution");
+
+                return distributeSuccessCount >= requiredCount;
             }
             catch (Exception ex)
             {
@@ -296,7 +357,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var verifications = new Dictionary<string, bool>();
 
                 LogUtility.Log($"[FROST MPC] Collecting Round 3 verifications...", "FrostMPCService.CollectDKGRound3Verifications");
-                await Task.Delay(2000); // Simulate verification time
+                await Task.Delay(2000); // Allow time for validators to complete DKG finalization
 
                 // FIND-015 Fix: Deserialize actual server response format
                 // Server GET /frost/dkg/round3/{sessionId} returns {Success, SessionId, Verifications: {addr:bool}, ...}
