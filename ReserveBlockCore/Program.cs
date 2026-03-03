@@ -109,8 +109,8 @@ namespace ReserveBlockCore
                 LogUtility.Log("Warden monitoring service started", "Program.Main()");
             }
             //Forced Testnet
-            Globals.IsTestNet = true;
-            Globals.IsCustomTestNet = true;
+            //Globals.IsTestNet = true;
+            //Globals.IsCustomTestNet = true;
             Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
             Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
             Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
@@ -528,6 +528,9 @@ namespace ReserveBlockCore
             // HAL-071 Fix: Start mempool cleanup service to prevent unbounded growth
             MempoolCleanupService.Start();
 
+            MessageLocksCleanupService.Start();
+            BroadcastTrackingCleanupService.Start();
+
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL
@@ -869,7 +872,17 @@ namespace ReserveBlockCore
                     }
 
                     await Settings.InitiateShutdownUpdate();
-                    Environment.Exit(0);
+                    
+                    // Use exit code 99 to signal intentional user exit to warden
+                    if (Globals.IsWardenMonitoring)
+                    {
+                        Console.WriteLine("Signaling warden to stop...");
+                        Environment.Exit(99);
+                    }
+                    else
+                    {
+                        Environment.Exit(0);
+                    }
                 }
 
                 Console.WriteLine(commandResult);

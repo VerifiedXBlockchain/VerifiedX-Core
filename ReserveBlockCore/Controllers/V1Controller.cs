@@ -2101,7 +2101,7 @@ namespace ReserveBlockCore.Controllers
             await Settings.InitiateShutdownUpdate();
 
             
-            Environment.Exit(0);
+            Environment.Exit(99);
         }
 
         /// <summary>
@@ -2124,7 +2124,7 @@ namespace ReserveBlockCore.Controllers
             await Settings.InitiateShutdownUpdate();
 
             Environment.SetEnvironmentVariable("VFX-Restart", "1", EnvironmentVariableTarget.User);
-            Environment.Exit(0);
+            Environment.Exit(99);
         }
 
         [HttpGet("SendExitComplete")]

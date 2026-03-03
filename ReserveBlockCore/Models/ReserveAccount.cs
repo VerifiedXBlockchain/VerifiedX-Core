@@ -215,7 +215,7 @@ namespace ReserveBlockCore.Models
 
         #region Save Reserve Account
 
-        public static void SaveReserveAccount(ReserveAccount reserveAccount)
+        public static async Task SaveReserveAccount(ReserveAccount reserveAccount)
         {
             var db = GetReserveAccountsDb();
             if(db != null)
@@ -223,11 +223,11 @@ namespace ReserveBlockCore.Models
                 var accountExist = db.Query().Where(x => x.Address == reserveAccount.Address).FirstOrDefault();
                 if(accountExist == null)
                 {
-                    db.InsertSafe(reserveAccount);
+                    await db.InsertSafeAsync(reserveAccount);
                 }
                 else
                 {
-                    db.UpdateSafe(reserveAccount);
+                    await db.UpdateSafeAsync(reserveAccount);
                 }
             }
         }

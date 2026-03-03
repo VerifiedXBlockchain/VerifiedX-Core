@@ -158,8 +158,8 @@ namespace ReserveBlockCore
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
         public static int MajorVer = 5;
-        public static int MinorVer = 2;
-        public static int RevisionVer = 1;
+        public static int MinorVer = 3;
+        public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
@@ -360,7 +360,7 @@ namespace ReserveBlockCore
         public static long GlobalBufferCost = 0;
         public const int MaxGlobalConnections = 500; // Maximum concurrent connections across all IPs
         public const long MaxGlobalBufferCost = 100000000; // 100MB total buffer across all IPs
-        public const int MaxConnectionsPerIP = 20; // Per-IP connection limit
+        public const int MaxConnectionsPerIP = 200; // Per-IP connection limit
         public const int MaxBufferCostPerIP = 5000000; // 5MB per-IP buffer limit
 
         #endregion
@@ -383,6 +383,7 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, Transaction> BroadcastedTrxDict = new ConcurrentDictionary<string, Transaction>(); // TX Hash
         public static ConcurrentDictionary<string, TransactionBroadcast> ConsensusBroadcastedTrxDict = new ConcurrentDictionary<string, TransactionBroadcast>(); //TX Hash
         public static ConcurrentDictionary<string, DuplicateValidators> DuplicatesBroadcastedDict= new ConcurrentDictionary<string, DuplicateValidators>();
+        public static ConcurrentDictionary<string, long> TxLastBroadcastTime = new ConcurrentDictionary<string, long>(); // TX Hash -> Unix timestamp of last broadcast
 
         #endregion        
 

@@ -258,7 +258,8 @@ namespace ReserveBlockCore.P2P
             try
             {
                 // HAL-048 Fix: Re-enable SignalRQueue protection with block size-based cost calculation
-                return await P2PServer.SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, async () =>
+                // HAL-16 Fix: Use Block message type to ensure blocks NEVER blocked by TXs
+                return await P2PServer.SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, SignalRMessageType.Block, async () =>
                 {
                     // HAL-048 Fix: Add basic validation before processing
                     var callerIP = GetIP(Context);

@@ -31,7 +31,7 @@ namespace ReserveBlockCore
                 options.MaximumReceiveMessageSize = 1179648;
                 options.StreamBufferCapacity = 25; //was 1024
                 options.EnableDetailedErrors = true;
-                options.MaximumParallelInvocationsPerClient = 20; // HAL-054 Fix: Limit concurrent invocations per client
+                options.MaximumParallelInvocationsPerClient = 200; // HAL-054 Fix: Limit concurrent invocations per client
             });
             services.AddHostedService<ClientCallService>();
         }

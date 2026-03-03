@@ -26,7 +26,8 @@ namespace ReserveBlockCore.Utilities
         public static void SendToCallerReliable<T>(this IClientProxy caller, string method, T data, 
             string context, string targetInfo = "", int timeoutMs = 2000, bool enableRetry = false)
         {
-            var task = caller.SendAsync(method, data, new CancellationTokenSource(timeoutMs).Token);
+            using var cts = new CancellationTokenSource(timeoutMs);
+            var task = caller.SendAsync(method, data, cts.Token);
             TrackSendWithContinuation(task, context, $"Caller({targetInfo})", method, new object[] { data }, targetInfo, enableRetry);
         }
 
@@ -36,7 +37,8 @@ namespace ReserveBlockCore.Utilities
         public static void SendToAllReliable<T>(this IHubCallerClients clients, string method, T data, 
             string context, int timeoutMs = 6000, bool enableRetry = false)
         {
-            var task = clients.All.SendAsync(method, data, new CancellationTokenSource(timeoutMs).Token);
+            using var cts = new CancellationTokenSource(timeoutMs);
+            var task = clients.All.SendAsync(method, data, cts.Token);
             TrackSendWithContinuation(task, context, "All", method, new object[] { data }, null, enableRetry);
         }
 
@@ -46,7 +48,8 @@ namespace ReserveBlockCore.Utilities
         public static void SendToCallerReliable(this IClientProxy caller, string method, object[] args, 
             string context, string targetInfo = "", int timeoutMs = 2000, bool enableRetry = false)
         {
-            var task = caller.SendAsync(method, args, new CancellationTokenSource(timeoutMs).Token);
+            using var cts = new CancellationTokenSource(timeoutMs);
+            var task = caller.SendAsync(method, args, cts.Token);
             TrackSendWithContinuation(task, context, $"Caller({targetInfo})", method, args, targetInfo, enableRetry);
         }
 
@@ -56,7 +59,8 @@ namespace ReserveBlockCore.Utilities
         public static void SendToAllReliable(this IHubCallerClients clients, string method, object[] args, 
             string context, int timeoutMs = 6000, bool enableRetry = false)
         {
-            var task = clients.All.SendAsync(method, args, new CancellationTokenSource(timeoutMs).Token);
+            using var cts = new CancellationTokenSource(timeoutMs);
+            var task = clients.All.SendAsync(method, args, cts.Token);
             TrackSendWithContinuation(task, context, "All", method, args, null, enableRetry);
         }
 

@@ -29,7 +29,15 @@ namespace ReserveBlockCore.Services
 
             if(Globals.IsTestNet)
             {
-                Globals.IsCustomTestNet = true; //devnet only
+                //Globals.IsCustomTestNet = true; //devnet only
+                Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
+                Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
+                Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
+                Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
+                Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
+            }
+            else
+            {
                 Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
                 Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
                 Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
@@ -92,6 +100,15 @@ namespace ReserveBlockCore.Services
                     // If we get here, child process exited or was killed
                     if (_isRunning)
                     {
+                        // Check exit code - 99 indicates intentional user exit
+                        if (_childProcess != null && _childProcess.ExitCode == 99)
+                        {
+                            LogUtility.Log("Child process exited with code 99 (intentional user exit) - stopping warden...", "WardenService.StartWarden()");
+                            _isRunning = false;
+                            _httpClient?.Dispose();
+                            break; // Exit the main warden loop
+                        }
+                        
                         LogUtility.Log("Child process stopped - waiting 60 seconds before restart...", "WardenService.StartWarden()");
                         await Task.Delay(60000);
                     }
@@ -102,6 +119,9 @@ namespace ReserveBlockCore.Services
                     await Task.Delay(60000);
                 }
             }
+
+            Console.WriteLine("Warden service stopped. Exiting Now.");
+            Environment.Exit(99);
         }
 
         private static async Task StartChildProcess(string[] args)

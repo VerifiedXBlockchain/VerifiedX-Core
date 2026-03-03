@@ -18,12 +18,12 @@ namespace ReserveBlockCore.Data
     internal class TransactionData
     {
         public static bool GenesisTransactionsCreated = false;
-        public static void CreateGenesisTransction()
+        public static async Task CreateGenesisTransction()
         {
             if (GenesisTransactionsCreated != true)
             {
                 var trxPool = TransactionData.GetPool();
-                trxPool.DeleteAllSafe();
+                await trxPool.DeleteAllSafeAsync();
                 var timeStamp = TimeUtil.GetTime();
 
                 var balanceSheet = GenesisBalanceUtility.GenesisBalances();
@@ -54,7 +54,7 @@ namespace ReserveBlockCore.Data
             }
 
         }
-        public static void AddTxToWallet(Transaction transaction, bool subtract = false)
+        public static async Task AddTxToWallet(Transaction transaction, bool subtract = false)
         {
             var txs = GetAll();
             var txCheck = txs.FindOne(x => x.Hash == transaction.Hash);
@@ -82,11 +82,11 @@ namespace ReserveBlockCore.Data
                     tx.Fee = (tx.Fee * -1M);
                 }
                     
-                txs.InsertSafe(tx);
+                await txs.InsertSafeAsync(tx);
             }
         }
 
-        public static void UpdateTxStatusAndHeightXXXX(Transaction transaction, TransactionStatus txStatus, long blockHeight, bool sameWalletTX = false, bool isReserveSend = false)
+        public static async Task UpdateTxStatusAndHeightXXXX(Transaction transaction, TransactionStatus txStatus, long blockHeight, bool sameWalletTX = false, bool isReserveSend = false)
         {
             var txs = GetAll();
             var txCheck = txs.FindOne(x => x.Hash == transaction.Hash);
@@ -98,7 +98,7 @@ namespace ReserveBlockCore.Data
                     transaction.Id = new LiteDB.ObjectId();
                     transaction.TransactionStatus = txStatus;
                     transaction.Height = blockHeight;
-                    txs.InsertSafe(transaction);
+                    await txs.InsertSafeAsync(transaction);
                     var account = AccountData.GetSingleAccount(transaction.FromAddress);
                     if (account != null)
                     {
@@ -107,7 +107,7 @@ namespace ReserveBlockCore.Data
                         if (stateTrei != null)
                         {
                             account.Balance = stateTrei.Balance;
-                            accountDb.UpdateSafe(account);
+                            await accountDb.UpdateSafeAsync(account);
                         }
                     }
                 }
@@ -115,7 +115,7 @@ namespace ReserveBlockCore.Data
                 {
                     txCheck.TransactionStatus = txStatus;
                     txCheck.Height = blockHeight;
-                    txs.UpdateSafe(txCheck);
+                    await txs.UpdateSafeAsync(txCheck);
                 }
             }
             else
@@ -129,7 +129,7 @@ namespace ReserveBlockCore.Data
                         transaction.Height = blockHeight;
                         transaction.Amount = transaction.Amount < 0 ? transaction.Amount * -1.0M : transaction.Amount;
                         transaction.Fee = transaction.Fee < 0 ? transaction.Fee * -1.0M : transaction.Fee;
-                        txs.InsertSafe(transaction);
+                        await txs.InsertSafeAsync(transaction);
 
                         var account = AccountData.GetSingleAccount(transaction.FromAddress);
                         if (account != null)
@@ -139,7 +139,7 @@ namespace ReserveBlockCore.Data
                             if (stateTrei != null)
                             {
                                 account.Balance = stateTrei.Balance;
-                                accountDb.UpdateSafe(account);
+                                await accountDb.UpdateSafeAsync(account);
                             }
                         }
                     }
@@ -148,7 +148,7 @@ namespace ReserveBlockCore.Data
             
         }
 
-        public static void UpdateTxStatusAndHeight(Transaction transaction, TransactionStatus txStatus, long blockHeight, bool sameWalletTX = false)
+        public static async Task UpdateTxStatusAndHeight(Transaction transaction, TransactionStatus txStatus, long blockHeight, bool sameWalletTX = false)
         {
             var txs = GetAll();
             var txCheck = txs.FindOne(x => x.Hash == transaction.Hash);
@@ -160,7 +160,7 @@ namespace ReserveBlockCore.Data
                     transaction.Id = new LiteDB.ObjectId();
                     transaction.TransactionStatus = txStatus;
                     transaction.Height = blockHeight;
-                    txs.InsertSafe(transaction);
+                    await txs.InsertSafeAsync(transaction);
                     var account = AccountData.GetSingleAccount(transaction.FromAddress);
                     var rAccount = ReserveAccount.GetReserveAccountSingle(transaction.FromAddress);
                     if (account != null)
@@ -170,7 +170,7 @@ namespace ReserveBlockCore.Data
                         if (stateTrei != null)
                         {
                             account.Balance = stateTrei.Balance;
-                            accountDb.UpdateSafe(account);
+                            await accountDb.UpdateSafeAsync(account);
                         }
                     }
                     if(rAccount != null)
@@ -180,7 +180,7 @@ namespace ReserveBlockCore.Data
                         {
                             rAccount.AvailableBalance = stateTrei.Balance;
                             rAccount.LockedBalance = stateTrei.LockedBalance;
-                            ReserveAccount.SaveReserveAccount(rAccount);
+                            await ReserveAccount.SaveReserveAccount(rAccount);
                         }
                     }
                 }
@@ -188,7 +188,7 @@ namespace ReserveBlockCore.Data
                 {
                     txCheck.TransactionStatus = txStatus;
                     txCheck.Height = blockHeight;
-                    txs.UpdateSafe(txCheck);
+                    await txs.UpdateSafeAsync(txCheck);
                 }
             }
             else
@@ -202,7 +202,7 @@ namespace ReserveBlockCore.Data
                         transaction.Height = blockHeight;
                         transaction.Amount = transaction.Amount < 0 ? transaction.Amount * -1.0M : transaction.Amount;
                         transaction.Fee = transaction.Fee < 0 ? transaction.Fee * -1.0M : transaction.Fee;
-                        txs.InsertSafe(transaction);
+                        await txs.InsertSafeAsync(transaction);
 
                         var account = AccountData.GetSingleAccount(transaction.FromAddress);
                         var rAccount = ReserveAccount.GetReserveAccountSingle(transaction.FromAddress);
@@ -214,7 +214,7 @@ namespace ReserveBlockCore.Data
                             if (stateTrei != null)
                             {
                                 account.Balance = stateTrei.Balance;
-                                accountDb.UpdateSafe(account);
+                                await accountDb.UpdateSafeAsync(account);
                             }
                         }
 
@@ -225,7 +225,7 @@ namespace ReserveBlockCore.Data
                             {
                                 rAccount.AvailableBalance = stateTrei.Balance;
                                 rAccount.LockedBalance = stateTrei.LockedBalance;
-                                ReserveAccount.SaveReserveAccount(rAccount);
+                                await ReserveAccount.SaveReserveAccount(rAccount);
                             }
                         }
                     }
@@ -246,7 +246,7 @@ namespace ReserveBlockCore.Data
                     if (isTXCrafted)
                     {
                         tx.TransactionStatus = TransactionStatus.Success;
-                        txs.UpdateSafe(tx);
+                        await txs.UpdateSafeAsync(tx);
                     }
                     else
                     {
@@ -254,7 +254,7 @@ namespace ReserveBlockCore.Data
                         if (isStale)
                         {
                             tx.TransactionStatus = TransactionStatus.Failed;
-                            txs.UpdateSafe(tx);
+                            await txs.UpdateSafeAsync(tx);
                             var account = AccountData.GetSingleAccount(tx.FromAddress);
                             if (account != null)
                             {
@@ -263,7 +263,7 @@ namespace ReserveBlockCore.Data
                                 if (stateTrei != null)
                                 {
                                     account.Balance = stateTrei.Balance;
-                                    accountDb.UpdateSafe(account);
+                                    await accountDb.UpdateSafeAsync(account);
                                 }
                             }
                         }
@@ -324,10 +324,10 @@ namespace ReserveBlockCore.Data
             return false;
         }
 
-        public static void AddToPool(Transaction transaction)
+        public static async Task AddToPool(Transaction transaction)
         {
             var TransactionPool = GetPool();
-            TransactionPool.InsertSafe(transaction);
+            await TransactionPool.InsertSafeAsync(transaction);
         }
 
         public static LiteDB.ILiteCollection<Transaction> GetPool()
@@ -349,7 +349,7 @@ namespace ReserveBlockCore.Data
         {
             var pool = GetPool();
 
-            pool.DeleteAllSafe();
+            await pool.DeleteAllSafeAsync();
         }
         public static void PrintMemPool()
         {
@@ -650,7 +650,7 @@ namespace ReserveBlockCore.Data
                                                     if (tx.Fee > existingTx.Fee)
                                                     {
                                                         approvedMemPoolList.Remove(existingTx);
-                                                        collection.DeleteManySafe(x => x.Hash == existingTx.Hash);
+                                                        await collection.DeleteManySafeAsync(x => x.Hash == existingTx.Hash);
 
                                                         // Mark old TX as replaced locally
                                                         var localTxDb = TransactionData.GetAll();
@@ -658,7 +658,7 @@ namespace ReserveBlockCore.Data
                                                         if (localTx != null)
                                                         {
                                                             localTx.TransactionStatus = TransactionStatus.ReplacedByFee;
-                                                            localTxDb.UpdateSafe(localTx);
+                                                            await localTxDb.UpdateSafeAsync(localTx);
                                                         }
 
                                                         approvedMemPoolList.Add(tx);
@@ -666,7 +666,7 @@ namespace ReserveBlockCore.Data
                                                     else
                                                     {
                                                         // Keep existing (higher fee), reject this one
-                                                        collection.DeleteManySafe(x => x.Hash == tx.Hash);
+                                                        await collection.DeleteManySafeAsync(x => x.Hash == tx.Hash);
                                                     }
                                                 }
                                                 else if (tx.Nonce == expectedNonce)
@@ -694,7 +694,7 @@ namespace ReserveBlockCore.Data
                                         {
                                             try
                                             {
-                                                collection.DeleteManySafe(x => x.Hash == txToDelete.Hash);
+                                                await collection.DeleteManySafeAsync(x => x.Hash == txToDelete.Hash);
                                             }
                                             catch (Exception ex)
                                             {
@@ -710,7 +710,7 @@ namespace ReserveBlockCore.Data
                                     {
                                         try
                                         {
-                                            collection.DeleteManySafe(x => x.Hash == txToDelete.Hash);
+                                            await collection.DeleteManySafeAsync(x => x.Hash == txToDelete.Hash);
                                         }
                                         catch (Exception ex)
                                         {
@@ -726,7 +726,7 @@ namespace ReserveBlockCore.Data
                                 {
                                     try
                                     {
-                                        collection.DeleteManySafe(x => x.Hash == txToDelete.Hash);
+                                        await collection.DeleteManySafeAsync(x => x.Hash == txToDelete.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -743,7 +743,7 @@ namespace ReserveBlockCore.Data
                         {
                             try
                             {
-                                collection.DeleteManySafe(x => x.Hash == txToDelete.Hash);
+                                await collection.DeleteManySafeAsync(x => x.Hash == txToDelete.Hash);
                             }
                             catch (Exception ex2)
                             {
