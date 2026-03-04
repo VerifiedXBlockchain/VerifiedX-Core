@@ -1099,26 +1099,36 @@ namespace ReserveBlockCore.Services
                                             if (!amount.HasValue || amount.Value <= 0)
                                                 return (txResult, "Amount must be greater than zero.");
 
-                                            // Validate balance for the sender
+                                            // Validate balance using v1 pattern:
+                                            // - Owner: deposit balance is tracked locally via Electrum scan, skip consensus balance check
+                                            //   (mirrors v1 TransferCoin() which skips balance check for isOwner)
+                                            // - Non-owner: check ledger balance from tokenization TXes
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                                             if (scStateTreiRec != null)
                                             {
+                                                bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
+
                                                 if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
                                                 {
                                                     var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
                                                         .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
                                                         .ToList();
 
-                                                    decimal balance = 0M;
-                                                    if (transactions.Any())
+                                                    // Non-owner: check ledger balance (received - sent)
+                                                    if (transactions.Any() && !isOwner)
                                                     {
                                                         var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
-                                                        var sent = transactions.Where(x => x.FromAddress == fromAddress && x.ToAddress == "-").Sum(x => Math.Abs(x.Amount));
-                                                        balance = received - sent;
-                                                    }
+                                                        var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
+                                                        decimal balance = received - sent;
 
-                                                    if (balance < amount.Value)
-                                                        return (txResult, $"Insufficient vBTC balance. Available: {balance}, Requested: {amount.Value}");
+                                                        if (balance < amount.Value)
+                                                            return (txResult, $"Insufficient vBTC balance. Available: {balance}, Requested: {amount.Value}");
+                                                    }
+                                                }
+                                                else if (!isOwner)
+                                                {
+                                                    // Non-owner with no tokenization TXes has zero balance
+                                                    return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
                                                 }
                                             }
 

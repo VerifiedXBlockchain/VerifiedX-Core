@@ -82,8 +82,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 };
 
                 // Save to database
-                // var db = VBTCValidator.GetVBTCValidatorDb();
-                // db.InsertSafe(validator);
+                VBTCValidator.SaveValidator(validator);
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -139,9 +138,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             try
             {
                 // Update validator's last heartbeat block
-                // var validator = VBTCValidator.GetValidator(validatorAddress);
-                // validator.LastHeartbeatBlock = Globals.LastBlock.Height;
-                // VBTCValidator.Update(validator);
+                var validator = VBTCValidator.GetValidator(validatorAddress);
+                if (validator == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
+                }
+                VBTCValidator.UpdateHeartbeat(validatorAddress, Globals.LastBlock.Height);
 
                 return JsonConvert.SerializeObject(new
                 {

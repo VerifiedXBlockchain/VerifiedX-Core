@@ -531,6 +531,9 @@ namespace ReserveBlockCore
             MessageLocksCleanupService.Start();
             BroadcastTrackingCleanupService.Start();
 
+            // vBTC V2: Start deposit balance scan loop (scans owned contracts via Electrum)
+            _ = Task.Run(Bitcoin.Services.VBTCService.VBTCV2BalanceScanLoop);
+
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL

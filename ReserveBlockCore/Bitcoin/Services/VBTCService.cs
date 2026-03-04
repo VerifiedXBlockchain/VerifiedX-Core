@@ -19,6 +19,119 @@ namespace ReserveBlockCore.Bitcoin.Services
     /// </summary>
     public class VBTCService
     {
+        #region Deposit Balance Scanning
+
+        /// <summary>
+        /// Scan all owned vBTC V2 contracts' deposit addresses via Electrum
+        /// and update the local Balance field. Called on startup and periodically.
+        /// Mirrors the v1 pattern where the owner scans their own deposit address.
+        /// </summary>
+        public static async Task ScanVBTCV2Balances()
+        {
+            try
+            {
+                var accounts = AccountData.GetAccounts();
+                if (accounts == null) return;
+
+                var allAddresses = accounts.FindAll().Select(a => a.Address).ToList();
+                if (!allAddresses.Any()) return;
+
+                foreach (var address in allAddresses)
+                {
+                    var contracts = VBTCContractV2.GetContractsByOwner(address);
+                    if (contracts == null || !contracts.Any()) continue;
+
+                    foreach (var contract in contracts)
+                    {
+                        await ScanSingleContractBalance(contract);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error scanning vBTC V2 balances: {ex.Message}", "VBTCService.ScanVBTCV2Balances()");
+            }
+        }
+
+        /// <summary>
+        /// Scan a single contract's deposit address via Electrum and update local balance.
+        /// </summary>
+        public static async Task<decimal> ScanSingleContractBalance(VBTCContractV2 contract)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(contract.DepositAddress))
+                    return 0M;
+
+                var utxos = await BitcoinTransactionService.GetTaprootUTXOs(contract.DepositAddress);
+                decimal btcBalance = 0M;
+
+                if (utxos != null && utxos.Any())
+                {
+                    // Sum all UTXO values (in satoshis) and convert to BTC
+                    ulong totalSatoshis = 0;
+                    foreach (var utxo in utxos)
+                    {
+                        totalSatoshis += utxo.Value;
+                    }
+                    btcBalance = totalSatoshis * BitcoinTransactionService.SatoshiMultiplier;
+                }
+
+                // Update contract balance locally
+                if (contract.Balance != btcBalance)
+                {
+                    contract.Balance = btcBalance;
+                    VBTCContractV2.UpdateContract(contract);
+                    SCLogUtility.Log($"Updated vBTC V2 balance for {contract.SmartContractUID}: {btcBalance} BTC", 
+                        "VBTCService.ScanSingleContractBalance()");
+                }
+
+                return btcBalance;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error scanning contract {contract.SmartContractUID}: {ex.Message}", 
+                    "VBTCService.ScanSingleContractBalance()");
+                return contract.Balance;
+            }
+        }
+
+        /// <summary>
+        /// Background loop that periodically scans vBTC V2 deposit balances.
+        /// Runs initial scan on startup, then every 5 minutes.
+        /// </summary>
+        public static async Task VBTCV2BalanceScanLoop()
+        {
+            try
+            {
+                // Wait for startup to complete before first scan
+                await Task.Delay(TimeSpan.FromSeconds(30));
+
+                LogUtility.Log("Starting vBTC V2 deposit balance scan loop", "VBTCService.VBTCV2BalanceScanLoop()");
+
+                while (true)
+                {
+                    try
+                    {
+                        await ScanVBTCV2Balances();
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Error in balance scan loop iteration: {ex.Message}", "VBTCService.VBTCV2BalanceScanLoop()");
+                    }
+
+                    // Wait 5 minutes between scans
+                    await Task.Delay(TimeSpan.FromMinutes(5));
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Fatal error in balance scan loop: {ex.Message}", "VBTCService.VBTCV2BalanceScanLoop()");
+            }
+        }
+
+        #endregion
+
         /// <summary>
         /// Transfer ownership of a vBTC V2 contract to another address
         /// </summary>
@@ -197,8 +310,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Smart contract state not found: {scUID}");
                 }
 
-                // Calculate balance
-                decimal balance = 0M;
+                // Calculate balance using v1 pattern: owner gets deposit balance + ledger, non-owner gets just ledger
+                decimal ledgerBalance = 0M;
                 if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                 {
                     var transactions = scState.SCStateTreiTokenizationTXes
@@ -209,15 +322,20 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
                         var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                        balance = received - sent;
+                        ledgerBalance = received - sent;
                     }
                 }
 
+                // Owner's available = BTC deposit balance + ledger (ledger goes negative as owner sends)
+                // Non-owner's available = just ledger (received - sent)
+                bool isOwner = vbtcContract.OwnerAddress == fromAddress;
+                decimal availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
+
                 // Check sufficient balance
-                if (balance < amount)
+                if (availableBalance < amount)
                 {
-                    SCLogUtility.Log($"Insufficient balance. Available: {balance}, Requested: {amount}", "VBTCService.TransferVBTC()");
-                    return (false, $"Insufficient balance. Available: {balance}, Requested: {amount}");
+                    SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.TransferVBTC()");
+                    return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
                 }
 
                 // Create transaction data
@@ -332,8 +450,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Smart contract state not found: {scUID}");
                 }
 
-                // Calculate balance
-                decimal balance = 0M;
+                // Calculate balance using v1 pattern: owner gets deposit balance + ledger
+                decimal ledgerBalance = 0M;
                 if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                 {
                     var transactions = scState.SCStateTreiTokenizationTXes
@@ -344,15 +462,20 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         var received = transactions.Where(x => x.ToAddress == ownerAddress).Sum(x => x.Amount);
                         var sent = transactions.Where(x => x.FromAddress == ownerAddress).Sum(x => x.Amount);
-                        balance = received - sent;
+                        ledgerBalance = received - sent;
                     }
                 }
 
+                // Owner's available = BTC deposit balance + ledger
+                // Non-owner's available = just ledger
+                bool isOwner = vbtcContract.OwnerAddress == ownerAddress;
+                decimal availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
+
                 // Check sufficient balance
-                if (balance < amount)
+                if (availableBalance < amount)
                 {
-                    SCLogUtility.Log($"Insufficient balance. Available: {balance}, Requested: {amount}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"Insufficient balance. Available: {balance}, Requested: {amount}");
+                    SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
                 }
 
                 // Create transaction data
