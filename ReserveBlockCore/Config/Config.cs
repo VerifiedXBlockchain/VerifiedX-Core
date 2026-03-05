@@ -126,7 +126,8 @@ namespace ReserveBlockCore.Config
                 config.BlockSeedCalls = dict.ContainsKey("BlockSeedCalls") ? Convert.ToBoolean(dict["BlockSeedCalls"]) : false;
                 config.BitcoinAddressFormat = dict.ContainsKey("BitcoinAddressFormat") ? (Bitcoin.Bitcoin.BitcoinAddressFormat)Convert.ToInt32(dict["BitcoinAddressFormat"]) : Bitcoin.Bitcoin.BitcoinAddressFormat.Segwit;
                 config.SkipIPs = dict.ContainsKey("SkipIPs") ? dict["SkipIPs"] : null;
-                config.ReportedIP = dict.ContainsKey("ReportedIP") ? dict["ReportedIP"] : null;
+                config.ReportedIP = dict.ContainsKey("IPAddress") ? dict["IPAddress"] : 
+                                    dict.ContainsKey("ReportedIP") ? dict["ReportedIP"] : null;
                 config.TestNetName = dict.ContainsKey("TestNetName") ? dict["TestNetName"] : null;
 
                 config.AutoDownloadNFTAsset = dict.ContainsKey("AutoDownloadNFTAsset") ? Convert.ToBoolean(dict["AutoDownloadNFTAsset"]) : false;
@@ -227,6 +228,7 @@ namespace ReserveBlockCore.Config
 			if(!string.IsNullOrEmpty(config.ReportedIP))
 			{
 				Globals.ReportedIP = config.ReportedIP;
+				Globals.ReportedIPManuallySet = true;
 				Globals.ReportedIPs.TryAdd(Globals.ReportedIP, 99999);
 			}
 

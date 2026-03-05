@@ -309,6 +309,7 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, long> FailedValidators = new ConcurrentDictionary<string, long>();
         public static int ElmahFileStore = 10000;
         public static string ReportedIP = "";
+        public static bool ReportedIPManuallySet = false;
 
         #endregion
 
