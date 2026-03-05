@@ -147,6 +147,16 @@ namespace ReserveBlockCore.Services
                             var sTreiAcct = StateData.GetSpecificAccountStateTrei(validator.Address);
                             if (sTreiAcct != null)
                             {
+                                // Wait for IP to be discovered (up to 90 seconds)
+                                var ipWaitAttempts = 0;
+                                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                                {
+                                    ipWaitAttempts++;
+                                    LogUtility.Log($"Waiting for IP discovery before vBTC V2 registration (attempt {ipWaitAttempts}/18)...", 
+                                        "ValidatorService.StartupValidatorProcess()");
+                                    await Task.Delay(5000);
+                                }
+                                
                                 var ipAddress = Globals.ReportedIP;
 
                                 var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);

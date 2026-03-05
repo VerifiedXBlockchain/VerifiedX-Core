@@ -109,12 +109,12 @@ namespace ReserveBlockCore.P2P
                     await RemoveNode(node);
             }
         }
-        public static string MostLikelyIP()
+        public static bool IsPrivateIP(string ip)
         {
-            // Function to check if an IP is within private ranges
-            bool IsPrivateIP(string ip)
+            try
             {
                 var ipParts = ip.Split('.').Select(int.Parse).ToArray();
+                if (ipParts.Length != 4) return true; // Not a valid IPv4, treat as private
                 if (ipParts[0] == 10)
                     return true; // 10.0.0.0/8
                 if (ipParts[0] == 172 && ipParts[1] >= 16 && ipParts[1] <= 31)
@@ -123,10 +123,41 @@ namespace ReserveBlockCore.P2P
                     return true; // 192.168.0.0/16
                 if (ip == "127.0.0.1")
                     return true; // localhost loopback
-
                 return false;
             }
+            catch { return true; } // If parsing fails, treat as private
+        }
 
+        /// <summary>
+        /// Auto-promotes the best non-private IP from ReportedIPs to Globals.ReportedIP
+        /// when no IP was manually configured. Requires at least 2 peer confirmations.
+        /// </summary>
+        public static void TryAutoUpdateReportedIP()
+        {
+            // Don't overwrite manually configured IP
+            if (Globals.ReportedIPManuallySet)
+                return;
+
+            // Already set via auto-discovery
+            if (!string.IsNullOrEmpty(Globals.ReportedIP))
+                return;
+
+            // Find the top non-private IP with at least 2 confirmations
+            var bestIP = Globals.ReportedIPs
+                .Where(kv => !IsPrivateIP(kv.Key) && kv.Value >= 2)
+                .OrderByDescending(kv => kv.Value)
+                .Select(kv => kv.Key)
+                .FirstOrDefault();
+
+            if (!string.IsNullOrEmpty(bestIP))
+            {
+                Globals.ReportedIP = bestIP;
+                LogUtility.Log($"Auto-discovered IP address: {bestIP}", "P2PClient.TryAutoUpdateReportedIP()");
+            }
+        }
+
+        public static string MostLikelyIP()
+        {
             return Globals.ReportedIPs.Count != 0 ?
                 Globals.ReportedIPs
                     .Where(y => !IsPrivateIP(y.Key)) // Filter out private IPs
@@ -283,6 +314,7 @@ namespace ReserveBlockCore.P2P
                                 Globals.ReportedIPs[IP]++;
                             else
                                 Globals.ReportedIPs[IP] = 1;
+                            TryAutoUpdateReportedIP();
                         }
                     }                    
                 });

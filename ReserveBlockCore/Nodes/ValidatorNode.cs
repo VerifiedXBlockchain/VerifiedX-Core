@@ -488,6 +488,7 @@ namespace ReserveBlockCore.Nodes
                 Globals.ReportedIPs[IP]++;
             else
                 Globals.ReportedIPs[IP] = 1;
+            P2P.P2PClient.TryAutoUpdateReportedIP();
         }
 
         //2

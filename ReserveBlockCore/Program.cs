@@ -275,6 +275,13 @@ namespace ReserveBlockCore
                     {
                         Globals.BlockSeedCalls = true;
                     }
+                    if(argC.Contains("ipaddress"))
+                    {
+                        var ipSplit = argC.Split(new char[] { '=' });
+                        Globals.ReportedIP = ipSplit[1];
+                        Globals.ReportedIPManuallySet = true;
+                        Globals.ReportedIPs.TryAdd(Globals.ReportedIP, 99999);
+                    }
                     if(argC.Contains("keslog"))
                     {
                         keslog = true;
