@@ -388,7 +388,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(tokenTx);
                 if (result.Item1)
                 {
-                    TransactionData.AddTxToWallet(tokenTx, true);
+                    await TransactionData.AddTxToWallet(tokenTx, true);
+                    await AccountData.UpdateLocalBalance(fromAddress, tokenTx.Fee + tokenTx.Amount);
+                    await TransactionData.AddToPool(tokenTx);
+                    await P2PClient.SendTXMempool(tokenTx);
                     SCLogUtility.Log($"vBTC V2 Transfer TX Success. SCUID: {scUID}, TxHash: {tokenTx.Hash}", "VBTCService.TransferVBTC()");
                     return (true, tokenTx.Hash);
                 }
@@ -529,7 +532,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(withdrawalTx);
                 if (result.Item1)
                 {
-                    TransactionData.AddTxToWallet(withdrawalTx, true);
+                    await TransactionData.AddTxToWallet(withdrawalTx, true);
+                    await AccountData.UpdateLocalBalance(ownerAddress, withdrawalTx.Fee + withdrawalTx.Amount);
+                    await TransactionData.AddToPool(withdrawalTx);
+                    await P2PClient.SendTXMempool(withdrawalTx);
                     SCLogUtility.Log($"vBTC V2 Withdrawal Request TX Success. SCUID: {scUID}, TxHash: {withdrawalTx.Hash}", "VBTCService.RequestWithdrawal()");
                     return (true, withdrawalTx.Hash);
                 }
@@ -727,7 +733,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(completionTx);
                 if (result.Item1)
                 {
-                    TransactionData.AddTxToWallet(completionTx, true);
+                    await TransactionData.AddTxToWallet(completionTx, true);
+                    await AccountData.UpdateLocalBalance(fromAddress, completionTx.Fee + completionTx.Amount);
+                    await TransactionData.AddToPool(completionTx);
+                    await P2PClient.SendTXMempool(completionTx);
                     
                     // Phase 5: Update activity tracking after successful withdrawal
                     vbtcContract.LastValidatorActivityBlock = Globals.LastBlock.Height;
