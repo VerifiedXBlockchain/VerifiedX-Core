@@ -47,56 +47,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
         #region Validator Management
 
-        /// <summary>
-        /// Register as a vBTC V2 Validator
-        /// </summary>
-        /// <param name="validatorAddress">VFX validator address</param>
-        /// <param name="ipAddress">Validator IP address</param>
-        /// <returns>Registration success status</returns>
-        [HttpPost("RegisterValidator/{validatorAddress}/{ipAddress}")]
-        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> RegisterValidator(string validatorAddress, string ipAddress)
-        {
-            try
-            {
-                // FIND-024 Fix: Generate real registration signature and derive public key identifier
-                // Note: The validator's FROST key share is generated later during DKG ceremony.
-                // At registration time, we store the validator's VFX signing public key as their
-                // FROST identity key, and sign the registration with the existing SignatureService.
-                var registrationMessage = $"{validatorAddress}.{ipAddress}.{Globals.LastBlock.Height}";
-                var registrationSignature = SignatureService.ValidatorSignature(registrationMessage);
-                
-                // Derive the validator's public key from their address for FROST identification
-                var account = AccountData.GetSingleAccount(validatorAddress);
-                var frostPublicKey = account?.PublicKey ?? validatorAddress;
-
-                var validator = new VBTCValidator
-                {
-                    ValidatorAddress = validatorAddress,
-                    IPAddress = ipAddress,
-                    RegistrationBlockHeight = Globals.LastBlock.Height,
-                    LastHeartbeatBlock = Globals.LastBlock.Height,
-                    IsActive = true,
-                    FrostPublicKey = frostPublicKey,
-                    RegistrationSignature = registrationSignature
-                };
-
-                // Save to database
-                VBTCValidator.SaveValidator(validator);
-
-                return JsonConvert.SerializeObject(new
-                {
-                    Success = true,
-                    Message = "Validator registered successfully",
-                    ValidatorAddress = validatorAddress,
-                    RegistrationBlock = validator.RegistrationBlockHeight
-                });
-            }
-            catch (Exception ex)
-            {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
-            }
-        }
+        // RegisterValidator removed — on-chain registration goes through
+        // ValidatorService.SendVBTCV2RegistrationTx() called by StartupValidatorProcess().
+        // Use GetValidatorList / GetValidatorStatus to query validators.
 
         /// <summary>
         /// Get list of all registered vBTC V2 validators
@@ -651,20 +604,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
                 }
 
-                // 3. TODO: Replay attack prevention - check if UniqueId already exists
-                // var existingContract = VBTCContractV2.GetByUniqueId(payload.OwnerAddress, payload.UniqueId);
-                // if (existingContract != null)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Duplicate request detected. This UniqueId has already been processed." });
-                // }
-
-                // 4. TODO: Verify owner signature
-                // var signatureData = $"{payload.OwnerAddress}{payload.Name}{payload.Description}{payload.Ticker}{payload.CeremonyId}{payload.Timestamp}{payload.UniqueId}";
-                // var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
-                // if (!isValidSignature)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
-                // }
+                // 3. Verify owner signature
+                var signatureData = $"{payload.OwnerAddress}{payload.Name}{payload.Description}{payload.Ticker}{payload.CeremonyId}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
+                if (!isValidSignature)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
+                }
 
                 // 5. Retrieve ceremony from memory
                 if (!_ceremonies.TryGetValue(payload.CeremonyId, out var ceremony))
@@ -740,14 +686,30 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     }
                 };
 
-                // Write smart contract (this will use TokenizationV2SourceGenerator)
-                // var (scText, scMainResult, isToken) = await SmartContractWriterService.WriteSmartContract(scMain);
+                // Write smart contract (uses TokenizationV2SourceGenerator)
+                var result = await SmartContractWriterService.WriteSmartContract(scMain);
+                if (string.IsNullOrWhiteSpace(result.Item1))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to generate smart contract code" });
+                }
+
+                // Save smart contract to databases
+                SmartContractMain.SmartContractData.SaveSmartContract(result.Item2, result.Item1);
+                await VBTCContractV2.SaveSmartContract(result.Item2, result.Item1, payload.OwnerAddress);
+
+                // Create and broadcast mint transaction
+                var scTx = await SmartContractService.MintSmartContractTx(result.Item2, TransactionType.VBTC_V2_CONTRACT_CREATE);
+                if (scTx == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create or broadcast smart contract transaction" });
+                }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "vBTC V2 contract created successfully via raw request using pre-generated MPC ceremony",
+                    Message = "vBTC V2 contract created and published to blockchain successfully via raw request",
                     SmartContractUID = scUID,
+                    TransactionHash = scTx.Hash,
                     CeremonyId = payload.CeremonyId,
                     DepositAddress = depositAddress,
                     DKGProof = dkgProof,
@@ -1162,20 +1124,32 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "An active withdrawal request already exists for this contract. Complete or cancel it first." });
                 }
 
-                // 5. TODO: Verify VFX signature
-                // var signatureData = $"{payload.VFXAddress}{payload.BTCAddress}{payload.SmartContractUID}{payload.Amount}{payload.FeeRate}{payload.Timestamp}{payload.UniqueId}";
-                // var isValidSignature = SignatureService.VerifySignature(payload.VFXAddress, signatureData, payload.VFXSignature);
-                // if (!isValidSignature)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid VFX signature" });
-                // }
+                // 5. Verify VFX signature
+                var signatureData = $"{payload.VFXAddress}{payload.BTCAddress}{payload.SmartContractUID}{payload.Amount}{payload.FeeRate}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.VFXAddress, signatureData, payload.VFXSignature);
+                if (!isValidSignature)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid VFX signature" });
+                }
 
-                // 6. TODO: Validate balance (call VBTCService)
-                // var balance = await VBTCService.GetBalance(payload.VFXAddress, payload.SmartContractUID);
-                // if (balance < payload.Amount)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {balance}, Requested: {payload.Amount}" });
-                // }
+                // 6. Validate balance from State Trei
+                var scState = SmartContractStateTrei.GetSmartContractState(payload.SmartContractUID);
+                if (scState != null && scState.SCStateTreiTokenizationTXes != null)
+                {
+                    var tokenTxs = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == payload.VFXAddress || x.ToAddress == payload.VFXAddress).ToList();
+                    var received = tokenTxs.Where(x => x.ToAddress == payload.VFXAddress).Sum(x => x.Amount);
+                    var sent = tokenTxs.Where(x => x.FromAddress == payload.VFXAddress).Sum(x => x.Amount);
+                    var vbtcBalance = received - sent;
+                    if (payload.Amount > vbtcBalance)
+                    {
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient vBTC balance. Available: {vbtcBalance}, Requested: {payload.Amount}" });
+                    }
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract state not found or no tokenization transactions exist." });
+                }
 
                 // 7. Create withdrawal request
                 var withdrawalRequest = new VBTCWithdrawalRequest
@@ -1264,31 +1238,20 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
                 }
 
-                // 3. TODO: Verify validator is active and eligible
-                // var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
-                // if (validator == null || !validator.IsActive)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
-                // }
+                // 3. Verify validator is active and eligible
+                var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
+                if (validator == null || !validator.IsActive)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
+                }
 
-                // 4. TODO: Verify validator signature (FROST signature)
-                // var signatureData = $"{payload.SmartContractUID}{payload.WithdrawalRequestHash}{payload.ValidatorAddress}{payload.Timestamp}{payload.UniqueId}";
-                // var isValidSignature = FrostService.VerifyValidatorSignature(payload.ValidatorAddress, signatureData, payload.ValidatorSignature);
-                // if (!isValidSignature)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid validator signature" });
-                // }
-
-                // 5. TODO: Retrieve withdrawal request and validate status
-                // var withdrawalRequest = VBTCWithdrawalRequest.GetByRequestHash(payload.WithdrawalRequestHash);
-                // if (withdrawalRequest == null)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request not found" });
-                // }
-                // if (withdrawalRequest.Status != VBTCWithdrawalStatus.Requested)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = $"Withdrawal request is not in 'Requested' status. Current status: {withdrawalRequest.Status}" });
-                // }
+                // 4. Verify validator signature (VFX signature over request data)
+                var signatureData = $"{payload.SmartContractUID}{payload.WithdrawalRequestHash}{payload.ValidatorAddress}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.ValidatorAddress, signatureData, payload.ValidatorSignature);
+                if (!isValidSignature)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid validator signature" });
+                }
 
                 // FIND-024 Fix: Wire to real FROST signing via VBTCService.CompleteWithdrawal
                 // This uses the same path as the non-raw CompleteWithdrawal endpoint,
@@ -1363,27 +1326,20 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
                 }
 
-                // 3. TODO: Verify owner signature
-                // var signatureData = $"{payload.SmartContractUID}{payload.OwnerAddress}{payload.WithdrawalRequestHash}{payload.BTCTxHash}{payload.FailureProof}{payload.Timestamp}{payload.UniqueId}";
-                // var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
-                // if (!isValidSignature)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
-                // }
+                // 3. Verify owner signature
+                var signatureData = $"{payload.SmartContractUID}{payload.OwnerAddress}{payload.WithdrawalRequestHash}{payload.BTCTxHash}{payload.FailureProof}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
+                if (!isValidSignature)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
+                }
 
-                // 4. TODO: Verify owner is the contract owner
-                // var contract = VBTCContractV2.GetContract(payload.SmartContractUID);
-                // if (contract == null || contract.OwnerAddress != payload.OwnerAddress)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Only the contract owner can request cancellation" });
-                // }
-
-                // 5. TODO: Verify failure proof (e.g., BTC TX rejected, mempool timeout)
-                // var isValidFailureProof = await BitcoinService.VerifyTransactionFailure(payload.BTCTxHash, payload.FailureProof);
-                // if (!isValidFailureProof)
-                // {
-                //     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid failure proof. Transaction may not have failed." });
-                // }
+                // 4. Verify owner is the contract owner
+                var contract = VBTCContractV2.GetContract(payload.SmartContractUID);
+                if (contract == null || contract.OwnerAddress != payload.OwnerAddress)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Only the contract owner can request cancellation" });
+                }
 
                 var cancellationUID = Guid.NewGuid().ToString();
 
@@ -1404,11 +1360,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     IsProcessed = false
                 };
 
-                // 7. TODO: Save to database
-                // VBTCWithdrawalCancellation.Save(cancellation);
-
-                // 8. TODO: Notify validators to vote on cancellation
-                // await VBTCService.NotifyValidatorsForCancellationVote(cancellationUID);
+                // 7. Save to database
+                VBTCWithdrawalCancellation.SaveCancellation(cancellation);
 
                 return JsonConvert.SerializeObject(new
                 {
