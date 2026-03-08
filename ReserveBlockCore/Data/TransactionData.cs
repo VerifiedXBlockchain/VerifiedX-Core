@@ -603,6 +603,50 @@ namespace ReserveBlockCore.Data
                                 }
                             }
 
+                            // Anti-spam: Reject REGISTER if validator is already active.
+                            // Also enforce only 1 pending validator TX (REGISTER or HEARTBEAT) per address.
+                            if (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER)
+                            {
+                                var signature = tx.Signature;
+                                var sigCheck = SignatureService.VerifySignature(tx.FromAddress, tx.Hash, signature);
+                                if (sigCheck)
+                                {
+                                    // Reject if already active in the DB — no need to register again
+                                    var existingVal = Bitcoin.Models.VBTCValidator.GetValidator(tx.FromAddress);
+                                    if (existingVal != null && existingVal.IsActive)
+                                    {
+                                        reject = true;
+                                    }
+
+                                    // Only 1 pending validator lifecycle TX per address
+                                    if (!reject)
+                                    {
+                                        var alreadyInPool = approvedMemPoolList.Exists(x =>
+                                            (x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER ||
+                                             x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT) &&
+                                            x.FromAddress == tx.FromAddress);
+                                        if (alreadyInPool)
+                                            reject = true;
+                                    }
+                                }
+                            }
+
+                            // Enforce only 1 pending validator lifecycle TX (REGISTER or HEARTBEAT) per address.
+                            if (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
+                            {
+                                var signature = tx.Signature;
+                                var sigCheck = SignatureService.VerifySignature(tx.FromAddress, tx.Hash, signature);
+                                if (sigCheck)
+                                {
+                                    var alreadyInPool = approvedMemPoolList.Exists(x =>
+                                        (x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER ||
+                                         x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT) &&
+                                        x.FromAddress == tx.FromAddress);
+                                    if (alreadyInPool)
+                                        reject = true;
+                                }
+                            }
+
                             if (reject == false)
                             {
                                 var signature = tx.Signature;

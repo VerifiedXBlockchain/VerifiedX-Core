@@ -284,21 +284,6 @@ namespace ReserveBlockCore.Services
 
             ToAddress = ToAddress.ToAddressNormalize();
 
-            //var adnrCheck = ToAddress.ToLower().EndsWith(".rbx");
-
-            //if (adnrCheck)
-            //{
-            //    var result = Adnr.GetAddress(ToAddress);
-            //    if(result.Item1 == true)
-            //    {
-            //        ToAddress = result.Item2;
-            //    }
-            //    else
-            //    {
-            //        return "Address not recognized or is not stored in the ADNR state trei.";
-            //    }
-            //}
-
             var nTx = new Transaction
             {
                 Timestamp = TimeUtil.GetTime(),
@@ -354,7 +339,7 @@ namespace ReserveBlockCore.Services
                         nTx.TransactionRating = rating;
                     }
 
-                    TransactionData.AddToPool(nTx);
+                    await TransactionData.AddToPool(nTx);
                     await P2PClient.SendTXMempool(nTx);//send out to mempool
 
                     output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Transaction has been broadcasted.", Hash = nTx.Hash });

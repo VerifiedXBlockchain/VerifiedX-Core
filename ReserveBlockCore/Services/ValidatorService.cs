@@ -131,119 +131,6 @@ namespace ReserveBlockCore.Services
                     await Task.Delay(1000);
                 }
                 
-                // Migration check: Send VBTC V2 validator registration if not in database
-                // This handles validators that were running before this feature was added
-                try
-                {
-                    var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(Globals.ValidatorAddress);
-                    if (existingValidator == null)
-                    {
-                        LogUtility.Log($"Validator {Globals.ValidatorAddress} not found in vBTC V2 database. Sending registration transaction...", 
-                            "ValidatorService.StartupValidatorProcess()");
-                        
-                        var validator = AccountData.GetSingleAccount(Globals.ValidatorAddress);
-                        if (validator != null)
-                        {
-                            var sTreiAcct = StateData.GetSpecificAccountStateTrei(validator.Address);
-                            if (sTreiAcct != null)
-                            {
-                                // Wait for IP to be discovered (up to 90 seconds)
-                                var ipWaitAttempts = 0;
-                                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
-                                {
-                                    ipWaitAttempts++;
-                                    LogUtility.Log($"Waiting for IP discovery before vBTC V2 registration (attempt {ipWaitAttempts}/18)...", 
-                                        "ValidatorService.StartupValidatorProcess()");
-                                    await Task.Delay(5000);
-                                }
-                                
-                                var ipAddress = Globals.ReportedIP;
-
-                                var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
-
-                                var verifySig = SignatureService.VerifySignature(validator.Address, validator.Address, signature);
-
-                                if (!string.IsNullOrEmpty(ipAddress))
-                                {
-                                    // Create VBTC_V2_VALIDATOR_REGISTER transaction
-                                    var registerTx = new Transaction
-                                    {
-                                        Timestamp = TimeUtil.GetTime(),
-                                        FromAddress = validator.Address,
-                                        ToAddress = validator.Address,  // Self transaction
-                                        Amount = 0M,
-                                        Fee = 0M,  // FREE transaction
-                                        Nonce = sTreiAcct.Nonce,
-                                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER,
-                                        Data = JsonConvert.SerializeObject(new
-                                        {
-                                            ValidatorAddress = validator.Address,
-                                            IPAddress = ipAddress,
-                                            FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",  // TODO: Replace with actual FROST key generation
-                                            RegistrationBlockHeight = Globals.LastBlock.Height,
-                                            Signature = signature
-                                        })
-                                    };
-
-                                    registerTx.Build();
-                                    // Sign the transaction
-                                    var privateKey = AccountData.GetPrivateKey(validator);
-
-                                    var txHash = registerTx.Hash;
-                                    var valTxSignature = SignatureService.CreateSignature(txHash, privateKey, validator.PublicKey);
-
-                                    registerTx.Signature = valTxSignature;
-
-                                    try
-                                    {
-                                        registerTx.ToAddress = registerTx.ToAddress.ToAddressNormalize();
-                                        registerTx.Amount = registerTx.Amount.ToNormalizeDecimal();
-                                        var result = await TransactionValidatorService.VerifyTX(registerTx);
-
-                                        if (result.Item1 == true)
-                                        {
-                                            if (registerTx.TransactionRating == null)
-                                            {
-                                                var rating = await TransactionRatingService.GetTransactionRating(registerTx);
-                                                registerTx.TransactionRating = rating;
-                                            }
-
-                                            TransactionData.AddToPool(registerTx);
-                                            await P2PClient.SendTXMempool(registerTx);//send out to mempool
-                                        }
-                                        else
-                                        {
-                                            ErrorLogUtility.LogError($"Transaction was not verified. Reason: {result.Item2}", "ValidatorService.StartupValidatorProcess()");
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Console.WriteLine("Error: {0}", ex.ToString());
-                                    }
-                                    
-                                    LogUtility.Log($"Migration: vBTC V2 validator registration transaction created for {validator.Address}: {registerTx.Hash}", 
-                                        "ValidatorService.StartupValidatorProcess()");
-                                }
-                                else
-                                {
-                                    LogUtility.Log($"Migration: Cannot send vBTC V2 registration - IP address not reported yet", 
-                                        "ValidatorService.StartupValidatorProcess()");
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        LogUtility.Log($"Validator {Globals.ValidatorAddress} already registered in vBTC V2 database", 
-                            "ValidatorService.StartupValidatorProcess()");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    ErrorLogUtility.LogError($"Error checking vBTC V2 validator registration: {ex}", 
-                        "ValidatorService.StartupValidatorProcess()");
-                }
-                
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
                 Globals.IsFrostValidator = true; // Enable FROST server for validator nodes
@@ -251,8 +138,316 @@ namespace ReserveBlockCore.Services
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
                 _ = VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop();  // Start vBTC V2 validator heartbeat loop
+
+                // Send vBTC V2 registration TX in the background after everything is loaded
+                _ = SendVBTCV2RegistrationTx();
             }
         }
+
+        private static async Task SendVBTCV2RegistrationTx()
+        {
+            try
+            {
+                var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(Globals.ValidatorAddress);
+                if (existingValidator != null)
+                {
+                    // Wait briefly for IP to be discovered before making decisions
+                    var quickIpWait = 0;
+                    while (string.IsNullOrEmpty(Globals.ReportedIP) && quickIpWait < 6)
+                    {
+                        quickIpWait++;
+                        await Task.Delay(5000);
+                    }
+
+                    var currentIp = Globals.ReportedIP;
+
+                    if (existingValidator.IsActive)
+                    {
+                        // Check if IP address has changed since last registration
+                        if (!string.IsNullOrEmpty(currentIp) && currentIp != existingValidator.IPAddress)
+                        {
+                            LogUtility.Log($"Validator {Globals.ValidatorAddress} IP changed from {existingValidator.IPAddress} to {currentIp}. Sending reactivation TX with updated IP...",
+                                "ValidatorService.SendVBTCV2RegistrationTx()");
+                            await SendVBTCV2ReactivationTx(existingValidator);
+                            return;
+                        }
+
+                        // Active and same IP — nothing to do
+                        LogUtility.Log($"Validator {Globals.ValidatorAddress} already registered and active in vBTC V2 database. No registration TX needed.",
+                            "ValidatorService.SendVBTCV2RegistrationTx()");
+                        return;
+                    }
+                    else
+                    {
+                        // Validator was marked inactive (e.g., went offline for 30+ minutes).
+                        // Send a VBTC_V2_VALIDATOR_HEARTBEAT TX to reactivate on the network.
+                        LogUtility.Log($"Validator {Globals.ValidatorAddress} found in vBTC V2 database but is INACTIVE. Sending reactivation TX...",
+                            "ValidatorService.SendVBTCV2RegistrationTx()");
+                        await SendVBTCV2ReactivationTx(existingValidator);
+                        return;
+                    }
+                }
+
+                LogUtility.Log($"Validator {Globals.ValidatorAddress} not found in vBTC V2 database. Waiting for readiness before sending registration...",
+                    "ValidatorService.SendVBTCV2RegistrationTx()");
+
+                var validator = AccountData.GetSingleAccount(Globals.ValidatorAddress);
+                if (validator == null) return;
+
+                var sTreiAcct = StateData.GetSpecificAccountStateTrei(validator.Address);
+                if (sTreiAcct == null) return;
+
+                // Wait for IP to be discovered (up to 90 seconds)
+                var ipWaitAttempts = 0;
+                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                {
+                    ipWaitAttempts++;
+                    LogUtility.Log($"Waiting for IP discovery before vBTC V2 registration (attempt {ipWaitAttempts}/18)...",
+                        "ValidatorService.SendVBTCV2RegistrationTx()");
+                    await Task.Delay(5000);
+                }
+
+                // Wait for validator peer connections (up to 5 minutes)
+                var peerWaitAttempts = 0;
+                while (peerWaitAttempts < 60)
+                {
+                    var peerCount = Globals.Nodes.Values.Where(x => x.IsValidator).Count();
+                    if (peerCount == 0) peerCount = Globals.ValidatorNodes.Count;
+                    if (peerCount > 0) break;
+                    peerWaitAttempts++;
+                    LogUtility.Log($"Waiting for validator peer connections before vBTC V2 registration (attempt {peerWaitAttempts}/60)...",
+                        "ValidatorService.SendVBTCV2RegistrationTx()");
+                    await Task.Delay(5000);
+                }
+
+                // Wait for 10 new blocks to pass
+                var registrationBlockTarget = Globals.LastBlock.Height + 10;
+                LogUtility.Log($"Waiting for 10 blocks before vBTC V2 registration (target height: {registrationBlockTarget})...",
+                    "ValidatorService.SendVBTCV2RegistrationTx()");
+                while (Globals.LastBlock.Height < registrationBlockTarget)
+                {
+                    await Task.Delay(5000);
+                }
+
+                var ipAddress = Globals.ReportedIP;
+                if (string.IsNullOrEmpty(ipAddress))
+                {
+                    LogUtility.Log($"Cannot send vBTC V2 registration - IP address not reported yet",
+                        "ValidatorService.SendVBTCV2RegistrationTx()");
+                    return;
+                }
+
+                var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
+
+                // Create VBTC_V2_VALIDATOR_REGISTER transaction
+                var registerTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = validator.Address,
+                    ToAddress = validator.Address,
+                    Amount = 0M,
+                    Fee = 0M,
+                    Nonce = sTreiAcct.Nonce,
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER,
+                    Data = JsonConvert.SerializeObject(new
+                    {
+                        ValidatorAddress = validator.Address,
+                        IPAddress = ipAddress,
+                        FrostPublicKey = validator.PublicKey,
+                        RegistrationBlockHeight = Globals.LastBlock.Height,
+                        Signature = signature
+                    })
+                };
+
+                registerTx.Build();
+                var privateKey = AccountData.GetPrivateKey(validator);
+                var txHash = registerTx.Hash;
+                var valTxSignature = SignatureService.CreateSignature(txHash, privateKey, validator.PublicKey);
+                registerTx.Signature = valTxSignature;
+
+                try
+                {
+                    registerTx.ToAddress = registerTx.ToAddress.ToAddressNormalize();
+                    registerTx.Amount = registerTx.Amount.ToNormalizeDecimal();
+                    var result = await TransactionValidatorService.VerifyTX(registerTx);
+
+                    if (result.Item1 == true)
+                    {
+                        if (registerTx.TransactionRating == null)
+                        {
+                            var rating = await TransactionRatingService.GetTransactionRating(registerTx);
+                            registerTx.TransactionRating = rating;
+                        }
+
+                        await TransactionData.AddToPool(registerTx);
+                        await P2PClient.SendTXMempool(registerTx);
+                    }
+                    else
+                    {
+                        ErrorLogUtility.LogError($"Transaction was not verified. Reason: {result.Item2}", "ValidatorService.SendVBTCV2RegistrationTx()");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Error: {0}", ex.ToString());
+                }
+
+                LogUtility.Log($"vBTC V2 validator registration transaction created for {validator.Address}: {registerTx.Hash}",
+                    "ValidatorService.SendVBTCV2RegistrationTx()");
+
+                // Save to local vBTC V2 database
+                var directValidator = new Bitcoin.Models.VBTCValidator
+                {
+                    ValidatorAddress = validator.Address,
+                    IPAddress = ipAddress,
+                    FrostPublicKey = validator.PublicKey,
+                    RegistrationBlockHeight = Globals.LastBlock.Height,
+                    LastHeartbeatBlock = Globals.LastBlock.Height,
+                    IsActive = true,
+                    RegistrationSignature = signature,
+                    RegisterTransactionHash = registerTx.Hash
+                };
+                Bitcoin.Models.VBTCValidator.SaveValidator(directValidator);
+                LogUtility.Log($"Directly saved validator {validator.Address} to vBTC V2 database",
+                    "ValidatorService.SendVBTCV2RegistrationTx()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error sending vBTC V2 validator registration: {ex}",
+                    "ValidatorService.SendVBTCV2RegistrationTx()");
+            }
+        }
+
+        /// <summary>
+        /// Sends a VBTC_V2_VALIDATOR_HEARTBEAT transaction to reactivate a validator that was
+        /// marked inactive or to broadcast an updated IP address after a restart.
+        /// This avoids the cost of a full re-registration when the validator is already known on-chain.
+        /// </summary>
+        private static async Task SendVBTCV2ReactivationTx(Bitcoin.Models.VBTCValidator existingValidator)
+        {
+            try
+            {
+                var validator = AccountData.GetSingleAccount(Globals.ValidatorAddress);
+                if (validator == null) return;
+
+                var sTreiAcct = StateData.GetSpecificAccountStateTrei(validator.Address);
+                if (sTreiAcct == null) return;
+
+                // Wait for IP to be discovered (up to 90 seconds)
+                var ipWaitAttempts = 0;
+                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                {
+                    ipWaitAttempts++;
+                    LogUtility.Log($"Waiting for IP discovery before vBTC V2 reactivation (attempt {ipWaitAttempts}/18)...",
+                        "ValidatorService.SendVBTCV2ReactivationTx()");
+                    await Task.Delay(5000);
+                }
+
+                // Wait for validator peer connections (up to 5 minutes)
+                var peerWaitAttempts = 0;
+                while (peerWaitAttempts < 60)
+                {
+                    var peerCount = Globals.Nodes.Values.Where(x => x.IsValidator).Count();
+                    if (peerCount == 0) peerCount = Globals.ValidatorNodes.Count;
+                    if (peerCount > 0) break;
+                    peerWaitAttempts++;
+                    LogUtility.Log($"Waiting for validator peer connections before vBTC V2 reactivation (attempt {peerWaitAttempts}/60)...",
+                        "ValidatorService.SendVBTCV2ReactivationTx()");
+                    await Task.Delay(5000);
+                }
+
+                // Wait for 5 new blocks (shorter than initial registration since we're already known)
+                var reactivationBlockTarget = Globals.LastBlock.Height + 5;
+                LogUtility.Log($"Waiting for 5 blocks before vBTC V2 reactivation (target height: {reactivationBlockTarget})...",
+                    "ValidatorService.SendVBTCV2ReactivationTx()");
+                while (Globals.LastBlock.Height < reactivationBlockTarget)
+                {
+                    await Task.Delay(5000);
+                }
+
+                var ipAddress = Globals.ReportedIP;
+                if (string.IsNullOrEmpty(ipAddress))
+                {
+                    LogUtility.Log($"Cannot send vBTC V2 reactivation - IP address not reported yet",
+                        "ValidatorService.SendVBTCV2ReactivationTx()");
+                    return;
+                }
+
+                var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
+
+                // Create VBTC_V2_VALIDATOR_HEARTBEAT transaction for reactivation / IP update
+                var reactivationTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = validator.Address,
+                    ToAddress = validator.Address,
+                    Amount = 0M,
+                    Fee = 0M,
+                    Nonce = sTreiAcct.Nonce,
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT,
+                    Data = JsonConvert.SerializeObject(new
+                    {
+                        ValidatorAddress = validator.Address,
+                        IPAddress = ipAddress,
+                        FrostPublicKey = validator.PublicKey,
+                        ReactivationBlockHeight = Globals.LastBlock.Height,
+                        PreviousIPAddress = existingValidator.IPAddress,
+                        Signature = signature
+                    })
+                };
+
+                reactivationTx.Build();
+                var privateKey = AccountData.GetPrivateKey(validator);
+                var txHash = reactivationTx.Hash;
+                var valTxSignature = SignatureService.CreateSignature(txHash, privateKey, validator.PublicKey);
+                reactivationTx.Signature = valTxSignature;
+
+                try
+                {
+                    reactivationTx.ToAddress = reactivationTx.ToAddress.ToAddressNormalize();
+                    reactivationTx.Amount = reactivationTx.Amount.ToNormalizeDecimal();
+                    var result = await TransactionValidatorService.VerifyTX(reactivationTx);
+
+                    if (result.Item1 == true)
+                    {
+                        if (reactivationTx.TransactionRating == null)
+                        {
+                            var rating = await TransactionRatingService.GetTransactionRating(reactivationTx);
+                            reactivationTx.TransactionRating = rating;
+                        }
+
+                        await TransactionData.AddToPool(reactivationTx);
+                        await P2PClient.SendTXMempool(reactivationTx);
+
+                        LogUtility.Log($"vBTC V2 validator reactivation TX sent for {validator.Address}: {reactivationTx.Hash}",
+                            "ValidatorService.SendVBTCV2ReactivationTx()");
+                    }
+                    else
+                    {
+                        ErrorLogUtility.LogError($"Reactivation transaction was not verified. Reason: {result.Item2}",
+                            "ValidatorService.SendVBTCV2ReactivationTx()");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Error: {0}", ex.ToString());
+                }
+
+                // Update local DB immediately — reflect the new IP and active status
+                existingValidator.IPAddress = ipAddress;
+                existingValidator.IsActive = true;
+                existingValidator.LastHeartbeatBlock = Globals.LastBlock.Height;
+                Bitcoin.Models.VBTCValidator.SaveValidator(existingValidator);
+                LogUtility.Log($"Updated local vBTC V2 validator record for {validator.Address} (IP: {ipAddress}, IsActive: true)",
+                    "ValidatorService.SendVBTCV2ReactivationTx()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error sending vBTC V2 validator reactivation: {ex}",
+                    "ValidatorService.SendVBTCV2ReactivationTx()");
+            }
+        }
+
         internal static async Task StartupValidators()
         {
             //wait 25 seconds
@@ -507,77 +702,6 @@ namespace ReserveBlockCore.Services
 
                         Globals.ValidatorAddress = validator.Address;
                         Globals.ValidatorPublicKey = account.PublicKey;
-
-                        // Register for vBTC V2 MPC pool via blockchain transaction
-                        try
-                        {
-                            var ipAddress = Globals.ReportedIP;
-                            
-                            // Create VBTC_V2_VALIDATOR_REGISTER transaction
-                            var registerTx = new Transaction
-                            {
-                                Timestamp = TimeUtil.GetTime(),
-                                FromAddress = validator.Address,
-                                ToAddress = validator.Address,  // Self transaction
-                                Amount = 0M,
-                                Fee = 0M,  // FREE transaction
-                                Nonce = sTreiAcct.Nonce,
-                                TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER,
-                                Data = JsonConvert.SerializeObject(new
-                                {
-                                    ValidatorAddress = validator.Address,
-                                    IPAddress = ipAddress,
-                                    FrostPublicKey = "PLACEHOLDER_FROST_PUBLIC_KEY",  // TODO: Replace with actual FROST key generation
-                                    RegistrationBlockHeight = Globals.LastBlock.Height,
-                                    Signature = validator.Signature
-                                })
-                            };
-
-                            registerTx.Build();
-                            // Sign the transaction
-                            var privateKey = AccountData.GetPrivateKey(account);
-
-                            var txHash = registerTx.Hash;
-                            var valTxSignature = SignatureService.CreateSignature(txHash, privateKey, account.PublicKey);
-
-                            registerTx.Signature = valTxSignature;
-
-                            try
-                            {
-                                registerTx.ToAddress = registerTx.ToAddress.ToAddressNormalize();
-                                registerTx.Amount = registerTx.Amount.ToNormalizeDecimal();
-                                var result = await TransactionValidatorService.VerifyTX(registerTx);
-
-                                if (result.Item1 == true)
-                                {
-                                    if (registerTx.TransactionRating == null)
-                                    {
-                                        var rating = await TransactionRatingService.GetTransactionRating(registerTx);
-                                        registerTx.TransactionRating = rating;
-                                    }
-
-                                    TransactionData.AddToPool(registerTx);
-                                    await P2PClient.SendTXMempool(registerTx);//send out to mempool
-                                }
-                                else
-                                {
-                                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not verified. Reason: {result.Item2}" });
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine("Error: {0}", ex.ToString());
-                            }
-
-                            
-                            LogUtility.Log($"Validator {validator.Address} join transaction created: {registerTx.Hash}", 
-                                "ValidatorService.StartValidating()");
-                        }
-                        catch (Exception ex)
-                        {
-                            ErrorLogUtility.LogError($"Error creating validator join transaction: {ex}", 
-                                "ValidatorService.StartValidating()");
-                        }
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 

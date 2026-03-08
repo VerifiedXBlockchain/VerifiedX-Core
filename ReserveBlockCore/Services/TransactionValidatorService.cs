@@ -87,7 +87,8 @@ namespace ReserveBlockCore.Services
             if (txRequest.Fee <= 0 
                 && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
                 && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
-                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT)
+                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT
+                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
             }
@@ -98,7 +99,8 @@ namespace ReserveBlockCore.Services
                 if (txRequest.Fee <= 0.000003M 
                     && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
                     && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
-                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT)
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
                 {
                     return (txResult, "Fee cannot be less than 0.000003 VFX");
                 }
@@ -2326,6 +2328,60 @@ namespace ReserveBlockCore.Services
                 else
                 {
                     return (txResult, "Transaction data cannot be null for validator exit.");
+                }
+            }
+
+            // VBTC V2 Validator Heartbeat (Reactivation / IP Update)
+            // Used when a validator comes back online after being marked inactive,
+            // or when the validator's IP address has changed since last registration.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
+                        var ipAddress = jobj["IPAddress"]?.ToObject<string>();
+
+                        if (string.IsNullOrEmpty(validatorAddress) || string.IsNullOrEmpty(ipAddress))
+                            return (txResult, "Validator address and IP address cannot be null.");
+
+                        // FIND-007: Validate IP address to prevent SSRF attacks
+                        if (!InputValidationHelper.ValidateValidatorIPAddress(ipAddress, out string ipValidationError))
+                        {
+                            ErrorLogUtility.LogError($"FIND-007 Security: Invalid validator IP address rejected in HEARTBEAT. Address: {validatorAddress}, IP: {ipAddress}, Error: {ipValidationError}",
+                                "TransactionValidatorService.VerifyTX()");
+                            return (txResult, $"Invalid validator IP address: {ipValidationError}");
+                        }
+
+                        if (txRequest.FromAddress != validatorAddress)
+                            return (txResult, "From address must match validator address.");
+
+                        if (txRequest.ToAddress != validatorAddress)
+                            return (txResult, "To address must match validator address (self-transaction).");
+
+                        if (txRequest.Fee != 0M)
+                            return (txResult, "Validator heartbeat must be a free transaction (Fee = 0).");
+
+                        if (txRequest.Amount != 0M)
+                            return (txResult, "Validator heartbeat cannot have an amount.");
+
+                        // Ensure validator has minimum balance (5000 VFX)
+                        if (from != null && from.Balance < ValidatorService.ValidatorRequiredAmount())
+                            return (txResult, $"Insufficient balance for validator heartbeat. Minimum required: {ValidatorService.ValidatorRequiredAmount()} VFX");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_VALIDATOR_HEARTBEAT transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate validator heartbeat transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for validator heartbeat.");
                 }
             }
 
