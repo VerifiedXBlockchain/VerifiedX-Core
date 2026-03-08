@@ -706,6 +706,64 @@ namespace ReserveBlockCore.Services
                                         }
                                     }
                                 }
+
+                                // vBTC V2 Transfer: Block-level overspend check
+                                // If multiple VBTC_V2_TRANSFER TXs from the same sender for the same contract
+                                // exist in this block, ensure their combined amount doesn't exceed balance.
+                                if (blkTransaction.TransactionType == TransactionType.VBTC_V2_TRANSFER && !rejectBlock)
+                                {
+                                    try
+                                    {
+                                        var vbtcData = JObject.Parse(blkTransaction.Data);
+                                        var vbtcScUID = vbtcData["ContractUID"]?.ToObject<string>();
+                                        var vbtcAmount = vbtcData["Amount"]?.ToObject<decimal?>() ?? 0M;
+
+                                        if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount > 0)
+                                        {
+                                            // Sum all VBTC_V2_TRANSFER amounts from the same sender + contract in this block
+                                            decimal blockTotal = vbtcAmount;
+                                            var otherVbtcTxs = block.Transactions
+                                                .Where(x => x.TransactionType == TransactionType.VBTC_V2_TRANSFER
+                                                          && x.FromAddress == blkTransaction.FromAddress
+                                                          && x.Hash != blkTransaction.Hash)
+                                                .ToList();
+
+                                            foreach (var otx in otherVbtcTxs)
+                                            {
+                                                try
+                                                {
+                                                    var otxData = JObject.Parse(otx.Data);
+                                                    if (otxData["ContractUID"]?.ToObject<string>() == vbtcScUID)
+                                                        blockTotal += otxData["Amount"]?.ToObject<decimal?>() ?? 0M;
+                                                }
+                                                catch { }
+                                            }
+
+                                            // Check against sender's vBTC balance
+                                            var scState = SmartContractStateTrei.GetSmartContractState(vbtcScUID);
+                                            if (scState != null)
+                                            {
+                                                bool isOwner = blkTransaction.FromAddress == scState.OwnerAddress;
+                                                if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                                {
+                                                    var tokenTxs = scState.SCStateTreiTokenizationTXes
+                                                        .Where(x => x.FromAddress == blkTransaction.FromAddress || x.ToAddress == blkTransaction.FromAddress)
+                                                        .ToList();
+                                                    var received = tokenTxs.Where(x => x.ToAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
+                                                    var sent = tokenTxs.Where(x => x.FromAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
+                                                    decimal vbtcBalance = received - sent;
+
+                                                    if (blockTotal > vbtcBalance)
+                                                        rejectBlock = true; // vBTC overspend in block
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        rejectBlock = true;
+                                    }
+                                }
                             }
                             else
                             {

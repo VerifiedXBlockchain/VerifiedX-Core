@@ -427,7 +427,16 @@ namespace ReserveBlockCore.Data
                                 tx.TransactionType != TransactionType.VOTE && 
                                 tx.TransactionType != TransactionType.DSTR &&
                                 tx.TransactionType != TransactionType.RESERVE &&
-                                tx.TransactionType != TransactionType.NFT_SALE)
+                                tx.TransactionType != TransactionType.NFT_SALE &&
+                                tx.TransactionType != TransactionType.VBTC_V2_TRANSFER &&
+                                tx.TransactionType != TransactionType.VBTC_V2_CONTRACT_CREATE &&
+                                tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER &&
+                                tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT &&
+                                tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT &&
+                                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
+                                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
+                                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
+                                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
                             {
                                 var scInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
                                 if (!scInfo.Item1)
@@ -647,6 +656,63 @@ namespace ReserveBlockCore.Data
                                 }
                             }
 
+                            // vBTC V2 Transfer: Prevent overspend across multiple pending transfers.
+                            // Sum all vBTC transfer amounts for this sender + contract already in the
+                            // approved list, add this TX's amount, and compare against balance.
+                            if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER && !reject)
+                            {
+                                try
+                                {
+                                    var jobj = JObject.Parse(tx.Data);
+                                    var txScUID = jobj["ContractUID"]?.ToObject<string>();
+                                    var txAmount = jobj["Amount"]?.ToObject<decimal?>() ?? 0M;
+
+                                    if (!string.IsNullOrEmpty(txScUID) && txAmount > 0)
+                                    {
+                                        // Sum amounts already approved for same sender + contract
+                                        decimal pendingTotal = txAmount;
+                                        var otherVbtcTxs = approvedMemPoolList
+                                            .Where(x => x.TransactionType == TransactionType.VBTC_V2_TRANSFER
+                                                     && x.FromAddress == tx.FromAddress
+                                                     && x.Hash != tx.Hash)
+                                            .ToList();
+
+                                        foreach (var otx in otherVbtcTxs)
+                                        {
+                                            try
+                                            {
+                                                var otxData = JObject.Parse(otx.Data);
+                                                var otxScUID = otxData["ContractUID"]?.ToObject<string>();
+                                                var otxAmount = otxData["Amount"]?.ToObject<decimal?>() ?? 0M;
+                                                if (otxScUID == txScUID)
+                                                    pendingTotal += otxAmount;
+                                            }
+                                            catch { }
+                                        }
+
+                                        // Get sender's vBTC balance from State Trei
+                                        var scState = SmartContractStateTrei.GetSmartContractState(txScUID);
+                                        if (scState != null)
+                                        {
+                                            bool isOwner = tx.FromAddress == scState.OwnerAddress;
+                                            if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                            {
+                                                var tokenTxs = scState.SCStateTreiTokenizationTXes
+                                                    .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress)
+                                                    .ToList();
+                                                var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
+                                                var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
+                                                decimal vbtcBalance = received - sent;
+
+                                                if (pendingTotal > vbtcBalance)
+                                                    reject = true; // Overspend detected
+                                            }
+                                        }
+                                    }
+                                }
+                                catch { }
+                            }
+
                             if (reject == false)
                             {
                                 var signature = tx.Signature;
@@ -843,6 +909,54 @@ namespace ReserveBlockCore.Data
                 return result;//replay or douple spend has occured
             }
 
+            // vBTC V2 Transfer: Mempool overspend check
+            // Sum all pending VBTC_V2_TRANSFER amounts for this sender+contract and reject if exceeds balance
+            if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER && tx.Data != null)
+            {
+                try
+                {
+                    var jobj = JObject.Parse(tx.Data);
+                    var txScUID = jobj["ContractUID"]?.ToObject<string>();
+                    var txAmount = jobj["Amount"]?.ToObject<decimal?>() ?? 0M;
+
+                    if (!string.IsNullOrEmpty(txScUID) && txAmount > 0)
+                    {
+                        var otherVbtcTxs = mempool.Find(x =>
+                            x.TransactionType == TransactionType.VBTC_V2_TRANSFER
+                            && x.FromAddress == tx.FromAddress
+                            && x.Hash != tx.Hash).ToList();
+
+                        decimal pendingTotal = txAmount;
+                        foreach (var otx in otherVbtcTxs)
+                        {
+                            try
+                            {
+                                var otxData = JObject.Parse(otx.Data);
+                                if (otxData["ContractUID"]?.ToObject<string>() == txScUID)
+                                    pendingTotal += otxData["Amount"]?.ToObject<decimal?>() ?? 0M;
+                            }
+                            catch { }
+                        }
+
+                        var scState = SmartContractStateTrei.GetSmartContractState(txScUID);
+                        if (scState != null)
+                        {
+                            bool isOwner = tx.FromAddress == scState.OwnerAddress;
+                            if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                            {
+                                var tokenTxs = scState.SCStateTreiTokenizationTXes
+                                    .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress).ToList();
+                                var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
+                                var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
+                                if (pendingTotal > (received - sent))
+                                    return true; // vBTC overspend detected
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
             //double NFT transfer or burn check
             if (tx.TransactionType != TransactionType.TX && 
                 tx.TransactionType != TransactionType.ADNR && 
@@ -850,7 +964,16 @@ namespace ReserveBlockCore.Data
                 tx.TransactionType != TransactionType.VOTE && 
                 tx.TransactionType != TransactionType.DSTR &&
                 tx.TransactionType != TransactionType.RESERVE &&
-                tx.TransactionType != TransactionType.NFT_SALE)
+                tx.TransactionType != TransactionType.NFT_SALE &&
+                tx.TransactionType != TransactionType.VBTC_V2_TRANSFER &&
+                tx.TransactionType != TransactionType.VBTC_V2_CONTRACT_CREATE &&
+                tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER &&
+                tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT &&
+                tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT &&
+                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
+                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
+                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
+                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
             {
                 if(tx.Data != null)
                 {
