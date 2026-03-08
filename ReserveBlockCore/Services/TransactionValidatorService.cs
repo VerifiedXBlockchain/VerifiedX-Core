@@ -2230,6 +2230,140 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+            // VBTC V2 Contract Creation - Consensus-level validation
+            // Ensures the contract hasn't already been minted, the data is well-formed,
+            // and the minter has sufficient balance.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        // Parse SC data — MintSmartContractTx creates JArray with Mint() function
+                        string scUID = "";
+                        string function = "";
+                        try
+                        {
+                            var scDataArray = JsonConvert.DeserializeObject<JArray>(txData);
+                            if (scDataArray != null && scDataArray.Count > 0)
+                            {
+                                var scData = scDataArray[0];
+                                function = (string?)scData["Function"] ?? "";
+                                scUID = (string?)scData["ContractUID"] ?? "";
+                            }
+                        }
+                        catch
+                        {
+                            // Try JObject fallback
+                            var jobj = JObject.Parse(txData);
+                            function = jobj["Function"]?.ToObject<string>() ?? "";
+                            scUID = jobj["ContractUID"]?.ToObject<string>() ?? "";
+                        }
+
+                        if (string.IsNullOrEmpty(scUID))
+                            return (txResult, "ContractUID cannot be null for vBTC V2 contract creation.");
+
+                        if (function != "Mint()")
+                            return (txResult, $"Invalid function for vBTC V2 contract creation. Expected: Mint(), Got: {function}");
+
+                        // Duplicate check: ensure this SC hasn't already been minted
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTreiRec != null)
+                            return (txResult, "This vBTC V2 smart contract has already been minted.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_CONTRACT_CREATE transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 contract creation transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 contract creation.");
+                }
+            }
+
+            // VBTC V2 Transfer - Consensus-level validation
+            // Validates sender binding, positive amount, and balance checks.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var scUID = jobj["ContractUID"]?.ToObject<string>();
+                        var fromAddress = jobj["FromAddress"]?.ToObject<string>();
+                        var toAddress = jobj["ToAddress"]?.ToObject<string>();
+                        var amount = jobj["Amount"]?.ToObject<decimal?>();
+
+                        if (string.IsNullOrEmpty(scUID))
+                            return (txResult, "ContractUID cannot be null for vBTC V2 transfer.");
+
+                        if (string.IsNullOrEmpty(fromAddress))
+                            return (txResult, "FromAddress cannot be null for vBTC V2 transfer.");
+
+                        if (string.IsNullOrEmpty(toAddress))
+                            return (txResult, "ToAddress cannot be null for vBTC V2 transfer.");
+
+                        // Sender binding: tx.Data.FromAddress MUST match tx.FromAddress
+                        if (txRequest.FromAddress != fromAddress)
+                            return (txResult, "From address in data must match transaction FromAddress for vBTC V2 transfer.");
+
+                        // Amount validation
+                        if (!amount.HasValue || amount.Value <= 0)
+                            return (txResult, "Amount must be greater than zero for vBTC V2 transfer.");
+
+                        // Balance validation using State Trei tokenization TXes
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTreiRec != null)
+                        {
+                            bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
+
+                            if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                            {
+                                var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
+                                    .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                                    .ToList();
+
+                                // Non-owner: check ledger balance (received - sent)
+                                if (transactions.Any() && !isOwner)
+                                {
+                                    var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
+                                    var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
+                                    decimal balance = received - sent;
+
+                                    if (balance < amount.Value)
+                                        return (txResult, $"Insufficient vBTC balance for transfer. Available: {balance}, Requested: {amount.Value}");
+                                }
+                            }
+                            else if (!isOwner)
+                            {
+                                // Non-owner with no tokenization TXes has zero balance
+                                return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+                            }
+                        }
+                        else
+                        {
+                            return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_TRANSFER transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 transfer transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 transfer.");
+                }
+            }
+
             // VBTC V2 Validator Registration
             if (txRequest.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER)
             {

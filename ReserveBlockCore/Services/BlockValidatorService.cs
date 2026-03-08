@@ -508,7 +508,13 @@ namespace ReserveBlockCore.Services
                                     blkTransaction.TransactionType != TransactionType.NFT_SALE &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT &&
-                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_CONTRACT_CREATE &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_TRANSFER &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
                                 {
                                     if (blkTransaction.Data != null)
                                     {
