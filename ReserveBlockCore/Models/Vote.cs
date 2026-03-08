@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.EllipticCurve;
 using ReserveBlockCore.P2P;
@@ -213,9 +213,9 @@ namespace ReserveBlockCore.Models
                 if (result.Item1 == true)
                 {
                     voteTx.TransactionStatus = TransactionStatus.Pending;
-                    TransactionData.AddToPool(voteTx);
-                    TransactionData.AddTxToWallet(voteTx, true);
-                    AccountData.UpdateLocalBalance(voteTx.FromAddress, (voteTx.Fee + voteTx.Amount));
+                    await TransactionData.AddToPool(voteTx);
+                    await TransactionData.AddTxToWallet(voteTx, true);
+                    await AccountData.UpdateLocalBalance(voteTx.FromAddress, (voteTx.Fee + voteTx.Amount));
                     await P2PValidatorClient.SendTXMempool(voteTx);//send out to mempool
                     return (voteTx, "Success");
                 }

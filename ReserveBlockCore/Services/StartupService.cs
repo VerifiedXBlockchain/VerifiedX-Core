@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -1206,7 +1206,7 @@ namespace ReserveBlockCore.Services
                             fromTx.Amount = transaction.Amount * -1M;
                             fromTx.Fee = transaction.Fee * -1M;
                             txData.InsertSafe(fromTx);
-                            AccountData.UpdateLocalBalance(fromAccount.Address, (transaction.Amount + transaction.Fee));
+                            await AccountData.UpdateLocalBalance(fromAccount.Address, (transaction.Amount + transaction.Fee));
                         }
                     }
                 }

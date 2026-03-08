@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.EllipticCurve;
 using ReserveBlockCore.Models;
@@ -209,23 +209,23 @@ namespace ReserveBlockCore.Bitcoin.Models
                     {
                         var validator = Validators.Validator.GetAll().FindOne(x => x.Address.ToLower() == adnrTx.FromAddress.ToLower());
                         ValidatorService.StopValidating(validator);
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PClient.SendTXMempool(adnrTx);//send out to mempool
                     }
                     else if (account.IsValidating)
                     {
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PValidatorClient.SendTXMempool(adnrTx);//send directly to adjs
                     }
                     else
                     {
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PClient.SendTXMempool(adnrTx);//send out to mempool
                     }
 
@@ -310,24 +310,24 @@ namespace ReserveBlockCore.Bitcoin.Models
                     {
                         var validator = Validators.Validator.GetAll().FindOne(x => x.Address.ToLower() == adnrTx.FromAddress.ToLower());
                         ValidatorService.StopValidating(validator);
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PClient.SendTXMempool(adnrTx);//send out to mempool
 
                     }
                     else if (account.IsValidating)
                     {
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PValidatorClient.SendTXMempool(adnrTx);//send directly to adjs
                     }
                     else
                     {
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PClient.SendTXMempool(adnrTx);//send out to mempool
                     }
                     return (adnrTx, "Success");
@@ -411,9 +411,9 @@ namespace ReserveBlockCore.Bitcoin.Models
                     {
                         var validator = Validators.Validator.GetAll().FindOne(x => x.Address.ToLower() == adnrTx.FromAddress.ToLower());
                         ValidatorService.StopValidating(validator);
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PClient.SendTXMempool(adnrTx);//send out to mempool
                                                               //await P2PValidatorClient.SendTXMempool(txRequest);
                                                               //add method to send to nearest validators too
@@ -421,16 +421,16 @@ namespace ReserveBlockCore.Bitcoin.Models
                     }
                     else if (account.IsValidating)
                     {
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PValidatorClient.SendTXMempool(adnrTx);//send directly to adjs
                     }
                     else
                     {
-                        TransactionData.AddToPool(adnrTx);
-                        TransactionData.AddTxToWallet(adnrTx, true);
-                        AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
+                        await TransactionData.AddToPool(adnrTx);
+                        await TransactionData.AddTxToWallet(adnrTx, true);
+                        await AccountData.UpdateLocalBalance(adnrTx.FromAddress, (adnrTx.Fee + adnrTx.Amount));
                         await P2PClient.SendTXMempool(adnrTx);//send out to mempool
                     }
                     return (adnrTx, "Success");

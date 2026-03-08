@@ -1,4 +1,4 @@
-﻿using LiteDB;
+using LiteDB;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using Newtonsoft.Json;
@@ -940,7 +940,7 @@ namespace ReserveBlockCore.Services
                 );
 
                 // Add to mempool
-                TransactionData.AddToPool(exitTx);
+                await TransactionData.AddToPool(exitTx);
 
                 LogUtility.Log($"Validator {validator.Address} exit transaction created: {exitTx.Hash}", 
                     "ValidatorService.StopValidating()");
