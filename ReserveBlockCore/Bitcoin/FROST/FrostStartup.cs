@@ -1733,6 +1733,88 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 });
 
                 #endregion
+
+                #region MPC Ceremony Endpoints (Public - for wallet node delegation)
+
+                /// <summary>
+                /// POST /frost/mpc/initiate/{ownerAddress} - Public endpoint for wallet nodes to delegate
+                /// MPC ceremony initiation to this validator. Calls into VBTCController's shared ceremony storage.
+                /// </summary>
+                endpoints.MapPost("/frost/mpc/initiate/{ownerAddress}", async context =>
+                {
+                    try
+                    {
+                        var ownerAddress = context.Request.RouteValues["ownerAddress"] as string;
+
+                        if (string.IsNullOrEmpty(ownerAddress))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Owner address is required"
+                            }));
+                            return;
+                        }
+
+                        // Delegate to VBTCController's static method (same ceremony storage)
+                        var result = await ReserveBlockCore.Bitcoin.Controllers.VBTCController.InitiateMPCCeremonyStatic(ownerAddress);
+
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        context.Response.ContentType = "application/json";
+                        await context.Response.WriteAsync(result);
+                    }
+                    catch (Exception ex)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = $"Error: {ex.Message}"
+                        }));
+                    }
+                });
+
+                /// <summary>
+                /// GET /frost/mpc/status/{ceremonyId} - Public endpoint for wallet nodes to poll
+                /// MPC ceremony status from this validator. Reads from VBTCController's shared ceremony storage.
+                /// </summary>
+                endpoints.MapGet("/frost/mpc/status/{ceremonyId}", async context =>
+                {
+                    try
+                    {
+                        var ceremonyId = context.Request.RouteValues["ceremonyId"] as string;
+
+                        if (string.IsNullOrEmpty(ceremonyId))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = false,
+                                Message = "Ceremony ID is required"
+                            }));
+                            return;
+                        }
+
+                        // Delegate to VBTCController's static method (same ceremony storage)
+                        var result = ReserveBlockCore.Bitcoin.Controllers.VBTCController.GetCeremonyStatusStatic(ceremonyId);
+
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        context.Response.ContentType = "application/json";
+                        await context.Response.WriteAsync(result);
+                    }
+                    catch (Exception ex)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = $"Error: {ex.Message}"
+                        }));
+                    }
+                });
+
+                #endregion
             });
         }
 

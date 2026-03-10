@@ -86,6 +86,211 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         /// </summary>
         public static bool RemoveCeremony(string ceremonyId) => _ceremonies.TryRemove(ceremonyId, out _);
 
+        /// <summary>
+        /// Static method to initiate a ceremony — called by both the local VBTCController endpoint
+        /// and the public FrostStartup endpoint. Returns a JSON string result.
+        /// </summary>
+        public static async Task<string> InitiateMPCCeremonyStatic(string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                // Anti-spam: Check if this owner already has an active (non-terminal) ceremony
+                var existingActive = _ceremonies.Values.FirstOrDefault(c =>
+                    c.OwnerAddress == ownerAddress && !IsCeremonyTerminal(c.Status));
+                if (existingActive != null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "You already have an active MPC ceremony in progress. Complete or cancel it before starting a new one.",
+                        ExistingCeremonyId = existingActive.CeremonyId,
+                        Status = existingActive.Status.ToString(),
+                        ProgressPercentage = existingActive.ProgressPercentage
+                    });
+                }
+
+                // Anti-spam: Check global concurrent ceremony cap
+                var activeCeremonyCount = _ceremonies.Values.Count(c => !IsCeremonyTerminal(c.Status));
+                if (activeCeremonyCount >= MaxConcurrentCeremonies)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Maximum concurrent ceremony limit reached ({MaxConcurrentCeremonies}). Please try again later.",
+                        ActiveCeremonies = activeCeremonyCount
+                    });
+                }
+
+                // Generate unique ceremony ID
+                var ceremonyId = Guid.NewGuid().ToString();
+                var currentTime = TimeUtil.GetTime();
+
+                // Create initial ceremony state
+                var ceremony = new MPCCeremonyState
+                {
+                    CeremonyId = ceremonyId,
+                    OwnerAddress = ownerAddress,
+                    Status = CeremonyStatus.Initiated,
+                    InitiatedTimestamp = currentTime,
+                    RequiredThreshold = 51,
+                    ProgressPercentage = 0,
+                    CurrentRound = 0
+                };
+
+                // Store in memory
+                if (!_ceremonies.TryAdd(ceremonyId, ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create ceremony" });
+                }
+
+                // Start background ceremony process (validator-only local execution)
+                _ = Task.Run(async () => await ExecuteMPCCeremonyLocallyStatic(ceremonyId));
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "MPC ceremony initiated successfully. Use GetCeremonyStatus to check progress.",
+                    CeremonyId = ceremonyId,
+                    Status = ceremony.Status.ToString(),
+                    InitiatedTimestamp = currentTime
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Static method to get ceremony status — called by both the local VBTCController endpoint
+        /// and the public FrostStartup endpoint. Returns a JSON string result.
+        /// </summary>
+        public static string GetCeremonyStatusStatic(string ceremonyId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ceremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony ID cannot be null" });
+
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony not found" });
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Ceremony status retrieved",
+                    CeremonyId = ceremony.CeremonyId,
+                    Status = ceremony.Status.ToString(),
+                    OwnerAddress = ceremony.OwnerAddress,
+                    ProgressPercentage = ceremony.ProgressPercentage,
+                    CurrentRound = ceremony.CurrentRound,
+                    InitiatedTimestamp = ceremony.InitiatedTimestamp,
+                    CompletedTimestamp = ceremony.CompletedTimestamp,
+                    ErrorMessage = ceremony.ErrorMessage,
+                    DepositAddress = ceremony.Status == CeremonyStatus.Completed ? ceremony.DepositAddress : null,
+                    FrostGroupPublicKey = ceremony.Status == CeremonyStatus.Completed ? ceremony.FrostGroupPublicKey : null,
+                    DKGProof = ceremony.Status == CeremonyStatus.Completed ? ceremony.DKGProof : null,
+                    ValidatorCount = ceremony.ValidatorSnapshot?.Count ?? 0,
+                    RequiredThreshold = ceremony.RequiredThreshold,
+                    ProofBlockHeight = ceremony.ProofBlockHeight
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Static version of ExecuteMPCCeremonyLocally for use by the FrostStartup public endpoint.
+        /// This only runs the validator-local path (no remote delegation).
+        /// </summary>
+        private static async Task ExecuteMPCCeremonyLocallyStatic(string ceremonyId)
+        {
+            try
+            {
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                    return;
+
+                // This runs on a validator node — coordinate locally
+                ceremony.Status = CeremonyStatus.ValidatingValidators;
+                ceremony.ProgressPercentage = 5;
+
+                var currentBlock = Globals.LastBlock.Height;
+                var activeValidators = VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
+                var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+
+                if (activeValidators == null || !activeValidators.Any())
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
+
+                var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
+                if (activeValidators.Count < requiredActiveValidators)
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
+
+                ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
+                ceremony.ProgressPercentage = 15;
+                ceremony.Status = CeremonyStatus.Round1InProgress;
+
+                var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                    ceremonyId,
+                    ceremony.OwnerAddress,
+                    activeValidators,
+                    ceremony.RequiredThreshold,
+                    (round, percentage) =>
+                    {
+                        ceremony.CurrentRound = round;
+                        ceremony.ProgressPercentage = percentage;
+                        if (round == 1 && ceremony.Status != CeremonyStatus.Round1InProgress)
+                            ceremony.Status = CeremonyStatus.Round1InProgress;
+                        else if (round == 2 && ceremony.Status != CeremonyStatus.Round2InProgress)
+                            ceremony.Status = CeremonyStatus.Round2InProgress;
+                        else if (round == 3 && ceremony.Status != CeremonyStatus.Round3InProgress)
+                            ceremony.Status = CeremonyStatus.Round3InProgress;
+                    }
+                );
+
+                if (dkgResult == null)
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = "FROST DKG ceremony failed - unable to generate Taproot address";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
+
+                ceremony.DepositAddress = dkgResult.TaprootAddress;
+                ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
+                ceremony.DKGProof = dkgResult.DKGProof;
+                ceremony.ProofBlockHeight = Globals.LastBlock.Height;
+                ceremony.Status = CeremonyStatus.Completed;
+                ceremony.ProgressPercentage = 100;
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+            }
+            catch (Exception ex)
+            {
+                if (_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = ex.Message;
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                }
+            }
+        }
+
         #endregion
 
         #region API Status
@@ -533,7 +738,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     var ip = validator.IPAddress?.Replace("::ffff:", "");
                     if (string.IsNullOrEmpty(ip)) continue;
 
-                    var url = $"http://{ip}:{Globals.APIPort}/vbtcapi/vbtc/InitiateMPCCeremony/{ceremony.OwnerAddress}";
+                    var url = $"http://{ip}:{Globals.FrostValidatorPort}/frost/mpc/initiate/{ceremony.OwnerAddress}";
                     using var client = Globals.HttpClientFactory.CreateClient();
                     client.Timeout = TimeSpan.FromSeconds(15);
 
@@ -585,7 +790,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 try
                 {
-                    var statusUrl = $"http://{remoteValidatorIP}:{Globals.APIPort}/vbtcapi/vbtc/GetCeremonyStatus/{remoteCeremonyId}";
+                    var statusUrl = $"http://{remoteValidatorIP}:{Globals.FrostValidatorPort}/frost/mpc/status/{remoteCeremonyId}";
                     using var client = Globals.HttpClientFactory.CreateClient();
                     client.Timeout = TimeSpan.FromSeconds(10);
 
