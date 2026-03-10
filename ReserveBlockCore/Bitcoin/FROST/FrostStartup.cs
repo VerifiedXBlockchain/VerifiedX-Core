@@ -518,9 +518,26 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // Remap commitment keys from VFX addresses to numeric participant IDs
+                            // The FROST native library expects {"1":"<data>","2":"<data>",...} not {"xAddr...":"<data>",...}
+                            var addressCommitments = JsonConvert.DeserializeObject<Dictionary<string, string>>(body);
+                            var idCommitments = new Dictionary<string, string>();
+                            if (addressCommitments != null && session.ParticipantAddresses != null)
+                            {
+                                foreach (var kvp in addressCommitments)
+                                {
+                                    var idx = session.ParticipantAddresses.IndexOf(kvp.Key);
+                                    if (idx >= 0)
+                                    {
+                                        idCommitments[(idx + 1).ToString()] = kvp.Value; // 1-based participant IDs
+                                    }
+                                }
+                            }
+                            var remappedCommitments = JsonConvert.SerializeObject(idCommitments);
+
                             // Call FROST native library to generate shares for other participants
                             var (sharesJson, round2Secret, errorCode) = FrostNative.DKGRound2GenerateShares(
-                                session.Round1SecretPackage, body);
+                                session.Round1SecretPackage, remappedCommitments);
 
                             if (errorCode != FrostNative.SUCCESS || string.IsNullOrEmpty(sharesJson))
                             {
@@ -924,10 +941,22 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             {
                                 if (!string.IsNullOrEmpty(session.Round2Secret))
                                 {
-                                    var round1Json = JsonConvert.SerializeObject(
-                                        session.Round1Commitments.ToDictionary(k => k.Key, k => k.Value));
-                                    var receivedSharesJsonStr = JsonConvert.SerializeObject(
-                                        session.ReceivedSharesJson.ToDictionary(k => k.Key, k => k.Value));
+                                    // Remap from VFX addresses to numeric participant IDs for FROST native
+                                    var r1IdMap = new Dictionary<string, string>();
+                                    foreach (var c in session.Round1Commitments)
+                                    {
+                                        var ci = session.ParticipantAddresses.IndexOf(c.Key);
+                                        if (ci >= 0) r1IdMap[(ci + 1).ToString()] = c.Value;
+                                    }
+                                    var round1Json = JsonConvert.SerializeObject(r1IdMap);
+
+                                    var s2IdMap = new Dictionary<string, string>();
+                                    foreach (var s in session.ReceivedSharesJson)
+                                    {
+                                        var si = session.ParticipantAddresses.IndexOf(s.Key);
+                                        if (si >= 0) s2IdMap[(si + 1).ToString()] = s.Value;
+                                    }
+                                    var receivedSharesJsonStr = JsonConvert.SerializeObject(s2IdMap);
 
                                     var (groupPubkey, keyPackage, pubkeyPackage, finalizeError) = FrostNative.DKGRound3Finalize(
                                         session.Round2Secret, round1Json, receivedSharesJsonStr);
@@ -1837,10 +1866,23 @@ namespace ReserveBlockCore.Bitcoin.FROST
                     return false;
                 }
 
-                var round1Json = JsonConvert.SerializeObject(
-                    session.Round1Commitments.ToDictionary(k => k.Key, k => k.Value));
-                var receivedSharesJsonStr = JsonConvert.SerializeObject(
-                    session.ReceivedSharesJson.ToDictionary(k => k.Key, k => k.Value));
+                // Remap Round 1 commitments from VFX addresses to numeric participant IDs
+                var round1IdMap = new Dictionary<string, string>();
+                foreach (var kvp in session.Round1Commitments)
+                {
+                    var idx = session.ParticipantAddresses.IndexOf(kvp.Key);
+                    if (idx >= 0) round1IdMap[(idx + 1).ToString()] = kvp.Value;
+                }
+                var round1Json = JsonConvert.SerializeObject(round1IdMap);
+
+                // Remap received shares from VFX addresses to numeric participant IDs
+                var sharesIdMap = new Dictionary<string, string>();
+                foreach (var kvp in session.ReceivedSharesJson)
+                {
+                    var idx = session.ParticipantAddresses.IndexOf(kvp.Key);
+                    if (idx >= 0) sharesIdMap[(idx + 1).ToString()] = kvp.Value;
+                }
+                var receivedSharesJsonStr = JsonConvert.SerializeObject(sharesIdMap);
 
                 var (groupPubkey, keyPackage, pubkeyPackage, finalizeError) = FrostNative.DKGRound3Finalize(
                     session.Round2Secret, round1Json, receivedSharesJsonStr);
