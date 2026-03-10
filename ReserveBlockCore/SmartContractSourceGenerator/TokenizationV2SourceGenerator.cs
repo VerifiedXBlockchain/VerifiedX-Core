@@ -53,7 +53,7 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             // Function: Get Required Threshold
             strTknzV2Bld.AppendLine("function GetRequiredThreshold() : string");
             strTknzV2Bld.AppendLine("{");
-            strTknzV2Bld.AppendLine("   return RequiredThreshold.ToString()");
+            strTknzV2Bld.AppendLine("   return RequiredThreshold");
             strTknzV2Bld.AppendLine("}");
 
             // Function: Get DKG Proof
@@ -61,7 +61,7 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("{");
             strTknzV2Bld.AppendLine("   var proof = \"" + tknzV2.DKGProof + "\"");
             strTknzV2Bld.AppendLine("   var blockHeight = " + tknzV2.ProofBlockHeight.ToString());
-            strTknzV2Bld.AppendLine("   return (proof + " + appendChar + " + blockHeight.ToString())");
+            strTknzV2Bld.AppendLine("   return (proof + " + appendChar + " + blockHeight)");
             strTknzV2Bld.AppendLine("}");
 
             // Function: Get Image Base
@@ -74,7 +74,7 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             // Function: Get Tokenization Version
             strTknzV2Bld.AppendLine("function GetTokenizationVersion() : string");
             strTknzV2Bld.AppendLine("{");
-            strTknzV2Bld.AppendLine("   return TokenizationVersion.ToString()");
+            strTknzV2Bld.AppendLine("   return TokenizationVersion");
             strTknzV2Bld.AppendLine("}");
 
             return (strBuild, strTknzV2Bld);
