@@ -954,6 +954,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     IsPublished = false,
                     IsToken = false,
                     Id = 0,
+                    SmartContractAsset = new SmartContractAsset
+                    {
+                        Name = "vbtc_v2_token",
+                        Location = "default",
+                        AssetAuthorName = payload.OwnerAddress,
+                        FileSize = 0
+                    },
                     Features = new List<SmartContractFeatures>
                     {
                         new SmartContractFeatures
@@ -1180,6 +1187,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     Description = payload.Description,
                     MinterAddress = payload.OwnerAddress,
                     MinterName = payload.OwnerAddress, // Can be customized
+                    SmartContractAsset = new SmartContractAsset
+                    {
+                        Name = "vbtc_v2_token",
+                        Location = "default",
+                        AssetAuthorName = payload.OwnerAddress,
+                        FileSize = 0
+                    },
                     Features = new List<SmartContractFeatures>
                     {
                         new SmartContractFeatures
