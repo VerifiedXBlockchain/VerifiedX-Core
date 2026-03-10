@@ -536,6 +536,9 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST DEBUG] Round2 addressCommitments is null or empty. Body length={body?.Length ?? 0}, body(first 300)='{body?.Substring(0, Math.Min(300, body?.Length ?? 0))}'", "FrostStartup.DKGRound2");
                             }
 
+                            // Build BTreeMap using computed FROST Identifiers from participant list ordering
+                            // FROST Identifier = 64-char hex of 1-based participant index (big-endian scalar)
+                            var addrToId = BuildAddressToIdentifierMap(session.ParticipantAddresses);
                             var btreeMap = new Newtonsoft.Json.Linq.JObject();
                             if (addressCommitments != null)
                             {
@@ -546,24 +549,18 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                     try
                                     {
                                         var packageJson = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
-                                        // DEBUG: Log parsed structure
-                                        var fieldNames = packageJson is Newtonsoft.Json.Linq.JObject obj ? string.Join(",", obj.Properties().Select(p => p.Name)) : "NOT_AN_OBJECT";
-                                        LogUtility.Log($"[FROST DEBUG] Parsed commitment for '{kvp.Key}': fields=[{fieldNames}], type={packageJson.Type}", "FrostStartup.DKGRound2");
-                                        
-                                        var identifier = packageJson["identifier"]?.ToString();
-                                        if (!string.IsNullOrEmpty(identifier))
+                                        if (addrToId.TryGetValue(kvp.Key, out var frostId))
                                         {
-                                            btreeMap[identifier] = packageJson;
-                                            LogUtility.Log($"[FROST DEBUG] Added to BTreeMap: identifier='{identifier}'", "FrostStartup.DKGRound2");
+                                            btreeMap[frostId] = packageJson;
                                         }
                                         else
                                         {
-                                            LogUtility.Log($"[FROST DEBUG] No 'identifier' field found in commitment for '{kvp.Key}'", "FrostStartup.DKGRound2");
+                                            LogUtility.Log($"[FROST] WARNING: Address '{kvp.Key}' not found in participant list, skipping", "FrostStartup.DKGRound2");
                                         }
                                     }
                                     catch (Exception parseEx)
                                     {
-                                        LogUtility.Log($"[FROST DEBUG] Failed to parse commitment for '{kvp.Key}': {parseEx.Message}. Raw value(first 200)='{kvp.Value?.Substring(0, Math.Min(200, kvp.Value?.Length ?? 0))}'", "FrostStartup.DKGRound2");
+                                        LogUtility.Log($"[FROST] Failed to parse commitment for '{kvp.Key}': {parseEx.Message}", "FrostStartup.DKGRound2");
                                     }
                                 }
                             }
@@ -807,22 +804,17 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             var myAddress = Globals.ValidatorAddress;
                             var sharesExtracted = 0;
 
-                            // Determine this validator's FROST Identifier from our own Round 1 commitment
-                            // The FROST native library keys shares by Identifier (64-char hex), not simple "1","2","3"
+                            // Compute this validator's FROST Identifier from the participant list ordering
+                            var sharesAddrToId = BuildAddressToIdentifierMap(session.ParticipantAddresses);
                             string myFrostIdentifier = null;
-                            if (session.Round1Commitments.TryGetValue(myAddress, out var myCommitmentJson))
+                            if (!string.IsNullOrEmpty(myAddress) && sharesAddrToId.TryGetValue(myAddress, out var myId))
                             {
-                                try
-                                {
-                                    var myPkg = Newtonsoft.Json.Linq.JToken.Parse(myCommitmentJson);
-                                    myFrostIdentifier = myPkg["identifier"]?.ToString();
-                                }
-                                catch { }
+                                myFrostIdentifier = myId;
                             }
 
                             if (string.IsNullOrEmpty(myFrostIdentifier))
                             {
-                                LogUtility.Log($"[FROST] WARNING: Could not determine own FROST Identifier for share extraction", "FrostStartup.DKGSharesBatch");
+                                LogUtility.Log($"[FROST] WARNING: Could not determine own FROST Identifier for share extraction. MyAddress={myAddress}", "FrostStartup.DKGSharesBatch");
                             }
 
                             // For each sender's generated shares, extract the share meant for this validator
@@ -1007,18 +999,19 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 {
                                     // Build BTreeMap JSON using FROST Identifiers from Package data (exclude self)
                                     var myAddrR3 = Globals.ValidatorAddress;
+                                    var addrToIdR3 = BuildAddressToIdentifierMap(session.ParticipantAddresses);
                                     var r1Map = new Newtonsoft.Json.Linq.JObject();
                                     foreach (var c in session.Round1Commitments)
                                     {
-                                        if (c.Key == myAddrR3) continue; // FROST part3 expects only OTHER participants
-                                        try { var p = Newtonsoft.Json.Linq.JToken.Parse(c.Value); var id = p["identifier"]?.ToString(); if (!string.IsNullOrEmpty(id)) r1Map[id] = p; } catch { }
+                                        if (c.Key == myAddrR3) continue;
+                                        try { var p = Newtonsoft.Json.Linq.JToken.Parse(c.Value); if (addrToIdR3.TryGetValue(c.Key, out var fid)) r1Map[fid] = p; } catch { }
                                     }
                                     var round1Json = r1Map.ToString(Newtonsoft.Json.Formatting.None);
 
                                     var s2Map = new Newtonsoft.Json.Linq.JObject();
                                     foreach (var s in session.ReceivedSharesJson)
                                     {
-                                        try { var p = Newtonsoft.Json.Linq.JToken.Parse(s.Value); var id = p["identifier"]?.ToString(); if (!string.IsNullOrEmpty(id)) s2Map[id] = p; } catch { }
+                                        try { var p = Newtonsoft.Json.Linq.JToken.Parse(s.Value); if (addrToIdR3.TryGetValue(s.Key, out var fid)) s2Map[fid] = p; } catch { }
                                     }
                                     var receivedSharesJsonStr = s2Map.ToString(Newtonsoft.Json.Formatting.None);
 
@@ -1933,6 +1926,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 // Build BTreeMap<Identifier, round1::Package> from commitments (exclude self)
                 // FROST part3 expects only OTHER participants' round1 packages
                 var myAddr2 = Globals.ValidatorAddress;
+                var addrToIdMap = BuildAddressToIdentifierMap(session.ParticipantAddresses);
                 var round1BTreeMap = new Newtonsoft.Json.Linq.JObject();
                 foreach (var kvp in session.Round1Commitments)
                 {
@@ -1940,22 +1934,23 @@ namespace ReserveBlockCore.Bitcoin.FROST
                     try
                     {
                         var pkg = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
-                        var id = pkg["identifier"]?.ToString();
-                        if (!string.IsNullOrEmpty(id)) round1BTreeMap[id] = pkg;
+                        if (addrToIdMap.TryGetValue(kvp.Key, out var frostId))
+                            round1BTreeMap[frostId] = pkg;
                     }
                     catch { }
                 }
                 var round1Json = round1BTreeMap.ToString(Newtonsoft.Json.Formatting.None);
 
                 // Build BTreeMap<Identifier, round2::Package> from received shares
+                // ReceivedSharesJson is keyed by sender VFX address
                 var sharesBTreeMap = new Newtonsoft.Json.Linq.JObject();
                 foreach (var kvp in session.ReceivedSharesJson)
                 {
                     try
                     {
                         var pkg = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
-                        var id = pkg["identifier"]?.ToString();
-                        if (!string.IsNullOrEmpty(id)) sharesBTreeMap[id] = pkg;
+                        if (addrToIdMap.TryGetValue(kvp.Key, out var frostId))
+                            sharesBTreeMap[frostId] = pkg;
                     }
                     catch { }
                 }
@@ -2009,6 +2004,35 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 ErrorLogUtility.LogError($"DKG finalize error: {ex.Message}", "FrostStartup.TryFinalizeDKG");
                 return false;
             }
+        }
+
+        #endregion
+
+        #region FROST Identifier Helper
+
+        /// <summary>
+        /// Convert a 1-based participant index to a FROST Identifier hex string.
+        /// FROST Identifier is a secp256k1 Scalar serialized as 32 bytes big-endian (64 hex chars).
+        /// Participant 1 → "0000000000000000000000000000000000000000000000000000000000000001"
+        /// Participant 2 → "0000000000000000000000000000000000000000000000000000000000000002"
+        /// </summary>
+        private static string ParticipantIndexToFrostIdentifier(int participantIndex)
+        {
+            // 32-byte big-endian scalar, zero-padded
+            return participantIndex.ToString("x").PadLeft(64, '0');
+        }
+
+        /// <summary>
+        /// Build a lookup from VFX address to FROST Identifier hex string using participant list ordering.
+        /// </summary>
+        private static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
+        {
+            var map = new Dictionary<string, string>();
+            for (int i = 0; i < participantAddresses.Count; i++)
+            {
+                map[participantAddresses[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
+            }
+            return map;
         }
 
         #endregion
