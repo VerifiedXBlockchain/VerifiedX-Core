@@ -536,6 +536,15 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST DEBUG] Round2 addressCommitments is null or empty. Body length={body?.Length ?? 0}, body(first 300)='{body?.Substring(0, Math.Min(300, body?.Length ?? 0))}'", "FrostStartup.DKGRound2");
                             }
 
+                            // Store all commitments in the session for later use by TryFinalizeDKG (Round 3)
+                            if (addressCommitments != null)
+                            {
+                                foreach (var kvp in addressCommitments)
+                                {
+                                    session.Round1Commitments.TryAdd(kvp.Key, kvp.Value);
+                                }
+                            }
+
                             // Build BTreeMap using computed FROST Identifiers from participant list ordering
                             // FROST Identifier = 64-char hex of 1-based participant index (big-endian scalar)
                             var addrToId = BuildAddressToIdentifierMap(session.ParticipantAddresses);
