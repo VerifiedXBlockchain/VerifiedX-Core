@@ -751,7 +751,7 @@ namespace ReserveBlockCore.Services
                                                         .ToList();
                                                     var received = tokenTxs.Where(x => x.ToAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
                                                     var sent = tokenTxs.Where(x => x.FromAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
-                                                    decimal vbtcBalance = received - sent;
+                                                    decimal vbtcBalance = received + sent;
 
                                                     if (blockTotal > vbtcBalance)
                                                         rejectBlock = true; // vBTC overspend in block

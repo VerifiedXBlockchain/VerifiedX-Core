@@ -707,7 +707,7 @@ namespace ReserveBlockCore.Data
                                                     .ToList();
                                                 var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
                                                 var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
-                                                decimal vbtcBalance = received - sent;
+                                                decimal vbtcBalance = received + sent;
 
                                                 if (pendingTotal > vbtcBalance)
                                                     reject = true; // Overspend detected

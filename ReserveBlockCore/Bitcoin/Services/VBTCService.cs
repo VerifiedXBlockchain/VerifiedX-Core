@@ -322,7 +322,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
                         var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                        ledgerBalance = received - sent;
+                        ledgerBalance = received + sent;
                     }
                 }
 
@@ -465,7 +465,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         var received = transactions.Where(x => x.ToAddress == ownerAddress).Sum(x => x.Amount);
                         var sent = transactions.Where(x => x.FromAddress == ownerAddress).Sum(x => x.Amount);
-                        ledgerBalance = received - sent;
+                        ledgerBalance = received + sent;
                     }
                 }
 

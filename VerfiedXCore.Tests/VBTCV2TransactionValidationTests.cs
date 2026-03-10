@@ -260,9 +260,9 @@ namespace VerfiedXCore.Tests
         //{
         //    // Arrange
         //    var received = initial; // Assume initial amount was received
-            
+
         //    // Act
-        //    var balance = received - sent;
+        //    var balance = received + sent;
 
         //    // Assert
         //    Assert.Equal(expected, balance);

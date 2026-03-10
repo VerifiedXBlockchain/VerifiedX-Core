@@ -604,7 +604,7 @@ namespace ReserveBlockCore.Services
                             {
                                 var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
                                 var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                                balance = received - sent;
+                                balance = received + sent;
                             }
 
                             if (balance < amount.Value)
@@ -699,7 +699,7 @@ namespace ReserveBlockCore.Services
                             {
                                 var received = transactions.Where(x => x.ToAddress == requesterAddress).Sum(x => x.Amount);
                                 var sent = transactions.Where(x => x.FromAddress == requesterAddress).Sum(x => x.Amount);
-                                balance = received - sent;
+                                balance = received + sent;
                             }
 
                             if (balance < amount.Value)
