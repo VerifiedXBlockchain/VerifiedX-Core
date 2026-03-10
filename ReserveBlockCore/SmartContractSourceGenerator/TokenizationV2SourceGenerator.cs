@@ -51,7 +51,7 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("}");
 
             // Function: Get Required Threshold
-            strTknzV2Bld.AppendLine("function GetRequiredThreshold() : string");
+            strTknzV2Bld.AppendLine("function GetRequiredThreshold() : int");
             strTknzV2Bld.AppendLine("{");
             strTknzV2Bld.AppendLine("   return RequiredThreshold");
             strTknzV2Bld.AppendLine("}");
@@ -60,7 +60,7 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("function GetDKGProof() : string");
             strTknzV2Bld.AppendLine("{");
             strTknzV2Bld.AppendLine("   var proof = \"" + tknzV2.DKGProof + "\"");
-            strTknzV2Bld.AppendLine("   var blockHeight = " + tknzV2.ProofBlockHeight.ToString());
+            strTknzV2Bld.AppendLine("   var blockHeight = \"" + tknzV2.ProofBlockHeight.ToString() + "\"");
             strTknzV2Bld.AppendLine("   return (proof + " + appendChar + " + blockHeight)");
             strTknzV2Bld.AppendLine("}");
 
@@ -72,7 +72,7 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("}");
 
             // Function: Get Tokenization Version
-            strTknzV2Bld.AppendLine("function GetTokenizationVersion() : string");
+            strTknzV2Bld.AppendLine("function GetTokenizationVersion() : int");
             strTknzV2Bld.AppendLine("{");
             strTknzV2Bld.AppendLine("   return TokenizationVersion");
             strTknzV2Bld.AppendLine("}");
