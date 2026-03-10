@@ -1555,6 +1555,7 @@ namespace ReserveBlockCore.Data
                     if (sc.Features != null)
                     {
                         var tokenFeatures = sc.Features.Where(x => x.FeatureName == FeatureName.Token).Select(x => x.FeatureFeatures).FirstOrDefault();
+                        var tokenizationV2Features = sc.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).Select(x => x.FeatureFeatures).FirstOrDefault();
                         if (tokenFeatures != null)
                         {
                             var tokenFeature = (TokenFeature)tokenFeatures;
@@ -1614,6 +1615,32 @@ namespace ReserveBlockCore.Data
                                 }
                             }
                             
+                        }
+                        else if (tokenizationV2Features != null)
+                        {
+                            TokenizationV2Feature tv2 = null;
+                            if (tokenizationV2Features is TokenizationV2Feature tv2Direct)
+                                tv2 = tv2Direct;
+                            else
+                                tv2 = JsonConvert.DeserializeObject<TokenizationV2Feature>(tokenizationV2Features.ToString());
+
+                            if (tv2 != null)
+                            {
+                                var tokenDetails = new TokenDetails
+                                {
+                                    TokenName = tv2.AssetName,
+                                    TokenTicker = tv2.AssetTicker,
+                                    StartingSupply = 0,
+                                    CurrentSupply = 0,
+                                    IsPaused = false,
+                                    ContractOwner = sc.MinterAddress,
+                                    DecimalPlaces = 8,
+                                    TokenBurnable = false,
+                                    TokenMintable = false,
+                                    TokenVoting = false,
+                                };
+                                scST.TokenDetails = tokenDetails;
+                            }
                         }
                     }
                 }

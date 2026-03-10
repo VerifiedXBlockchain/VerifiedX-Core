@@ -44,7 +44,9 @@ namespace ReserveBlockCore.Services
 
             var txData = "";
 
-            var md5List = await MD5Utility.GetMD5FromSmartContract(scMain);
+            var md5List = scMain.SmartContractAsset?.Location == "default"
+                ? "NA"
+                : await MD5Utility.GetMD5FromSmartContract(scMain);
 
             if (!string.IsNullOrWhiteSpace(scData.Item1))
             {

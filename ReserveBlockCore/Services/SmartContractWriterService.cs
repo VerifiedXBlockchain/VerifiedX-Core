@@ -154,7 +154,11 @@ namespace ReserveBlockCore.Services
                         }
                         else if(feature.FeatureName == FeatureName.TokenizationV2)
                         {
-                            var tokenizationV2 = ((JObject)feature.FeatureFeatures).ToObject<TokenizationV2Feature>();
+                            TokenizationV2Feature? tokenizationV2;
+                            if (feature.FeatureFeatures is TokenizationV2Feature tv2Direct)
+                                tokenizationV2 = tv2Direct;
+                            else
+                                tokenizationV2 = ((JObject)feature.FeatureFeatures).ToObject<TokenizationV2Feature>();
                             if(tokenizationV2 != null)
                             {
                                 feature.FeatureFeatures = tokenizationV2;
