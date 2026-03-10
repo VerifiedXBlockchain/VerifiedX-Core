@@ -534,6 +534,7 @@ namespace ReserveBlockCore
 
             // HAL-071 Fix: Start mempool cleanup service to prevent unbounded growth
             MempoolCleanupService.Start();
+            CeremonyCleanupService.Start();
 
             MessageLocksCleanupService.Start();
             BroadcastTrackingCleanupService.Start();

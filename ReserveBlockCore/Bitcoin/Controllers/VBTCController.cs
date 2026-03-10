@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Controllers;
 using ReserveBlockCore.Data;
@@ -28,6 +29,62 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         /// Key: CeremonyId, Value: MPCCeremonyState
         /// </summary>
         private static readonly ConcurrentDictionary<string, MPCCeremonyState> _ceremonies = new();
+
+        /// <summary>
+        /// Maximum number of concurrent active (non-terminal) ceremonies allowed across all requestors.
+        /// </summary>
+        private const int MaxConcurrentCeremonies = 100;
+
+        /// <summary>
+        /// Check if a ceremony status is terminal (completed, failed, or timed out)
+        /// </summary>
+        private static bool IsCeremonyTerminal(CeremonyStatus status) =>
+            status == CeremonyStatus.Completed || status == CeremonyStatus.Failed || status == CeremonyStatus.TimedOut;
+
+        /// <summary>
+        /// Public accessor for the cleanup service to prune stale ceremonies.
+        /// Removes all ceremonies older than the given TTL, and any terminal ceremonies older than terminalTTL.
+        /// Returns the number of ceremonies removed.
+        /// </summary>
+        public static int CleanupStaleCeremonies(long activeTtlSeconds = 3600, long terminalTtlSeconds = 3600)
+        {
+            var now = TimeUtil.GetTime();
+            var removedCount = 0;
+
+            foreach (var kvp in _ceremonies)
+            {
+                var ceremony = kvp.Value;
+                var age = now - ceremony.InitiatedTimestamp;
+
+                if (IsCeremonyTerminal(ceremony.Status))
+                {
+                    // Terminal ceremonies: remove after terminalTtlSeconds
+                    if (age > terminalTtlSeconds)
+                    {
+                        if (_ceremonies.TryRemove(kvp.Key, out _))
+                            removedCount++;
+                    }
+                }
+                else
+                {
+                    // Active ceremonies: force-expire after activeTtlSeconds
+                    if (age > activeTtlSeconds)
+                    {
+                        ceremony.Status = CeremonyStatus.TimedOut;
+                        ceremony.ErrorMessage = "Ceremony expired due to inactivity (1 hour TTL exceeded).";
+                        ceremony.CompletedTimestamp = now;
+                        removedCount++;
+                    }
+                }
+            }
+
+            return removedCount;
+        }
+
+        /// <summary>
+        /// Remove a specific ceremony from memory (used after contract creation consumes the result).
+        /// </summary>
+        public static bool RemoveCeremony(string ceremonyId) => _ceremonies.TryRemove(ceremonyId, out _);
 
         #endregion
 
@@ -161,6 +218,33 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(ownerAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
 
+                // Anti-spam: Check if this owner already has an active (non-terminal) ceremony
+                var existingActive = _ceremonies.Values.FirstOrDefault(c =>
+                    c.OwnerAddress == ownerAddress && !IsCeremonyTerminal(c.Status));
+                if (existingActive != null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "You already have an active MPC ceremony in progress. Complete or cancel it before starting a new one.",
+                        ExistingCeremonyId = existingActive.CeremonyId,
+                        Status = existingActive.Status.ToString(),
+                        ProgressPercentage = existingActive.ProgressPercentage
+                    });
+                }
+
+                // Anti-spam: Check global concurrent ceremony cap
+                var activeCeremonyCount = _ceremonies.Values.Count(c => !IsCeremonyTerminal(c.Status));
+                if (activeCeremonyCount >= MaxConcurrentCeremonies)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Maximum concurrent ceremony limit reached ({MaxConcurrentCeremonies}). Please try again later.",
+                        ActiveCeremonies = activeCeremonyCount
+                    });
+                }
+
                 // Generate unique ceremony ID
                 var ceremonyId = Guid.NewGuid().ToString();
                 var currentTime = TimeUtil.GetTime();
@@ -250,8 +334,70 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Background task that executes the MPC (FROST DKG) ceremony
-        /// Steps 1-8 from the original CreateVBTCContract method
+        /// Cancel an active MPC ceremony. Only the original owner can cancel.
+        /// </summary>
+        /// <param name="ceremonyId">Ceremony ID to cancel</param>
+        /// <param name="ownerAddress">Owner address that initiated the ceremony</param>
+        /// <returns>Cancellation result</returns>
+        [HttpPost("CancelCeremony/{ceremonyId}/{ownerAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CancelCeremony(string ceremonyId, string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ceremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony ID cannot be null" });
+
+                if (string.IsNullOrEmpty(ownerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony not found" });
+                }
+
+                if (ceremony.OwnerAddress != ownerAddress)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Only the ceremony owner can cancel it" });
+                }
+
+                if (IsCeremonyTerminal(ceremony.Status))
+                {
+                    // Already terminal — just remove it
+                    _ceremonies.TryRemove(ceremonyId, out _);
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = $"Ceremony was already in terminal state ({ceremony.Status}). Removed from memory."
+                    });
+                }
+
+                // Mark as failed (cancelled)
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "Ceremony cancelled by owner";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+
+                // Remove immediately since owner explicitly cancelled
+                _ceremonies.TryRemove(ceremonyId, out _);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Ceremony cancelled and removed successfully",
+                    CeremonyId = ceremonyId,
+                    PreviousStatus = ceremony.Status.ToString()
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Background task that executes the MPC (FROST DKG) ceremony.
+        /// If this node is a validator, it coordinates the ceremony locally.
+        /// If this node is a regular wallet, it delegates to a remote validator.
         /// </summary>
         private async Task ExecuteMPCCeremony(string ceremonyId)
         {
@@ -260,87 +406,15 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
                     return;
 
-                // Update status: Validating validators
-                ceremony.Status = CeremonyStatus.ValidatingValidators;
-                ceremony.ProgressPercentage = 5;
-
-                // Step 1: Get list of active validators
-                var currentBlock = Globals.LastBlock.Height;
-                List<VBTCValidator>? activeValidators;
-
-                if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                // Non-validator wallet node: delegate the entire ceremony to a remote validator
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
                 {
-                    activeValidators = VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
-                }
-                else
-                {
-                    activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
-                }
-
-                var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
-
-                if (activeValidators == null || !activeValidators.Any())
-                {
-                    ceremony.Status = CeremonyStatus.Failed;
-                    ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
-                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    await ExecuteMPCCeremonyViaRemoteValidator(ceremonyId, ceremony);
                     return;
                 }
 
-                var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
-                if (activeValidators.Count < requiredActiveValidators)
-                {
-                    ceremony.Status = CeremonyStatus.Failed;
-                    ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}";
-                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
-                    return;
-                }
-
-                ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
-                ceremony.ProgressPercentage = 15;
-
-                // Execute FROST DKG Ceremony via FrostMPCService with progress callback
-                ceremony.Status = CeremonyStatus.Round1InProgress;
-                
-                var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
-                    ceremonyId,
-                    ceremony.OwnerAddress,
-                    activeValidators,
-                    ceremony.RequiredThreshold,
-                    (round, percentage) =>
-                    {
-                        // Update ceremony progress from callback
-                        ceremony.CurrentRound = round;
-                        ceremony.ProgressPercentage = percentage;
-                        
-                        // Update status based on round
-                        if (round == 1 && ceremony.Status != CeremonyStatus.Round1InProgress)
-                            ceremony.Status = CeremonyStatus.Round1InProgress;
-                        else if (round == 2 && ceremony.Status != CeremonyStatus.Round2InProgress)
-                            ceremony.Status = CeremonyStatus.Round2InProgress;
-                        else if (round == 3 && ceremony.Status != CeremonyStatus.Round3InProgress)
-                            ceremony.Status = CeremonyStatus.Round3InProgress;
-                    }
-                );
-
-                if (dkgResult == null)
-                {
-                    ceremony.Status = CeremonyStatus.Failed;
-                    ceremony.ErrorMessage = "FROST DKG ceremony failed - unable to generate Taproot address";
-                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
-                    return;
-                }
-
-                // DKG ceremony completed successfully
-                ceremony.DepositAddress = dkgResult.TaprootAddress;
-                ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
-                ceremony.DKGProof = dkgResult.DKGProof;
-                ceremony.ProofBlockHeight = Globals.LastBlock.Height;
-
-                // Complete
-                ceremony.Status = CeremonyStatus.Completed;
-                ceremony.ProgressPercentage = 100;
-                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                // Validator node: coordinate the ceremony locally
+                await ExecuteMPCCeremonyLocally(ceremonyId, ceremony);
             }
             catch (Exception ex)
             {
@@ -351,6 +425,228 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 }
             }
+        }
+
+        /// <summary>
+        /// Execute MPC ceremony locally (validator node path)
+        /// </summary>
+        private async Task ExecuteMPCCeremonyLocally(string ceremonyId, MPCCeremonyState ceremony)
+        {
+            // Update status: Validating validators
+            ceremony.Status = CeremonyStatus.ValidatingValidators;
+            ceremony.ProgressPercentage = 5;
+
+            // Step 1: Get list of active validators
+            var currentBlock = Globals.LastBlock.Height;
+            var activeValidators = VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
+            var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+
+            if (activeValidators == null || !activeValidators.Any())
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
+
+            var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
+            if (activeValidators.Count < requiredActiveValidators)
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
+
+            ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
+            ceremony.ProgressPercentage = 15;
+
+            // Execute FROST DKG Ceremony via FrostMPCService with progress callback
+            ceremony.Status = CeremonyStatus.Round1InProgress;
+
+            var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                ceremonyId,
+                ceremony.OwnerAddress,
+                activeValidators,
+                ceremony.RequiredThreshold,
+                (round, percentage) =>
+                {
+                    ceremony.CurrentRound = round;
+                    ceremony.ProgressPercentage = percentage;
+
+                    if (round == 1 && ceremony.Status != CeremonyStatus.Round1InProgress)
+                        ceremony.Status = CeremonyStatus.Round1InProgress;
+                    else if (round == 2 && ceremony.Status != CeremonyStatus.Round2InProgress)
+                        ceremony.Status = CeremonyStatus.Round2InProgress;
+                    else if (round == 3 && ceremony.Status != CeremonyStatus.Round3InProgress)
+                        ceremony.Status = CeremonyStatus.Round3InProgress;
+                }
+            );
+
+            if (dkgResult == null)
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "FROST DKG ceremony failed - unable to generate Taproot address";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
+
+            // DKG ceremony completed successfully
+            ceremony.DepositAddress = dkgResult.TaprootAddress;
+            ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
+            ceremony.DKGProof = dkgResult.DKGProof;
+            ceremony.ProofBlockHeight = Globals.LastBlock.Height;
+
+            ceremony.Status = CeremonyStatus.Completed;
+            ceremony.ProgressPercentage = 100;
+            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+        }
+
+        /// <summary>
+        /// Execute MPC ceremony by delegating to a remote validator (wallet node path).
+        /// The wallet node sends the ceremony request to a validator, which coordinates the
+        /// actual FROST DKG. The wallet then polls for completion and syncs the results locally.
+        /// </summary>
+        private async Task ExecuteMPCCeremonyViaRemoteValidator(string ceremonyId, MPCCeremonyState ceremony)
+        {
+            ceremony.Status = CeremonyStatus.ValidatingValidators;
+            ceremony.ProgressPercentage = 5;
+
+            // Step 1: Discover active validators from the network
+            var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+            if (activeValidators == null || !activeValidators.Any())
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "No active validators available on the network. Cannot delegate MPC ceremony.";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
+
+            // Step 2: Try each validator until one successfully initiates the ceremony
+            string? remoteValidatorIP = null;
+            string? remoteCeremonyId = null;
+
+            foreach (var validator in activeValidators)
+            {
+                try
+                {
+                    var ip = validator.IPAddress?.Replace("::ffff:", "");
+                    if (string.IsNullOrEmpty(ip)) continue;
+
+                    var url = $"http://{ip}:{Globals.APIPort}/vbtcapi/vbtc/InitiateMPCCeremony/{ceremony.OwnerAddress}";
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    client.Timeout = TimeSpan.FromSeconds(15);
+
+                    var response = await client.PostAsync(url, null);
+                    if (!response.IsSuccessStatusCode) continue;
+
+                    var responseBody = await response.Content.ReadAsStringAsync();
+                    var json = Newtonsoft.Json.Linq.JObject.Parse(responseBody);
+
+                    if (json["Success"]?.Value<bool>() == true && !string.IsNullOrEmpty(json["CeremonyId"]?.Value<string>()))
+                    {
+                        remoteValidatorIP = ip;
+                        remoteCeremonyId = json["CeremonyId"]!.Value<string>();
+
+                        LogUtility.Log($"[FROST MPC] Wallet node delegated ceremony to validator {validator.ValidatorAddress} ({ip}). Remote CeremonyId: {remoteCeremonyId}",
+                            "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
+                        break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogUtility.Log($"[FROST MPC] Failed to delegate to validator {validator.ValidatorAddress}: {ex.Message}",
+                        "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
+                }
+            }
+
+            if (string.IsNullOrEmpty(remoteValidatorIP) || string.IsNullOrEmpty(remoteCeremonyId))
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "Failed to delegate MPC ceremony to any validator. No validator accepted the request.";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
+
+            // Step 3: Mark ceremony as remote and store delegation info
+            ceremony.IsRemote = true;
+            ceremony.RemoteValidatorIP = remoteValidatorIP;
+            ceremony.RemoteCeremonyId = remoteCeremonyId;
+            ceremony.ProgressPercentage = 10;
+            ceremony.Status = CeremonyStatus.Round1InProgress;
+
+            // Step 4: Poll the remote validator until the ceremony completes or fails
+            var maxPollAttempts = 120; // Up to ~4 minutes (120 * 2s)
+            var pollInterval = 2000; // 2 seconds
+
+            for (int attempt = 0; attempt < maxPollAttempts; attempt++)
+            {
+                await Task.Delay(pollInterval);
+
+                try
+                {
+                    var statusUrl = $"http://{remoteValidatorIP}:{Globals.APIPort}/vbtcapi/vbtc/GetCeremonyStatus/{remoteCeremonyId}";
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    client.Timeout = TimeSpan.FromSeconds(10);
+
+                    var response = await client.GetAsync(statusUrl);
+                    if (!response.IsSuccessStatusCode) continue;
+
+                    var responseBody = await response.Content.ReadAsStringAsync();
+                    var json = Newtonsoft.Json.Linq.JObject.Parse(responseBody);
+
+                    if (json["Success"]?.Value<bool>() != true) continue;
+
+                    var remoteStatus = json["Status"]?.Value<string>() ?? "";
+                    var remoteProgress = json["ProgressPercentage"]?.Value<int>() ?? 0;
+                    var remoteRound = json["CurrentRound"]?.Value<int>() ?? 0;
+
+                    // Sync progress to local ceremony state
+                    ceremony.CurrentRound = remoteRound;
+                    ceremony.ProgressPercentage = remoteProgress;
+                    if (Enum.TryParse<CeremonyStatus>(remoteStatus, out var parsedStatus))
+                        ceremony.Status = parsedStatus;
+
+                    // Check for completion
+                    if (remoteStatus == "Completed")
+                    {
+                        ceremony.DepositAddress = json["DepositAddress"]?.Value<string>();
+                        ceremony.FrostGroupPublicKey = json["FrostGroupPublicKey"]?.Value<string>();
+                        ceremony.DKGProof = json["DKGProof"]?.Value<string>();
+                        ceremony.ProofBlockHeight = json["ProofBlockHeight"]?.Value<long>() ?? 0;
+                        ceremony.ValidatorSnapshot = json["ValidatorCount"]?.Value<int>() > 0
+                            ? activeValidators.Select(v => v.ValidatorAddress).ToList()
+                            : new List<string>();
+                        ceremony.Status = CeremonyStatus.Completed;
+                        ceremony.ProgressPercentage = 100;
+                        ceremony.CompletedTimestamp = TimeUtil.GetTime();
+
+                        LogUtility.Log($"[FROST MPC] Remote ceremony completed. Deposit address: {ceremony.DepositAddress}",
+                            "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
+                        return;
+                    }
+
+                    // Check for failure
+                    if (remoteStatus == "Failed" || remoteStatus == "TimedOut")
+                    {
+                        ceremony.Status = CeremonyStatus.Failed;
+                        ceremony.ErrorMessage = json["ErrorMessage"]?.Value<string>() ?? "Remote ceremony failed";
+                        ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Network hiccup during poll — continue retrying
+                    LogUtility.Log($"[FROST MPC] Poll attempt {attempt + 1} failed: {ex.Message}",
+                        "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
+                }
+            }
+
+            // Timed out waiting for remote ceremony
+            ceremony.Status = CeremonyStatus.TimedOut;
+            ceremony.ErrorMessage = $"Timed out waiting for remote validator ({remoteValidatorIP}) to complete MPC ceremony after {maxPollAttempts * pollInterval / 1000} seconds.";
+            ceremony.CompletedTimestamp = TimeUtil.GetTime();
         }
 
         #endregion
@@ -489,8 +785,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     });
                 }
 
-                // Mark contract as published (set flag in database)
-                // TODO: Implement VBTCContractV2.SetContractIsPublished() helper method
+                // Mark contract as published in the tokenized bitcoin database
+                await TokenizedBitcoin.SetTokenContractIsPublished(scUID);
+
+                // Ceremony results consumed — remove from memory immediately to free space
+                RemoveCeremony(payload.CeremonyId);
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -703,6 +1002,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create or broadcast smart contract transaction" });
                 }
+
+                // Ceremony results consumed — remove from memory immediately to free space
+                RemoveCeremony(payload.CeremonyId);
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -1175,8 +1477,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to save withdrawal request to database" });
                 }
 
-                // 9. TODO: Update contract state to "Requested"
-                // await VBTCService.UpdateWithdrawalStatus(payload.SmartContractUID, VBTCWithdrawalStatus.Requested, payload.Amount, payload.BTCAddress);
+                // 9. Update contract withdrawal status to "Requested"
+                VBTCContractV2.UpdateWithdrawalStatus(payload.SmartContractUID, VBTCWithdrawalStatus.Requested);
 
                 var requestHash = $"{payload.VFXAddress.Substring(0, 8)}_{payload.UniqueId.Substring(0, 8)}_{currentTime}";
 

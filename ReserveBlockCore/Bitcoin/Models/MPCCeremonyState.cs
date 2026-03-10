@@ -83,6 +83,21 @@ namespace ReserveBlockCore.Bitcoin.Models
         /// </summary>
         public Dictionary<string, object> Metadata { get; set; }
 
+        /// <summary>
+        /// Whether this ceremony is being coordinated by a remote validator (wallet node delegation)
+        /// </summary>
+        public bool IsRemote { get; set; }
+
+        /// <summary>
+        /// IP address of the validator coordinating the remote ceremony
+        /// </summary>
+        public string? RemoteValidatorIP { get; set; }
+
+        /// <summary>
+        /// Ceremony ID on the remote validator (may differ from local CeremonyId)
+        /// </summary>
+        public string? RemoteCeremonyId { get; set; }
+
         public MPCCeremonyState()
         {
             ValidatorSnapshot = new List<string>();
@@ -90,6 +105,7 @@ namespace ReserveBlockCore.Bitcoin.Models
             Status = CeremonyStatus.Initiated;
             ProgressPercentage = 0;
             CurrentRound = 0;
+            IsRemote = false;
         }
     }
 
