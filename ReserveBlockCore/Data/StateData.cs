@@ -643,6 +643,18 @@ namespace ReserveBlockCore.Data
                                     scStateTreiRec.IsLocked = false;
 
                                     SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                                    // Sync VBTCContractV2.OwnerAddress on reserve transfer completion
+                                    try
+                                    {
+                                        var vbtcContract = VBTCContractV2.GetContract(scUID);
+                                        if (vbtcContract != null && vbtcContract.OwnerAddress != rtx.ToAddress)
+                                        {
+                                            vbtcContract.OwnerAddress = rtx.ToAddress;
+                                            VBTCContractV2.UpdateContract(vbtcContract);
+                                        }
+                                    }
+                                    catch { }
                                 }
                             }
 
@@ -1448,6 +1460,24 @@ namespace ReserveBlockCore.Data
                     scStateTreiRec.Nonce += 1;
                     scStateTreiRec.ContractData = data;
                     scStateTreiRec.Locators = !string.IsNullOrWhiteSpace(locator) ? locator : scStateTreiRec.Locators;
+
+                    // Sync VBTCContractV2.OwnerAddress when ownership transfers at state level
+                    // This ensures the local vBTC V2 contract DB stays in sync with state trei
+                    try
+                    {
+                        var vbtcContract = VBTCContractV2.GetContract(scUID);
+                        if (vbtcContract != null && vbtcContract.OwnerAddress != tx.ToAddress)
+                        {
+                            vbtcContract.OwnerAddress = tx.ToAddress;
+                            VBTCContractV2.UpdateContract(vbtcContract);
+                            SCLogUtility.Log($"Synced VBTCContractV2.OwnerAddress to {tx.ToAddress} for contract {scUID}", 
+                                "StateData.TransferSmartContract()");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to sync VBTCContractV2 owner: {ex.Message}", "StateData.TransferSmartContract()");
+                    }
                 }
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             }

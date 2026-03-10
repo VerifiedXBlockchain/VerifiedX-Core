@@ -361,11 +361,11 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Data = txData
                 };
 
+                tokenTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(tokenTx);
+
                 // Build and sign transaction
                 tokenTx.Build();
                 var txHash = tokenTx.Hash;
-                tokenTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(tokenTx);
-
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
 

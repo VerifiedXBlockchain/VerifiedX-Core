@@ -1101,36 +1101,73 @@ namespace ReserveBlockCore.Services
                                             if (!amount.HasValue || amount.Value <= 0)
                                                 return (txResult, "Amount must be greater than zero.");
 
-                                            // Validate balance using v1 pattern:
-                                            // - Owner: deposit balance is tracked locally via Electrum scan, skip consensus balance check
-                                            //   (mirrors v1 TransferCoin() which skips balance check for isOwner)
+                                            // Balance validation for both owner and non-owner:
+                                            // - Owner: query ElectrumX for deposit address balance + ledger balance
                                             // - Non-owner: check ledger balance from tokenization TXes
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                                             if (scStateTreiRec != null)
                                             {
                                                 bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 
+                                                decimal ledgerBalance = 0M;
                                                 if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
                                                 {
                                                     var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
                                                         .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
                                                         .ToList();
 
-                                                    // Non-owner: check ledger balance (received - sent)
-                                                    if (transactions.Any() && !isOwner)
+                                                    if (transactions.Any())
                                                     {
-                                                        var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
-                                                        var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                                                        decimal balance = received - sent;
-
-                                                        if (balance < amount.Value)
-                                                            return (txResult, $"Insufficient vBTC balance. Available: {balance}, Requested: {amount.Value}");
+                                                        ledgerBalance = transactions.Sum(x => x.Amount);
                                                     }
                                                 }
-                                                else if (!isOwner)
+
+                                                if (isOwner)
                                                 {
-                                                    // Non-owner with no tokenization TXes has zero balance
-                                                    return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+                                                    // Owner: query ElectrumX for deposit address balance and add ledger balance
+                                                    decimal depositBalance = 0M;
+                                                    var contract = Bitcoin.Models.VBTCContractV2.GetContract(scUID);
+                                                    if (contract != null && !string.IsNullOrEmpty(contract.DepositAddress))
+                                                    {
+                                                        if (!blockDownloads && !blockVerify)
+                                                        {
+                                                            try
+                                                            {
+                                                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                                                if (elxClient != null)
+                                                                {
+                                                                    var balance = await elxClient.GetBalance(contract.DepositAddress, false);
+                                                                    depositBalance = balance.Confirmed / 100_000_000M;
+                                                                }
+                                                                else
+                                                                {
+                                                                    depositBalance = contract.Balance;
+                                                                }
+                                                            }
+                                                            catch
+                                                            {
+                                                                depositBalance = contract.Balance;
+                                                            }
+                                                        }
+                                                        else
+                                                        {
+                                                            // During block sync/verify, use cached balance - block already passed consensus
+                                                            depositBalance = contract.Balance;
+                                                        }
+                                                    }
+
+                                                    decimal ownerBalance = depositBalance + ledgerBalance;
+                                                    if (ownerBalance < amount.Value)
+                                                        return (txResult, $"Insufficient vBTC balance (owner). Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                                                }
+                                                else
+                                                {
+                                                    // Non-owner: just ledger balance
+                                                    if (ledgerBalance < amount.Value)
+                                                        return (txResult, $"Insufficient vBTC balance. Available: {ledgerBalance}, Requested: {amount.Value}");
+
+                                                    if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                                        return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
                                                 }
                                             }
 
@@ -2317,33 +2354,71 @@ namespace ReserveBlockCore.Services
                         if (!amount.HasValue || amount.Value <= 0)
                             return (txResult, "Amount must be greater than zero for vBTC V2 transfer.");
 
-                        // Balance validation using State Trei tokenization TXes
+                        // Balance validation for both owner and non-owner
                         var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                         if (scStateTreiRec != null)
                         {
                             bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 
+                            decimal ledgerBalance = 0M;
                             if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
                             {
                                 var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
                                     .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
                                     .ToList();
 
-                                // Non-owner: check ledger balance (received - sent)
-                                if (transactions.Any() && !isOwner)
+                                if (transactions.Any())
                                 {
-                                    var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
-                                    var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                                    decimal balance = received - sent;
-
-                                    if (balance < amount.Value)
-                                        return (txResult, $"Insufficient vBTC balance for transfer. Available: {balance}, Requested: {amount.Value}");
+                                    ledgerBalance = transactions.Sum(x => x.Amount);
                                 }
                             }
-                            else if (!isOwner)
+
+                            if (isOwner)
                             {
-                                // Non-owner with no tokenization TXes has zero balance
-                                return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+                                // Owner: query ElectrumX for deposit address balance and add ledger balance
+                                decimal depositBalance = 0M;
+                                var contract = VBTCContractV2.GetContract(scUID);
+                                if (contract != null && !string.IsNullOrEmpty(contract.DepositAddress))
+                                {
+                                    if (!blockDownloads && !blockVerify)
+                                    {
+                                        try
+                                        {
+                                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                            if (elxClient != null)
+                                            {
+                                                var balance = await elxClient.GetBalance(contract.DepositAddress, false);
+                                                depositBalance = balance.Confirmed / 100_000_000M;
+                                            }
+                                            else
+                                            {
+                                                depositBalance = contract.Balance;
+                                            }
+                                        }
+                                        catch
+                                        {
+                                            depositBalance = contract.Balance;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // During block sync/verify, use cached balance - block already passed consensus
+                                        depositBalance = contract.Balance;
+                                    }
+                                }
+
+                                decimal ownerBalance = depositBalance + ledgerBalance;
+                                if (ownerBalance < amount.Value)
+                                    return (txResult, $"Insufficient vBTC balance (owner) for transfer. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                            }
+                            else
+                            {
+                                // Non-owner: just ledger balance
+                                if (ledgerBalance < amount.Value)
+                                    return (txResult, $"Insufficient vBTC balance for transfer. Available: {ledgerBalance}, Requested: {amount.Value}");
+
+                                if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                    return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
                             }
                         }
                         else
@@ -2577,26 +2652,64 @@ namespace ReserveBlockCore.Services
 
                         // Validate balance for requesterAddress (tx.FromAddress)
                         var scState = SmartContractStateTrei.GetSmartContractState(scUID);
-                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        if (scState != null)
                         {
-                            var transactions = scState.SCStateTreiTokenizationTXes
-                                .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
-                                .ToList();
+                            bool isRequesterOwner = requesterAddress == scState.OwnerAddress;
+                            decimal ledgerBalance = 0M;
 
-                            decimal balance = 0M;
-                            if (transactions.Any())
+                            if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                             {
-                                var received = transactions.Where(x => x.ToAddress == requesterAddress).Sum(x => x.Amount);
-                                var sent = transactions.Where(x => x.FromAddress == requesterAddress).Sum(x => x.Amount);
-                                balance = received - sent;
+                                var transactions = scState.SCStateTreiTokenizationTXes
+                                    .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
+                                    .ToList();
+
+                                if (transactions.Any())
+                                {
+                                    ledgerBalance = transactions.Sum(x => x.Amount);
+                                }
                             }
 
-                            if (balance < amount.Value)
-                                return (txResult, $"Insufficient vBTC balance. Available: {balance}, Requested: {amount.Value}");
+                            decimal totalBalance = ledgerBalance;
+                            if (isRequesterOwner)
+                            {
+                                decimal depositBalance = 0M;
+                                if (!string.IsNullOrEmpty(contract.DepositAddress))
+                                {
+                                    if (!blockDownloads && !blockVerify)
+                                    {
+                                        try
+                                        {
+                                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                            if (elxClient != null)
+                                            {
+                                                var bal = await elxClient.GetBalance(contract.DepositAddress, false);
+                                                depositBalance = bal.Confirmed / 100_000_000M;
+                                            }
+                                            else
+                                            {
+                                                depositBalance = contract.Balance;
+                                            }
+                                        }
+                                        catch
+                                        {
+                                            depositBalance = contract.Balance;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // During block sync/verify, use cached balance - block already passed consensus
+                                        depositBalance = contract.Balance;
+                                    }
+                                }
+                                totalBalance = depositBalance + ledgerBalance;
+                            }
+
+                            if (totalBalance < amount.Value)
+                                return (txResult, $"Insufficient vBTC balance. Available: {totalBalance}, Requested: {amount.Value}");
                         }
                         else
                         {
-                            return (txResult, $"No vBTC balance found for requester {requesterAddress} in contract {scUID}.");
+                            return (txResult, $"No vBTC state found for contract {scUID}.");
                         }
                     }
                     catch (Exception ex)

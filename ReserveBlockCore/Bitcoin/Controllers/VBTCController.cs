@@ -1659,9 +1659,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 {
                     var tokenTxs = scState.SCStateTreiTokenizationTXes
                         .Where(x => x.FromAddress == payload.VFXAddress || x.ToAddress == payload.VFXAddress).ToList();
-                    var received = tokenTxs.Where(x => x.ToAddress == payload.VFXAddress).Sum(x => x.Amount);
-                    var sent = tokenTxs.Where(x => x.FromAddress == payload.VFXAddress).Sum(x => x.Amount);
-                    var vbtcBalance = received - sent;
+                    var vbtcBalance = tokenTxs.Sum(x => x.Amount);
                     if (payload.Amount > vbtcBalance)
                     {
                         return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient vBTC balance. Available: {vbtcBalance}, Requested: {payload.Amount}" });
@@ -1907,7 +1905,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         #region Balance & Status
 
         /// <summary>
-        /// Get vBTC V2 balance for an address in a specific contract
+        /// Get vBTC V2 balance for an address in a specific contract.
+        /// For the contract owner, the balance includes the BTC deposit address balance
+        /// (queried from ElectrumX) plus the net ledger balance from tokenization TXes.
+        /// For non-owners, the balance is simply received - sent from tokenization TXes.
         /// </summary>
         /// <param name="address">VFX address</param>
         /// <param name="scUID">Smart contract UID</param>
@@ -1928,10 +1929,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract not found or no state available" });
                 }
 
-                decimal balance = 0.0M;
+                decimal ledgerBalance = 0.0M;
                 bool isOwner = false;
+                decimal depositBalance = 0.0M;
 
-                // Calculate balance from State Trei tokenization transactions
+                // Calculate ledger balance from State Trei tokenization transactions.
+                // State entries use negative amounts for debits, so the net balance is simply the sum.
                 if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                 {
                     var transactions = scState.SCStateTreiTokenizationTXes
@@ -1940,19 +1943,51 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                     if (transactions.Any())
                     {
-                        // Calculate net balance: sum of received - sum of sent
-                        var received = transactions.Where(x => x.ToAddress == address).Sum(x => x.Amount);
-                        var sent = transactions.Where(x => x.FromAddress == address).Sum(x => x.Amount);
-                        balance = received - sent;
+                        ledgerBalance = transactions.Sum(x => x.Amount);
                     }
                 }
 
-                // Check if this address is the contract owner
+                // Check if this address is the contract owner (check both local DB and state trei)
                 var contract = VBTCContractV2.GetContract(scUID);
-                if (contract != null && contract.OwnerAddress == address)
+                if (contract != null && (contract.OwnerAddress == address || scState.OwnerAddress == address))
                 {
                     isOwner = true;
+
+                    // For the owner, query ElectrumX for the real-time deposit address balance
+                    if (!string.IsNullOrEmpty(contract.DepositAddress))
+                    {
+                        try
+                        {
+                            using var client = await ReserveBlockCore.Bitcoin.Bitcoin.ElectrumXClient();
+                            if (client != null)
+                            {
+                                var balance = await client.GetBalance(contract.DepositAddress, false);
+                                depositBalance = balance.Confirmed / 100_000_000M;
+                            }
+                            else
+                            {
+                                depositBalance = contract.Balance;
+                            }
+
+                            // Also update the local contract balance while we have it
+                            if (contract.Balance != depositBalance)
+                            {
+                                contract.Balance = depositBalance;
+                                VBTCContractV2.UpdateContract(contract);
+                            }
+                        }
+                        catch (Exception elxEx)
+                        {
+                            // If ElectrumX is unavailable, fall back to cached local balance
+                            depositBalance = contract.Balance;
+                            ErrorLogUtility.LogError($"ElectrumX query failed, using cached balance: {elxEx.Message}", "VBTCController.GetVBTCBalance");
+                        }
+                    }
                 }
+
+                // Owner balance = deposit address balance + ledger balance
+                // Non-owner balance = just ledger balance
+                decimal totalBalance = isOwner ? depositBalance + ledgerBalance : ledgerBalance;
 
                 // Get pending withdrawal amount (locked funds)
                 var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, scUID);
@@ -1963,8 +1998,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     Message = "Balance retrieved successfully",
                     Address = address,
                     SmartContractUID = scUID,
-                    Balance = balance,
-                    AvailableBalance = balance - pendingWithdrawals,
+                    Balance = totalBalance,
+                    DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
+                    LedgerBalance = ledgerBalance,
+                    AvailableBalance = totalBalance - pendingWithdrawals,
                     PendingWithdrawals = pendingWithdrawals,
                     IsOwner = isOwner,
                     TransactionCount = scState.SCStateTreiTokenizationTXes?.Count(x => x.FromAddress == address || x.ToAddress == address) ?? 0
@@ -2002,6 +2039,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     {
                         // Get contract state from State Trei to calculate current balance
                         var scState = SmartContractStateTrei.GetSmartContractState(contract.SmartContractUID);
+                        
+                        decimal ledgerBalance = 0.0M;
+                        int txCount = 0;
+
                         if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                         {
                             var transactions = scState.SCStateTreiTokenizationTXes
@@ -2010,30 +2051,63 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                             if (transactions.Any())
                             {
-                                // Calculate balance
-                                var received = transactions.Where(x => x.ToAddress == address).Sum(x => x.Amount);
-                                var sent = transactions.Where(x => x.FromAddress == address).Sum(x => x.Amount);
-                                var contractBalance = received - sent;
+                                ledgerBalance = transactions.Sum(x => x.Amount);
+                                txCount = transactions.Count;
+                            }
+                        }
 
-                                if (contractBalance > 0)
+                        // Check if this address is the owner (check both local DB and state trei)
+                        bool isOwner = contract.OwnerAddress == address || scState?.OwnerAddress == address;
+                        decimal depositBalance = 0.0M;
+
+                        if (isOwner && !string.IsNullOrEmpty(contract.DepositAddress))
+                        {
+                            try
+                            {
+                                using var elxClient = await ReserveBlockCore.Bitcoin.Bitcoin.ElectrumXClient();
+                                if (elxClient != null)
                                 {
-                                    var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, contract.SmartContractUID);
+                                    var balance = await elxClient.GetBalance(contract.DepositAddress, false);
+                                    depositBalance = balance.Confirmed / 100_000_000M;
+                                }
+                                else
+                                {
+                                    depositBalance = contract.Balance;
+                                }
 
-                                    contractBalances.Add(new
-                                    {
-                                        SmartContractUID = contract.SmartContractUID,
-                                        DepositAddress = contract.DepositAddress,
-                                        Balance = contractBalance,
-                                        AvailableBalance = contractBalance - pendingWithdrawals,
-                                        PendingWithdrawals = pendingWithdrawals,
-                                        TransactionCount = transactions.Count,
-                                        IsOwner = contract.OwnerAddress == address,
-                                        WithdrawalStatus = contract.WithdrawalStatus.ToString()
-                                    });
-
-                                    totalBalance += contractBalance;
+                                if (contract.Balance != depositBalance)
+                                {
+                                    contract.Balance = depositBalance;
+                                    VBTCContractV2.UpdateContract(contract);
                                 }
                             }
+                            catch
+                            {
+                                depositBalance = contract.Balance;
+                            }
+                        }
+
+                        decimal contractBalance = isOwner ? depositBalance + ledgerBalance : ledgerBalance;
+
+                        if (contractBalance > 0 || isOwner)
+                        {
+                            var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, contract.SmartContractUID);
+
+                            contractBalances.Add(new
+                            {
+                                SmartContractUID = contract.SmartContractUID,
+                                DepositAddress = contract.DepositAddress,
+                                Balance = contractBalance,
+                                DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
+                                LedgerBalance = ledgerBalance,
+                                AvailableBalance = contractBalance - pendingWithdrawals,
+                                PendingWithdrawals = pendingWithdrawals,
+                                TransactionCount = txCount,
+                                IsOwner = isOwner,
+                                WithdrawalStatus = contract.WithdrawalStatus.ToString()
+                            });
+
+                            totalBalance += contractBalance;
                         }
                     }
                 }

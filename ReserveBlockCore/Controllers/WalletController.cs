@@ -145,25 +145,69 @@ namespace ReserveBlockCore.Controllers
         {
             try
             {
-                var contracts = VBTCContractV2.GetContractsByOwner(address);
-                if (contracts == null || !contracts.Any())
+                // Find all vBTC contracts where address is owner OR has a balance via tokenization TXes
+                var scStates = SmartContractStateTrei.GetvBTCSmartContracts(address);
+                if (scStates == null || !scStates.Any())
                     return Ok(Array.Empty<object>());
 
-                var result = contracts.Select(c => new
-                {
-                    scUID = c.SmartContractUID,
-                    ownerAddress = c.OwnerAddress,
-                    depositAddress = c.DepositAddress,
-                    balance = c.Balance,
-                    withdrawalStatus = c.WithdrawalStatus.ToString(),
-                    activeWithdrawalAmount = c.ActiveWithdrawalAmount,
-                    activeWithdrawalDest = c.ActiveWithdrawalBTCDestination,
-                    proofBlockHeight = c.ProofBlockHeight,
-                    totalValidators = c.TotalRegisteredValidators,
-                    requiredThreshold = c.RequiredThreshold
-                });
+                var resultList = new List<object>();
+                var seen = new HashSet<string>();
 
-                return Ok(result);
+                foreach (var scState in scStates)
+                {
+                    bool isOwner = scState.OwnerAddress == address;
+
+                    // Calculate ledger balance from tokenization TXes
+                    decimal ledgerBalance = 0M;
+                    if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                    {
+                        var transactions = scState.SCStateTreiTokenizationTXes
+                            .Where(x => x.FromAddress == address || x.ToAddress == address)
+                            .ToList();
+                        if (transactions.Any())
+                            ledgerBalance = transactions.Sum(x => x.Amount);
+                    }
+
+                    decimal totalBalance = ledgerBalance;
+                    string depositAddress = "";
+
+                    if (isOwner)
+                    {
+                        // Owner: add deposit address balance from local contract
+                        var contract = VBTCContractV2.GetContract(scState.SmartContractUID);
+                        if (contract != null)
+                        {
+                            depositAddress = contract.DepositAddress ?? "";
+                            totalBalance = contract.Balance + ledgerBalance;
+                        }
+                    }
+
+                    // Only include once per contract (deduplicate owner appearing in both owner + tx queries)
+                    if (!seen.Add(scState.SmartContractUID))
+                        continue;
+
+                    if (totalBalance > 0M || isOwner)
+                    {
+                        var contract = VBTCContractV2.GetContract(scState.SmartContractUID);
+                        resultList.Add(new
+                        {
+                            scUID = scState.SmartContractUID,
+                            ownerAddress = scState.OwnerAddress,
+                            depositAddress = depositAddress,
+                            balance = totalBalance,
+                            ledgerBalance = ledgerBalance,
+                            isOwner = isOwner,
+                            withdrawalStatus = contract?.WithdrawalStatus.ToString() ?? "None",
+                            activeWithdrawalAmount = contract?.ActiveWithdrawalAmount ?? 0M,
+                            activeWithdrawalDest = contract?.ActiveWithdrawalBTCDestination ?? "",
+                            proofBlockHeight = contract?.ProofBlockHeight ?? 0,
+                            totalValidators = contract?.TotalRegisteredValidators ?? 0,
+                            requiredThreshold = contract?.RequiredThreshold ?? 0
+                        });
+                    }
+                }
+
+                return Ok(resultList);
             }
             catch (Exception ex)
             {
