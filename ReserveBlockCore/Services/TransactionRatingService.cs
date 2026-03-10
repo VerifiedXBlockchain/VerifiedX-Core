@@ -67,6 +67,20 @@ namespace ReserveBlockCore.Services
                     rating = TransactionRating.A;
                 }
 
+                // vBTC V2 transaction types — all rated A (high priority, fee-free by design)
+                if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER ||
+                    tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE ||
+                    tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER ||
+                    tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_EXIT ||
+                    tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT ||
+                    tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST ||
+                    tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE ||
+                    tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL ||
+                    tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                {
+                    rating = TransactionRating.A;
+                }
+
                 return rating;
             }
             catch(Exception ex)

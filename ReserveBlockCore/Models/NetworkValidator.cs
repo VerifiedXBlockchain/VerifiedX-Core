@@ -86,7 +86,9 @@ namespace ReserveBlockCore.Models
                     {
                         networkVal.ConfirmingSources.Add(advertisingPeerIP);
                     }
-                    validator.CheckFailCount = networkVal.CheckFailCount;
+                    // Reset fail count on re-advertisement — the validator is clearly online
+                    // if it's being advertised by peers again
+                    validator.CheckFailCount = 0;
                     validator.ConfirmingSources = networkVal.ConfirmingSources;
                     validator.IsFullyTrusted = networkVal.IsFullyTrusted;
                     validator.LastSeen = TimeUtil.GetTime(); // HAL-26 Fix: Update last seen timestamp
@@ -202,7 +204,7 @@ namespace ReserveBlockCore.Models
             var currentTime = TimeUtil.GetTime();
             var pendingStaleThreshold = currentTime - 3600; // 1 hour for pending validators
             var mainRegistryStaleThreshold = currentTime - 86400; // 24 hours for main registry
-            var failCountThreshold = 5; // Remove validators with high fail counts
+            var failCountThreshold = 50; // Remove validators with very high sustained fail counts
 
             // Cleanup pending validators (1 hour inactivity)
             var stalePendingValidators = _pendingValidators.Where(kvp => kvp.Value.FirstAdvertised < pendingStaleThreshold).ToList();
@@ -214,12 +216,17 @@ namespace ReserveBlockCore.Models
             }
 
             // HAL-26 Fix: Cleanup main NetworkValidators registry
+            // Never prune our own validator address from the registry
+            var selfAddress = Globals.ValidatorAddress;
             var staleMainValidators = Globals.NetworkValidators
                 .Where(kvp => 
-                    // Remove if not seen in 24 hours
-                    (kvp.Value.LastSeen > 0 && kvp.Value.LastSeen < mainRegistryStaleThreshold) ||
-                    // Remove if has high fail count
-                    kvp.Value.CheckFailCount > failCountThreshold)
+                    kvp.Key != selfAddress && // Never prune self
+                    (
+                        // Remove if not seen in 24 hours
+                        (kvp.Value.LastSeen > 0 && kvp.Value.LastSeen < mainRegistryStaleThreshold) ||
+                        // Remove if has high fail count
+                        kvp.Value.CheckFailCount > failCountThreshold
+                    ))
                 .ToList();
 
             int removedCount = 0;
