@@ -341,6 +341,41 @@ namespace ReserveBlockCore.Controllers
             public string RequestHash { get; set; } = "";
         }
 
+        // ── vBTC Transfer (send vBTC to another VFX address) ──────────────────────
+        [HttpPost("api/vbtc/transfer")]
+        public async Task<IActionResult> VBTCTransfer([FromBody] VBTCTransferRequest req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.FromAddress) ||
+                    string.IsNullOrWhiteSpace(req.ToAddress) || string.IsNullOrWhiteSpace(req.Amount))
+                    return BadRequest(new { success = false, message = "scUID, fromAddress, toAddress, and amount are required." });
+
+                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
+                    return BadRequest(new { success = false, message = "Invalid amount." });
+
+                var addrValid = AddressValidateUtility.ValidateAddress(req.ToAddress);
+                if (!addrValid)
+                    return BadRequest(new { success = false, message = "Invalid destination VFX address." });
+
+                var result = await Bitcoin.Services.VBTCService.TransferVBTC(req.ScUID, req.FromAddress, req.ToAddress, amount);
+                return Ok(new { success = result.Item1, message = result.Item2 });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = ex.Message });
+            }
+        }
+
+        public class VBTCTransferRequest
+        {
+            public string ScUID { get; set; } = "";
+            public string FromAddress { get; set; } = "";
+            public string ToAddress { get; set; } = "";
+            public string Amount { get; set; } = "";
+        }
+
         // ── Embedded HTML ─────────────────────────────────────────────────────────
         private static string GetHtml() => @"<!DOCTYPE html>
 <html lang='en'>
@@ -691,6 +726,39 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
   </div>
 </div>
 
+<!-- Send vBTC Modal -->
+<div class='overlay' id='vbtc-tx-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8383; Send vBTC</div>
+      <button class='modal-close' onclick='closeVBTCTx()'>&#215;</button>
+    </div>
+    <input type='hidden' id='vbtc-tx-scuid'>
+    <input type='hidden' id='vbtc-tx-from'>
+    <div class='form-grp'>
+      <label>Contract</label>
+      <input class='form-inp' id='vbtc-tx-contract-disp' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>From</label>
+      <input class='form-inp' id='vbtc-tx-from-disp' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>To (VFX Address)</label>
+      <input class='form-inp' id='vbtc-tx-to' type='text' placeholder='Enter destination VFX address...'>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (vBTC)</label>
+      <input class='form-inp' id='vbtc-tx-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='msg' id='vbtc-tx-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeVBTCTx()'>Cancel</button>
+      <button class='btn-prim' id='vbtc-tx-btn' onclick='doVBTCTransfer()'>Send vBTC</button>
+    </div>
+  </div>
+</div>
+
 <!-- Send BTC Modal -->
 <div class='overlay' id='btc-overlay'>
   <div class='modal'>
@@ -875,6 +943,7 @@ function renderVBTC(contracts){
     var canRequest=c.balance>0&&(c.withdrawalStatus==='None'||c.withdrawalStatus==='Completed');
     var canComplete=c.withdrawalStatus==='Requested';
     var btns='<div class=""nft-actions"" style=""margin-top:6px"">';
+    if(c.balance>0)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx(\''+esc(c.scUID)+'\','+c.balance+')"">&rarr; Send vBTC</button>';
     if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD(\''+esc(c.scUID)+'\',\''+esc(c.ownerAddress)+'\','+c.balance+')"">&darr; Withdraw</button>';
     if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC(\''+esc(c.scUID)+'\','+c.activeWithdrawalAmount+',\''+esc(c.activeWithdrawalDest||'')+'\')"">&check; Complete Withdrawal</button>';
     btns+='</div>';
@@ -1164,6 +1233,45 @@ window.doWDComplete=function(){
   }).catch(function(e){
     btn.disabled=false;btn.textContent='Complete Withdrawal';
     showMsg('wdc-msg',e.message||'Request failed.','err');
+  });
+};
+
+/* ---- Send vBTC (transfer to another VFX address) ---- */
+window.openVBTCTx=function(scUID,bal){
+  el('vbtc-tx-scuid').value=scUID;
+  el('vbtc-tx-from').value=selAddr||'';
+  el('vbtc-tx-contract-disp').value=scUID;
+  el('vbtc-tx-from-disp').value=selAddr||'';
+  el('vbtc-tx-to').value='';
+  el('vbtc-tx-amount').value='';
+  hideMsg('vbtc-tx-msg');
+  el('vbtc-tx-overlay').classList.add('on');
+};
+window.closeVBTCTx=function(){el('vbtc-tx-overlay').classList.remove('on');};
+
+window.doVBTCTransfer=function(){
+  var scUID=el('vbtc-tx-scuid').value;
+  var from=el('vbtc-tx-from').value;
+  var to=el('vbtc-tx-to').value.trim();
+  var amt=el('vbtc-tx-amount').value.trim();
+  if(!to||!amt){showMsg('vbtc-tx-msg','Please fill To address and Amount.','err');return;}
+  var btn=el('vbtc-tx-btn');
+  btn.disabled=true;btn.textContent='Sending...';
+  fetch('/wallet/api/vbtc/transfer',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ScUID:scUID,FromAddress:from,ToAddress:to,Amount:amt})
+  }).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Send vBTC';
+    if(d.success){
+      showMsg('vbtc-tx-msg','vBTC sent successfully! TX: '+(d.message||''),'ok');
+      setTimeout(function(){closeVBTCTx();tabLoaded.vbtc=false;loadVBTC();},2500);
+    }else{
+      showMsg('vbtc-tx-msg',d.message||'Transfer failed.','err');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.textContent='Send vBTC';
+    showMsg('vbtc-tx-msg',e.message||'Request failed.','err');
   });
 };
 
