@@ -523,6 +523,19 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             // We parse each as a JSON object, extract the identifier, and use it as the map key.
                             var addressCommitments = JsonConvert.DeserializeObject<Dictionary<string, string>>(body);
                             var myAddress = Globals.ValidatorAddress;
+
+                            // DEBUG: Log actual commitment data format to understand FROST serialization
+                            if (addressCommitments != null && addressCommitments.Count > 0)
+                            {
+                                var sample = addressCommitments.First();
+                                var valPreview = sample.Value?.Length > 500 ? sample.Value.Substring(0, 500) : sample.Value;
+                                LogUtility.Log($"[FROST DEBUG] Round2 received {addressCommitments.Count} commitments. Sample key='{sample.Key}', value(first 500)='{valPreview}'", "FrostStartup.DKGRound2");
+                            }
+                            else
+                            {
+                                LogUtility.Log($"[FROST DEBUG] Round2 addressCommitments is null or empty. Body length={body?.Length ?? 0}, body(first 300)='{body?.Substring(0, Math.Min(300, body?.Length ?? 0))}'", "FrostStartup.DKGRound2");
+                            }
+
                             var btreeMap = new Newtonsoft.Json.Linq.JObject();
                             if (addressCommitments != null)
                             {
@@ -533,11 +546,25 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                     try
                                     {
                                         var packageJson = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                                        // DEBUG: Log parsed structure
+                                        var fieldNames = packageJson is Newtonsoft.Json.Linq.JObject obj ? string.Join(",", obj.Properties().Select(p => p.Name)) : "NOT_AN_OBJECT";
+                                        LogUtility.Log($"[FROST DEBUG] Parsed commitment for '{kvp.Key}': fields=[{fieldNames}], type={packageJson.Type}", "FrostStartup.DKGRound2");
+                                        
                                         var identifier = packageJson["identifier"]?.ToString();
                                         if (!string.IsNullOrEmpty(identifier))
+                                        {
                                             btreeMap[identifier] = packageJson;
+                                            LogUtility.Log($"[FROST DEBUG] Added to BTreeMap: identifier='{identifier}'", "FrostStartup.DKGRound2");
+                                        }
+                                        else
+                                        {
+                                            LogUtility.Log($"[FROST DEBUG] No 'identifier' field found in commitment for '{kvp.Key}'", "FrostStartup.DKGRound2");
+                                        }
                                     }
-                                    catch { /* skip malformed commitment */ }
+                                    catch (Exception parseEx)
+                                    {
+                                        LogUtility.Log($"[FROST DEBUG] Failed to parse commitment for '{kvp.Key}': {parseEx.Message}. Raw value(first 200)='{kvp.Value?.Substring(0, Math.Min(200, kvp.Value?.Length ?? 0))}'", "FrostStartup.DKGRound2");
+                                    }
                                 }
                             }
                             var remappedCommitments = btreeMap.ToString(Newtonsoft.Json.Formatting.None);
