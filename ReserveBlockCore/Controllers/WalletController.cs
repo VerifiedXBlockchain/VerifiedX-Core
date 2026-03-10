@@ -253,6 +253,94 @@ namespace ReserveBlockCore.Controllers
             public string Amount { get; set; } = "";
         }
 
+        // ── vBTC Withdrawal: Request ──────────────────────────────────────────────
+        [HttpPost("api/vbtc/withdraw/request")]
+        public async Task<IActionResult> VBTCWithdrawRequest([FromBody] VBTCWDRequest req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.OwnerAddress) ||
+                    string.IsNullOrWhiteSpace(req.BTCAddress) || string.IsNullOrWhiteSpace(req.Amount))
+                    return BadRequest(new { success = false, message = "scUID, ownerAddress, btcAddress, and amount are required." });
+
+                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
+                    return BadRequest(new { success = false, message = "Invalid amount." });
+
+                int feeRate = 10;
+                if (!string.IsNullOrWhiteSpace(req.FeeRate) && int.TryParse(req.FeeRate, out int fr) && fr > 0)
+                    feeRate = fr;
+
+                var result = await Bitcoin.Services.VBTCService.RequestWithdrawal(req.ScUID, req.OwnerAddress, req.BTCAddress, amount, feeRate);
+                return Ok(new { success = result.Item1, message = result.Item2 });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = ex.Message });
+            }
+        }
+
+        // ── vBTC Withdrawal: Complete ─────────────────────────────────────────────
+        [HttpPost("api/vbtc/withdraw/complete")]
+        public async Task<IActionResult> VBTCWithdrawComplete([FromBody] VBTCWDComplete req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.RequestHash))
+                    return BadRequest(new { success = false, message = "scUID and requestHash are required." });
+
+                var result = await Bitcoin.Services.VBTCService.CompleteWithdrawal(req.ScUID, req.RequestHash);
+                if (result.Success)
+                    return Ok(new { success = true, message = "Withdrawal completed!", vfxTxHash = result.VFXTxHash, btcTxHash = result.BTCTxHash });
+                else
+                    return Ok(new { success = false, message = result.ErrorMessage });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = ex.Message });
+            }
+        }
+
+        // ── vBTC Withdrawal: Status ───────────────────────────────────────────────
+        [HttpGet("api/vbtc/withdraw/status/{scUID}")]
+        public IActionResult VBTCWithdrawStatus(string scUID)
+        {
+            try
+            {
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                    return Ok(new { success = false, message = "Contract not found" });
+
+                return Ok(new
+                {
+                    success = true,
+                    status = contract.WithdrawalStatus.ToString(),
+                    amount = contract.ActiveWithdrawalAmount ?? 0M,
+                    destination = contract.ActiveWithdrawalBTCDestination ?? "",
+                    requestHash = contract.ActiveWithdrawalRequestHash ?? ""
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = ex.Message });
+            }
+        }
+
+        public class VBTCWDRequest
+        {
+            public string ScUID { get; set; } = "";
+            public string OwnerAddress { get; set; } = "";
+            public string BTCAddress { get; set; } = "";
+            public string Amount { get; set; } = "";
+            public string FeeRate { get; set; } = "10";
+        }
+
+        public class VBTCWDComplete
+        {
+            public string ScUID { get; set; } = "";
+            public string RequestHash { get; set; } = "";
+        }
+
         // ── Embedded HTML ─────────────────────────────────────────────────────────
         private static string GetHtml() => @"<!DOCTYPE html>
 <html lang='en'>
@@ -538,6 +626,71 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
   </div>
 </div>
 
+<!-- vBTC Withdrawal Modal -->
+<div class='overlay' id='wd-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8383; vBTC Withdrawal</div>
+      <button class='modal-close' onclick='closeWD()'>&#215;</button>
+    </div>
+    <input type='hidden' id='wd-scuid'>
+    <input type='hidden' id='wd-owner'>
+    <div class='form-grp'>
+      <label>Contract</label>
+      <input class='form-inp' id='wd-contract-disp' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>Destination BTC Address</label>
+      <input class='form-inp' id='wd-btcaddr' type='text' placeholder='Enter Bitcoin address to receive BTC...'>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (BTC)</label>
+      <input class='form-inp' id='wd-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='form-grp'>
+      <label>Fee Rate (sat/vbyte)</label>
+      <input class='form-inp' id='wd-fee' type='text' placeholder='10' value='10'>
+    </div>
+    <div class='msg' id='wd-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeWD()'>Cancel</button>
+      <button class='btn-prim' id='wd-btn' onclick='doWDRequest()'>Request Withdrawal</button>
+    </div>
+  </div>
+</div>
+
+<!-- vBTC Complete Withdrawal Modal -->
+<div class='overlay' id='wdc-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8383; Complete Withdrawal</div>
+      <button class='modal-close' onclick='closeWDC()'>&#215;</button>
+    </div>
+    <input type='hidden' id='wdc-scuid'>
+    <input type='hidden' id='wdc-hash'>
+    <div class='form-grp'>
+      <label>Contract</label>
+      <input class='form-inp' id='wdc-contract-disp' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>Pending Amount</label>
+      <input class='form-inp' id='wdc-amount-disp' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>Destination</label>
+      <input class='form-inp' id='wdc-dest-disp' type='text' readonly>
+    </div>
+    <div style='padding:12px;background:rgba(227,179,65,.1);border:1px solid rgba(227,179,65,.2);border-radius:8px;font-size:13px;color:var(--orange);margin-bottom:12px'>
+      This will coordinate a FROST MPC signing ceremony with validators and broadcast the Bitcoin transaction.
+    </div>
+    <div class='msg' id='wdc-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeWDC()'>Cancel</button>
+      <button class='btn-prim' id='wdc-btn' onclick='doWDComplete()'>Complete Withdrawal</button>
+    </div>
+  </div>
+</div>
+
 <!-- Send BTC Modal -->
 <div class='overlay' id='btc-overlay'>
   <div class='modal'>
@@ -719,6 +872,12 @@ function renderVBTC(contracts){
   }
   var cards=contracts.map(function(c){
     var statusCls=c.withdrawalStatus==='None'?'badge-ok':c.withdrawalStatus==='Pending'?'badge-pend':'badge-tok';
+    var canRequest=c.balance>0&&(c.withdrawalStatus==='None'||c.withdrawalStatus==='Completed');
+    var canComplete=c.withdrawalStatus==='Requested';
+    var btns='<div class=""nft-actions"" style=""margin-top:6px"">';
+    if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD(\''+esc(c.scUID)+'\',\''+esc(c.ownerAddress)+'\','+c.balance+')"">&darr; Withdraw</button>';
+    if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC(\''+esc(c.scUID)+'\','+c.activeWithdrawalAmount+',\''+esc(c.activeWithdrawalDest||'')+'\')"">&check; Complete Withdrawal</button>';
+    btns+='</div>';
     return '<div class=""vbtc-card"">'+
       '<div class=""muted"" style=""font-size:11px;font-family:monospace"">'+esc(c.scUID||'')+'</div>'+
       '<div class=""vbtc-bal"">'+fmtBal(c.balance)+'<span>vBTC</span></div>'+
@@ -727,6 +886,7 @@ function renderVBTC(contracts){
       (c.activeWithdrawalAmount?'<div class=""vbtc-row""><span class=""k"">Pending Withdrawal</span><span class=""v org"">'+c.activeWithdrawalAmount+' BTC &rarr; '+esc(c.activeWithdrawalDest||'')+'</span></div>':'')+
       '<div class=""vbtc-row""><span class=""k"">Validators</span><span class=""v"">'+c.totalValidators+' (threshold: '+c.requiredThreshold+')</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">Proof Block</span><span class=""v"">#'+c.proofBlockHeight+'</span></div>'+
+      btns+
       '</div>';
   }).join('');
   el('vbtc-content').innerHTML='<div class=""vbtc-grid"">'+cards+'</div>';
@@ -915,6 +1075,96 @@ window.doTransferToken=function(){
       btn.disabled=false;btn.textContent='Send';
       showMsg('tok-msg',e.message||'Transfer failed.','err');
     });
+};
+
+/* ---- vBTC Withdrawal Request ---- */
+window.openWD=function(scUID,owner,bal){
+  el('wd-scuid').value=scUID;
+  el('wd-owner').value=owner;
+  el('wd-contract-disp').value=scUID;
+  el('wd-btcaddr').value='';
+  el('wd-amount').value=bal>0?bal.toFixed(8):'';
+  el('wd-fee').value='10';
+  hideMsg('wd-msg');
+  el('wd-overlay').classList.add('on');
+};
+window.closeWD=function(){el('wd-overlay').classList.remove('on');};
+
+window.doWDRequest=function(){
+  var scUID=el('wd-scuid').value;
+  var owner=el('wd-owner').value;
+  var btcAddr=el('wd-btcaddr').value.trim();
+  var amt=el('wd-amount').value.trim();
+  var fee=el('wd-fee').value.trim()||'10';
+  if(!btcAddr||!amt){showMsg('wd-msg','Please fill BTC address and amount.','err');return;}
+  var btn=el('wd-btn');
+  btn.disabled=true;btn.textContent='Requesting...';
+  fetch('/wallet/api/vbtc/withdraw/request',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ScUID:scUID,OwnerAddress:owner,BTCAddress:btcAddr,Amount:amt,FeeRate:fee})
+  }).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Request Withdrawal';
+    if(d.success){
+      showMsg('wd-msg','Withdrawal request submitted! Wait for it to be mined, then click Complete Withdrawal.','ok');
+      setTimeout(function(){closeWD();tabLoaded.vbtc=false;loadVBTC();},3000);
+    }else{
+      showMsg('wd-msg',d.message||'Request failed.','err');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.textContent='Request Withdrawal';
+    showMsg('wd-msg',e.message||'Request failed.','err');
+  });
+};
+
+/* ---- vBTC Complete Withdrawal ---- */
+window.openWDC=function(scUID,amt,dest){
+  el('wdc-scuid').value=scUID;
+  el('wdc-contract-disp').value=scUID;
+  el('wdc-amount-disp').value=amt?amt.toFixed(8)+' BTC':'Unknown';
+  el('wdc-dest-disp').value=dest||'Unknown';
+  el('wdc-hash').value='';
+  hideMsg('wdc-msg');
+  showMsg('wdc-msg','Fetching withdrawal status...','ok');
+  fetch('/wallet/api/vbtc/withdraw/status/'+encodeURIComponent(scUID))
+    .then(function(r){return r.json();}).then(function(d){
+      if(d.success&&d.requestHash){
+        el('wdc-hash').value=d.requestHash;
+        el('wdc-amount-disp').value=(d.amount||amt||0).toFixed(8)+' BTC';
+        el('wdc-dest-disp').value=d.destination||dest||'';
+        hideMsg('wdc-msg');
+      }else{
+        showMsg('wdc-msg','Could not find request hash. The request may still be pending in the mempool.','err');
+      }
+    }).catch(function(){hideMsg('wdc-msg');});
+  el('wdc-overlay').classList.add('on');
+};
+window.closeWDC=function(){el('wdc-overlay').classList.remove('on');};
+
+window.doWDComplete=function(){
+  var scUID=el('wdc-scuid').value;
+  var hash=el('wdc-hash').value;
+  if(!hash){showMsg('wdc-msg','No withdrawal request hash found. Wait for the request TX to be mined.','err');return;}
+  var btn=el('wdc-btn');
+  btn.disabled=true;btn.textContent='Completing... (FROST signing)';
+  fetch('/wallet/api/vbtc/withdraw/complete',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ScUID:scUID,RequestHash:hash})
+  }).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Complete Withdrawal';
+    if(d.success){
+      var msg='Withdrawal completed! BTC TX: '+(d.btcTxHash||'pending');
+      if(d.vfxTxHash)msg+=' | VFX TX: '+d.vfxTxHash;
+      showMsg('wdc-msg',msg,'ok');
+      setTimeout(function(){closeWDC();tabLoaded.vbtc=false;loadVBTC();},4000);
+    }else{
+      showMsg('wdc-msg',d.message||'Completion failed.','err');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.textContent='Complete Withdrawal';
+    showMsg('wdc-msg',e.message||'Request failed.','err');
+  });
 };
 
 /* ---- Send BTC ---- */
