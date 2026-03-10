@@ -518,22 +518,27 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Remap commitment keys from VFX addresses to numeric participant IDs
-                            // The FROST native library expects {"1":"<data>","2":"<data>",...} not {"xAddr...":"<data>",...}
+                            // Build BTreeMap<Identifier, Package> JSON that FROST native expects.
+                            // Each commitment is a serialized round1::Package containing its own FROST Identifier.
+                            // We parse each as a JSON object, extract the identifier, and use it as the map key.
                             var addressCommitments = JsonConvert.DeserializeObject<Dictionary<string, string>>(body);
-                            var idCommitments = new Dictionary<string, string>();
-                            if (addressCommitments != null && session.ParticipantAddresses != null)
+                            var btreeMap = new Newtonsoft.Json.Linq.JObject();
+                            if (addressCommitments != null)
                             {
                                 foreach (var kvp in addressCommitments)
                                 {
-                                    var idx = session.ParticipantAddresses.IndexOf(kvp.Key);
-                                    if (idx >= 0)
+                                    try
                                     {
-                                        idCommitments[(idx + 1).ToString()] = kvp.Value; // 1-based participant IDs
+                                        var packageJson = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                                        var identifier = packageJson["identifier"]?.ToString();
+                                        if (!string.IsNullOrEmpty(identifier))
+                                            btreeMap[identifier] = packageJson;
                                     }
+                                    catch { /* skip malformed commitment */ }
                                 }
                             }
-                            var remappedCommitments = JsonConvert.SerializeObject(idCommitments);
+                            var remappedCommitments = btreeMap.ToString(Newtonsoft.Json.Formatting.None);
+                            LogUtility.Log($"[FROST] Round 2 BTreeMap built with {btreeMap.Count} entries for session {sessionId}", "FrostStartup.DKGRound2");
 
                             // Call FROST native library to generate shares for other participants
                             var (sharesJson, round2Secret, errorCode) = FrostNative.DKGRound2GenerateShares(
@@ -941,22 +946,20 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             {
                                 if (!string.IsNullOrEmpty(session.Round2Secret))
                                 {
-                                    // Remap from VFX addresses to numeric participant IDs for FROST native
-                                    var r1IdMap = new Dictionary<string, string>();
+                                    // Build BTreeMap JSON using FROST Identifiers from Package data
+                                    var r1Map = new Newtonsoft.Json.Linq.JObject();
                                     foreach (var c in session.Round1Commitments)
                                     {
-                                        var ci = session.ParticipantAddresses.IndexOf(c.Key);
-                                        if (ci >= 0) r1IdMap[(ci + 1).ToString()] = c.Value;
+                                        try { var p = Newtonsoft.Json.Linq.JToken.Parse(c.Value); var id = p["identifier"]?.ToString(); if (!string.IsNullOrEmpty(id)) r1Map[id] = p; } catch { }
                                     }
-                                    var round1Json = JsonConvert.SerializeObject(r1IdMap);
+                                    var round1Json = r1Map.ToString(Newtonsoft.Json.Formatting.None);
 
-                                    var s2IdMap = new Dictionary<string, string>();
+                                    var s2Map = new Newtonsoft.Json.Linq.JObject();
                                     foreach (var s in session.ReceivedSharesJson)
                                     {
-                                        var si = session.ParticipantAddresses.IndexOf(s.Key);
-                                        if (si >= 0) s2IdMap[(si + 1).ToString()] = s.Value;
+                                        try { var p = Newtonsoft.Json.Linq.JToken.Parse(s.Value); var id = p["identifier"]?.ToString(); if (!string.IsNullOrEmpty(id)) s2Map[id] = p; } catch { }
                                     }
-                                    var receivedSharesJsonStr = JsonConvert.SerializeObject(s2IdMap);
+                                    var receivedSharesJsonStr = s2Map.ToString(Newtonsoft.Json.Formatting.None);
 
                                     var (groupPubkey, keyPackage, pubkeyPackage, finalizeError) = FrostNative.DKGRound3Finalize(
                                         session.Round2Secret, round1Json, receivedSharesJsonStr);
@@ -1866,23 +1869,36 @@ namespace ReserveBlockCore.Bitcoin.FROST
                     return false;
                 }
 
-                // Remap Round 1 commitments from VFX addresses to numeric participant IDs
-                var round1IdMap = new Dictionary<string, string>();
+                // Build BTreeMap<Identifier, round1::Package> from commitments
+                // Extract the FROST Identifier from each Package JSON and use it as the map key
+                var round1BTreeMap = new Newtonsoft.Json.Linq.JObject();
                 foreach (var kvp in session.Round1Commitments)
                 {
-                    var idx = session.ParticipantAddresses.IndexOf(kvp.Key);
-                    if (idx >= 0) round1IdMap[(idx + 1).ToString()] = kvp.Value;
+                    try
+                    {
+                        var pkg = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                        var id = pkg["identifier"]?.ToString();
+                        if (!string.IsNullOrEmpty(id)) round1BTreeMap[id] = pkg;
+                    }
+                    catch { }
                 }
-                var round1Json = JsonConvert.SerializeObject(round1IdMap);
+                var round1Json = round1BTreeMap.ToString(Newtonsoft.Json.Formatting.None);
 
-                // Remap received shares from VFX addresses to numeric participant IDs
-                var sharesIdMap = new Dictionary<string, string>();
+                // Build BTreeMap<Identifier, round2::Package> from received shares
+                var sharesBTreeMap = new Newtonsoft.Json.Linq.JObject();
                 foreach (var kvp in session.ReceivedSharesJson)
                 {
-                    var idx = session.ParticipantAddresses.IndexOf(kvp.Key);
-                    if (idx >= 0) sharesIdMap[(idx + 1).ToString()] = kvp.Value;
+                    try
+                    {
+                        var pkg = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                        var id = pkg["identifier"]?.ToString();
+                        if (!string.IsNullOrEmpty(id)) sharesBTreeMap[id] = pkg;
+                    }
+                    catch { }
                 }
-                var receivedSharesJsonStr = JsonConvert.SerializeObject(sharesIdMap);
+                var receivedSharesJsonStr = sharesBTreeMap.ToString(Newtonsoft.Json.Formatting.None);
+
+                LogUtility.Log($"[FROST] TryFinalizeDKG: Round1 entries={round1BTreeMap.Count}, Shares entries={sharesBTreeMap.Count}", "FrostStartup.TryFinalizeDKG");
 
                 var (groupPubkey, keyPackage, pubkeyPackage, finalizeError) = FrostNative.DKGRound3Finalize(
                     session.Round2Secret, round1Json, receivedSharesJsonStr);
