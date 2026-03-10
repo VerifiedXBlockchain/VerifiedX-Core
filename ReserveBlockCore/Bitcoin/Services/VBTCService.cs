@@ -625,15 +625,30 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, string.Empty, $"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)");
                 }
 
-                // Get withdrawal details from contract
-                if (!vbtcContract.ActiveWithdrawalAmount.HasValue || string.IsNullOrEmpty(vbtcContract.ActiveWithdrawalBTCDestination))
-                {
-                    SCLogUtility.Log($"Invalid withdrawal details in contract", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, "Invalid withdrawal details in contract");
-                }
+                // Get withdrawal details — prefer contract Active* fields (set by StateData when TX is mined),
+                // fall back to the VBTCWithdrawalRequest record (handles Raw path and timing edge cases)
+                decimal withdrawalAmount;
+                string btcDestination;
 
-                decimal withdrawalAmount = vbtcContract.ActiveWithdrawalAmount.Value;
-                string btcDestination = vbtcContract.ActiveWithdrawalBTCDestination;
+                if (vbtcContract.ActiveWithdrawalAmount.HasValue && vbtcContract.ActiveWithdrawalAmount.Value > 0
+                    && !string.IsNullOrEmpty(vbtcContract.ActiveWithdrawalBTCDestination))
+                {
+                    withdrawalAmount = vbtcContract.ActiveWithdrawalAmount.Value;
+                    btcDestination = vbtcContract.ActiveWithdrawalBTCDestination;
+                }
+                else if (withdrawalRequest.Amount > 0 && !string.IsNullOrEmpty(withdrawalRequest.BTCDestination))
+                {
+                    // Fall back to withdrawal request record (Raw path or TX not yet mined into block)
+                    SCLogUtility.Log($"Using withdrawal request record for details (contract Active* fields not yet populated). Amount: {withdrawalRequest.Amount}, Dest: {withdrawalRequest.BTCDestination}",
+                        "VBTCService.CompleteWithdrawal()");
+                    withdrawalAmount = withdrawalRequest.Amount;
+                    btcDestination = withdrawalRequest.BTCDestination;
+                }
+                else
+                {
+                    SCLogUtility.Log($"Invalid withdrawal details in both contract and request record", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, "Invalid withdrawal details — amount/destination not found in contract or request record");
+                }
                 long feeRate = 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
 
                 // Execute FROST withdrawal (build, sign, broadcast)
@@ -682,15 +697,15 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, btcTxHash, $"Account not found: {fromAddress}");
                 }
 
-                // Create transaction data
+                // Create transaction data (use resolved withdrawal details, not contract Active* fields which may be null)
                 var txData = JsonConvert.SerializeObject(new
                 {
                     Function = "VBTCWithdrawalComplete()",
                     ContractUID = scUID,
                     WithdrawalRequestHash = withdrawalRequestHash,
                     BTCTransactionHash = btcTxHash,
-                    Amount = vbtcContract.ActiveWithdrawalAmount,
-                    Destination = vbtcContract.ActiveWithdrawalBTCDestination
+                    Amount = withdrawalAmount,
+                    Destination = btcDestination
                 });
 
                 // Build transaction

@@ -1815,10 +1815,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to save withdrawal request to database" });
                 }
 
-                // 9. Update contract withdrawal status to "Requested"
-                VBTCContractV2.UpdateWithdrawalStatus(payload.SmartContractUID, VBTCWithdrawalStatus.Requested);
-
                 var requestHash = $"{payload.VFXAddress.Substring(0, 8)}_{payload.UniqueId.Substring(0, 8)}_{currentTime}";
+
+                // 9. Update contract withdrawal status to "Requested" with full details
+                VBTCContractV2.UpdateWithdrawalStatus(payload.SmartContractUID, VBTCWithdrawalStatus.Requested,
+                    btcDestination: payload.BTCAddress, amount: payload.Amount, requestHash: requestHash);
 
                 return JsonConvert.SerializeObject(new
                 {
