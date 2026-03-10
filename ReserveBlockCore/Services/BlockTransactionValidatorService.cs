@@ -786,15 +786,23 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // FIND-002 FIX: Validate that the person completing is the original requester
+                        // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
+                        // to submit WITHDRAWAL_COMPLETE. Validators coordinate FROST signing on behalf of
+                        // requestors, so their address legitimately appears as tx.FromAddress.
                         if (withdrawalRequest.RequestorAddress != tx.FromAddress)
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: tx.FromAddress ({tx.FromAddress}) does not match original requester ({withdrawalRequest.RequestorAddress})", 
+                            var completingValidator = VBTCValidator.GetValidator(tx.FromAddress);
+                            if (completingValidator == null || !completingValidator.IsActive)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: tx.FromAddress ({tx.FromAddress}) is neither the original requester ({withdrawalRequest.RequestorAddress}) nor an active vBTC validator", 
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE: Validator {tx.FromAddress} completing withdrawal on behalf of requester {withdrawalRequest.RequestorAddress}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
                         }
 
                         // Validate the request is not already completed
