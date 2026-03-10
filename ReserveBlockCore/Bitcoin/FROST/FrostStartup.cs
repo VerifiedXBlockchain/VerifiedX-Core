@@ -2057,16 +2057,29 @@ namespace ReserveBlockCore.Bitcoin.FROST
         {
             try
             {
-                // The FROST group public key should be a 32-byte (64 hex char) x-only public key
+                // The FROST group public key may be either:
+                // - 32 bytes (64 hex chars): x-only public key (BIP340)
+                // - 33 bytes (66 hex chars): compressed public key with 02/03 prefix
                 var pubkeyBytes = Convert.FromHexString(groupPublicKeyHex);
-                if (pubkeyBytes.Length != 32)
+                byte[] xOnlyBytes;
+                if (pubkeyBytes.Length == 32)
                 {
-                    ErrorLogUtility.LogError($"FROST group public key unexpected length: {pubkeyBytes.Length} bytes (expected 32)", "FrostStartup.DeriveTaprootAddress");
+                    xOnlyBytes = pubkeyBytes;
+                }
+                else if (pubkeyBytes.Length == 33 && (pubkeyBytes[0] == 0x02 || pubkeyBytes[0] == 0x03))
+                {
+                    // Strip the prefix byte to get the 32-byte x-only key
+                    xOnlyBytes = pubkeyBytes[1..];
+                    LogUtility.Log($"[FROST] Converted 33-byte compressed pubkey to 32-byte x-only (stripped 0x{pubkeyBytes[0]:x2} prefix)", "FrostStartup.DeriveTaprootAddress");
+                }
+                else
+                {
+                    ErrorLogUtility.LogError($"FROST group public key unexpected length: {pubkeyBytes.Length} bytes (expected 32 or 33)", "FrostStartup.DeriveTaprootAddress");
                     return string.Empty;
                 }
 
                 // Create NBitcoin TaprootPubKey from 32-byte x-only key
-                var taprootPubKey = new TaprootPubKey(pubkeyBytes);
+                var taprootPubKey = new TaprootPubKey(xOnlyBytes);
 
                 // Derive the Taproot address using proper Bech32m encoding
                 var network = Globals.IsTestNet ? Network.TestNet : Network.Main;
