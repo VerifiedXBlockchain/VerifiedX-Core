@@ -2399,9 +2399,12 @@ namespace ReserveBlockCore.Services
                         if (txRequest.Amount != 0M)
                             return (txResult, "Validator registration cannot have an amount.");
                         
-                        // Anti-spam check: Ensure validator doesn't already have an active record
+                        // Anti-spam check: Ensure validator doesn't already have an active record.
+                        // Exception: if the existing record's RegisterTransactionHash matches this TX hash,
+                        // it means this TX was already processed into a block but not yet cleaned from mempool.
                         var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(validatorAddress);
-                        if (existingValidator != null && existingValidator.IsActive)
+                        if (existingValidator != null && existingValidator.IsActive 
+                            && existingValidator.RegisterTransactionHash != txRequest.Hash)
                             return (txResult, "Validator already has an active registration. Cannot register again.");
                         
                         // Ensure validator has minimum balance (5000 VFX)

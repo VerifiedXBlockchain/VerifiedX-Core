@@ -620,9 +620,14 @@ namespace ReserveBlockCore.Data
                                 var sigCheck = SignatureService.VerifySignature(tx.FromAddress, tx.Hash, signature);
                                 if (sigCheck)
                                 {
-                                    // Reject if already active in the DB — no need to register again
+                                    // Reject if already active in the DB — no need to register again.
+                                    // Exception: if the existing record's RegisterTransactionHash matches
+                                    // this TX hash, it means this TX was already processed into a block
+                                    // but not yet cleaned from mempool — allow it through (it will be
+                                    // filtered by HasTxBeenCraftedIntoBlock check later).
                                     var existingVal = Bitcoin.Models.VBTCValidator.GetValidator(tx.FromAddress);
-                                    if (existingVal != null && existingVal.IsActive)
+                                    if (existingVal != null && existingVal.IsActive 
+                                        && existingVal.RegisterTransactionHash != tx.Hash)
                                     {
                                         reject = true;
                                     }

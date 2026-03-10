@@ -281,6 +281,15 @@ namespace ReserveBlockCore.Services
 
                         await TransactionData.AddToPool(registerTx);
                         await P2PClient.SendTXMempool(registerTx);
+
+                        LogUtility.Log($"vBTC V2 validator registration transaction created and broadcast for {validator.Address}: {registerTx.Hash}",
+                            "ValidatorService.SendVBTCV2RegistrationTx()");
+
+                        // NOTE: Do NOT save the validator to the local vBTC V2 database here.
+                        // The validator will be saved when the registration TX is included in a block
+                        // and processed by BlockValidatorService. Saving prematurely would cause
+                        // the anti-spam checks in ProcessTxPool() and VerifyTX() to reject our own
+                        // TX (they check if the validator is already active in the local DB).
                     }
                     else
                     {
@@ -291,25 +300,6 @@ namespace ReserveBlockCore.Services
                 {
                     Console.WriteLine("Error: {0}", ex.ToString());
                 }
-
-                LogUtility.Log($"vBTC V2 validator registration transaction created for {validator.Address}: {registerTx.Hash}",
-                    "ValidatorService.SendVBTCV2RegistrationTx()");
-
-                // Save to local vBTC V2 database
-                var directValidator = new Bitcoin.Models.VBTCValidator
-                {
-                    ValidatorAddress = validator.Address,
-                    IPAddress = ipAddress,
-                    FrostPublicKey = validator.PublicKey,
-                    RegistrationBlockHeight = Globals.LastBlock.Height,
-                    LastHeartbeatBlock = Globals.LastBlock.Height,
-                    IsActive = true,
-                    RegistrationSignature = signature,
-                    RegisterTransactionHash = registerTx.Hash
-                };
-                Bitcoin.Models.VBTCValidator.SaveValidator(directValidator);
-                LogUtility.Log($"Directly saved validator {validator.Address} to vBTC V2 database",
-                    "ValidatorService.SendVBTCV2RegistrationTx()");
             }
             catch (Exception ex)
             {
@@ -421,6 +411,11 @@ namespace ReserveBlockCore.Services
 
                         LogUtility.Log($"vBTC V2 validator reactivation TX sent for {validator.Address}: {reactivationTx.Hash}",
                             "ValidatorService.SendVBTCV2ReactivationTx()");
+
+                        // NOTE: Do NOT update the local DB here. The validator record will be
+                        // updated when the heartbeat TX is included in a block and processed
+                        // by BlockValidatorService. Updating prematurely could cause state
+                        // inconsistency if the TX never makes it into a block.
                     }
                     else
                     {
@@ -432,14 +427,6 @@ namespace ReserveBlockCore.Services
                 {
                     Console.WriteLine("Error: {0}", ex.ToString());
                 }
-
-                // Update local DB immediately — reflect the new IP and active status
-                existingValidator.IPAddress = ipAddress;
-                existingValidator.IsActive = true;
-                existingValidator.LastHeartbeatBlock = Globals.LastBlock.Height;
-                Bitcoin.Models.VBTCValidator.SaveValidator(existingValidator);
-                LogUtility.Log($"Updated local vBTC V2 validator record for {validator.Address} (IP: {ipAddress}, IsActive: true)",
-                    "ValidatorService.SendVBTCV2ReactivationTx()");
             }
             catch (Exception ex)
             {
