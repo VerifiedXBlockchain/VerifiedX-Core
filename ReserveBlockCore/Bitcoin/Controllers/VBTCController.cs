@@ -856,6 +856,118 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
         #endregion
 
+        #region Withdrawal Delegation (FIND-027 Fix)
+
+        /// <summary>
+        /// FIND-027 Fix: Delegate withdrawal completion to a remote validator.
+        /// Non-validator wallet nodes cannot coordinate FROST signing because they lack
+        /// validator keys and FROST key packages. This mirrors the MPC ceremony delegation pattern.
+        /// </summary>
+        private async Task<string> DelegateWithdrawalToRemoteValidator(string scUID, string withdrawalRequestHash)
+        {
+            try
+            {
+                LogUtility.Log($"[FROST MPC] Non-validator node delegating withdrawal to remote validator. scUID: {scUID}", 
+                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+
+                // Discover active validators from the network
+                var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+                if (activeValidators == null || !activeValidators.Any())
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available on the network. Cannot delegate withdrawal." });
+                }
+
+                // Try each validator until one successfully handles the withdrawal
+                foreach (var validator in activeValidators)
+                {
+                    try
+                    {
+                        var ip = validator.IPAddress?.Replace("::ffff:", "");
+                        if (string.IsNullOrEmpty(ip)) continue;
+
+                        var url = $"http://{ip}:{Globals.FrostValidatorPort}/frost/mpc/withdrawal/complete";
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        client.Timeout = TimeSpan.FromSeconds(120); // Withdrawal can take time (FROST signing + BTC broadcast)
+
+                        var payload = JsonConvert.SerializeObject(new
+                        {
+                            SmartContractUID = scUID,
+                            WithdrawalRequestHash = withdrawalRequestHash
+                        });
+                        var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+
+                        var response = await client.PostAsync(url, content);
+                        if (!response.IsSuccessStatusCode) continue;
+
+                        var responseBody = await response.Content.ReadAsStringAsync();
+                        var json = JObject.Parse(responseBody);
+
+                        if (json["Success"]?.Value<bool>() == true)
+                        {
+                            LogUtility.Log($"[FROST MPC] Withdrawal delegated successfully to validator {validator.ValidatorAddress} ({ip})", 
+                                "VBTCController.DelegateWithdrawalToRemoteValidator");
+                            return responseBody; // Pass the validator's response directly back
+                        }
+                        else
+                        {
+                            var errMsg = json["Message"]?.Value<string>() ?? "Unknown error";
+                            LogUtility.Log($"[FROST MPC] Validator {validator.ValidatorAddress} rejected withdrawal: {errMsg}", 
+                                "VBTCController.DelegateWithdrawalToRemoteValidator");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogUtility.Log($"[FROST MPC] Failed to delegate withdrawal to validator {validator.ValidatorAddress}: {ex.Message}", 
+                            "VBTCController.DelegateWithdrawalToRemoteValidator");
+                    }
+                }
+
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to delegate withdrawal to any validator. No validator accepted the request." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error delegating withdrawal: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// FIND-027 Fix: Static method for withdrawal completion — called by the FrostStartup
+        /// public endpoint when a non-validator wallet node delegates. Runs on a validator node.
+        /// </summary>
+        public static async Task<string> CompleteWithdrawalStatic(string scUID, string withdrawalRequestHash)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID and WithdrawalRequestHash are required" });
+
+                var result = await Services.VBTCService.CompleteWithdrawal(scUID, withdrawalRequestHash);
+
+                if (result.Success)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "vBTC V2 withdrawal completed successfully with FROST signing",
+                        VFXTransactionHash = result.VFXTxHash,
+                        BTCTransactionHash = result.BTCTxHash,
+                        Status = "Pending_BTC",
+                        SmartContractUID = scUID
+                    });
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.ErrorMessage });
+                }
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
         #region Contract Creation
 
         /// <summary>
@@ -1409,7 +1521,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Complete withdrawal by coordinating FROST MPC signing and broadcasting Bitcoin transaction
+        /// Complete withdrawal by coordinating FROST MPC signing and broadcasting Bitcoin transaction.
+        /// FIND-027 Fix: If this node is NOT a validator, delegates to a remote validator via the
+        /// FROST port, mirroring the MPC ceremony delegation pattern. Only validators have the FROST
+        /// key packages needed to coordinate the signing ceremony.
         /// </summary>
         /// <param name="payload">Withdrawal completion details</param>
         /// <returns>Both VFX and Bitcoin transaction hashes if successful</returns>
@@ -1425,8 +1540,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
-                // Call service to execute FROST withdrawal (builds, signs, broadcasts BTC TX) 
-                // and create VFX completion transaction
+                // FIND-027 Fix: Non-validator wallet nodes cannot coordinate FROST signing directly
+                // because they don't have validator keys or FROST key packages. Delegate to a remote validator.
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    return await DelegateWithdrawalToRemoteValidator(payload.SmartContractUID, payload.WithdrawalRequestHash);
+                }
+
+                // Validator path: execute FROST withdrawal locally
                 var result = await Services.VBTCService.CompleteWithdrawal(
                     payload.SmartContractUID,
                     payload.WithdrawalRequestHash

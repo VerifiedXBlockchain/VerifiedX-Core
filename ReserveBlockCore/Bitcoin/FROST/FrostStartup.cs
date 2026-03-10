@@ -1671,8 +1671,50 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // FIND-026 Fix: Remap nonce commitments from VFX addresses to FROST Identifiers.
+                            // The coordinator sends nonces keyed by VFX addresses, but the FROST native library
+                            // expects nonce commitments keyed by FROST Identifiers (64-char hex scalars).
+                            // Unlike DKG Round 2, signing Round 2 expects ALL participants' nonces (including self).
+                            var addressNonces = JsonConvert.DeserializeObject<Dictionary<string, string>>(body);
+                            string remappedNoncesJson;
+
+                            if (addressNonces != null && addressNonces.Count > 0 && session.SignerAddresses != null && session.SignerAddresses.Count > 0)
+                            {
+                                var signerAddrToId = BuildAddressToIdentifierMap(session.SignerAddresses);
+                                var noncesBTreeMap = new Newtonsoft.Json.Linq.JObject();
+
+                                foreach (var kvp in addressNonces)
+                                {
+                                    try
+                                    {
+                                        var nonceToken = Newtonsoft.Json.Linq.JToken.Parse(kvp.Value);
+                                        if (signerAddrToId.TryGetValue(kvp.Key, out var frostId))
+                                        {
+                                            noncesBTreeMap[frostId] = nonceToken;
+                                        }
+                                        else
+                                        {
+                                            LogUtility.Log($"[FROST] WARNING: Signer address '{kvp.Key}' not found in signer list, skipping nonce", "FrostStartup.SignRound2");
+                                        }
+                                    }
+                                    catch (Exception parseEx)
+                                    {
+                                        LogUtility.Log($"[FROST] Failed to parse nonce for '{kvp.Key}': {parseEx.Message}", "FrostStartup.SignRound2");
+                                    }
+                                }
+
+                                remappedNoncesJson = noncesBTreeMap.ToString(Newtonsoft.Json.Formatting.None);
+                                LogUtility.Log($"[FROST] Sign Round 2: Remapped {noncesBTreeMap.Count} nonces from VFX addresses to FROST Identifiers for session {sessionId}", "FrostStartup.SignRound2");
+                            }
+                            else
+                            {
+                                // Fallback: pass body as-is (shouldn't happen in normal flow)
+                                remappedNoncesJson = body;
+                                LogUtility.Log($"[FROST] WARNING: Sign Round 2 could not remap nonces - using raw body. SignerAddresses count: {session.SignerAddresses?.Count ?? 0}", "FrostStartup.SignRound2");
+                            }
+
                             var (signatureShare, sigShareError) = FrostNative.SignRound2Signature(
-                                session.MyKeyPackage, session.NonceSecret, body, session.MessageHash);
+                                session.MyKeyPackage, session.NonceSecret, remappedNoncesJson, session.MessageHash);
 
                             if (sigShareError != FrostNative.SUCCESS || string.IsNullOrEmpty(signatureShare))
                             {
@@ -1900,6 +1942,59 @@ namespace ReserveBlockCore.Bitcoin.FROST
                     }
                     catch (Exception ex)
                     {
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = $"Error: {ex.Message}"
+                        }));
+                    }
+                });
+
+                /// <summary>
+                /// FIND-027 Fix: POST /frost/mpc/withdrawal/complete - Public endpoint for wallet nodes to
+                /// delegate withdrawal completion (FROST signing ceremony) to this validator.
+                /// Non-validator wallet nodes cannot coordinate FROST signing because they lack
+                /// validator keys and FROST key packages. This mirrors the /frost/mpc/initiate pattern.
+                /// </summary>
+                endpoints.MapPost("/frost/mpc/withdrawal/complete", async context =>
+                {
+                    try
+                    {
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var body = await reader.ReadToEndAsync();
+                            var payload = JsonConvert.DeserializeObject<dynamic>(body);
+
+                            string scUID = payload?.SmartContractUID;
+                            string withdrawalRequestHash = payload?.WithdrawalRequestHash;
+
+                            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "SmartContractUID and WithdrawalRequestHash are required"
+                                }));
+                                return;
+                            }
+
+                            LogUtility.Log($"[FROST MPC] Received delegated withdrawal request. scUID: {scUID}, hash: {withdrawalRequestHash}",
+                                "FrostStartup.WithdrawalComplete");
+
+                            // Delegate to VBTCController's static method which runs the FROST signing locally
+                            var result = await ReserveBlockCore.Bitcoin.Controllers.VBTCController.CompleteWithdrawalStatic(
+                                scUID, withdrawalRequestHash);
+
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            context.Response.ContentType = "application/json";
+                            await context.Response.WriteAsync(result);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Withdrawal delegation error: {ex.Message}", "FrostStartup.WithdrawalComplete");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {

@@ -567,7 +567,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
 
                 // Phase 4: Aggregate signature
-                var signingResult = await AggregateSignature(sessionId, messageHash, validators, threshold, round2Shares);
+                // FIND-026 Fix: Pass scUID and ordered signer addresses for correct pubkey package lookup
+                // and FROST Identifier remapping
+                var signerAddresses = validators.Select(v => v.ValidatorAddress).ToList();
+                var signingResult = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares);
                 if (signingResult != null)
                 {
                     LogUtility.Log($"[FROST MPC] Signing ceremony completed successfully", "FrostMPCService.CoordinateSigningCeremony");
@@ -777,23 +780,30 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// FIND-024 Fix: Aggregate signature shares into final Schnorr signature using FROST native library.
+        /// FIND-026 Fix: Aggregate signature shares into final Schnorr signature using FROST native library.
         /// The coordinator collects nonce commitments and signature shares from validators (which were
         /// generated via FrostNative on each validator), then calls FrostNative.SignAggregate to produce
         /// the final 64-byte Schnorr signature. The signature is verified internally by the FROST library
         /// against the group public key before returning. If aggregation or verification fails, returns null
         /// (fail closed - no invalid signatures will be injected into Bitcoin transactions).
+        /// 
+        /// FIND-026 Fix: Now accepts scUID and signerAddresses to:
+        /// 1. Look up the correct pubkey package for this specific contract (not just the first found)
+        /// 2. Remap signature shares and nonce commitments from VFX address keys to FROST Identifier keys
+        ///    (64-char hex scalars), matching the format the FROST native library expects.
         /// </summary>
         private static async Task<FrostSigningResult?> AggregateSignature(
             string sessionId,
             string messageHash,
+            string scUID,
+            List<string> signerAddresses,
             List<VBTCValidator> validators,
             int threshold,
             Dictionary<string, string> shares)
         {
             try
             {
-                LogUtility.Log($"[FROST MPC] Aggregating {shares.Count} signature shares via FROST native library...", "FrostMPCService.AggregateSignature");
+                LogUtility.Log($"[FROST MPC] Aggregating {shares.Count} signature shares via FROST native library for contract {scUID}...", "FrostMPCService.AggregateSignature");
 
                 // Collect nonce commitments from validators (needed for aggregation)
                 var nonces = new Dictionary<string, string>();
@@ -819,50 +829,91 @@ namespace ReserveBlockCore.Bitcoin.Services
                     catch { /* Already logged during collection phase */ }
                 }
 
-                // Get the pubkey package for this contract (needed for aggregation)
-                // The coordinator needs to know which contract to look up
+                // FIND-026 Fix: Look up the pubkey package for THIS SPECIFIC contract using scUID
+                // Previously this iterated all contracts and grabbed the first one found, which was wrong
+                // if the validator participated in DKG for multiple vBTC contracts.
                 string? pubkeyPackage = null;
-                foreach (var validator in validators)
+                var myAddr = Globals.ValidatorAddress;
+                if (!string.IsNullOrEmpty(myAddr) && !string.IsNullOrEmpty(scUID))
                 {
-                    try
+                    var keyStore = FrostValidatorKeyStore.GetKeyPackage(scUID, myAddr);
+                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.PubkeyPackage))
                     {
-                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/result/{sessionId}";
-                        var response = await _httpClient.GetAsync(url);
-                        // Try to get pubkey package from local key store if coordinator is also a validator
-                        break;
+                        pubkeyPackage = keyStore.PubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package for contract {scUID} via direct lookup", "FrostMPCService.AggregateSignature");
                     }
-                    catch { }
                 }
 
-                // Try local key store first (coordinator is typically a validator too)
-                var myAddr = Globals.ValidatorAddress;
-                if (!string.IsNullOrEmpty(myAddr))
+                // Fallback: try any validator's key store for this contract
+                if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    // Search all contracts for one matching our validators
-                    var contracts = VBTCContractV2.GetAllContracts();
-                    if (contracts != null)
+                    pubkeyPackage = FrostValidatorKeyStore.GetPubkeyPackage(scUID);
+                    if (!string.IsNullOrEmpty(pubkeyPackage))
                     {
-                        foreach (var contract in contracts)
-                        {
-                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(contract.SmartContractUID, myAddr);
-                            if (keyStore != null && !string.IsNullOrEmpty(keyStore.PubkeyPackage))
-                            {
-                                pubkeyPackage = keyStore.PubkeyPackage;
-                                break;
-                            }
-                        }
+                        LogUtility.Log($"[FROST MPC] Found pubkey package for contract {scUID} via fallback lookup", "FrostMPCService.AggregateSignature");
                     }
                 }
 
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    ErrorLogUtility.LogError("FROST Signing: Could not find pubkey package for signature aggregation", "FrostMPCService.AggregateSignature");
+                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package for contract {scUID}", "FrostMPCService.AggregateSignature");
                     return null;
                 }
 
-                // Serialize shares and nonces for FROST native library
-                var sharesJson = JsonConvert.SerializeObject(shares);
-                var noncesJson = JsonConvert.SerializeObject(nonces);
+                // FIND-026 Fix: Remap signature shares and nonce commitments from VFX address keys
+                // to FROST Identifier keys (64-char hex scalars). The FROST native library expects
+                // BTreeMap<Identifier, SignatureShare> and BTreeMap<Identifier, NonceCommitment>.
+                var addrToFrostId = BuildAddressToFrostIdentifierMap(signerAddresses);
+
+                // Remap shares: VFX address → FROST Identifier
+                var remappedShares = new JObject();
+                foreach (var kvp in shares)
+                {
+                    try
+                    {
+                        var shareToken = JToken.Parse(kvp.Value);
+                        if (addrToFrostId.TryGetValue(kvp.Key, out var frostId))
+                        {
+                            remappedShares[frostId] = shareToken;
+                        }
+                        else
+                        {
+                            LogUtility.Log($"[FROST MPC] WARNING: Signer address '{kvp.Key}' not found in signer list for share remapping", "FrostMPCService.AggregateSignature");
+                        }
+                    }
+                    catch (Exception parseEx)
+                    {
+                        LogUtility.Log($"[FROST MPC] Failed to parse share for '{kvp.Key}': {parseEx.Message}", "FrostMPCService.AggregateSignature");
+                    }
+                }
+
+                // Remap nonces: VFX address → FROST Identifier
+                var remappedNonces = new JObject();
+                foreach (var kvp in nonces)
+                {
+                    try
+                    {
+                        var nonceToken = JToken.Parse(kvp.Value);
+                        if (addrToFrostId.TryGetValue(kvp.Key, out var frostId))
+                        {
+                            remappedNonces[frostId] = nonceToken;
+                        }
+                        else
+                        {
+                            LogUtility.Log($"[FROST MPC] WARNING: Signer address '{kvp.Key}' not found in signer list for nonce remapping", "FrostMPCService.AggregateSignature");
+                        }
+                    }
+                    catch (Exception parseEx)
+                    {
+                        LogUtility.Log($"[FROST MPC] Failed to parse nonce for '{kvp.Key}': {parseEx.Message}", "FrostMPCService.AggregateSignature");
+                    }
+                }
+
+                var sharesJson = remappedShares.ToString(Formatting.None);
+                var noncesJson = remappedNonces.ToString(Formatting.None);
+
+                LogUtility.Log($"[FROST MPC] Remapped {remappedShares.Count} shares and {remappedNonces.Count} nonces from VFX addresses to FROST Identifiers", 
+                    "FrostMPCService.AggregateSignature");
 
                 // Call FROST native library to aggregate signature shares
                 var (schnorrSignature, errorCode) = FrostNative.SignAggregate(
@@ -893,7 +944,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     SchnorrSignature = schnorrSignature,
                     SignatureValid = true, // FROST native library verifies internally before returning
                     CompletionTimestamp = TimeUtil.GetTime(),
-                    SignerAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
+                    SignerAddresses = signerAddresses,
                     Threshold = threshold
                 };
             }
@@ -924,6 +975,33 @@ namespace ReserveBlockCore.Bitcoin.Services
             var verifiedCount = verifications.Count(v => v.Value);
             var required = GetRequiredValidatorCount(totalValidators, threshold);
             return verifiedCount >= required;
+        }
+
+        /// <summary>
+        /// FIND-026 Fix: Convert a 1-based participant index to a FROST Identifier hex string.
+        /// FROST Identifier is a secp256k1 Scalar serialized as 32 bytes big-endian (64 hex chars).
+        /// Participant 1 → "0000000000000000000000000000000000000000000000000000000000000001"
+        /// Participant 2 → "0000000000000000000000000000000000000000000000000000000000000002"
+        /// This must match the identical logic in FrostStartup.BuildAddressToIdentifierMap.
+        /// </summary>
+        private static string ParticipantIndexToFrostIdentifier(int participantIndex)
+        {
+            return participantIndex.ToString("x").PadLeft(64, '0');
+        }
+
+        /// <summary>
+        /// FIND-026 Fix: Build a lookup from VFX address to FROST Identifier hex string
+        /// using participant list ordering. The ordering must be identical to how the signing
+        /// session was created (i.e., the SignerAddresses list order from BroadcastSigningStart).
+        /// </summary>
+        private static Dictionary<string, string> BuildAddressToFrostIdentifierMap(List<string> signerAddresses)
+        {
+            var map = new Dictionary<string, string>();
+            for (int i = 0; i < signerAddresses.Count; i++)
+            {
+                map[signerAddresses[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
+            }
+            return map;
         }
 
         #endregion
