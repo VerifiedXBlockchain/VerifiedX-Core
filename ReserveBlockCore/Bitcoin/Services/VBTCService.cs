@@ -565,7 +565,9 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// <param name="scUID">Smart contract UID</param>
         /// <param name="withdrawalRequestHash">Hash of withdrawal request transaction</param>
         /// <returns>Completion transaction hash and Bitcoin transaction hash</returns>
-        public static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage)> CompleteWithdrawal(string scUID, string withdrawalRequestHash)
+        public static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage)> CompleteWithdrawal(
+            string scUID, string withdrawalRequestHash,
+            decimal? delegatedAmount = null, string? delegatedBTCDestination = null, int? delegatedFeeRate = null)
         {
             try
             {
@@ -640,12 +642,36 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, string.Empty, $"Deposit address not found for contract: {scUID}");
                 }
 
-                // FIND-003 FIX: Look up withdrawal request using per-user tracking
+                // FIND-003 FIX: Look up withdrawal request using per-user tracking.
+                // VBTCWithdrawalRequest is a local DB record — remote validators may not have it if
+                // StateData hasn't saved it yet or if the TX was processed differently on that node.
+                // When the local lookup fails, fall back to delegated params passed from the requesting node.
                 var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
                 if (withdrawalRequest == null)
                 {
-                    SCLogUtility.Log($"Withdrawal request not found for hash: {withdrawalRequestHash}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"Withdrawal request not found for hash: {withdrawalRequestHash}");
+                    // Check if we have delegated withdrawal details from the requesting node
+                    if (delegatedAmount.HasValue && delegatedAmount.Value > 0 && !string.IsNullOrEmpty(delegatedBTCDestination))
+                    {
+                        SCLogUtility.Log($"Withdrawal request not in local DB for hash: {withdrawalRequestHash}. Using delegated params: Amount={delegatedAmount.Value}, Dest={delegatedBTCDestination}, FeeRate={delegatedFeeRate}", 
+                            "VBTCService.CompleteWithdrawal()");
+                        
+                        // Create a transient withdrawal request from delegated data (not saved to DB)
+                        withdrawalRequest = new VBTCWithdrawalRequest
+                        {
+                            TransactionHash = withdrawalRequestHash,
+                            SmartContractUID = scUID,
+                            Amount = delegatedAmount.Value,
+                            BTCDestination = delegatedBTCDestination,
+                            FeeRate = delegatedFeeRate ?? 10,
+                            IsCompleted = false,
+                            Status = VBTCWithdrawalStatus.Requested
+                        };
+                    }
+                    else
+                    {
+                        SCLogUtility.Log($"Withdrawal request not found for hash: {withdrawalRequestHash} and no delegated params provided", "VBTCService.CompleteWithdrawal()");
+                        return (false, string.Empty, string.Empty, $"Withdrawal request not found for hash: {withdrawalRequestHash}");
+                    }
                 }
 
                 // Validate the request is not already completed

@@ -870,6 +870,40 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 LogUtility.Log($"[FROST MPC] Non-validator node delegating withdrawal to remote validator. scUID: {scUID}", 
                     "VBTCController.DelegateWithdrawalToRemoteValidator");
 
+                // Look up the local withdrawal request to include details in the delegation payload.
+                // The remote validator may not have this record in its local DB.
+                decimal? localAmount = null;
+                string? localBTCDestination = null;
+                int? localFeeRate = null;
+
+                var localWithdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (localWithdrawalRequest != null)
+                {
+                    localAmount = localWithdrawalRequest.Amount;
+                    localBTCDestination = localWithdrawalRequest.BTCDestination;
+                    localFeeRate = localWithdrawalRequest.FeeRate;
+                    LogUtility.Log($"[FROST MPC] Including local withdrawal details in delegation: Amount={localAmount}, Dest={localBTCDestination}, FeeRate={localFeeRate}",
+                        "VBTCController.DelegateWithdrawalToRemoteValidator");
+                }
+                else
+                {
+                    // Also try the local contract's Active* fields as a fallback
+                    var localContract = VBTCContractV2.GetContract(scUID);
+                    if (localContract != null && localContract.ActiveWithdrawalAmount.HasValue && localContract.ActiveWithdrawalAmount.Value > 0)
+                    {
+                        localAmount = localContract.ActiveWithdrawalAmount.Value;
+                        localBTCDestination = localContract.ActiveWithdrawalBTCDestination;
+                        localFeeRate = 10; // Default
+                        LogUtility.Log($"[FROST MPC] Including contract Active* fields in delegation: Amount={localAmount}, Dest={localBTCDestination}",
+                            "VBTCController.DelegateWithdrawalToRemoteValidator");
+                    }
+                    else
+                    {
+                        LogUtility.Log($"[FROST MPC] WARNING: No local withdrawal request or contract Active* fields found. Remote validator will need its own data.",
+                            "VBTCController.DelegateWithdrawalToRemoteValidator");
+                    }
+                }
+
                 // Discover active validators from the network
                 var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
                 if (activeValidators == null || !activeValidators.Any())
@@ -892,7 +926,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                         var payload = JsonConvert.SerializeObject(new
                         {
                             SmartContractUID = scUID,
-                            WithdrawalRequestHash = withdrawalRequestHash
+                            WithdrawalRequestHash = withdrawalRequestHash,
+                            Amount = localAmount,
+                            BTCDestination = localBTCDestination,
+                            FeeRate = localFeeRate
                         });
                         var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
 
@@ -954,14 +991,16 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         /// FIND-027 Fix: Static method for withdrawal completion — called by the FrostStartup
         /// public endpoint when a non-validator wallet node delegates. Runs on a validator node.
         /// </summary>
-        public static async Task<string> CompleteWithdrawalStatic(string scUID, string withdrawalRequestHash)
+        public static async Task<string> CompleteWithdrawalStatic(string scUID, string withdrawalRequestHash,
+            decimal? delegatedAmount = null, string? delegatedBTCDestination = null, int? delegatedFeeRate = null)
         {
             try
             {
                 if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID and WithdrawalRequestHash are required" });
 
-                var result = await Services.VBTCService.CompleteWithdrawal(scUID, withdrawalRequestHash);
+                var result = await Services.VBTCService.CompleteWithdrawal(scUID, withdrawalRequestHash,
+                    delegatedAmount, delegatedBTCDestination, delegatedFeeRate);
 
                 if (result.Success)
                 {

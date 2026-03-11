@@ -1968,6 +1968,15 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                             string scUID = payload?.SmartContractUID;
                             string withdrawalRequestHash = payload?.WithdrawalRequestHash;
+                            
+                            // Parse optional delegated withdrawal details (sent by non-validator nodes)
+                            decimal? delegatedAmount = null;
+                            string? delegatedBTCDestination = null;
+                            int? delegatedFeeRate = null;
+
+                            try { delegatedAmount = (decimal?)payload?.Amount; } catch { }
+                            try { delegatedBTCDestination = (string?)payload?.BTCDestination; } catch { }
+                            try { delegatedFeeRate = (int?)payload?.FeeRate; } catch { }
 
                             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                             {
@@ -1980,12 +1989,12 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            LogUtility.Log($"[FROST MPC] Received delegated withdrawal request. scUID: {scUID}, hash: {withdrawalRequestHash}",
+                            LogUtility.Log($"[FROST MPC] Received delegated withdrawal request. scUID: {scUID}, hash: {withdrawalRequestHash}, delegatedAmount: {delegatedAmount}, delegatedDest: {delegatedBTCDestination}",
                                 "FrostStartup.WithdrawalComplete");
 
                             // Delegate to VBTCController's static method which runs the FROST signing locally
                             var result = await ReserveBlockCore.Bitcoin.Controllers.VBTCController.CompleteWithdrawalStatic(
-                                scUID, withdrawalRequestHash);
+                                scUID, withdrawalRequestHash, delegatedAmount, delegatedBTCDestination, delegatedFeeRate);
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
                             context.Response.ContentType = "application/json";
