@@ -511,11 +511,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Data = txData
                 };
 
+                withdrawalTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(withdrawalTx);
+
                 // Build and sign transaction
                 withdrawalTx.Build();
                 var txHash = withdrawalTx.Hash;
-                withdrawalTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(withdrawalTx);
-
+                
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
 
@@ -727,11 +728,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Data = txData
                 };
 
+                completionTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(completionTx);
+                
                 // Build and sign transaction
                 completionTx.Build();
                 var txHash = completionTx.Hash;
-                completionTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(completionTx);
-
+                
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;
 
