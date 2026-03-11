@@ -579,11 +579,11 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // Validate contract exists
-                        var contract = VBTCContractV2.GetContract(scUID);
-                        if (contract == null)
+                        // Validate contract exists via state trei (available on ALL nodes)
+                        var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTrei == null)
                         {
-                            SCLogUtility.Log($"VBTC_V2_TRANSFER validation failed: Contract not found - {scUID}", 
+                            SCLogUtility.Log($"VBTC_V2_TRANSFER validation failed: Contract not found in state trei - {scUID}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;
@@ -661,17 +661,20 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // Validate contract exists
-                        var contract = VBTCContractV2.GetContract(scUID);
-                        if (contract == null)
+                        // Validate contract exists via state trei (available on ALL nodes)
+                        var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTrei == null)
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Contract not found - {scUID}", 
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Contract not found in state trei - {scUID}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;
                             txdata.InsertSafe(tx);
                             return;
                         }
+
+                        // Try local VBTCContractV2 for deposit balance (optional — remote nodes won't have this)
+                        var localContract = VBTCContractV2.GetContract(scUID);
 
                         // FIND-002 FIX: Check if THIS USER already has an active withdrawal request for this contract
                         // (Per-user tracking, not contract-level)
@@ -715,16 +718,17 @@ namespace ReserveBlockCore.Services
                         else
                         {
                             // No ledger transactions — but owner may still have deposit balance
-                            bool isRequesterOwnerNoTx = contract.OwnerAddress == requesterAddress;
-                            if (isRequesterOwnerNoTx && contract.Balance >= amount.Value)
+                            bool isRequesterOwnerNoTx = scStateTrei.OwnerAddress == requesterAddress;
+                            decimal depositBal = localContract?.Balance ?? 0M;
+                            if (isRequesterOwnerNoTx && depositBal >= amount.Value)
                             {
                                 // Owner has sufficient deposit balance even without ledger transactions
-                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST: Owner {requesterAddress} using deposit balance ({contract.Balance}) for withdrawal of {amount.Value}",
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST: Owner {requesterAddress} using deposit balance ({depositBal}) for withdrawal of {amount.Value}",
                                     "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             }
                             else
                             {
-                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: No balance available for withdrawal. Requester: {requesterAddress}, IsOwner: {isRequesterOwnerNoTx}, DepositBalance: {contract.Balance}",
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: No balance available for withdrawal. Requester: {requesterAddress}, IsOwner: {isRequesterOwnerNoTx}, DepositBalance: {depositBal}",
                                     "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                                 var txdata = TransactionData.GetAll();
                                 tx.TransactionStatus = TransactionStatus.Invalid;
@@ -772,11 +776,11 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // Validate contract exists
-                        var contract = VBTCContractV2.GetContract(scUID);
-                        if (contract == null)
+                        // Validate contract exists via state trei (available on ALL nodes)
+                        var scStateComplete = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateComplete == null)
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Contract not found - {scUID}", 
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Contract not found in state trei - {scUID}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;
