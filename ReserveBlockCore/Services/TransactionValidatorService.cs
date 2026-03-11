@@ -2752,9 +2752,14 @@ namespace ReserveBlockCore.Services
                         if (withdrawalRequest == null)
                             return (txResult, $"Withdrawal request not found for hash: {withdrawalRequestHash}");
 
-                        // FIND-002 FIX: Validate that the person completing is the original requester
+                        // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
+                        // to submit WITHDRAWAL_COMPLETE. Validators coordinate FROST signing on behalf of users.
                         if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
-                            return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) can complete this withdrawal. Received from: {txRequest.FromAddress}");
+                        {
+                            var completingValidator = VBTCValidator.GetValidator(txRequest.FromAddress);
+                            if (completingValidator == null || !completingValidator.IsActive)
+                                return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) or an active vBTC validator can complete this withdrawal. Received from: {txRequest.FromAddress}");
+                        }
 
                         // Validate the request is not already completed
                         if (withdrawalRequest.IsCompleted)

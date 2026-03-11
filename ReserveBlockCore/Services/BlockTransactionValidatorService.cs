@@ -714,13 +714,23 @@ namespace ReserveBlockCore.Services
                         }
                         else
                         {
-                            // No transactions mean no balance
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: No balance available for withdrawal. Requester: {requesterAddress}", 
-                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
+                            // No ledger transactions — but owner may still have deposit balance
+                            bool isRequesterOwnerNoTx = contract.OwnerAddress == requesterAddress;
+                            if (isRequesterOwnerNoTx && contract.Balance >= amount.Value)
+                            {
+                                // Owner has sufficient deposit balance even without ledger transactions
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST: Owner {requesterAddress} using deposit balance ({contract.Balance}) for withdrawal of {amount.Value}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+                            else
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: No balance available for withdrawal. Requester: {requesterAddress}, IsOwner: {isRequesterOwnerNoTx}, DepositBalance: {contract.Balance}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
                         }
 
                         // Mark as success and insert

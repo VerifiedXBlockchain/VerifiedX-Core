@@ -1,16 +1,17 @@
 using Microsoft.AspNetCore.Mvc;
-using Newtonsoft.Json.Linq;
 using Newtonsoft.Json;
-using ReserveBlockCore.Models.SmartContracts;
+using Newtonsoft.Json.Linq;
+using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Data;
+using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.P2P;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
-using System.Text;
-using ReserveBlockCore.Bitcoin.Models;
-using System.IO;
 using System;
-using ReserveBlockCore.Data;
-using ReserveBlockCore.P2P;
+using System.IO;
+using System.Text;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
@@ -338,6 +339,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
                 }
 
+                toAddress = toAddress.ToAddressNormalize();
+
                 // Create transaction data
                 var txData = JsonConvert.SerializeObject(new
                 {
@@ -409,24 +412,25 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Request withdrawal of vBTC to Bitcoin address
+        /// Request withdrawal of vBTC to Bitcoin address.
+        /// Any address with a vBTC balance in the contract can request a withdrawal — not just the owner.
         /// </summary>
         /// <param name="scUID">Smart contract UID</param>
-        /// <param name="ownerAddress">Owner address</param>
+        /// <param name="requestorAddress">Address requesting withdrawal (any address with a vBTC balance)</param>
         /// <param name="btcAddress">Bitcoin destination address</param>
         /// <param name="amount">Amount to withdraw</param>
         /// <param name="feeRate">Bitcoin fee rate (sats/vB)</param>
         /// <returns>Withdrawal request transaction hash</returns>
-        public static async Task<(bool, string)> RequestWithdrawal(string scUID, string ownerAddress, string btcAddress, decimal amount, int feeRate)
+        public static async Task<(bool, string)> RequestWithdrawal(string scUID, string requestorAddress, string btcAddress, decimal amount, int feeRate)
         {
             try
             {
                 // Get account and validate
-                var account = AccountData.GetSingleAccount(ownerAddress);
+                var account = AccountData.GetSingleAccount(requestorAddress);
                 if (account == null)
                 {
-                    SCLogUtility.Log($"Account not found: {ownerAddress}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"Account not found: {ownerAddress}");
+                    SCLogUtility.Log($"Account not found: {requestorAddress}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Account not found: {requestorAddress}");
                 }
 
                 // Get contract and validate
@@ -438,10 +442,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
 
                 // FIND-003 FIX: Check if THIS USER already has an active withdrawal request (per-user tracking)
-                var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(ownerAddress, scUID);
+                var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requestorAddress, scUID);
                 if (existingRequest != null)
                 {
-                    SCLogUtility.Log($"Active withdrawal already exists for user {ownerAddress}. Request Hash: {existingRequest.TransactionHash}", "VBTCService.RequestWithdrawal()");
+                    SCLogUtility.Log($"Active withdrawal already exists for user {requestorAddress}. Request Hash: {existingRequest.TransactionHash}", "VBTCService.RequestWithdrawal()");
                     return (false, $"You already have an active withdrawal request. Complete it before starting a new one. Request Hash: {existingRequest.TransactionHash}");
                 }
 
@@ -458,20 +462,20 @@ namespace ReserveBlockCore.Bitcoin.Services
                 if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                 {
                     var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == ownerAddress || x.ToAddress == ownerAddress)
+                        .Where(x => x.FromAddress == requestorAddress || x.ToAddress == requestorAddress)
                         .ToList();
 
                     if (transactions.Any())
                     {
-                        var received = transactions.Where(x => x.ToAddress == ownerAddress).Sum(x => x.Amount);
-                        var sent = transactions.Where(x => x.FromAddress == ownerAddress).Sum(x => x.Amount);
+                        var received = transactions.Where(x => x.ToAddress == requestorAddress).Sum(x => x.Amount);
+                        var sent = transactions.Where(x => x.FromAddress == requestorAddress).Sum(x => x.Amount);
                         ledgerBalance = received + sent;
                     }
                 }
 
                 // Owner's available = BTC deposit balance + ledger
                 // Non-owner's available = just ledger
-                bool isOwner = vbtcContract.OwnerAddress == ownerAddress;
+                bool isOwner = vbtcContract.OwnerAddress == requestorAddress;
                 decimal availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
 
                 // Check sufficient balance
@@ -481,26 +485,28 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
                 }
 
+                btcAddress = btcAddress.ToBTCAddressNormalize();
+
                 // Create transaction data
                 var txData = JsonConvert.SerializeObject(new
                 {
                     Function = "VBTCWithdrawalRequest()",
                     ContractUID = scUID,
-                    OwnerAddress = ownerAddress,
+                    RequestorAddress = requestorAddress,
                     BTCAddress = btcAddress,
                     Amount = amount,
                     FeeRate = feeRate
                 });
 
-                // Build transaction
+                // Build transaction — FromAddress and ToAddress are both the requestor's address
                 var withdrawalTx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
-                    FromAddress = ownerAddress,
-                    ToAddress = scUID, // Withdrawal target is the contract itself
+                    FromAddress = requestorAddress,
+                    ToAddress = requestorAddress, // The address of the balance owner requesting withdrawal
                     Amount = 0.0M,
                     Fee = 0.0M,
-                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    Nonce = AccountStateTrei.GetNextNonce(requestorAddress),
                     TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
                     Data = txData
                 };
@@ -515,8 +521,8 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 if (privateKey == null)
                 {
-                    SCLogUtility.Log($"Private key was null for account {ownerAddress}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"Private key was null for account {ownerAddress}");
+                    SCLogUtility.Log($"Private key was null for account {requestorAddress}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Private key was null for account {requestorAddress}");
                 }
 
                 var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
@@ -533,7 +539,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 if (result.Item1)
                 {
                     await TransactionData.AddTxToWallet(withdrawalTx, true);
-                    await AccountData.UpdateLocalBalance(ownerAddress, withdrawalTx.Fee + withdrawalTx.Amount);
+                    await AccountData.UpdateLocalBalance(requestorAddress, withdrawalTx.Fee + withdrawalTx.Amount);
                     await TransactionData.AddToPool(withdrawalTx);
                     await P2PClient.SendTXMempool(withdrawalTx);
                     SCLogUtility.Log($"vBTC V2 Withdrawal Request TX Success. SCUID: {scUID}, TxHash: {withdrawalTx.Hash}", "VBTCService.RequestWithdrawal()");

@@ -1476,7 +1476,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.OwnerAddress) || 
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.RequestorAddress) || 
                     string.IsNullOrEmpty(payload.BTCAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
@@ -1489,7 +1489,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 // Call service to create and broadcast withdrawal request transaction
                 var result = await Services.VBTCService.RequestWithdrawal(
                     payload.SmartContractUID,
-                    payload.OwnerAddress,
+                    payload.RequestorAddress,
                     payload.BTCAddress,
                     payload.Amount,
                     payload.FeeRate
@@ -2449,7 +2449,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
     public class VBTCWithdrawalPayload
     {
         public string SmartContractUID { get; set; }
-        public string OwnerAddress { get; set; }
+        /// <summary>
+        /// The VFX address requesting withdrawal. Can be any address with a vBTC balance — not just the contract owner.
+        /// </summary>
+        public string RequestorAddress { get; set; }
         public string BTCAddress { get; set; }
         public decimal Amount { get; set; }
         public int FeeRate { get; set; }
