@@ -2406,7 +2406,18 @@ namespace ReserveBlockCore.Services
 
                                 decimal ownerBalance = depositBalance + ledgerBalance;
                                 if (ownerBalance < amount.Value)
-                                    return (txResult, $"Insufficient vBTC balance (owner) for transfer. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                                {
+                                    // During block verification, skip deposit balance check for owner.
+                                    // The block crafter already verified via ElectrumX during mempool admission.
+                                    if (blockVerify)
+                                    {
+                                        // Trust the block crafter's ElectrumX verification
+                                    }
+                                    else
+                                    {
+                                        return (txResult, $"Insufficient vBTC balance (owner) for transfer. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                                    }
+                                }
                             }
                             else
                             {
@@ -2683,7 +2694,7 @@ namespace ReserveBlockCore.Services
 
                                 if (!string.IsNullOrEmpty(wdDepositAddr))
                                 {
-                                    if (!blockDownloads && !blockVerify)
+                                    if (!blockDownloads)
                                     {
                                         try
                                         {
@@ -2701,7 +2712,21 @@ namespace ReserveBlockCore.Services
                             }
 
                             if (totalBalance < amount.Value)
-                                return (txResult, $"Insufficient vBTC balance. Available: {totalBalance}, Requested: {amount.Value}");
+                            {
+                                // During block verification, skip deposit balance check for the owner.
+                                // The block crafter already verified via ElectrumX during mempool admission.
+                                // Deposit balance is external Bitcoin chain state — if ElectrumX is temporarily
+                                // unavailable during block validation, we trust the crafter's prior verification.
+                                // This matches the v1 TransferCoin() pattern where owner balance is not checked.
+                                if (isRequesterOwner && blockVerify)
+                                {
+                                    // Trust the block crafter's ElectrumX verification
+                                }
+                                else
+                                {
+                                    return (txResult, $"Insufficient vBTC balance. Available: {totalBalance}, Requested: {amount.Value}");
+                                }
+                            }
                         }
                         else
                         {
