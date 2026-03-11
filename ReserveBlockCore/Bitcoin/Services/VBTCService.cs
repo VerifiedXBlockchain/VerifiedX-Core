@@ -805,12 +805,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Destination = btcDestination
                 });
 
-                // Build transaction
+                // Build transaction — self-transaction by the validator recording the withdrawal completion
                 var completionTx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = fromAddress,
-                    ToAddress = scUID,
+                    ToAddress = fromAddress,
                     Amount = 0.0M,
                     Fee = 0.0M,
                     Nonce = AccountStateTrei.GetNextNonce(fromAddress),

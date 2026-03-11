@@ -107,7 +107,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 List<BlockchainScripthashListunspentResult> selectedUtxos = new List<BlockchainScripthashListunspentResult>();
                 ulong previousTotalInputAmount = 0;
 
-                // Select UTXOs to cover amount + fees
+                // Select UTXOs to cover the withdrawal amount.
+                // The fee is deducted FROM the withdrawal amount (user receives amount - fee).
                 while (!sufficientInputsFound)
                 {
                     unspentCoins.Clear();
@@ -154,7 +155,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                             int estimatedSize = (int)(57.5 * inputCount + 43 * outputCount + 10.5);
                             feeEstimate = (ulong)(estimatedSize * feeRateSatsPerVByte);
 
-                            ulong totalRequired = amountToSend + feeEstimate;
+                            // Fee is deducted from withdrawal amount, so UTXOs only need to cover the amount
+                            ulong totalRequired = amountToSend;
 
                             if (totalInputAmount >= totalRequired)
                             {
@@ -169,15 +171,25 @@ namespace ReserveBlockCore.Bitcoin.Services
                     if (!sufficientInputsFound && totalInputAmount == previousTotalInputAmount)
                     {
                         return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), 
-                            $"Insufficient funds. Required: {(amountToSend + feeEstimate) * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC");
+                            $"Insufficient funds. Required: {amountToSend * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC");
                     }
                 }
+
+                // Safety check: fee must not exceed withdrawal amount
+                if (feeEstimate >= amountToSend)
+                {
+                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
+                        $"Fee ({feeEstimate * SatoshiMultiplier:F8} BTC) exceeds or equals withdrawal amount ({amountToSend * SatoshiMultiplier:F8} BTC). Increase withdrawal amount or decrease fee rate.");
+                }
+
+                // Fee is deducted from the withdrawal amount: user receives (amount - fee)
+                ulong userReceives = amountToSend - feeEstimate;
 
                 // Build the unsigned transaction
                 var txBuilder = Globals.BTCNetwork.CreateTransactionBuilder();
                 
                 txBuilder.AddCoins(unspentCoins.ToArray());
-                txBuilder.Send(toAddress, new Money(amountToSend, MoneyUnit.Satoshi));
+                txBuilder.Send(toAddress, new Money(userReceives, MoneyUnit.Satoshi));
                 txBuilder.SetChange(fromAddress);
                 txBuilder.SendFees(new Money(feeEstimate, MoneyUnit.Satoshi));
 
