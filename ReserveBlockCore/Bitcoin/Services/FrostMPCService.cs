@@ -620,11 +620,20 @@ namespace ReserveBlockCore.Bitcoin.Services
                     try
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/start";
+                        LogUtility.Log($"[FROST MPC] Signing start → contacting {validator.ValidatorAddress} at {url}", "FrostMPCService.BroadcastSigningStart");
                         var response = await _httpClient.PostAsJsonAsync(url, startRequest);
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            var errorBody = await response.Content.ReadAsStringAsync();
+                            LogUtility.Log($"[FROST MPC] Signing start REJECTED by {validator.ValidatorAddress} ({validator.IPAddress}): HTTP {(int)response.StatusCode} — {errorBody}",
+                                "FrostMPCService.BroadcastSigningStart");
+                        }
                         return response.IsSuccessStatusCode;
                     }
-                    catch
+                    catch (Exception ex)
                     {
+                        LogUtility.Log($"[FROST MPC] Signing start EXCEPTION contacting {validator.ValidatorAddress} ({validator.IPAddress}): {ex.Message}",
+                            "FrostMPCService.BroadcastSigningStart");
                         return false;
                     }
                 });
