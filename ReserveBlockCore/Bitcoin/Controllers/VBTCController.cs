@@ -953,11 +953,38 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                         if (json["Success"]?.Value<bool>() == true)
                         {
-                            LogUtility.Log($"[FROST MPC] Withdrawal delegated successfully to validator {validator.ValidatorAddress} ({ip})", 
+                            LogUtility.Log($"[FROST MPC] FROST signing delegated successfully to validator {validator.ValidatorAddress} ({ip})", 
                                 "VBTCController.DelegateWithdrawalToRemoteValidator");
 
-                            // Update local VBTCContractV2 record after successful remote withdrawal
-                            // The local (non-validator) node has this contract in its DB since it's the owner
+                            // Extract the signed TX hex from the validator response
+                            var signedTxHex = json["SignedTxHex"]?.Value<string>();
+                            if (string.IsNullOrEmpty(signedTxHex))
+                            {
+                                LogUtility.Log($"[FROST MPC] Validator returned success but no SignedTxHex. Response: {responseBody}",
+                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+                                continue; // Try next validator
+                            }
+
+                            // Step 1: Broadcast the signed BTC TX locally (single broadcast — only this wallet node)
+                            LogUtility.Log($"[FROST MPC] Broadcasting signed BTC TX locally. Hex length: {signedTxHex.Length}",
+                                "VBTCController.DelegateWithdrawalToRemoteValidator");
+
+                            var btcNetwork = Globals.BTCNetwork;
+                            var signedTx = NBitcoin.Transaction.Parse(signedTxHex, btcNetwork);
+                            var broadcastResult = await ReserveBlockCore.Bitcoin.Services.BitcoinTransactionService.BroadcastTransaction(signedTx);
+
+                            if (!broadcastResult.Success)
+                            {
+                                LogUtility.Log($"[FROST MPC] BTC broadcast failed: {broadcastResult.ErrorMessage}. Will try next validator.",
+                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+                                continue; // Try next validator
+                            }
+
+                            string btcTxHash = broadcastResult.TxHash;
+                            LogUtility.Log($"[FROST MPC] BTC TX broadcast SUCCESS: {btcTxHash}",
+                                "VBTCController.DelegateWithdrawalToRemoteValidator");
+
+                            // Step 2: Update local contract record
                             try
                             {
                                 var localContract = VBTCContractV2.GetContract(scUID);
@@ -965,17 +992,102 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                                 {
                                     localContract.LastValidatorActivityBlock = Globals.LastBlock.Height;
                                     VBTCContractV2.UpdateContract(localContract);
-                                    LogUtility.Log($"[FROST MPC] Updated local VBTCContractV2.LastValidatorActivityBlock to {Globals.LastBlock.Height}",
-                                        "VBTCController.DelegateWithdrawalToRemoteValidator");
                                 }
                             }
                             catch (Exception updateEx)
                             {
-                                LogUtility.Log($"[FROST MPC] Warning: Failed to update local contract after delegation: {updateEx.Message}",
+                                LogUtility.Log($"[FROST MPC] Warning: Failed to update local contract: {updateEx.Message}",
                                     "VBTCController.DelegateWithdrawalToRemoteValidator");
                             }
 
-                            return responseBody; // Pass the validator's response directly back
+                            // Step 3: Create VFX completion TX locally (wallet node has the withdrawal request)
+                            string vfxTxHash = string.Empty;
+                            try
+                            {
+                                // Find the requestor account to sign the VFX TX
+                                string fromAddress = localWithdrawalRequest?.RequestorAddress ?? string.Empty;
+                                if (string.IsNullOrEmpty(fromAddress))
+                                {
+                                    var localContract = VBTCContractV2.GetContract(scUID);
+                                    fromAddress = localContract?.OwnerAddress ?? string.Empty;
+                                }
+
+                                var account = AccountData.GetSingleAccount(fromAddress);
+                                if (account != null)
+                                {
+                                    var txData = JsonConvert.SerializeObject(new
+                                    {
+                                        Function = "VBTCWithdrawalComplete()",
+                                        ContractUID = scUID,
+                                        WithdrawalRequestHash = withdrawalRequestHash,
+                                        BTCTransactionHash = btcTxHash,
+                                        Amount = localAmount ?? 0M,
+                                        Destination = localBTCDestination ?? ""
+                                    });
+
+                                    var completionTx = new Transaction
+                                    {
+                                        Timestamp = TimeUtil.GetTime(),
+                                        FromAddress = fromAddress,
+                                        ToAddress = fromAddress,
+                                        Amount = 0.0M,
+                                        Fee = 0.0M,
+                                        Nonce = AccountStateTrei.GetNextNonce(fromAddress),
+                                        TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
+                                        Data = txData
+                                    };
+
+                                    completionTx.Fee = FeeCalcService.CalculateTXFee(completionTx);
+                                    completionTx.Build();
+
+                                    var privateKey = account.GetPrivKey;
+                                    var publicKey = account.PublicKey;
+                                    if (privateKey != null)
+                                    {
+                                        var signature = SignatureService.CreateSignature(completionTx.Hash, privateKey, publicKey);
+                                        if (signature != "ERROR")
+                                        {
+                                            completionTx.Signature = signature;
+                                            var verifyResult = await TransactionValidatorService.VerifyTX(completionTx);
+                                            if (verifyResult.Item1)
+                                            {
+                                                await TransactionData.AddTxToWallet(completionTx, true);
+                                                await AccountData.UpdateLocalBalance(fromAddress, completionTx.Fee + completionTx.Amount);
+                                                await TransactionData.AddToPool(completionTx);
+                                                await ReserveBlockCore.P2P.P2PClient.SendTXMempool(completionTx);
+                                                vfxTxHash = completionTx.Hash;
+                                                LogUtility.Log($"[FROST MPC] VFX completion TX broadcast SUCCESS: {vfxTxHash}",
+                                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+                                            }
+                                            else
+                                            {
+                                                LogUtility.Log($"[FROST MPC] VFX completion TX verify failed: {verifyResult.Item2}. BTC TX already broadcast — VFX TX can be retried.",
+                                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+                                            }
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    LogUtility.Log($"[FROST MPC] Account not found for {fromAddress} — cannot create VFX completion TX. BTC TX already broadcast.",
+                                        "VBTCController.DelegateWithdrawalToRemoteValidator");
+                                }
+                            }
+                            catch (Exception vfxEx)
+                            {
+                                LogUtility.Log($"[FROST MPC] VFX completion TX error (non-blocking): {vfxEx.Message}. BTC TX already broadcast: {btcTxHash}",
+                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+                            }
+
+                            return JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                Message = "vBTC V2 withdrawal completed successfully with FROST signing",
+                                BTCTransactionHash = btcTxHash,
+                                VFXTransactionHash = vfxTxHash,
+                                Status = "Pending_BTC",
+                                SmartContractUID = scUID
+                            });
                         }
                         else
                         {
@@ -1011,18 +1123,18 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID and WithdrawalRequestHash are required" });
 
+                // signOnly: true — validator only does FROST signing, returns signed TX hex.
+                // The wallet node (caller) handles BTC broadcast and VFX completion TX.
                 var result = await Services.VBTCService.CompleteWithdrawal(scUID, withdrawalRequestHash,
-                    delegatedAmount, delegatedBTCDestination, delegatedFeeRate);
+                    delegatedAmount, delegatedBTCDestination, delegatedFeeRate, signOnly: true);
 
                 if (result.Success)
                 {
                     return JsonConvert.SerializeObject(new
                     {
                         Success = true,
-                        Message = "vBTC V2 withdrawal completed successfully with FROST signing",
-                        VFXTransactionHash = result.VFXTxHash,
-                        BTCTransactionHash = result.BTCTxHash,
-                        Status = "Pending_BTC",
+                        Message = "FROST signing completed. Signed TX hex returned for caller to broadcast.",
+                        SignedTxHex = result.BTCTxHash, // In signOnly mode, BTCTxHash carries the signed hex
                         SmartContractUID = scUID
                     });
                 }

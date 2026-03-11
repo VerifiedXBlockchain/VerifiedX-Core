@@ -567,7 +567,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// <returns>Completion transaction hash and Bitcoin transaction hash</returns>
         public static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage)> CompleteWithdrawal(
             string scUID, string withdrawalRequestHash,
-            decimal? delegatedAmount = null, string? delegatedBTCDestination = null, int? delegatedFeeRate = null)
+            decimal? delegatedAmount = null, string? delegatedBTCDestination = null, int? delegatedFeeRate = null,
+            bool signOnly = false)
         {
             try
             {
@@ -748,8 +749,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
                 long feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
 
-                // Execute FROST withdrawal (build, sign, broadcast)
-                SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination}", "VBTCService.CompleteWithdrawal()");
+                // Execute FROST withdrawal (build + sign; broadcast only if not signOnly)
+                SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination} (signOnly={signOnly})", "VBTCService.CompleteWithdrawal()");
                 
                 var btcResult = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
                     depositAddress,
@@ -758,7 +759,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     feeRate,
                     scUID,
                     validators,
-                    adjustedThreshold
+                    adjustedThreshold,
+                    broadcast: !signOnly
                 );
 
                 if (!btcResult.Success)
@@ -768,10 +770,19 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
 
                 string btcTxHash = btcResult.TxHash;
-                SCLogUtility.Log($"Bitcoin transaction successful. TxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
+                string signedTxHex = btcResult.SignedTxHex;
+                SCLogUtility.Log($"FROST signing successful. TxHash: {btcTxHash}, SignedTxHex length: {signedTxHex?.Length ?? 0}", "VBTCService.CompleteWithdrawal()");
+
+                // signOnly mode: Return the signed TX hex without broadcasting or creating VFX TX.
+                // The caller (wallet node) will handle broadcast and VFX completion TX.
+                if (signOnly)
+                {
+                    SCLogUtility.Log($"signOnly mode: returning signed TX hex to caller. TxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
+                    return (true, string.Empty, signedTxHex, string.Empty);
+                }
 
                 // ============================================================
-                // End FROST Integration - Continue with VFX transaction
+                // Full mode: Continue with VFX completion transaction
                 // ============================================================
 
                 // Use validator address or first available account for transaction creation

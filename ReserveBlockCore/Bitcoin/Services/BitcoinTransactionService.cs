@@ -443,7 +443,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// <summary>
         /// Complete workflow: Build, sign with FROST, and broadcast a Bitcoin withdrawal transaction
         /// </summary>
-        public static async Task<(bool Success, string TxHash, string ErrorMessage)> 
+        public static async Task<(bool Success, string TxHash, string SignedTxHex, string ErrorMessage)>
             ExecuteFROSTWithdrawal(
                 string taprootAddress,
                 string destinationAddress,
@@ -451,7 +451,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 long feeRateSatsPerVByte,
                 string scUID,
                 List<VBTCValidator> validators,
-                int threshold)
+                int threshold,
+                bool broadcast = true)
         {
             try
             {
@@ -464,7 +465,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 if (!buildResult.Success || buildResult.UnsignedTx == null)
                 {
-                    return (false, string.Empty, $"Failed to build transaction: {buildResult.ErrorMessage}");
+                    return (false, string.Empty, string.Empty, $"Failed to build transaction: {buildResult.ErrorMessage}");
                 }
 
                 // Step 2: Sign with FROST (FIND-020: pass spent coins for BIP341 sighash computation)
@@ -477,10 +478,18 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 if (!signingResult.Success)
                 {
-                    return (false, string.Empty, $"Failed to sign transaction: {signingResult.ErrorMessage}");
+                    return (false, string.Empty, string.Empty, $"Failed to sign transaction: {signingResult.ErrorMessage}");
                 }
 
-                // Step 3: Broadcast signed transaction to Bitcoin network
+                // Step 3: Optionally broadcast signed transaction to Bitcoin network
+                if (!broadcast)
+                {
+                    // signOnly mode: return the signed TX hex without broadcasting
+                    LogUtility.Log($"[FROST] Sign-only mode: returning signed TX hex without broadcasting. TxHash: {signingResult.TxHash}",
+                        "BitcoinTransactionService.ExecuteFROSTWithdrawal()");
+                    return (true, signingResult.TxHash, signingResult.SignedTxHex, string.Empty);
+                }
+
                 // Parse the FROST-signed tx hex back into a Transaction object for broadcast
                 var btcNetwork = Globals.BTCNetwork;
                 var signedTx = NBitcoin.Transaction.Parse(signingResult.SignedTxHex, btcNetwork);
@@ -488,15 +497,16 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 if (!broadcastResult.Success)
                 {
-                    return (false, string.Empty, $"Failed to broadcast transaction: {broadcastResult.ErrorMessage}");
+                    // Broadcast failed but we have the signed hex — return it so caller can retry
+                    return (false, string.Empty, signingResult.SignedTxHex, $"Failed to broadcast transaction: {broadcastResult.ErrorMessage}");
                 }
 
-                return (true, broadcastResult.TxHash, string.Empty);
+                return (true, broadcastResult.TxHash, signingResult.SignedTxHex, string.Empty);
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error executing FROST withdrawal: {ex}", "BitcoinTransactionService.ExecuteFROSTWithdrawal()");
-                return (false, string.Empty, $"Error: {ex.Message}");
+                return (false, string.Empty, string.Empty, $"Error: {ex.Message}");
             }
         }
     }
