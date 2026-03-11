@@ -280,11 +280,9 @@ namespace ReserveBlockCore.Bitcoin.Services
                     // Compute BIP341 signature hash for this specific input (key-path spend, SIGHASH_DEFAULT)
                     var execData = new TaprootExecutionData(i) { SigHash = TaprootSigHash.Default };
                     uint256 sighash = unsignedTx.GetSignatureHashTaproot(precomputedData, execData);
-                    // CRITICAL FIX: Use ToString() which returns big-endian hex matching the raw SHA-256
-                    // output byte order. This is the byte order Bitcoin Core uses when passing the sighash
-                    // to secp256k1_schnorrsig_verify. uint256.ToBytes() returns little-endian (reversed)
-                    // bytes which would cause FROST to sign the wrong message.
-                    string sighashHex = sighash.ToString();
+                    // Convert sighash to hex for FROST. ToBytes() returns the raw SHA-256 output bytes
+                    // in their natural order (same as Bitcoin Core's internal representation).
+                    string sighashHex = Convert.ToHexString(sighash.ToBytes()).ToLowerInvariant();
 
                     LogUtility.Log($"[FROST] Computing BIP341 sighash for input {i}/{unsignedTx.Inputs.Count}: {sighashHex}", 
                         "BitcoinTransactionService.SignTransactionWithFROST()");
