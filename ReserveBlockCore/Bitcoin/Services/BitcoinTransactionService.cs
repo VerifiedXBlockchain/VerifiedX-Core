@@ -4,6 +4,8 @@ using ReserveBlockCore.Bitcoin.ElectrumX;
 using ReserveBlockCore.Bitcoin.ElectrumX.Results;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Bitcoin.FROST.Models;
+using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.Utilities;
 using System;
 using System.Collections.Generic;
@@ -206,16 +208,49 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                // Get the contract to retrieve FROST public key
+                // Get the contract to retrieve FROST public key — try local DB first, fall back to State Trei
                 var contract = VBTCContractV2.GetContract(scUID);
-                if (contract == null)
+                string frostGroupPublicKey = contract?.FrostGroupPublicKey;
+
+                // If local DB doesn't have the contract (e.g. remote validator / non-validator node),
+                // reconstruct the needed data from the State Trei + SmartContractMain which all nodes share.
+                if (string.IsNullOrEmpty(frostGroupPublicKey))
                 {
-                    return (false, string.Empty, string.Empty, "Contract not found");
+                    LogUtility.Log($"[FROST] VBTCContractV2 not in local DB for {scUID}, falling back to State Trei",
+                        "BitcoinTransactionService.SignTransactionWithFROST()");
+
+                    var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                    if (scStateTreiRec == null || string.IsNullOrEmpty(scStateTreiRec.ContractData))
+                    {
+                        return (false, string.Empty, string.Empty, $"Contract not found in local DB or State Trei: {scUID}");
+                    }
+
+                    var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                    if (scMainDecompile == null || scMainDecompile.Features == null)
+                    {
+                        return (false, string.Empty, string.Empty, $"Failed to decompile contract {scUID} from State Trei");
+                    }
+
+                    var tknzFeature = scMainDecompile.Features
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures)
+                        .FirstOrDefault();
+
+                    if (tknzFeature == null)
+                    {
+                        return (false, string.Empty, string.Empty, $"TokenizationV2 feature not found in contract {scUID}");
+                    }
+
+                    var tknz = (TokenizationV2Feature)tknzFeature;
+                    frostGroupPublicKey = tknz.FrostGroupPublicKey;
+
+                    LogUtility.Log($"[FROST] Resolved FrostGroupPublicKey from State Trei: {frostGroupPublicKey}",
+                        "BitcoinTransactionService.SignTransactionWithFROST()");
                 }
 
-                if (string.IsNullOrEmpty(contract.FrostGroupPublicKey))
+                if (string.IsNullOrEmpty(frostGroupPublicKey))
                 {
-                    return (false, string.Empty, string.Empty, "FROST group public key not found in contract");
+                    return (false, string.Empty, string.Empty, "FROST group public key not found in contract or State Trei");
                 }
 
                 // FIND-020 Fix: Build the spent outputs array in input order for BIP341 sighash.
@@ -271,7 +306,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                     // FIND-020 Fix: Pre-broadcast validation - verify the Schnorr signature locally
                     // before attaching it to the transaction. This prevents broadcasting invalid transactions.
-                    var groupPubKeyBytes = Convert.FromHexString(contract.FrostGroupPublicKey);
+                    var groupPubKeyBytes = Convert.FromHexString(frostGroupPublicKey);
                     var taprootPubKey = new TaprootPubKey(groupPubKeyBytes);
                     var schnorrSig = new SchnorrSignature(aggregateSignatureBytes);
 
@@ -279,7 +314,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         ErrorLogUtility.LogError(
                             $"FIND-020 Pre-broadcast check FAILED: Schnorr signature verification failed for input {i}. " +
-                            $"Sighash: {sighashHex}, GroupPubKey: {contract.FrostGroupPublicKey}",
+                            $"Sighash: {sighashHex}, GroupPubKey: {frostGroupPublicKey}",
                             "BitcoinTransactionService.SignTransactionWithFROST()");
                         return (false, string.Empty, string.Empty, 
                             $"Pre-broadcast signature verification failed for input {i}. Transaction would be rejected by Bitcoin network.");

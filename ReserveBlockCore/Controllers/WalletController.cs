@@ -341,6 +341,40 @@ namespace ReserveBlockCore.Controllers
                 LogUtility.Log($"[FROST MPC] Non-validator node delegating withdrawal to remote validator. scUID: {scUID}",
                     "VBTCController.DelegateWithdrawalToRemoteValidator");
 
+                // Look up the local withdrawal request to include details in the delegation payload.
+                // The remote validator may not have this record in its local DB.
+                decimal? localAmount = null;
+                string? localBTCDestination = null;
+                int? localFeeRate = null;
+
+                var localWithdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (localWithdrawalRequest != null)
+                {
+                    localAmount = localWithdrawalRequest.Amount;
+                    localBTCDestination = localWithdrawalRequest.BTCDestination;
+                    localFeeRate = localWithdrawalRequest.FeeRate;
+                    LogUtility.Log($"[FROST MPC] Including local withdrawal details in delegation: Amount={localAmount}, Dest={localBTCDestination}, FeeRate={localFeeRate}",
+                        "VBTCController.DelegateWithdrawalToRemoteValidator");
+                }
+                else
+                {
+                    // Also try the local contract's Active* fields as a fallback
+                    var localContract = VBTCContractV2.GetContract(scUID);
+                    if (localContract != null && localContract.ActiveWithdrawalAmount.HasValue && localContract.ActiveWithdrawalAmount.Value > 0)
+                    {
+                        localAmount = localContract.ActiveWithdrawalAmount.Value;
+                        localBTCDestination = localContract.ActiveWithdrawalBTCDestination;
+                        localFeeRate = 10; // Default
+                        LogUtility.Log($"[FROST MPC] Including contract Active* fields in delegation: Amount={localAmount}, Dest={localBTCDestination}",
+                            "VBTCController.DelegateWithdrawalToRemoteValidator");
+                    }
+                    else
+                    {
+                        LogUtility.Log($"[FROST MPC] WARNING: No local withdrawal request or contract Active* fields found. Remote validator will need its own data.",
+                            "VBTCController.DelegateWithdrawalToRemoteValidator");
+                    }
+                }
+
                 // Discover active validators from the network
                 var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
                 if (activeValidators == null || !activeValidators.Any())
@@ -363,7 +397,10 @@ namespace ReserveBlockCore.Controllers
                         var payload = JsonConvert.SerializeObject(new
                         {
                             SmartContractUID = scUID,
-                            WithdrawalRequestHash = withdrawalRequestHash
+                            WithdrawalRequestHash = withdrawalRequestHash,
+                            Amount = localAmount,
+                            BTCDestination = localBTCDestination,
+                            FeeRate = localFeeRate
                         });
                         var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
 
@@ -377,6 +414,26 @@ namespace ReserveBlockCore.Controllers
                         {
                             LogUtility.Log($"[FROST MPC] Withdrawal delegated successfully to validator {validator.ValidatorAddress} ({ip})",
                                 "VBTCController.DelegateWithdrawalToRemoteValidator");
+
+                            // Update local VBTCContractV2 record after successful remote withdrawal
+                            // The local (non-validator) node has this contract in its DB since it's the owner
+                            try
+                            {
+                                var localContract = VBTCContractV2.GetContract(scUID);
+                                if (localContract != null)
+                                {
+                                    localContract.LastValidatorActivityBlock = Globals.LastBlock.Height;
+                                    VBTCContractV2.UpdateContract(localContract);
+                                    LogUtility.Log($"[FROST MPC] Updated local VBTCContractV2.LastValidatorActivityBlock to {Globals.LastBlock.Height}",
+                                        "VBTCController.DelegateWithdrawalToRemoteValidator");
+                                }
+                            }
+                            catch (Exception updateEx)
+                            {
+                                LogUtility.Log($"[FROST MPC] Warning: Failed to update local contract after delegation: {updateEx.Message}",
+                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+                            }
+
                             return responseBody; // Pass the validator's response directly back
                         }
                         else
