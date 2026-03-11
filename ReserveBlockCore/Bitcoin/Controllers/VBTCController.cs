@@ -1894,6 +1894,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid validator signature" });
                 }
 
+                // FIND-027 Fix: Non-validator wallet nodes cannot coordinate FROST signing directly
+                // because they don't have validator keys or FROST key packages. Delegate to a remote validator.
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    return await DelegateWithdrawalToRemoteValidator(payload.SmartContractUID, payload.WithdrawalRequestHash);
+                }
+
                 // FIND-024 Fix: Wire to real FROST signing via VBTCService.CompleteWithdrawal
                 // This uses the same path as the non-raw CompleteWithdrawal endpoint,
                 // which coordinates the FROST MPC signing ceremony and broadcasts the BTC TX.

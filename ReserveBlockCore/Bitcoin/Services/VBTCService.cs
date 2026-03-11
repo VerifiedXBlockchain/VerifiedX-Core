@@ -569,6 +569,16 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
+                // FIND-027 Fix: Safety guard — CompleteWithdrawal requires FROST signing which can only
+                // run on a validator node. If this is a non-validator, fail fast with a clear error
+                // instead of crashing with a NullReferenceException deep in the FROST signing flow.
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    SCLogUtility.Log($"CompleteWithdrawal called on non-validator node. This must be delegated to a validator.", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, 
+                        "This node is not a validator and cannot coordinate FROST signing. The withdrawal must be delegated to a remote validator.");
+                }
+
                 // Get contract and validate
                 var vbtcContract = VBTCContractV2.GetContract(scUID);
                 if (vbtcContract == null)
@@ -656,7 +666,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     SCLogUtility.Log($"Invalid withdrawal details in both contract and request record", "VBTCService.CompleteWithdrawal()");
                     return (false, string.Empty, string.Empty, "Invalid withdrawal details — amount/destination not found in contract or request record");
                 }
-                long feeRate = 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
+                long feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
 
                 // Execute FROST withdrawal (build, sign, broadcast)
                 SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination}", "VBTCService.CompleteWithdrawal()");
