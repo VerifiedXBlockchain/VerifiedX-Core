@@ -597,17 +597,25 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
                 else
                 {
-                    SCLogUtility.Log($"VBTCContractV2 not in local DB for {scUID}, falling back to State Trei / SmartContractMain", "VBTCService.CompleteWithdrawal()");
+                    SCLogUtility.Log($"VBTCContractV2 not in local DB for {scUID}, falling back to State Trei + GenerateSmartContractInMemory", "VBTCService.CompleteWithdrawal()");
 
-                    // Get smart contract from the shared SmartContractMain database
-                    var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
-                    if (sc == null || sc.Features == null)
+                    // Get smart contract state from the State Trei (shared across ALL nodes — consensus data)
+                    var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                    if (scStateTreiRec == null || string.IsNullOrEmpty(scStateTreiRec.ContractData))
                     {
-                        SCLogUtility.Log($"Smart contract not found in SmartContractMain either: {scUID}", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, string.Empty, $"vBTC V2 contract not found in local DB or SmartContractMain: {scUID}");
+                        SCLogUtility.Log($"Smart contract state not found in State Trei: {scUID}", "VBTCService.CompleteWithdrawal()");
+                        return (false, string.Empty, string.Empty, $"vBTC V2 contract not found in local DB or State Trei: {scUID}");
                     }
 
-                    var tknzFeature = sc.Features
+                    // Decompile the contract from the State Trei's ContractData field
+                    var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                    if (scMainDecompile == null || scMainDecompile.Features == null)
+                    {
+                        SCLogUtility.Log($"Failed to decompile smart contract from State Trei ContractData: {scUID}", "VBTCService.CompleteWithdrawal()");
+                        return (false, string.Empty, string.Empty, $"Failed to decompile contract {scUID} from State Trei");
+                    }
+
+                    var tknzFeature = scMainDecompile.Features
                         .Where(x => x.FeatureName == FeatureName.TokenizationV2)
                         .Select(x => x.FeatureFeatures)
                         .FirstOrDefault();
