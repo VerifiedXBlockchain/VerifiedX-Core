@@ -638,6 +638,7 @@ namespace ReserveBlockCore.Models.SmartContracts
                                     var v2Threshold = repl.Run(@"RequiredThreshold").Value != null ? (int)repl.Run(@"RequiredThreshold").Value : 0;
                                     var v2ProofBlockHeight = repl.Run(@"ProofBlockHeight").Value != null ? Convert.ToInt64(repl.Run(@"ProofBlockHeight").Value.ToString()) : 0L;
                                     var v2FrostGroupKey = repl.Run(@"GetFrostGroupPublicKey()").Value != null ? repl.Run(@"GetFrostGroupPublicKey()").Value.ToString() : "";
+                                    var v2CeremonyId = repl.Run(@"GetCeremonyId()").Value != null ? repl.Run(@"GetCeremonyId()").Value.ToString() : "";
                                     var v2ValidatorSnapshot = repl.Run(@"GetValidatorSnapshot()").Value != null ? repl.Run(@"GetValidatorSnapshot()").Value.ToString() : "";
                                     var v2DkgProofRaw = repl.Run(@"GetDKGProof()").Value != null ? repl.Run(@"GetDKGProof()").Value.ToString() : "";
                                     var v2ImageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
@@ -672,6 +673,7 @@ namespace ReserveBlockCore.Models.SmartContracts
                                         RequiredThreshold = v2Threshold,
                                         DKGProof = v2DkgProof,
                                         ProofBlockHeight = v2ProofBlockHeight,
+                                        CeremonyId = v2CeremonyId,
                                         ImageBase = v2ImageBase
                                     };
 
@@ -816,6 +818,7 @@ namespace ReserveBlockCore.Models.SmartContracts
                                 var v2Threshold = repl.Run(@"RequiredThreshold").Value != null ? (int)repl.Run(@"RequiredThreshold").Value : 0;
                                 var v2ProofBlockHeight = repl.Run(@"ProofBlockHeight").Value != null ? Convert.ToInt64(repl.Run(@"ProofBlockHeight").Value.ToString()) : 0L;
                                 var v2FrostGroupKey = repl.Run(@"GetFrostGroupPublicKey()").Value != null ? repl.Run(@"GetFrostGroupPublicKey()").Value.ToString() : "";
+                                var v2CeremonyId = repl.Run(@"GetCeremonyId()").Value != null ? repl.Run(@"GetCeremonyId()").Value.ToString() : "";
                                 var v2ValidatorSnapshot = repl.Run(@"GetValidatorSnapshot()").Value != null ? repl.Run(@"GetValidatorSnapshot()").Value.ToString() : "";
                                 var v2DkgProofRaw = repl.Run(@"GetDKGProof()").Value != null ? repl.Run(@"GetDKGProof()").Value.ToString() : "";
                                 var v2ImageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
@@ -850,6 +853,7 @@ namespace ReserveBlockCore.Models.SmartContracts
                                     RequiredThreshold = v2Threshold,
                                     DKGProof = v2DkgProof,
                                     ProofBlockHeight = v2ProofBlockHeight,
+                                    CeremonyId = v2CeremonyId,
                                     ImageBase = v2ImageBase
                                 };
 

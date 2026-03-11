@@ -1108,6 +1108,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     RequiredThreshold = 51, // 51% initially
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
+                    CeremonyId = payload.CeremonyId,
                     ImageBase = payload.ImageBase
                 };
 
@@ -1347,6 +1348,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     RequiredThreshold = 51, // 51% initially
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
+                    CeremonyId = payload.CeremonyId,
                     ImageBase = payload.ImageBase
                 };
 

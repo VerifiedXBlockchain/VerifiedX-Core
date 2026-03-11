@@ -533,7 +533,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             string messageHash,
             string scUID,
             List<VBTCValidator> validators,
-            int threshold)
+            int threshold,
+            string? ceremonyId = null)
         {
             try
             {
@@ -543,7 +544,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}", "FrostMPCService.CoordinateSigningCeremony");
 
                 // Phase 1: Broadcast signing start
-                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold);
+                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId);
                 if (!startSuccess)
                 {
                     LogUtility.Log($"[FROST MPC] Failed to start signing ceremony", "FrostMPCService.CoordinateSigningCeremony");
@@ -594,7 +595,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             string scUID,
             string leaderAddress,
             List<VBTCValidator> validators,
-            int threshold)
+            int threshold,
+            string? ceremonyId = null)
         {
             try
             {
@@ -608,6 +610,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     SessionId = sessionId,
                     MessageHash = messageHash,
                     SmartContractUID = scUID,
+                    CeremonyId = ceremonyId,
                     LeaderAddress = leaderAddress,
                     Timestamp = timestamp,
                     LeaderSignature = signingLeaderSignature,

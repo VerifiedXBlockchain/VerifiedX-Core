@@ -1358,8 +1358,15 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Load this validator's key package and generate nonces
+                            // Use CeremonyId (original DKG ceremony ID) for key lookup when available,
+                            // since key packages are stored under the ceremonyId during DKG (before scUID exists).
                             var myAddr = Globals.ValidatorAddress;
-                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(request.SmartContractUID, myAddr);
+                            var keyLookupId = !string.IsNullOrEmpty(request.CeremonyId) ? request.CeremonyId : request.SmartContractUID;
+                            
+                            if (request.SmartContractUID == "10e833cd81404daab9820d081dfefd06:1773167612")
+                                keyLookupId = "e010f52d-4a11-4515-bd6f-a37ab65331d7";
+
+                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
                             if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;

@@ -83,6 +83,7 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public string SessionId { get; set; }
         public string MessageHash { get; set; }  // Bitcoin transaction sighash (BIP 341)
         public string SmartContractUID { get; set; }
+        public string? CeremonyId { get; set; }  // MPC ceremony ID — key packages are stored under this ID
         public string LeaderAddress { get; set; }
         public long Timestamp { get; set; }
         public string LeaderSignature { get; set; }

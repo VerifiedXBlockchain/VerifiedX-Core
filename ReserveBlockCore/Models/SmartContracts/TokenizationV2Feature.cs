@@ -20,6 +20,7 @@ namespace ReserveBlockCore.Models.SmartContracts
         #region DKG Proof
         public string DKGProof { get; set; }  // Distributed Key Generation completion proof
         public long ProofBlockHeight { get; set; }
+        public string CeremonyId { get; set; }  // MPC ceremony ID used during DKG (key packages stored under this ID)
         #endregion
 
         #region Visual

@@ -211,6 +211,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // Get the contract to retrieve FROST public key — try local DB first, fall back to State Trei
                 var contract = VBTCContractV2.GetContract(scUID);
                 string frostGroupPublicKey = contract?.FrostGroupPublicKey;
+                string? ceremonyId = null;
 
                 // If local DB doesn't have the contract (e.g. remote validator / non-validator node),
                 // reconstruct the needed data from the State Trei + SmartContractMain which all nodes share.
@@ -243,8 +244,9 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                     var tknz = (TokenizationV2Feature)tknzFeature;
                     frostGroupPublicKey = tknz.FrostGroupPublicKey;
+                    ceremonyId = tknz.CeremonyId;
 
-                    LogUtility.Log($"[FROST] Resolved FrostGroupPublicKey from State Trei: {frostGroupPublicKey}",
+                    LogUtility.Log($"[FROST] Resolved FrostGroupPublicKey from State Trei: {frostGroupPublicKey}, CeremonyId: {ceremonyId ?? "null"}",
                         "BitcoinTransactionService.SignTransactionWithFROST()");
                 }
 
@@ -288,7 +290,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                         sighashHex,
                         scUID,
                         validators,
-                        threshold);
+                        threshold,
+                        ceremonyId);
 
                     if (signingResult == null || !signingResult.SignatureValid)
                     {

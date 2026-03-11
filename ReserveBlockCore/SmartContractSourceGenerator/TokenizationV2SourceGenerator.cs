@@ -56,6 +56,13 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("   return RequiredThreshold");
             strTknzV2Bld.AppendLine("}");
 
+            // Function: Get Ceremony ID
+            strTknzV2Bld.AppendLine("function GetCeremonyId() : string");
+            strTknzV2Bld.AppendLine("{");
+            strTknzV2Bld.AppendLine("   var ceremonyId = \"" + (tknzV2.CeremonyId ?? "") + "\"");
+            strTknzV2Bld.AppendLine("   return (ceremonyId)");
+            strTknzV2Bld.AppendLine("}");
+
             // Function: Get DKG Proof
             strTknzV2Bld.AppendLine("function GetDKGProof() : string");
             strTknzV2Bld.AppendLine("{");
