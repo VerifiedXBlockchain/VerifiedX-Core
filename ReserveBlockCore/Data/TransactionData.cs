@@ -394,6 +394,35 @@ namespace ReserveBlockCore.Data
             var collection = DbContext.DB_Mempool.GetCollection<Transaction>(DbContext.RSRV_TRANSACTION_POOL);
 
             var memPoolTxList = collection.FindAll().ToList();
+
+            // ===== DEDUPLICATION FIX =====
+            // Remove duplicate TXs by hash from the mempool before processing.
+            // Duplicates can occur when the same TX is received from multiple validators
+            // due to race conditions in the P2P broadcast/receive path.
+            var duplicateGroups = memPoolTxList.GroupBy(x => x.Hash).Where(g => g.Count() > 1).ToList();
+            if (duplicateGroups.Any())
+            {
+                foreach (var group in duplicateGroups)
+                {
+                    // Keep only the first TX, remove all extras from the DB
+                    var duplicates = group.Skip(1).ToList();
+                    foreach (var dup in duplicates)
+                    {
+                        try
+                        {
+                            collection.Delete(dup.Id);
+                        }
+                        catch (Exception ex)
+                        {
+                            ErrorLogUtility.LogError($"Failed to delete duplicate TX {dup.Hash} from mempool: {ex.Message}", "TransactionData.ProcessTxPool()-Dedup");
+                        }
+                    }
+                }
+
+                // Re-fetch the cleaned mempool list after deduplication
+                memPoolTxList = collection.FindAll().ToList();
+            }
+
             //Size the pool to 1mb
             var sizedMempoolList = MempoolSizeUtility.SizeMempoolDown(memPoolTxList);
 
@@ -406,7 +435,7 @@ namespace ReserveBlockCore.Data
 
             if(sizedMempoolList.Count() > 0)
             {
-                sizedMempoolList.ForEach(async tx =>
+                foreach (var tx in sizedMempoolList)
                 {
                     try
                     {
@@ -866,7 +895,7 @@ namespace ReserveBlockCore.Data
                             }
                         }
                     }
-                });
+                }
 
             }
 
