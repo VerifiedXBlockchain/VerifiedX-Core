@@ -441,6 +441,7 @@ namespace ReserveBlockCore.P2P
                                 {
                                     try
                                     {
+                                        ErrorLogUtility.LogError($"TX Faile From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()");
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
                                     }
                                     catch (Exception ex)
@@ -484,54 +485,55 @@ namespace ReserveBlockCore.P2P
                                         }
                                     }
 
-                                mempool.InsertSafe(txReceived);
+                                    mempool.InsertSafe(txReceived);
                                 
-                                // HAL-16 Fix: Broadcast guard - check if we should broadcast
-                                // Store broadcast decision but DON'T execute yet (release semaphore first)
-                                bool shouldBroadcast = false;
-                                if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
-                                {
-                                    var now = TimeUtil.GetTime();
-                                    
-                                    if (Globals.TxLastBroadcastTime.TryGetValue(txReceived.Hash, out var lastBroadcastTime))
+                                    // HAL-16 Fix: Broadcast guard - check if we should broadcast
+                                    // Store broadcast decision but DON'T execute yet (release semaphore first)
+                                    bool shouldBroadcast = false;
+                                    if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
                                     {
-                                        // Allow rebroadcast only if it's been > 30 seconds
-                                        if (now - lastBroadcastTime > 30)
+                                        var now = TimeUtil.GetTime();
+                                    
+                                        if (Globals.TxLastBroadcastTime.TryGetValue(txReceived.Hash, out var lastBroadcastTime))
                                         {
-                                            shouldBroadcast = true;
-                                            Globals.TxLastBroadcastTime[txReceived.Hash] = now;
+                                            // Allow rebroadcast only if it's been > 30 seconds
+                                            if (now - lastBroadcastTime > 30)
+                                            {
+                                                shouldBroadcast = true;
+                                                Globals.TxLastBroadcastTime[txReceived.Hash] = now;
+                                            }
+                                            else
+                                            {
+                                                if (Globals.OptionalLogging)
+                                                {
+                                                    LogUtility.Log($"TX {txReceived.Hash.Substring(0, 8)}... skip broadcast (last: {now - lastBroadcastTime}s ago)", 
+                                                        "BroadcastThrottle");
+                                                }
+                                            }
                                         }
                                         else
                                         {
-                                            if (Globals.OptionalLogging)
-                                            {
-                                                LogUtility.Log($"TX {txReceived.Hash.Substring(0, 8)}... skip broadcast (last: {now - lastBroadcastTime}s ago)", 
-                                                    "BroadcastThrottle");
-                                            }
+                                            // First time, broadcast it
+                                            shouldBroadcast = true;
+                                            Globals.TxLastBroadcastTime.TryAdd(txReceived.Hash, now);
                                         }
                                     }
-                                    else
+                                
+                                    // HAL-16 Fix: Schedule broadcast AFTER semaphore release (fire-and-forget)
+                                    // This prevents broadcasts from blocking TX processing or block reception
+                                    if (shouldBroadcast)
                                     {
-                                        // First time, broadcast it
-                                        shouldBroadcast = true;
-                                        Globals.TxLastBroadcastTime.TryAdd(txReceived.Hash, now);
+                                        var txToBroadcast = txReceived; // Capture for closure
+                                        _ = Task.Run(() => ValidatorNode.Broadcast("7777", txToBroadcast, "SendTxToMempoolVals"));
                                     }
-                                }
                                 
-                                // HAL-16 Fix: Schedule broadcast AFTER semaphore release (fire-and-forget)
-                                // This prevents broadcasts from blocking TX processing or block reception
-                                if (shouldBroadcast)
-                                {
-                                    var txToBroadcast = txReceived; // Capture for closure
-                                    _ = Task.Run(() => ValidatorNode.Broadcast("7777", txToBroadcast, "SendTxToMempoolVals"));
-                                }
-                                
-                                return "ATMP";//added to mempool
+                                    return "ATMP";//added to mempool
                                 }
                                 else
                                 {
                                     try
                                     {
+                                        ErrorLogUtility.LogError($"TX Faile From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()");
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
                                     }
                                     catch (Exception ex)
@@ -588,6 +590,7 @@ namespace ReserveBlockCore.P2P
                             {
                                 try
                                 {
+                                    ErrorLogUtility.LogError($"TX Faile From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()");
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
                                 }
                                 catch { }
@@ -677,6 +680,7 @@ namespace ReserveBlockCore.P2P
                             {
                                 try
                                 {
+                                    ErrorLogUtility.LogError($"TX Faile From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()");
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
                                 }
                                 catch { }
