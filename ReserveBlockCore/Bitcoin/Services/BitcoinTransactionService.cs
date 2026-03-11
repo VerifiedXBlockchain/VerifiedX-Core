@@ -444,8 +444,11 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, string.Empty, $"Failed to sign transaction: {signingResult.ErrorMessage}");
                 }
 
-                // Step 3: Broadcast to Bitcoin network
-                var broadcastResult = await BroadcastTransaction(buildResult.UnsignedTx);
+                // Step 3: Broadcast signed transaction to Bitcoin network
+                // Parse the FROST-signed tx hex back into a Transaction object for broadcast
+                var btcNetwork = Globals.BTCNetwork;
+                var signedTx = NBitcoin.Transaction.Parse(signingResult.SignedTxHex, btcNetwork);
+                var broadcastResult = await BroadcastTransaction(signedTx);
 
                 if (!broadcastResult.Success)
                 {

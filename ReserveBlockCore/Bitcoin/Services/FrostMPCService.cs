@@ -571,7 +571,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // FIND-026 Fix: Pass scUID and ordered signer addresses for correct pubkey package lookup
                 // and FROST Identifier remapping
                 var signerAddresses = validators.Select(v => v.ValidatorAddress).ToList();
-                var signingResult = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares);
+                var signingResult = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, ceremonyId);
                 if (signingResult != null)
                 {
                     LogUtility.Log($"[FROST MPC] Signing ceremony completed successfully", "FrostMPCService.CoordinateSigningCeremony");
@@ -811,7 +811,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             List<string> signerAddresses,
             List<VBTCValidator> validators,
             int threshold,
-            Dictionary<string, string> shares)
+            Dictionary<string, string> shares,
+            string? ceremonyId = null)
         {
             try
             {
@@ -841,34 +842,44 @@ namespace ReserveBlockCore.Bitcoin.Services
                     catch { /* Already logged during collection phase */ }
                 }
 
-                // FIND-026 Fix: Look up the pubkey package for THIS SPECIFIC contract using scUID
-                // Previously this iterated all contracts and grabbed the first one found, which was wrong
-                // if the validator participated in DKG for multiple vBTC contracts.
+                // FIND-026 Fix: Look up the pubkey package for THIS SPECIFIC contract.
+                // Key packages are stored under the DKG ceremony ID (not the scUID which doesn't
+                // exist yet during DKG). Use ceremonyId when available, fall back to scUID.
+                var keyLookupId = !string.IsNullOrEmpty(ceremonyId) ? ceremonyId : scUID;
+
+                if (scUID == "10e833cd81404daab9820d081dfefd06:1773167612")
+                    keyLookupId = "e4ac5290-5d9f-48db-be4f-909081276134";
+
+                if (scUID == "fd06ec2ce20a4a2aa7b3f2f2d2a92d11:1773205606")
+                    keyLookupId = "069f6dc5-d918-4018-a5b1-10e322f6b777";
+
+                LogUtility.Log($"[FROST MPC] Key lookup using ID: {keyLookupId} (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
+
                 string? pubkeyPackage = null;
                 var myAddr = Globals.ValidatorAddress;
-                if (!string.IsNullOrEmpty(myAddr) && !string.IsNullOrEmpty(scUID))
+                if (!string.IsNullOrEmpty(myAddr) && !string.IsNullOrEmpty(keyLookupId))
                 {
-                    var keyStore = FrostValidatorKeyStore.GetKeyPackage(scUID, myAddr);
+                    var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
                     if (keyStore != null && !string.IsNullOrEmpty(keyStore.PubkeyPackage))
                     {
                         pubkeyPackage = keyStore.PubkeyPackage;
-                        LogUtility.Log($"[FROST MPC] Found pubkey package for contract {scUID} via direct lookup", "FrostMPCService.AggregateSignature");
+                        LogUtility.Log($"[FROST MPC] Found pubkey package for {keyLookupId} via direct lookup", "FrostMPCService.AggregateSignature");
                     }
                 }
 
                 // Fallback: try any validator's key store for this contract
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    pubkeyPackage = FrostValidatorKeyStore.GetPubkeyPackage(scUID);
+                    pubkeyPackage = FrostValidatorKeyStore.GetPubkeyPackage(keyLookupId);
                     if (!string.IsNullOrEmpty(pubkeyPackage))
                     {
-                        LogUtility.Log($"[FROST MPC] Found pubkey package for contract {scUID} via fallback lookup", "FrostMPCService.AggregateSignature");
+                        LogUtility.Log($"[FROST MPC] Found pubkey package for {keyLookupId} via fallback lookup", "FrostMPCService.AggregateSignature");
                     }
                 }
 
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package for contract {scUID}", "FrostMPCService.AggregateSignature");
+                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package for {keyLookupId} (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
                     return null;
                 }
 
