@@ -2192,16 +2192,15 @@ namespace ReserveBlockCore.Bitcoin.FROST
                     return string.Empty;
                 }
 
-                // FROST-TR (FROST-secp256k1-SHA256-TR-v1) applies the BIP341 Taproot key tweak
-                // during signing. The Taproot output key = internal_key + H_TapTweak(internal_key) * G.
-                // We must derive the address from the TWEAKED output key so that Bitcoin signature
-                // verification matches what FROST-TR produces.
-                var internalKey = new TaprootInternalPubKey(xOnlyBytes);
-                var outputKeyInfo = internalKey.GetTaprootFullPubKey();
-                var taprootAddress = outputKeyInfo.OutputKey.GetAddress(Globals.BTCNetwork);
+                // The FROST FFI (frost-secp256k1-tr) signs against the RAW group key — it does NOT
+                // apply the BIP341 Taproot key tweak internally. Therefore the Taproot address must
+                // encode the raw x-only group key so that Bitcoin key-path spending validates the
+                // FROST signature against the same key.
+                var taprootPubKey = new TaprootPubKey(xOnlyBytes);
+                var taprootAddress = taprootPubKey.GetAddress(Globals.BTCNetwork);
 
                 var addressStr = taprootAddress.ToString();
-                LogUtility.Log($"[FROST] Real Taproot address derived via NBitcoin (BIP341 tweaked): {addressStr}", "FrostStartup.DeriveTaprootAddress");
+                LogUtility.Log($"[FROST] Real Taproot address derived via NBitcoin (raw key, no tweak): {addressStr}", "FrostStartup.DeriveTaprootAddress");
                 return addressStr;
             }
             catch (Exception ex)
