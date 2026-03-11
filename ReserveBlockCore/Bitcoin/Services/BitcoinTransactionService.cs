@@ -362,6 +362,9 @@ namespace ReserveBlockCore.Bitcoin.Services
                 string txHex = signedTx.ToHex();
                 string txHash = signedTx.GetHash().ToString();
 
+                LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS HEX: {txHex}",
+                            "BitcoinTransactionService.BroadcastTransaction()");
+
                 var client = GetElectrumClient();
                 if (client == null)
                 {
@@ -374,11 +377,18 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                     if (!string.IsNullOrEmpty(broadcastResult?.TxHash))
                     {
+                        LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS: {broadcastResult.TxHash}",
+                            "BitcoinTransactionService.BroadcastTransaction()");
                         return (true, broadcastResult.TxHash, string.Empty);
                     }
                     else
                     {
-                        return (false, string.Empty, "Broadcast failed - no result returned");
+                        var errorDetail = !string.IsNullOrEmpty(broadcastResult?.ErrorMessage)
+                            ? $"Electrum rejected: {broadcastResult.ErrorMessage}"
+                            : "Broadcast failed - no result returned (empty response or connection issue)";
+                        ErrorLogUtility.LogError($"Bitcoin broadcast failed. TxHex length: {txHex.Length}, Error: {errorDetail}",
+                            "BitcoinTransactionService.BroadcastTransaction()");
+                        return (false, string.Empty, errorDetail);
                     }
                 }
             }

@@ -218,9 +218,22 @@ namespace ReserveBlockCore.Bitcoin.ElectrumX
             {
                 // ignored
             }
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainTransactionBroadcastResponse>(buff) : null;
+            if (string.IsNullOrEmpty(buff))
+            {
+                ReserveBlockCore.Utilities.ErrorLogUtility.LogError(
+                    $"Electrum broadcast: empty response from {Host}:{Port}",
+                    "Client.Broadcast");
+                return new BlockchainTransactionBroadcastResult();
+            }
+            var response = JsonConvert.DeserializeObject<BlockchainTransactionBroadcastResponse>(buff);
             if (response?.Error != null)
+            {
+                ReserveBlockCore.Utilities.ErrorLogUtility.LogError(
+                    $"Electrum broadcast REJECTED: code={response.Error.Code}, message={response.Error.Message}, host={Host}:{Port}",
+                    "Client.Broadcast");
                 OnError?.Invoke(this, response.Error.Code, response.Error.Message);
+                return new BlockchainTransactionBroadcastResult { ErrorMessage = response.Error.Message };
+            }
             return response != null ? response.GetResultModel() : new BlockchainTransactionBroadcastResult();
         }
         #endregion
