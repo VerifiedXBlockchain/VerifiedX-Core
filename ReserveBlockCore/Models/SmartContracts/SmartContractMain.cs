@@ -629,6 +629,57 @@ namespace ReserveBlockCore.Models.SmartContracts
                                     featuresList.Add(scFeature);
                                     break;
                                 }
+                            case FeatureName.TokenizationV2:
+                                {
+                                    var v2AssetName = repl.Run(@"AssetName").Value != null ? (string)repl.Run(@"AssetName").Value : "vBTC Token";
+                                    var v2AssetTicker = repl.Run(@"AssetTicker").Value != null ? (string)repl.Run(@"AssetTicker").Value : "BTC";
+                                    var v2DepositAddress = repl.Run(@"DepositAddress").Value != null ? (string)repl.Run(@"DepositAddress").Value : "";
+                                    var v2Version = repl.Run(@"TokenizationVersion").Value != null ? (int)repl.Run(@"TokenizationVersion").Value : 2;
+                                    var v2Threshold = repl.Run(@"RequiredThreshold").Value != null ? (int)repl.Run(@"RequiredThreshold").Value : 0;
+                                    var v2ProofBlockHeight = repl.Run(@"ProofBlockHeight").Value != null ? Convert.ToInt64(repl.Run(@"ProofBlockHeight").Value.ToString()) : 0L;
+                                    var v2FrostGroupKey = repl.Run(@"GetFrostGroupPublicKey()").Value != null ? repl.Run(@"GetFrostGroupPublicKey()").Value.ToString() : "";
+                                    var v2ValidatorSnapshot = repl.Run(@"GetValidatorSnapshot()").Value != null ? repl.Run(@"GetValidatorSnapshot()").Value.ToString() : "";
+                                    var v2DkgProofRaw = repl.Run(@"GetDKGProof()").Value != null ? repl.Run(@"GetDKGProof()").Value.ToString() : "";
+                                    var v2ImageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
+
+                                    // Parse DKG proof (format: "proof|->blockHeight")
+                                    var v2DkgProof = "";
+                                    if (!string.IsNullOrEmpty(v2DkgProofRaw) && v2DkgProofRaw.Contains("|->"))
+                                    {
+                                        var dkgParts = v2DkgProofRaw.Split(new string[] { "|->" }, StringSplitOptions.None);
+                                        v2DkgProof = dkgParts[0];
+                                    }
+                                    else
+                                    {
+                                        v2DkgProof = v2DkgProofRaw;
+                                    }
+
+                                    // Parse validator snapshot (comma-separated)
+                                    var v2ValidatorList = new List<string>();
+                                    if (!string.IsNullOrEmpty(v2ValidatorSnapshot))
+                                    {
+                                        v2ValidatorList = v2ValidatorSnapshot.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
+                                    }
+
+                                    var tokenizationV2Feature = new TokenizationV2Feature
+                                    {
+                                        AssetName = v2AssetName,
+                                        AssetTicker = v2AssetTicker,
+                                        DepositAddress = v2DepositAddress,
+                                        Version = v2Version,
+                                        FrostGroupPublicKey = v2FrostGroupKey,
+                                        ValidatorAddressesSnapshot = v2ValidatorList,
+                                        RequiredThreshold = v2Threshold,
+                                        DKGProof = v2DkgProof,
+                                        ProofBlockHeight = v2ProofBlockHeight,
+                                        ImageBase = v2ImageBase
+                                    };
+
+                                    scFeature.FeatureName = FeatureName.TokenizationV2;
+                                    scFeature.FeatureFeatures = tokenizationV2Feature;
+                                    featuresList.Add(scFeature);
+                                    break;
+                                }
                             case FeatureName.MultiAsset:
                                 var multiAssetList = new List<string>();
                                 var multiAssetCount = Convert.ToInt32(repl.Run(@"MultiAssetCount").Value.ToString());
@@ -753,6 +804,57 @@ namespace ReserveBlockCore.Models.SmartContracts
 
                                 scFeature.FeatureName = FeatureName.Tokenization;
                                 scFeature.FeatureFeatures = tokenizationFeature;
+                                featuresList.Add(scFeature);
+                                break;
+                            }
+                        case FeatureName.TokenizationV2:
+                            {
+                                var v2AssetName = repl.Run(@"AssetName").Value != null ? (string)repl.Run(@"AssetName").Value : "vBTC Token";
+                                var v2AssetTicker = repl.Run(@"AssetTicker").Value != null ? (string)repl.Run(@"AssetTicker").Value : "BTC";
+                                var v2DepositAddress = repl.Run(@"DepositAddress").Value != null ? (string)repl.Run(@"DepositAddress").Value : "";
+                                var v2Version = repl.Run(@"TokenizationVersion").Value != null ? (int)repl.Run(@"TokenizationVersion").Value : 2;
+                                var v2Threshold = repl.Run(@"RequiredThreshold").Value != null ? (int)repl.Run(@"RequiredThreshold").Value : 0;
+                                var v2ProofBlockHeight = repl.Run(@"ProofBlockHeight").Value != null ? Convert.ToInt64(repl.Run(@"ProofBlockHeight").Value.ToString()) : 0L;
+                                var v2FrostGroupKey = repl.Run(@"GetFrostGroupPublicKey()").Value != null ? repl.Run(@"GetFrostGroupPublicKey()").Value.ToString() : "";
+                                var v2ValidatorSnapshot = repl.Run(@"GetValidatorSnapshot()").Value != null ? repl.Run(@"GetValidatorSnapshot()").Value.ToString() : "";
+                                var v2DkgProofRaw = repl.Run(@"GetDKGProof()").Value != null ? repl.Run(@"GetDKGProof()").Value.ToString() : "";
+                                var v2ImageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
+
+                                // Parse DKG proof (format: "proof|->blockHeight")
+                                var v2DkgProof = "";
+                                if (!string.IsNullOrEmpty(v2DkgProofRaw) && v2DkgProofRaw.Contains("|->"))
+                                {
+                                    var dkgParts = v2DkgProofRaw.Split(new string[] { "|->" }, StringSplitOptions.None);
+                                    v2DkgProof = dkgParts[0];
+                                }
+                                else
+                                {
+                                    v2DkgProof = v2DkgProofRaw;
+                                }
+
+                                // Parse validator snapshot (comma-separated)
+                                var v2ValidatorList = new List<string>();
+                                if (!string.IsNullOrEmpty(v2ValidatorSnapshot))
+                                {
+                                    v2ValidatorList = v2ValidatorSnapshot.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
+                                }
+
+                                var tokenizationV2Feature = new TokenizationV2Feature
+                                {
+                                    AssetName = v2AssetName,
+                                    AssetTicker = v2AssetTicker,
+                                    DepositAddress = v2DepositAddress,
+                                    Version = v2Version,
+                                    FrostGroupPublicKey = v2FrostGroupKey,
+                                    ValidatorAddressesSnapshot = v2ValidatorList,
+                                    RequiredThreshold = v2Threshold,
+                                    DKGProof = v2DkgProof,
+                                    ProofBlockHeight = v2ProofBlockHeight,
+                                    ImageBase = v2ImageBase
+                                };
+
+                                scFeature.FeatureName = FeatureName.TokenizationV2;
+                                scFeature.FeatureFeatures = tokenizationV2Feature;
                                 featuresList.Add(scFeature);
                                 break;
                             }

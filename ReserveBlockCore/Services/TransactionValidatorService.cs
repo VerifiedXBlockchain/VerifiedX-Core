@@ -1126,10 +1126,19 @@ namespace ReserveBlockCore.Services
                                                 {
                                                     // Owner: query ElectrumX for deposit address balance and add ledger balance
                                                     decimal depositBalance = 0M;
-                                                    // Try local VBTCContractV2 first (has DepositAddress for ElectrumX query)
-                                                    // Falls back gracefully if not available (remote nodes won't have this)
-                                                    var localContract = Bitcoin.Models.VBTCContractV2.GetContract(scUID);
-                                                    if (localContract != null && !string.IsNullOrEmpty(localContract.DepositAddress))
+                                                    // Get deposit address from state trei contract data (available on ALL nodes)
+                                                    string depositAddr = null;
+                                                    var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                                                    if (scMainDecompile?.Features != null)
+                                                    {
+                                                        var tknzV2 = scMainDecompile.Features
+                                                            .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                                            .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                                        if (tknzV2 != null)
+                                                            depositAddr = ((TokenizationV2Feature)tknzV2).DepositAddress;
+                                                    }
+
+                                                    if (!string.IsNullOrEmpty(depositAddr))
                                                     {
                                                         if (!blockDownloads && !blockVerify)
                                                         {
@@ -1138,26 +1147,13 @@ namespace ReserveBlockCore.Services
                                                                 using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
                                                                 if (elxClient != null)
                                                                 {
-                                                                    var balance = await elxClient.GetBalance(localContract.DepositAddress, false);
+                                                                    var balance = await elxClient.GetBalance(depositAddr, false);
                                                                     depositBalance = balance.Confirmed / 100_000_000M;
                                                                 }
-                                                                else
-                                                                {
-                                                                    depositBalance = localContract.Balance;
-                                                                }
                                                             }
-                                                            catch
-                                                            {
-                                                                depositBalance = localContract.Balance;
-                                                            }
-                                                        }
-                                                        else
-                                                        {
-                                                            // During block sync/verify, use cached balance - block already passed consensus
-                                                            depositBalance = localContract.Balance;
+                                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
                                                         }
                                                     }
-                                                    // else: remote node — depositBalance stays 0, only ledger balance used
 
                                                     decimal ownerBalance = depositBalance + ledgerBalance;
                                                     if (ownerBalance < amount.Value)
@@ -2378,10 +2374,20 @@ namespace ReserveBlockCore.Services
 
                             if (isOwner)
                             {
-                                // Owner: try local VBTCContractV2 for deposit balance (remote nodes won't have this)
+                                // Owner: get deposit address from state trei contract data (available on ALL nodes)
                                 decimal depositBalance = 0M;
-                                var localContract = VBTCContractV2.GetContract(scUID);
-                                if (localContract != null && !string.IsNullOrEmpty(localContract.DepositAddress))
+                                string depositAddr2 = null;
+                                var scMainDecompile2 = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                                if (scMainDecompile2?.Features != null)
+                                {
+                                    var tknzV2 = scMainDecompile2.Features
+                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                    if (tknzV2 != null)
+                                        depositAddr2 = ((TokenizationV2Feature)tknzV2).DepositAddress;
+                                }
+
+                                if (!string.IsNullOrEmpty(depositAddr2))
                                 {
                                     if (!blockDownloads && !blockVerify)
                                     {
@@ -2390,26 +2396,13 @@ namespace ReserveBlockCore.Services
                                             using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
                                             if (elxClient != null)
                                             {
-                                                var balance = await elxClient.GetBalance(localContract.DepositAddress, false);
+                                                var balance = await elxClient.GetBalance(depositAddr2, false);
                                                 depositBalance = balance.Confirmed / 100_000_000M;
                                             }
-                                            else
-                                            {
-                                                depositBalance = localContract.Balance;
-                                            }
                                         }
-                                        catch
-                                        {
-                                            depositBalance = localContract.Balance;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // During block sync/verify, use cached balance - block already passed consensus
-                                        depositBalance = localContract.Balance;
+                                        catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
                                     }
                                 }
-                                // else: remote node — depositBalance stays 0, only ledger balance used
 
                                 decimal ownerBalance = depositBalance + ledgerBalance;
                                 if (ownerBalance < amount.Value)
@@ -2627,9 +2620,6 @@ namespace ReserveBlockCore.Services
                         if (scState == null)
                             return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
 
-                        // Try local VBTCContractV2 for deposit balance (optional — only available on originating node)
-                        var localContract = VBTCContractV2.GetContract(scUID);
-
                         // FIND-002 FIX: Check if this user already has an active withdrawal request in database
                         var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
                         if (existingRequest != null)
@@ -2678,8 +2668,20 @@ namespace ReserveBlockCore.Services
                             decimal totalBalance = ledgerBalance;
                             if (isRequesterOwner)
                             {
+                                // Get deposit address from state trei contract data (available on ALL nodes)
                                 decimal depositBalance = 0M;
-                                if (localContract != null && !string.IsNullOrEmpty(localContract.DepositAddress))
+                                string wdDepositAddr = null;
+                                var scMainWd = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                                if (scMainWd?.Features != null)
+                                {
+                                    var tknzV2Wd = scMainWd.Features
+                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                    if (tknzV2Wd != null)
+                                        wdDepositAddr = ((TokenizationV2Feature)tknzV2Wd).DepositAddress;
+                                }
+
+                                if (!string.IsNullOrEmpty(wdDepositAddr))
                                 {
                                     if (!blockDownloads && !blockVerify)
                                     {
@@ -2688,26 +2690,13 @@ namespace ReserveBlockCore.Services
                                             using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
                                             if (elxClient != null)
                                             {
-                                                var bal = await elxClient.GetBalance(localContract.DepositAddress, false);
+                                                var bal = await elxClient.GetBalance(wdDepositAddr, false);
                                                 depositBalance = bal.Confirmed / 100_000_000M;
                                             }
-                                            else
-                                            {
-                                                depositBalance = localContract.Balance;
-                                            }
                                         }
-                                        catch
-                                        {
-                                            depositBalance = localContract.Balance;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // During block sync/verify, use cached balance - block already passed consensus
-                                        depositBalance = localContract.Balance;
+                                        catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
                                     }
                                 }
-                                // else: remote node — depositBalance stays 0, only ledger balance used
                                 totalBalance = depositBalance + ledgerBalance;
                             }
 

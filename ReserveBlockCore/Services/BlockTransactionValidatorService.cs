@@ -673,9 +673,6 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // Try local VBTCContractV2 for deposit balance (optional — remote nodes won't have this)
-                        var localContract = VBTCContractV2.GetContract(scUID);
-
                         // FIND-002 FIX: Check if THIS USER already has an active withdrawal request for this contract
                         // (Per-user tracking, not contract-level)
                         var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
@@ -719,7 +716,34 @@ namespace ReserveBlockCore.Services
                         {
                             // No ledger transactions — but owner may still have deposit balance
                             bool isRequesterOwnerNoTx = scStateTrei.OwnerAddress == requesterAddress;
-                            decimal depositBal = localContract?.Balance ?? 0M;
+                            decimal depositBal = 0M;
+                            if (isRequesterOwnerNoTx)
+                            {
+                                // Get deposit address from state trei contract data (available on ALL nodes)
+                                string wdDepositAddr = null;
+                                var scMainWd = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
+                                if (scMainWd?.Features != null)
+                                {
+                                    var tknzV2Wd = scMainWd.Features
+                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                    if (tknzV2Wd != null)
+                                        wdDepositAddr = ((TokenizationV2Feature)tknzV2Wd).DepositAddress;
+                                }
+                                if (!string.IsNullOrEmpty(wdDepositAddr))
+                                {
+                                    try
+                                    {
+                                        using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                        if (elxClient != null)
+                                        {
+                                            var bal = await elxClient.GetBalance(wdDepositAddr, false);
+                                            depositBal = bal.Confirmed / 100_000_000M;
+                                        }
+                                    }
+                                    catch { /* ElectrumX unavailable — depositBal stays 0 */ }
+                                }
+                            }
                             if (isRequesterOwnerNoTx && depositBal >= amount.Value)
                             {
                                 // Owner has sufficient deposit balance even without ledger transactions
