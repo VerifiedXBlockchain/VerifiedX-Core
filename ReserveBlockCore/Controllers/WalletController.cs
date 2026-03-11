@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
+using NBitcoin.Protocol;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
@@ -289,6 +291,12 @@ namespace ReserveBlockCore.Controllers
                 if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.RequestHash))
                     return BadRequest(new { success = false, message = "scUID and requestHash are required." });
 
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    var remoteResult = await DelegateWithdrawalToRemoteValidator(req.ScUID, req.RequestHash);
+                    return Ok(remoteResult);
+                }
+
                 var result = await Bitcoin.Services.VBTCService.CompleteWithdrawal(req.ScUID, req.RequestHash);
                 if (result.Success)
                     return Ok(new { success = true, message = "Withdrawal completed!", vfxTxHash = result.VFXTxHash, btcTxHash = result.BTCTxHash });
@@ -323,6 +331,73 @@ namespace ReserveBlockCore.Controllers
             catch (Exception ex)
             {
                 return StatusCode(500, new { success = false, message = ex.Message });
+            }
+        }
+
+        private async Task<string> DelegateWithdrawalToRemoteValidator(string scUID, string withdrawalRequestHash)
+        {
+            try
+            {
+                LogUtility.Log($"[FROST MPC] Non-validator node delegating withdrawal to remote validator. scUID: {scUID}",
+                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+
+                // Discover active validators from the network
+                var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+                if (activeValidators == null || !activeValidators.Any())
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available on the network. Cannot delegate withdrawal." });
+                }
+
+                // Try each validator until one successfully handles the withdrawal
+                foreach (var validator in activeValidators)
+                {
+                    try
+                    {
+                        var ip = validator.IPAddress?.Replace("::ffff:", "");
+                        if (string.IsNullOrEmpty(ip)) continue;
+
+                        var url = $"http://{ip}:{Globals.FrostValidatorPort}/frost/mpc/withdrawal/complete";
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        client.Timeout = TimeSpan.FromSeconds(120); // Withdrawal can take time (FROST signing + BTC broadcast)
+
+                        var payload = JsonConvert.SerializeObject(new
+                        {
+                            SmartContractUID = scUID,
+                            WithdrawalRequestHash = withdrawalRequestHash
+                        });
+                        var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+
+                        var response = await client.PostAsync(url, content);
+                        if (!response.IsSuccessStatusCode) continue;
+
+                        var responseBody = await response.Content.ReadAsStringAsync();
+                        var json = JObject.Parse(responseBody);
+
+                        if (json["Success"]?.Value<bool>() == true)
+                        {
+                            LogUtility.Log($"[FROST MPC] Withdrawal delegated successfully to validator {validator.ValidatorAddress} ({ip})",
+                                "VBTCController.DelegateWithdrawalToRemoteValidator");
+                            return responseBody; // Pass the validator's response directly back
+                        }
+                        else
+                        {
+                            var errMsg = json["Message"]?.Value<string>() ?? "Unknown error";
+                            LogUtility.Log($"[FROST MPC] Validator {validator.ValidatorAddress} rejected withdrawal: {errMsg}",
+                                "VBTCController.DelegateWithdrawalToRemoteValidator");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogUtility.Log($"[FROST MPC] Failed to delegate withdrawal to validator {validator.ValidatorAddress}: {ex.Message}",
+                            "VBTCController.DelegateWithdrawalToRemoteValidator");
+                    }
+                }
+
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to delegate withdrawal to any validator. No validator accepted the request." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error delegating withdrawal: {ex.Message}" });
             }
         }
 

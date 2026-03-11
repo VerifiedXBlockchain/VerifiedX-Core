@@ -579,12 +579,57 @@ namespace ReserveBlockCore.Bitcoin.Services
                         "This node is not a validator and cannot coordinate FROST signing. The withdrawal must be delegated to a remote validator.");
                 }
 
-                // Get contract and validate
+                // Get contract — try local DB first, fall back to State Trei for remote validators
                 var vbtcContract = VBTCContractV2.GetContract(scUID);
-                if (vbtcContract == null)
+                bool hasLocalContract = vbtcContract != null;
+
+                // If local DB doesn't have the contract (e.g. remote validator node), reconstruct
+                // the needed data from the State Trei + SmartContractMain which all nodes share.
+                string depositAddress = null;
+                int totalRegisteredValidators = 0;
+                long lastValidatorActivityBlock = 0;
+
+                if (vbtcContract != null)
                 {
-                    SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"vBTC V2 contract not found: {scUID}");
+                    depositAddress = vbtcContract.DepositAddress;
+                    totalRegisteredValidators = vbtcContract.TotalRegisteredValidators;
+                    lastValidatorActivityBlock = vbtcContract.LastValidatorActivityBlock;
+                }
+                else
+                {
+                    SCLogUtility.Log($"VBTCContractV2 not in local DB for {scUID}, falling back to State Trei / SmartContractMain", "VBTCService.CompleteWithdrawal()");
+
+                    // Get smart contract from the shared SmartContractMain database
+                    var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
+                    if (sc == null || sc.Features == null)
+                    {
+                        SCLogUtility.Log($"Smart contract not found in SmartContractMain either: {scUID}", "VBTCService.CompleteWithdrawal()");
+                        return (false, string.Empty, string.Empty, $"vBTC V2 contract not found in local DB or SmartContractMain: {scUID}");
+                    }
+
+                    var tknzFeature = sc.Features
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures)
+                        .FirstOrDefault();
+
+                    if (tknzFeature == null)
+                    {
+                        SCLogUtility.Log($"No TokenizationV2 feature on contract: {scUID}", "VBTCService.CompleteWithdrawal()");
+                        return (false, string.Empty, string.Empty, $"Contract {scUID} has no TokenizationV2 feature");
+                    }
+
+                    var tknz = (TokenizationV2Feature)tknzFeature;
+                    depositAddress = tknz.DepositAddress;
+                    totalRegisteredValidators = tknz.ValidatorAddressesSnapshot?.Count ?? 0;
+                    lastValidatorActivityBlock = tknz.ProofBlockHeight; // Default to DKG completion block
+
+                    SCLogUtility.Log($"Resolved from State Trei — DepositAddress: {depositAddress}, Validators: {totalRegisteredValidators}, ActivityBlock: {lastValidatorActivityBlock}", "VBTCService.CompleteWithdrawal()");
+                }
+
+                if (string.IsNullOrEmpty(depositAddress))
+                {
+                    SCLogUtility.Log($"Deposit address is empty for contract: {scUID}", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"Deposit address not found for contract: {scUID}");
                 }
 
                 // FIND-003 FIX: Look up withdrawal request using per-user tracking
@@ -618,9 +663,9 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Phase 5: Calculate DYNAMIC adjusted threshold based on validator availability
                 int adjustedThreshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(
-                    vbtcContract.TotalRegisteredValidators,
+                    totalRegisteredValidators,
                     validators.Count,
-                    vbtcContract.LastValidatorActivityBlock,
+                    lastValidatorActivityBlock,
                     Globals.LastBlock.Height
                 );
                 
@@ -629,9 +674,9 @@ namespace ReserveBlockCore.Bitcoin.Services
                 
                 // Log threshold information
                 string thresholdInfo = VBTCThresholdCalculator.GetThresholdExplanation(
-                    vbtcContract.TotalRegisteredValidators,
+                    totalRegisteredValidators,
                     validators.Count,
-                    vbtcContract.LastValidatorActivityBlock,
+                    lastValidatorActivityBlock,
                     Globals.LastBlock.Height
                 );
                 SCLogUtility.Log($"Threshold calculation: {thresholdInfo}", "VBTCService.CompleteWithdrawal()");
@@ -643,11 +688,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
 
                 // Get withdrawal details — prefer contract Active* fields (set by StateData when TX is mined),
-                // fall back to the VBTCWithdrawalRequest record (handles Raw path and timing edge cases)
+                // fall back to the VBTCWithdrawalRequest record (handles Raw path, remote validators, and timing edge cases)
                 decimal withdrawalAmount;
                 string btcDestination;
 
-                if (vbtcContract.ActiveWithdrawalAmount.HasValue && vbtcContract.ActiveWithdrawalAmount.Value > 0
+                if (hasLocalContract 
+                    && vbtcContract!.ActiveWithdrawalAmount.HasValue && vbtcContract.ActiveWithdrawalAmount.Value > 0
                     && !string.IsNullOrEmpty(vbtcContract.ActiveWithdrawalBTCDestination))
                 {
                     withdrawalAmount = vbtcContract.ActiveWithdrawalAmount.Value;
@@ -672,7 +718,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination}", "VBTCService.CompleteWithdrawal()");
                 
                 var btcResult = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
-                    vbtcContract.DepositAddress,
+                    depositAddress,
                     btcDestination,
                     withdrawalAmount,
                     feeRate,
@@ -771,10 +817,13 @@ namespace ReserveBlockCore.Bitcoin.Services
                     await TransactionData.AddToPool(completionTx);
                     await P2PClient.SendTXMempool(completionTx);
                     
-                    // Phase 5: Update activity tracking after successful withdrawal
-                    vbtcContract.LastValidatorActivityBlock = Globals.LastBlock.Height;
-                    VBTCContractV2.UpdateContract(vbtcContract);
-                    SCLogUtility.Log($"Updated LastValidatorActivityBlock to {Globals.LastBlock.Height}", "VBTCService.CompleteWithdrawal()");
+                    // Phase 5: Update activity tracking after successful withdrawal (only if local contract exists)
+                    if (hasLocalContract && vbtcContract != null)
+                    {
+                        vbtcContract.LastValidatorActivityBlock = Globals.LastBlock.Height;
+                        VBTCContractV2.UpdateContract(vbtcContract);
+                        SCLogUtility.Log($"Updated LastValidatorActivityBlock to {Globals.LastBlock.Height}", "VBTCService.CompleteWithdrawal()");
+                    }
                     
                     SCLogUtility.Log($"vBTC V2 Withdrawal Complete TX Success. SCUID: {scUID}, TxHash: {completionTx.Hash}, BTCTxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
                     return (true, completionTx.Hash, btcTxHash, string.Empty);

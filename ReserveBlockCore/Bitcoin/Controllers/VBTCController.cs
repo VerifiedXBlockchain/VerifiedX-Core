@@ -906,6 +906,26 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                         {
                             LogUtility.Log($"[FROST MPC] Withdrawal delegated successfully to validator {validator.ValidatorAddress} ({ip})", 
                                 "VBTCController.DelegateWithdrawalToRemoteValidator");
+
+                            // Update local VBTCContractV2 record after successful remote withdrawal
+                            // The local (non-validator) node has this contract in its DB since it's the owner
+                            try
+                            {
+                                var localContract = VBTCContractV2.GetContract(scUID);
+                                if (localContract != null)
+                                {
+                                    localContract.LastValidatorActivityBlock = Globals.LastBlock.Height;
+                                    VBTCContractV2.UpdateContract(localContract);
+                                    LogUtility.Log($"[FROST MPC] Updated local VBTCContractV2.LastValidatorActivityBlock to {Globals.LastBlock.Height}",
+                                        "VBTCController.DelegateWithdrawalToRemoteValidator");
+                                }
+                            }
+                            catch (Exception updateEx)
+                            {
+                                LogUtility.Log($"[FROST MPC] Warning: Failed to update local contract after delegation: {updateEx.Message}",
+                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
+                            }
+
                             return responseBody; // Pass the validator's response directly back
                         }
                         else
