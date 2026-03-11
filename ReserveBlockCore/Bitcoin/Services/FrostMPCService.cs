@@ -480,8 +480,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // Validate the Taproot address format using NBitcoin
                 try
                 {
-                    var network = Globals.IsTestNet ? Network.TestNet : Network.Main;
-                    var parsedAddress = BitcoinAddress.Create(taprootAddress, network);
+                    var parsedAddress = BitcoinAddress.Create(taprootAddress, Globals.BTCNetwork);
                     if (parsedAddress is not TaprootAddress)
                     {
                         ErrorLogUtility.LogError($"FROST DKG: Address {taprootAddress} is not a valid Taproot address", "FrostMPCService.AggregateDKGResult");

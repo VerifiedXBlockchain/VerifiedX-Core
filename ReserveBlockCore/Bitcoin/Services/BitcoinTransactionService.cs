@@ -310,14 +310,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                     // FIND-020 Fix: Pre-broadcast validation - verify the Schnorr signature locally
                     // before attaching it to the transaction. This prevents broadcasting invalid transactions.
                     var groupPubKeyBytes = Convert.FromHexString(frostGroupPublicKey);
-                    // Taproot uses x-only pubkeys (32 bytes per BIP340/BIP341).
                     // FROST returns compressed SEC pubkeys (33 bytes with 02/03 prefix).
-                    // Strip the prefix byte to convert to x-only format.
+                    // Strip the prefix byte to get the 32-byte x-only internal key.
                     if (groupPubKeyBytes.Length == 33 && (groupPubKeyBytes[0] == 0x02 || groupPubKeyBytes[0] == 0x03))
                     {
                         groupPubKeyBytes = groupPubKeyBytes[1..];
                     }
-                    var taprootPubKey = new TaprootPubKey(groupPubKeyBytes);
+                    // FROST-TR (FROST-secp256k1-SHA256-TR-v1) applies the BIP341 Taproot key tweak
+                    // during signing. The signature verifies against the TWEAKED output key, not the
+                    // raw group key. We must apply the same tweak for pre-broadcast verification.
+                    var internalKey = new TaprootInternalPubKey(groupPubKeyBytes);
+                    var taprootPubKey = internalKey.GetTaprootFullPubKey().OutputKey;
                     var schnorrSig = new SchnorrSignature(aggregateSignatureBytes);
 
                     if (!taprootPubKey.VerifySignature(sighash, schnorrSig))
