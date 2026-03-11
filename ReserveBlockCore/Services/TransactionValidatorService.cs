@@ -2768,23 +2768,33 @@ namespace ReserveBlockCore.Services
                         if (scStateTrei == null)
                             return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
 
-                        // FIND-002 FIX: Look up the withdrawal request by transaction hash
+                        // FIND-002 FIX: Look up the withdrawal request by transaction hash.
+                        // NOTE: VBTCWithdrawalRequest is a LOCAL DB record — only the wallet node that created
+                        // the withdrawal request has it. Remote nodes validating this TX via mempool won't have it.
+                        // When not found, fall back to lightweight validation (contract + BTC hash already checked).
                         var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
-                        if (withdrawalRequest == null)
-                            return (txResult, $"Withdrawal request not found for hash: {withdrawalRequestHash}");
-
-                        // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
-                        // to submit WITHDRAWAL_COMPLETE. Validators coordinate FROST signing on behalf of users.
-                        if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
+                        if (withdrawalRequest != null)
                         {
-                            var completingValidator = VBTCValidator.GetValidator(txRequest.FromAddress);
-                            if (completingValidator == null || !completingValidator.IsActive)
-                                return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) or an active vBTC validator can complete this withdrawal. Received from: {txRequest.FromAddress}");
-                        }
+                            // Full validation path (local node has the request record)
+                            // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
+                            if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
+                            {
+                                var completingValidator = VBTCValidator.GetValidator(txRequest.FromAddress);
+                                if (completingValidator == null || !completingValidator.IsActive)
+                                    return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) or an active vBTC validator can complete this withdrawal. Received from: {txRequest.FromAddress}");
+                            }
 
-                        // Validate the request is not already completed
-                        if (withdrawalRequest.IsCompleted)
-                            return (txResult, $"Withdrawal request already completed: {withdrawalRequestHash}");
+                            if (withdrawalRequest.IsCompleted)
+                                return (txResult, $"Withdrawal request already completed: {withdrawalRequestHash}");
+                        }
+                        else
+                        {
+                            // Lightweight validation path (remote node — no local withdrawal request record).
+                            // Contract existence already validated above. Just log and allow through.
+                            LogUtility.Log($"[VBTC V2] Withdrawal request not in local DB for hash: {withdrawalRequestHash}. " +
+                                $"Allowing TX through with lightweight validation (contract exists in State Trei).",
+                                "TransactionValidatorService.VerifyTX()");
+                        }
 
                         // Validate Bitcoin transaction hash format (64 hex chars)
                         if (btcTxHash.Length != 64 || !System.Text.RegularExpressions.Regex.IsMatch(btcTxHash, "^[0-9a-fA-F]{64}$"))

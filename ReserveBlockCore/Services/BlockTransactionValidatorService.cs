@@ -812,46 +812,48 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // FIND-002 FIX: Look up the withdrawal request by transaction hash and validate requester
+                        // FIND-002 FIX: Look up the withdrawal request by transaction hash and validate requester.
+                        // NOTE: VBTCWithdrawalRequest is a LOCAL DB record — only the wallet node that created
+                        // the withdrawal request has it. Remote nodes processing this block won't have it.
+                        // When not found, fall back to lightweight validation (contract + BTC hash checked below).
                         var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
-                        if (withdrawalRequest == null)
+                        if (withdrawalRequest != null)
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Withdrawal request not found for hash - {withdrawalRequestHash}", 
-                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
-                        }
-
-                        // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
-                        // to submit WITHDRAWAL_COMPLETE. Validators coordinate FROST signing on behalf of
-                        // requestors, so their address legitimately appears as tx.FromAddress.
-                        if (withdrawalRequest.RequestorAddress != tx.FromAddress)
-                        {
-                            var completingValidator = VBTCValidator.GetValidator(tx.FromAddress);
-                            if (completingValidator == null || !completingValidator.IsActive)
+                            // Full validation path (local node has the request record)
+                            // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
+                            if (withdrawalRequest.RequestorAddress != tx.FromAddress)
                             {
-                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: tx.FromAddress ({tx.FromAddress}) is neither the original requester ({withdrawalRequest.RequestorAddress}) nor an active vBTC validator", 
+                                var completingValidator = VBTCValidator.GetValidator(tx.FromAddress);
+                                if (completingValidator == null || !completingValidator.IsActive)
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: tx.FromAddress ({tx.FromAddress}) is neither the original requester ({withdrawalRequest.RequestorAddress}) nor an active vBTC validator",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdata = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdata.InsertSafe(tx);
+                                    return;
+                                }
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE: Validator {tx.FromAddress} completing withdrawal on behalf of requester {withdrawalRequest.RequestorAddress}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+
+                            if (withdrawalRequest.IsCompleted)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Withdrawal request already completed - {withdrawalRequestHash}",
                                     "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                                 var txdata = TransactionData.GetAll();
                                 tx.TransactionStatus = TransactionStatus.Invalid;
                                 txdata.InsertSafe(tx);
                                 return;
                             }
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE: Validator {tx.FromAddress} completing withdrawal on behalf of requester {withdrawalRequest.RequestorAddress}", 
-                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         }
-
-                        // Validate the request is not already completed
-                        if (withdrawalRequest.IsCompleted)
+                        else
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Withdrawal request already completed - {withdrawalRequestHash}", 
+                            // Lightweight validation path (remote node — no local withdrawal request record).
+                            // Contract existence already validated above. Log and allow through.
+                            SCLogUtility.Log($"[VBTC V2] Withdrawal request not in local DB for hash: {withdrawalRequestHash}. " +
+                                $"Allowing block TX through with lightweight validation (contract exists in State Trei).",
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
                         }
 
                         // Validate Bitcoin transaction hash format (basic check - should be 64 hex chars)
@@ -870,7 +872,7 @@ namespace ReserveBlockCore.Services
                         tx.TransactionStatus = TransactionStatus.Success;
                         txdataSuccess.InsertSafe(tx);
 
-                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validated successfully. Requester: {withdrawalRequest.RequestorAddress}, SCUID: {scUID}, BTCTxHash: {btcTxHash}, RequestHash: {withdrawalRequestHash}", 
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validated successfully. Requester: {withdrawalRequest?.RequestorAddress ?? tx.FromAddress}, SCUID: {scUID}, BTCTxHash: {btcTxHash}, RequestHash: {withdrawalRequestHash}", 
                             "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                     }
                     catch (Exception ex)

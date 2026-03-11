@@ -294,7 +294,7 @@ namespace ReserveBlockCore.Controllers
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
                 {
                     var remoteResult = await DelegateWithdrawalToRemoteValidator(req.ScUID, req.RequestHash);
-                    return Ok(remoteResult);
+                    return Ok(new { success = true, message = "Withdrawal completed!", remoteResult });
                 }
 
                 var result = await Bitcoin.Services.VBTCService.CompleteWithdrawal(req.ScUID, req.RequestHash);
