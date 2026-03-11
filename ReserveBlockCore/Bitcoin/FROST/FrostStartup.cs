@@ -1362,9 +1362,12 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             // since key packages are stored under the ceremonyId during DKG (before scUID exists).
                             var myAddr = Globals.ValidatorAddress;
                             var keyLookupId = !string.IsNullOrEmpty(request.CeremonyId) ? request.CeremonyId : request.SmartContractUID;
-                            
+
                             if (request.SmartContractUID == "10e833cd81404daab9820d081dfefd06:1773167612")
-                                keyLookupId = "e010f52d-4a11-4515-bd6f-a37ab65331d7";
+                                keyLookupId = "e4ac5290-5d9f-48db-be4f-909081276134";
+
+                            if(request.SmartContractUID == "fd06ec2ce20a4a2aa7b3f2f2d2a92d11:1773205606")
+                                keyLookupId = "069f6dc5-d918-4018-a5b1-10e322f6b777";
 
                             var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
                             if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))

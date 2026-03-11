@@ -826,6 +826,18 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                         ceremony.ProgressPercentage = 100;
                         ceremony.CompletedTimestamp = TimeUtil.GetTime();
 
+                        // CRITICAL FIX: The remote validator generated its own ceremony ID during
+                        // InitiateMPCCeremonyStatic. That remote ID is what was used for the DKG
+                        // ceremony and is what validators stored in FrostValidatorKeyStore.
+                        // We must propagate it so that contract creation stores the correct
+                        // CeremonyId in TokenizationV2Feature, enabling key lookup during signing.
+                        if (!string.IsNullOrEmpty(remoteCeremonyId) && remoteCeremonyId != ceremonyId)
+                        {
+                            LogUtility.Log($"[FROST MPC] Propagating remote ceremony ID for key lookup. " +
+                                $"Local: {ceremonyId}, Remote (used by validators): {remoteCeremonyId}",
+                                "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
+                        }
+
                         LogUtility.Log($"[FROST MPC] Remote ceremony completed. Deposit address: {ceremony.DepositAddress}",
                             "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
                         return;
@@ -1096,6 +1108,20 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 string dkgProof = ceremony.DKGProof!;
                 var validatorSnapshot = ceremony.ValidatorSnapshot;
 
+                // CRITICAL FIX: When the ceremony was delegated to a remote validator,
+                // the remote validator generated its own ceremony ID which was used for the
+                // actual DKG ceremony. Validators stored their FROST key packages under that
+                // remote ceremony ID. We must use it here so that signing can find the keys.
+                var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
+                    ? ceremony.RemoteCeremonyId
+                    : payload.CeremonyId;
+
+                if (effectiveCeremonyId != payload.CeremonyId)
+                {
+                    LogUtility.Log($"[FROST MPC] Using remote ceremony ID for contract. Local: {payload.CeremonyId}, Remote (validators use): {effectiveCeremonyId}",
+                        "VBTCController.CreateVBTCContract");
+                }
+
                 // Create TokenizationV2Feature
                 var tokenizationV2Feature = new TokenizationV2Feature
                 {
@@ -1108,7 +1134,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     RequiredThreshold = 51, // 51% initially
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
-                    CeremonyId = payload.CeremonyId,
+                    CeremonyId = effectiveCeremonyId,
                     ImageBase = payload.ImageBase
                 };
 
@@ -1336,6 +1362,18 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 string dkgProof = ceremony.DKGProof!;
                 var validatorSnapshot = ceremony.ValidatorSnapshot;
 
+                // CRITICAL FIX: Same as CreateVBTCContract — use the remote ceremony ID
+                // when the ceremony was delegated, so validators can find their FROST keys.
+                var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
+                    ? ceremony.RemoteCeremonyId
+                    : payload.CeremonyId;
+
+                if (effectiveCeremonyId != payload.CeremonyId)
+                {
+                    LogUtility.Log($"[FROST MPC] Using remote ceremony ID for raw contract. Local: {payload.CeremonyId}, Remote (validators use): {effectiveCeremonyId}",
+                        "VBTCController.CreateVBTCContractRaw");
+                }
+
                 // Create TokenizationV2Feature
                 var tokenizationV2Feature = new TokenizationV2Feature
                 {
@@ -1348,7 +1386,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     RequiredThreshold = 51, // 51% initially
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
-                    CeremonyId = payload.CeremonyId,
+                    CeremonyId = effectiveCeremonyId,
                     ImageBase = payload.ImageBase
                 };
 
