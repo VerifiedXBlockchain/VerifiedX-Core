@@ -56,12 +56,14 @@ All endpoints map to `SCV1Controller` methods. Key mappings verified:
 
 ### 3. Is it safe?
 
-- **Wallet-locked protection:** All 5 key write actions are in `EncryptionRequiredActions`:
+- **Wallet-locked protection:** All 7 key write actions are in `EncryptionRequiredActions`:
   - `Mint` -- in set
   - `Transfer` -- in set
   - `Burn` -- in set
   - `Evolve` -- in set
   - `Devolve` -- in set
+  - `StartSale` -- in set (added in Phase 7)
+  - `CompleteSale` -- in set (added in Phase 7)
 - **Royalty validation:** `Create` validates royalty type (no flat rates) and amount (< 1.0). Correct.
 - **TX size validation:** `Create` checks `TransactionValidatorService.VerifyTXSize()` for image size limits. Correct.
 - **Ownership verification:** `VerifyOwnership` validates signature, checks time expiry, and confirms state owner matches address. Multi-layer validation.
@@ -99,4 +101,4 @@ None. All 16 endpoints implemented correctly with appropriate validation, auth p
 
 ## Summary
 
-Phase 7 implements all 16 planned smart contract and NFT endpoints. This is the most complex controller in the REST API, covering the full NFT lifecycle: listing, creation, minting, transfer, burn, evolve/devolve, sale flow (start/complete/cancel), and ownership proof/verification. All map faithfully to SCV1Controller logic. Five write actions are wallet-locked protected. Royalty validation, TX size checks, beacon connectivity, and ownership verification are all correctly implemented. Request DTOs have proper validation. Build compiles cleanly. No warnings.
+Phase 7 implements all 16 planned smart contract and NFT endpoints. This is the most complex controller in the REST API, covering the full NFT lifecycle: listing, creation, minting, transfer, burn, evolve/devolve, sale flow (start/complete/cancel), and ownership proof/verification. All map faithfully to SCV1Controller logic. Seven write actions are wallet-locked protected (including StartSale and CompleteSale added to the auth filter in this phase). Royalty validation, TX size checks, beacon connectivity, and ownership verification are all correctly implemented. Request DTOs have proper validation. Build compiles cleanly. No warnings.
