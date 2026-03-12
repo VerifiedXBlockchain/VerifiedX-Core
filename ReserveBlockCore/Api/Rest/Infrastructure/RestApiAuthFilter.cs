@@ -17,7 +17,9 @@ namespace ReserveBlockCore.Api.Rest.Infrastructure
             "Send", "CreateAdnr", "TransferAdnr", "DeleteAdnr",
             "ImportKey", "CreateSignature", "CastVote", "CreateTopic",
             "Mint", "Transfer", "Burn", "Evolve", "Devolve",
-            "StartSale", "CompleteSale"
+            "StartSale", "CompleteSale",
+            "TransferToken", "BurnToken", "MintToken", "PauseToken",
+            "BanAddress", "TransferOwnership"
         };
 
         public override void OnActionExecuting(ActionExecutingContext context)
