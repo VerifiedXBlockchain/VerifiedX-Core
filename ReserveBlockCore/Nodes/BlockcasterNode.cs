@@ -1,4 +1,4 @@
-﻿using Elmah.ContentSyndication;
+using Elmah.ContentSyndication;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using Newtonsoft.Json;
@@ -2128,6 +2128,7 @@ namespace ReserveBlockCore.Nodes
                                 try
                                 {
                                     mempool.DeleteManySafe(x => x.Hash == transaction.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
                                 }
                                 catch (Exception ex)
                                 {

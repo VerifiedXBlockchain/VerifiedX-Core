@@ -39,15 +39,32 @@ namespace ReserveBlockCore.Privacy
             {
                 var mempool = TransactionData.GetPool();
                 if (mempool.Count() > 0)
+                {
                     mempool.DeleteManySafe(x => x.Hash == txRequest.Hash);
+                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txRequest.Hash);
+                }
                 return (false, "This transactions has already been sent.");
             }
+
+            if (txRequest.FromAddress.StartsWith("xRBX") || txRequest.ToAddress.StartsWith("xRBX"))
+                return (false, "Privacy transactions cannot involve reserve (xRBX) addresses.");
 
             if (!PrivateTxPayloadCodec.TryDecode(txRequest.Data, out var payload, out var decErr))
                 return (false, decErr ?? "Invalid private payload.");
 
             if (!payload!.TryValidateStructure(out var structErr))
                 return (false, structErr ?? "Invalid private payload structure.");
+
+            if (payload.NullsB64.Count > 0)
+            {
+                foreach (var n in payload.NullsB64)
+                {
+                    if (string.IsNullOrWhiteSpace(n))
+                        return (false, "Nullifier entry is empty.");
+                    if (NullifierService.IsNullifierSpentInDb(n, payload.Asset))
+                        return (false, "Nullifier already spent on-chain.");
+                }
+            }
 
             if (!string.IsNullOrWhiteSpace(payload.Kind) && !ExpectedKindMatches(txRequest.TransactionType, payload.Kind))
                 return (false, "PrivateTxPayload kind does not match transaction type.");
@@ -86,6 +103,12 @@ namespace ReserveBlockCore.Privacy
             {
                 if (txRequest.Signature != PrivacyConstants.PlonkSignatureSentinel)
                     return (false, "Private ZK transaction must use PLONK signature sentinel until proof verification is wired.");
+            }
+
+            if (!blockDownloads && !blockVerify && payload.NullsB64.Count > 0)
+            {
+                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, payload.Asset, payload.NullsB64, out var mErr))
+                    return (false, mErr ?? "Mempool nullifier conflict.");
             }
 
             return (true, "Transaction has been verified.");
@@ -182,23 +205,6 @@ namespace ReserveBlockCore.Privacy
 
                 if (processedNonces != null)
                     processedNonces[txRequest.FromAddress] = expectedNonce + 1;
-            }
-
-            if (txRequest.FromAddress.StartsWith("xRBX"))
-            {
-                var balanceTooLow = from.Balance - (txRequest.Fee + txRequest.Amount) < 0.5M;
-                if (balanceTooLow)
-                    return (false, "This transaction will make the balance too low. Must maintain a balance above 0.5 VFX with a Reserve Account.");
-
-                if (txRequest.UnlockTime == null)
-                    return (false, "There must be an unlock time for this transaction");
-
-                if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
-                {
-                    var validUnlockTime = TimeUtil.GetReserveTime(-3);
-                    if (txRequest.UnlockTime.Value < validUnlockTime)
-                        return (false, "Unlock time does not meet 24 hour requirement.");
-                }
             }
 
             return (true, "");

@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading.Tasks;
 using ReserveBlockCore.Utilities;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.EllipticCurve;
 using ReserveBlockCore.Services;
@@ -329,6 +330,10 @@ namespace ReserveBlockCore.Data
             var TransactionPool = GetPool();
             await TransactionPool.InsertSafeAsync(transaction);
         }
+
+        /// <summary>Call when a transaction is removed from the mempool so private nullifier reservations can be cleared.</summary>
+        public static void ReleasePrivateMempoolNullifiersForTx(string txHash) =>
+            MempoolNullifierTracker.ReleaseClaimsForTxHash(txHash);
 
         public static LiteDB.ILiteCollection<Transaction> GetPool()
         {

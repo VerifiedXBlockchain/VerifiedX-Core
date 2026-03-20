@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
@@ -330,6 +330,7 @@ namespace ReserveBlockCore.P2P
                                                 try
                                                 {
                                                     mempool.DeleteManySafe(x => x.Hash == transaction.Hash);// tx has been crafted into block. Remove.
+                                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
                                                     Globals.BroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                                     Globals.ConsensusBroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                                 }

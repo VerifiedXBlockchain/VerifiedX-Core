@@ -259,5 +259,58 @@ namespace VerfiedXCore.Tests
             var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
             Assert.Equal(1, commitments.Count(x => x.AssetType == "VFX"));
         }
+
+        [Fact]
+        public void MempoolNullifierTracker_BlocksDoubleSpendInMempool()
+        {
+            var n = Convert.ToBase64String(new byte[32]);
+            var nulls = new List<string> { n };
+            try
+            {
+                Assert.True(MempoolNullifierTracker.TryRegisterForMempool("tx-a", "VFX", nulls, out var e1), e1);
+                Assert.False(MempoolNullifierTracker.TryRegisterForMempool("tx-b", "VFX", nulls, out _), "second tx same nullifier");
+                MempoolNullifierTracker.ReleaseClaimsForTxHash("tx-a");
+                Assert.True(MempoolNullifierTracker.TryRegisterForMempool("tx-b", "VFX", nulls, out var e2), e2);
+            }
+            finally
+            {
+                MempoolNullifierTracker.ReleaseClaimsForTxHash("tx-a");
+                MempoolNullifierTracker.ReleaseClaimsForTxHash("tx-b");
+            }
+        }
+
+        [Fact]
+        public void MempoolNullifierTracker_BlockScopedSet_RejectsDuplicate()
+        {
+            var r = new byte[32];
+            r[0] = 9;
+            var g1 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(1, r, g1));
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX",
+                Kind = "z2z",
+                Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1) } },
+                NullsB64 = { Convert.ToBase64String(new byte[32]) }
+            };
+            var json = JsonConvert.SerializeObject(payload);
+            var tx = new Transaction
+            {
+                Timestamp = 1,
+                FromAddress = PrivacyConstants.ShieldedPoolAddress,
+                ToAddress = PrivacyConstants.ShieldedPoolAddress,
+                Amount = 0,
+                Fee = 0,
+                Nonce = 0,
+                TransactionType = TransactionType.VFX_PRIVATE_TRANSFER,
+                Signature = PrivacyConstants.PlonkSignatureSentinel,
+                Data = json
+            };
+            tx.BuildPrivate();
+
+            var set = new HashSet<string>();
+            Assert.True(MempoolNullifierTracker.TryAddBlockScopedNullifiers(tx, set, out _));
+            Assert.False(MempoolNullifierTracker.TryAddBlockScopedNullifiers(tx, set, out _), "same nullifier twice in block");
+        }
     }
 }

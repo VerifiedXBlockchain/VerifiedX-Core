@@ -7,6 +7,7 @@ using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.Nodes;
 using ReserveBlockCore.P2P;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using System;
 using System.Diagnostics;
@@ -138,6 +139,7 @@ namespace ReserveBlockCore.Services
                                         // This is a duplicate of the withdrawal in the block
                                         // Remove it from mempool
                                         mempool.DeleteManySafe(x => x.Hash == mempoolTx.Hash);
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(mempoolTx.Hash);
                                         
                                         VFXLogging.LogInfo($"Cleaned up duplicate withdrawal request from mempool. TX Hash: {mempoolTx.Hash}, Arbiter: {mempoolTx.FromAddress}", "BlockValidatorService.CleanupMempoolAfterBlock()");
                                     }
@@ -460,6 +462,7 @@ namespace ReserveBlockCore.Services
                         // HAL-067 Fix: Track nonces per address during block validation to support multiple TXs from same sender
                         // Initialize dictionary with current state nonces for all addresses in block
                         var processedNonces = new Dictionary<string, long>();
+                        var blockPrivateNullifierKeys = new HashSet<string>();
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -486,7 +489,14 @@ namespace ReserveBlockCore.Services
                             {
                                 var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces);
 
-                                if(txResult.Item1 == false)
+                                var effectiveTxResult = txResult;
+                                if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(blkTransaction.TransactionType))
+                                {
+                                    if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(blkTransaction, blockPrivateNullifierKeys, out var nulErr))
+                                        effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
+                                }
+
+                                if(effectiveTxResult.Item1 == false)
                                 {
                                     //testing
                                 }
@@ -495,7 +505,7 @@ namespace ReserveBlockCore.Services
                                     //if (!txResult.Item1)
                                     //    await TransactionValidatorService.BadTXDetected(blkTransaction);
                                 }
-                                rejectBlock = txResult.Item1 == false ? rejectBlock = true : false;
+                                rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                                 //check for duplicate tx
                                 // FIND-009 FIX: Exempt vBTC V2 validator lifecycle transactions from smart-contract parsing
                                 // These transactions don't have ContractUID/Function fields and should not be validated as SC TXs
@@ -953,6 +963,7 @@ namespace ReserveBlockCore.Services
                                     if (mempoolTx.Count() > 0)
                                     {
                                         mempool.DeleteManySafe(x => x.Hash == localFromTransaction.Hash);
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(localFromTransaction.Hash);
                                     }
                                 }
                                 try
@@ -1168,12 +1179,19 @@ namespace ReserveBlockCore.Services
             {
                 //validate transactions.
                 bool rejectBlock = false;
+                var blockPrivateNullifierKeys = new HashSet<string>();
                 foreach (Transaction transaction in block.Transactions)
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                     {
                         var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads);
-                        rejectBlock = txResult.Item1 == false ? rejectBlock = true : false;
+                        var effectiveTxResult = txResult;
+                        if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(transaction.TransactionType))
+                        {
+                            if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(transaction, blockPrivateNullifierKeys, out var nulErr))
+                                effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
+                        }
+                        rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                         if (rejectBlock)
                         {
                             RemoveTxFromMempool(transaction);//this should not happen, but if client did fail to properly handle tx it will reject it here.
@@ -1207,6 +1225,7 @@ namespace ReserveBlockCore.Services
                 if (mempool.Count() > 0)
                 {
                     mempool.DeleteManySafe(x => x.Hash == tx.Hash);
+                    TransactionData.ReleasePrivateMempoolNullifiersForTx(tx.Hash);
                 }
             }
         }

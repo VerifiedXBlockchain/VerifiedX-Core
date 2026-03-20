@@ -126,6 +126,7 @@ namespace ReserveBlockCore.Utilities
                 try
                 {
                     mempool.DeleteManySafe(x => x.Hash == tx.Hash);
+                    TransactionData.ReleasePrivateMempoolNullifiersForTx(tx.Hash);
                     evictedHashes.Add(tx.Hash);
                     evictedSize += CalculateTransactionSize(tx);
                     evictedCount++;
@@ -186,6 +187,7 @@ namespace ReserveBlockCore.Utilities
                         try
                         {
                             mempool.DeleteManySafe(x => x.Hash == tx.Hash);
+                            TransactionData.ReleasePrivateMempoolNullifiersForTx(tx.Hash);
                             removedCount++;
                         }
                         catch { }

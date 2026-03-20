@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
@@ -443,6 +443,7 @@ namespace ReserveBlockCore.P2P
                                     {
                                         ErrorLogUtility.LogError($"TX Faile From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()");
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -535,6 +536,7 @@ namespace ReserveBlockCore.P2P
                                     {
                                         ErrorLogUtility.LogError($"TX Faile From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()");
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -557,6 +559,7 @@ namespace ReserveBlockCore.P2P
                                     try
                                     {
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -571,6 +574,7 @@ namespace ReserveBlockCore.P2P
                                 try
                                 {
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch (Exception ex)
                                 {
@@ -592,6 +596,7 @@ namespace ReserveBlockCore.P2P
                                 {
                                     ErrorLogUtility.LogError($"TX Faile From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()");
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -682,6 +687,7 @@ namespace ReserveBlockCore.P2P
                                 {
                                     ErrorLogUtility.LogError($"TX Faile From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()");
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 

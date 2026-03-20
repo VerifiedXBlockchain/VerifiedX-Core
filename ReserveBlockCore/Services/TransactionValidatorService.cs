@@ -164,6 +164,7 @@ namespace ReserveBlockCore.Services
                 if (mempool.Count() > 0)
                 {
                     mempool.DeleteManySafe(x => x.Hash == txRequest.Hash);
+                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txRequest.Hash);
                 }
                 return (txResult, "This transactions has already been sent.");
             }

@@ -74,6 +74,7 @@ namespace ReserveBlockCore.Utilities
                         if (mempoolTx != null)
                         {
                             mempool.DeleteManySafe(x => x.Hash == transaction.Hash);
+                            TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
                         }
 
                         var account = AccountData.GetAccounts().FindAll().Where(x => x.Address == transaction.ToAddress).FirstOrDefault();

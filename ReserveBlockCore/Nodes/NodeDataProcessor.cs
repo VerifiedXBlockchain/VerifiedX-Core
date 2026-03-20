@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.P2P;
@@ -130,6 +130,7 @@ namespace ReserveBlockCore.Nodes
                                         try
                                         {
                                             mempool.DeleteManySafe(x => x.Hash == transaction.Hash);// tx has been crafted into block. Remove.
+                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
                                         }
                                         catch (Exception ex)
                                         {
