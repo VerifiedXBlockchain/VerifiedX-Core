@@ -2660,7 +2660,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                         req.Memo,
                         out var tx,
                         out var err,
-                        null))
+                        DbContext.DB_Privacy))
                     return JsonConvert.SerializeObject(new { Success = false, Message = err ?? "Build failed." });
 
                 tx!.Fee = req.TransparentFee ?? FeeCalcService.CalculateTXFee(tx);
@@ -2704,7 +2704,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
 
                 var ts = TimeUtil.GetTime();
-                if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(req.VbtcContractUid, inputs, req.TransparentVbtcAmount, req.TransparentToAddress, keys, ts, out var tx, out var berr, null))
+                if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(req.VbtcContractUid, inputs, req.TransparentVbtcAmount, req.TransparentToAddress, keys, ts, out var tx, out var berr, DbContext.DB_Privacy))
                     return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
 
                 var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
@@ -2736,7 +2736,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
 
                 var ts = TimeUtil.GetTime();
-                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(req.VbtcContractUid, inputs, req.PaymentAmount, req.RecipientZfxAddress, keys, ts, out var tx, out var berr, null))
+                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(req.VbtcContractUid, inputs, req.PaymentAmount, req.RecipientZfxAddress, keys, ts, out var tx, out var berr, DbContext.DB_Privacy))
                     return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
 
                 var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);

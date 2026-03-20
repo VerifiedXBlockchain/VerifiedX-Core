@@ -252,6 +252,12 @@ namespace ReserveBlockCore.Privacy
                 Signature = PrivacyConstants.PlonkSignatureSentinel
             };
             tx.BuildPrivate();
+            if (!PrivateTxPlonkV0.TryPopulateV0Proofs(tx, out var plonkErr))
+            {
+                tx = null;
+                error = plonkErr;
+                return false;
+            }
             return true;
         }
 

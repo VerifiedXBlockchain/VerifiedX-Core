@@ -23,6 +23,43 @@ namespace ReserveBlockCore.Controllers
         private static string Ok(object payload) =>
             JsonConvert.SerializeObject(new { Success = true, Result = payload });
 
+        /// <summary>Node / wallet ops: native PLONK caps, strict proof flag, params mirror size (no paths or secrets).</summary>
+        [HttpGet("GetPlonkStatus")]
+        public Task<string> GetPlonkStatus()
+        {
+            try
+            {
+                PLONKSetup.RefreshVerificationCapability();
+                uint caps = 0;
+                try
+                {
+                    caps = PlonkNative.plonk_capabilities();
+                }
+                catch
+                {
+                    /* older plonk_ffi without capabilities */
+                }
+
+                var envSet = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable));
+                return Task.FromResult(Ok(new
+                {
+                    ProofVerificationImplemented = PLONKSetup.IsProofVerificationImplemented,
+                    ProofProvingImplemented = PLONKSetup.IsProofProvingImplemented,
+                    EnforcePlonkProofsForZk = Globals.EnforcePlonkProofsForZk,
+                    ParamsBytesMirrored = Globals.PLONKUniversalParams?.Length ?? 0,
+                    ParamsPathEnvSet = envSet,
+                    NativeCapabilities = caps,
+                    CapVerifyV1 = (caps & PlonkNative.CapVerifyV1) != 0,
+                    CapParsePublicInputsV1 = (caps & PlonkNative.CapParsePublicInputsV1) != 0,
+                    CapProveV1 = (caps & PlonkNative.CapProveV1) != 0
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ex.Message));
+            }
+        }
+
         /// <summary>Transparent VFX → shielded (T→Z). Signs with local account keys for <paramref name="req"/>.FromAddress.</summary>
         [HttpPost("ShieldVFX")]
         public async Task<string> ShieldVFX([FromBody] ShieldVfxRequest req)
@@ -49,7 +86,7 @@ namespace ReserveBlockCore.Controllers
                         req.Memo,
                         out var tx,
                         out var err,
-                        null))
+                        DbContext.DB_Privacy))
                     return Fail(err ?? "Build failed.");
 
                 tx!.Fee = req.TransparentFee ?? FeeCalcService.CalculateTXFee(tx);
@@ -103,7 +140,7 @@ namespace ReserveBlockCore.Controllers
                         ts,
                         out var tx,
                         out var berr,
-                        null))
+                        DbContext.DB_Privacy))
                     return Fail(berr ?? "Build failed.");
 
                 var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
@@ -147,7 +184,7 @@ namespace ReserveBlockCore.Controllers
                         ts,
                         out var tx,
                         out var berr,
-                        null))
+                        DbContext.DB_Privacy))
                     return Fail(berr ?? "Build failed.");
 
                 var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);

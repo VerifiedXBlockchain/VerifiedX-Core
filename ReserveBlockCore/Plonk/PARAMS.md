@@ -21,3 +21,5 @@
 3. Ship real `plonk_verify` + proving keys from **`plonk`**; set the native **`PLONK_CAP_VERIFY_V1`** bit so [`PLONKSetup.IsProofVerificationImplemented`](../Privacy/PLONKSetup.cs) becomes true; optionally set [`Globals.EnforcePlonkProofsForZk`](../GlobalsPrivacy.cs) for strict ZK mempool rules.
 
 See also [`Plonk/README.md`](README.md) for native library layout.
+
+**Runtime**: `GET privacyapi/PrivacyV1/GetPlonkStatus` returns whether verify/prove are implemented, native capability bits, and whether `VFX_PLONK_PARAMS_PATH` is set (boolean only).
