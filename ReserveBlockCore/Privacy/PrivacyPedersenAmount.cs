@@ -8,6 +8,10 @@ namespace ReserveBlockCore.Privacy
     /// </summary>
     public static class PrivacyPedersenAmount
     {
+        /// <remarks>
+        /// Rejects values above <c>u64</c> after 10^18 scaling. Fine for current on-chain amounts; public-input / circuit
+        /// v2 may need <c>u128</c> if the spec’s full range must be represented (see <see cref="PlonkPublicInputsV1"/> remarks).
+        /// </remarks>
         public static bool TryToScaledU64(decimal amount, out ulong scaled, out string? error)
         {
             scaled = 0;

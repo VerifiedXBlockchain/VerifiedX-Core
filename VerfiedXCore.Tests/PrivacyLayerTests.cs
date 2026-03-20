@@ -789,5 +789,76 @@ namespace VerfiedXCore.Tests
             Assert.Single(hits);
             Assert.Equal(9m, hits[0].Note.Amount);
         }
+
+        [Fact]
+        public void VbtcPrivacyAsset_FormatAndMatch()
+        {
+            var k = VbtcPrivacyAsset.FormatAssetKey("sc-uid-1");
+            Assert.Equal("VBTC:sc-uid-1", k);
+            Assert.True(VbtcPrivacyAsset.TryParseContractUid(k, out var uid));
+            Assert.Equal("sc-uid-1", uid);
+            Assert.True(VbtcPrivacyAsset.MatchesContract(k, "sc-uid-1"));
+        }
+
+        [Fact]
+        public void VbtcPrivateTransactionBuilder_Shield_ProducesValidPayload()
+        {
+            const string seedHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40";
+            var m = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 11);
+            Assert.True(VbtcPrivateTransactionBuilder.TryBuildShield(
+                "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "test-sc-uid",
+                0.00002m,
+                0.000003m,
+                0,
+                1000,
+                m.ZfxAddress,
+                null,
+                out var tx,
+                out var err,
+                _db), err);
+            Assert.NotNull(tx);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx!.Data, out var p, out _), "decode");
+            Assert.True(p!.TryValidateStructure(out var ve), ve);
+            Assert.Equal("VBTC:test-sc-uid", p.Asset);
+            Assert.Equal("test-sc-uid", p.VbtcContractUid);
+        }
+
+        [Fact]
+        public async Task PrivateTxLedgerService_VbtcShield_UpdatesPoolSupply()
+        {
+            var r = new byte[32];
+            Array.Fill(r, (byte)13);
+            var g1 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(1, r, g1));
+            var amt = 0.00002m;
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VBTC:mycontract",
+                Kind = "t2z",
+                VbtcContractUid = "mycontract",
+                VbtcTransparentAmount = amt,
+                Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1) } }
+            };
+            var json = JsonConvert.SerializeObject(payload);
+            var tx = new Transaction
+            {
+                Timestamp = 50,
+                FromAddress = "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ToAddress = PrivacyConstants.ShieldedPoolAddress,
+                Amount = 0,
+                Fee = 0.000003m,
+                Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_SHIELD,
+                Signature = "sig",
+                Data = json
+            };
+            tx.BuildPrivate();
+            var block = new Block { Height = 11, StateRoot = "sr", Transactions = new List<Transaction>() };
+            await PrivateTxLedgerService.ApplyBlockTransactionAsync(tx, block, _db);
+            var pool = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindOne(x => x.AssetType == "VBTC:mycontract");
+            Assert.NotNull(pool);
+            Assert.Equal(amt, pool!.TotalShieldedSupply);
+        }
     }
 }

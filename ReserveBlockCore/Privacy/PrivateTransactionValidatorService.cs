@@ -148,6 +148,22 @@ namespace ReserveBlockCore.Privacy
                     return false;
                 }
             }
+            if (t == TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+            {
+                if (string.IsNullOrWhiteSpace(payload.VbtcContractUid))
+                {
+                    err = "VBTC_V2_PRIVATE_TRANSFER requires vbtc_uid in payload.";
+                    return false;
+                }
+            }
+            if (t is TransactionType.VBTC_V2_SHIELD or TransactionType.VBTC_V2_UNSHIELD or TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+            {
+                if (!VbtcPrivacyAsset.MatchesContract(payload.Asset, payload.VbtcContractUid))
+                {
+                    err = "PrivateTxPayload asset must equal VBTC:{vbtc_uid} for vBTC privacy transactions.";
+                    return false;
+                }
+            }
             return true;
         }
 
@@ -264,14 +280,13 @@ namespace ReserveBlockCore.Privacy
             if (txRequest.FromAddress != PrivacyConstants.ShieldedPoolAddress)
                 return (false, "Private ZK transactions must use FromAddress Shielded_Pool.");
 
-            if (string.Equals(payload.Asset, "VFX", StringComparison.Ordinal))
+            if (txRequest.TransactionType == TransactionType.VFX_UNSHIELD
+                || txRequest.TransactionType == TransactionType.VFX_PRIVATE_TRANSFER
+                || txRequest.TransactionType == TransactionType.VBTC_V2_UNSHIELD
+                || txRequest.TransactionType == TransactionType.VBTC_V2_PRIVATE_TRANSFER)
             {
-                if (txRequest.TransactionType == TransactionType.VFX_UNSHIELD
-                    || txRequest.TransactionType == TransactionType.VFX_PRIVATE_TRANSFER)
-                {
-                    if (payload.Fee != Globals.PrivateTxFixedFee)
-                        return (false, $"VFX private payload fee must equal fixed fee {Globals.PrivateTxFixedFee}.");
-                }
+                if (payload.Fee != Globals.PrivateTxFixedFee)
+                    return (false, $"Private ZK payload fee must equal fixed fee {Globals.PrivateTxFixedFee}.");
             }
 
             switch (txRequest.TransactionType)

@@ -35,7 +35,7 @@ namespace ReserveBlockCore.Privacy
             var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var poolRow = poolCol.FindOne(x => x.AssetType == payload.Asset);
             var supply = poolRow?.TotalShieldedSupply ?? 0m;
-            supply = ApplyVfxShieldedSupplyDelta(tx, payload, supply);
+            supply = ApplyShieldedSupplyDelta(tx, payload, supply);
 
             for (var ni = 0; ni < payload.NullsB64.Count; ni++)
             {
@@ -64,13 +64,22 @@ namespace ReserveBlockCore.Privacy
             }
 
             store.UpdatePoolStateRoot(height, supply, store.LeafDigests.Count);
+
+            ApplyVfxFeeBurnFromVbtcZk(tx, payload, height, db);
         }
 
-        /// <summary>VFX shielded supply accounting (native VFX only; vBTC uses separate asset keys in later phases).</summary>
-        private static decimal ApplyVfxShieldedSupplyDelta(Transaction tx, PrivateTxPayload payload, decimal supply)
+        /// <summary>Per-asset shielded supply: <c>VFX</c> native pool, <c>VBTC:…</c> token-scoped pools (Phase 5).</summary>
+        private static decimal ApplyShieldedSupplyDelta(Transaction tx, PrivateTxPayload payload, decimal supply)
         {
-            if (!string.Equals(payload.Asset, "VFX", StringComparison.Ordinal))
-                return supply;
+            if (string.Equals(payload.Asset, "VFX", StringComparison.Ordinal))
+                return ApplyVfxAssetSupplyDelta(tx, payload, supply);
+            if (VbtcPrivacyAsset.IsVbtcShieldedAsset(payload.Asset))
+                return ApplyVbtcAssetSupplyDelta(tx, payload, supply);
+            return supply;
+        }
+
+        private static decimal ApplyVfxAssetSupplyDelta(Transaction tx, PrivateTxPayload payload, decimal supply)
+        {
             var fee = payload.Fee ?? Globals.PrivateTxFixedFee;
             return tx.TransactionType switch
             {
@@ -79,6 +88,35 @@ namespace ReserveBlockCore.Privacy
                 TransactionType.VFX_PRIVATE_TRANSFER => supply - fee,
                 _ => supply
             };
+        }
+
+        private static decimal ApplyVbtcAssetSupplyDelta(Transaction tx, PrivateTxPayload payload, decimal supply)
+        {
+            var amt = payload.VbtcTransparentAmount ?? 0m;
+            return tx.TransactionType switch
+            {
+                TransactionType.VBTC_V2_SHIELD => supply + amt,
+                TransactionType.VBTC_V2_UNSHIELD => supply - amt,
+                TransactionType.VBTC_V2_PRIVATE_TRANSFER => supply,
+                _ => supply
+            };
+        }
+
+        /// <summary>Burns fixed VFX fee from the <c>VFX</c> shielded pool on vBTC Z→T / Z→Z (dual-fee leg).</summary>
+        private static void ApplyVfxFeeBurnFromVbtcZk(Transaction tx, PrivateTxPayload payload, long height, LiteDatabase db)
+        {
+            if (tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD && tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+                return;
+            var fee = payload.Fee ?? Globals.PrivateTxFixedFee;
+            if (fee <= 0)
+                return;
+
+            var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
+            var vfxRow = poolCol.FindOne(x => x.AssetType == "VFX");
+            var vfxSupply = (vfxRow?.TotalShieldedSupply ?? 0m) - fee;
+            var vfxStore = new ShieldedMerkleStore("VFX", db);
+            vfxStore.LoadLeavesFromCommitments();
+            vfxStore.UpdatePoolStateRoot(height, vfxSupply, vfxStore.LeafDigests.Count);
         }
 
         private static async Task ApplyTransparentLedgerAsync(Transaction tx, Block block, PrivateTxPayload payload)
