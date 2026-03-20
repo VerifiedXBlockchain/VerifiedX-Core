@@ -40,11 +40,11 @@ Plonk/
 
 ## Roadmap (beyond Phase 1 FFI)
 
-The committed library exposes **Pedersen**, **Poseidon** (plonk-hashing–aligned), **Merkle**, **nullifiers**, and **`plonk_load_params` / `plonk_verify`** (verify still a stub in Rust). Next work is mostly **product + ZK**, not more FFI packaging:
+The committed library exposes **Pedersen**, **Poseidon** (plonk-hashing–aligned), **Merkle**, **nullifiers**, and **`plonk_load_params` / `plonk_verify`**. **C# Phase 4** wires [`PlonkProofVerifier`](../Privacy/PlonkProofVerifier.cs) + [`PlonkPublicInputsV1`](../Privacy/PlonkPublicInputsV1.cs) into validation; the Rust **`plonk_verify` body** is still a stub until the sibling **`plonk`** repo ships circuits and refreshed binaries are dropped here.
 
-1. **Parameters** — define how proving/verification keys are generated, stored, and loaded end-to-end (`plonk_load_params` and callers).
-2. **Circuits** — implement shielded / transfer constraints in the `plonk` workspace; keep FFI hash/Pedersen semantics aligned with in-circuit gadgets.
-3. **`plonk_verify`** — replace the stub with real verifier wiring in [`PlonkNative.cs`](../Privacy/PlonkNative.cs) and consensus/block validation when shielded transactions exist.
-4. **Consensus integration** — connect shielded state (commitments, nullifiers, roots) to block and mempool rules.
+1. **Parameters** — proving/verification keys generated in **`plonk`**, loaded via `plonk_load_params` (see [`PARAMS.md`](PARAMS.md)).
+2. **Circuits** — implement Transfer / Shield / Unshield / Fee in **`plonk`**; align public-input encoding with [`PlonkPublicInputsV1`](../Privacy/PlonkPublicInputsV1.cs).
+3. **`plonk_verify`** — implement in **`plonk`**; no C# signature change required. [`PLONKSetup.RefreshVerificationCapability`](../Privacy/PLONKSetup.cs) will detect non-stub behavior.
+4. **Optional FFI** — `plonk_prove_*` / `plonk_batch_verify` from the plan can be added to [`PlonkNative.cs`](../Privacy/PlonkNative.cs) when exported.
 
-See also any in-repo privacy design doc (e.g. `Privacy_Layer_Implementation_Plan.md`) for phased detail.
+See `Privacy_Layer_Implementation_Plan.md` for phased detail.

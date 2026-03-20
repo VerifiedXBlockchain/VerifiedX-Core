@@ -30,5 +30,25 @@ namespace ReserveBlockCore.Privacy
             col.InsertSafe(created);
             return created;
         }
+
+        /// <summary>Current pool Merkle root Base64, or null when the tree is empty / uninitialized.</summary>
+        public static string? GetCurrentMerkleRootB64(string assetType, LiteDatabase? db = null)
+        {
+            var st = GetState(assetType, db);
+            return string.IsNullOrWhiteSpace(st?.CurrentMerkleRoot) ? null : st!.CurrentMerkleRoot;
+        }
+
+        /// <summary>Builds an inclusion proof against commitments persisted for <paramref name="assetType"/>.</summary>
+        public static bool TryGetInclusionProof(
+            string assetType,
+            long treePosition,
+            LiteDatabase? db,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out byte[]? proof,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out byte[]? root32)
+        {
+            var store = new ShieldedMerkleStore(assetType, db);
+            store.LoadLeavesFromCommitments();
+            return store.TryGetInclusionProof(treePosition, out proof, out root32);
+        }
     }
 }

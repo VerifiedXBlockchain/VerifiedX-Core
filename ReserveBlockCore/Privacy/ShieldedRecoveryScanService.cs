@@ -50,5 +50,17 @@ namespace ReserveBlockCore.Privacy
                 }
             }
         }
+
+        /// <summary>Same as <see cref="ScanBlocksForNotes"/> but parses Phase 3 JSON <see cref="Models.Privacy.ShieldedPlainNote"/> when decryption succeeds.</summary>
+        public static IEnumerable<(Block Block, Transaction Tx, ShieldedPlainNote Note)> ScanBlocksForPlainNotes(
+            IEnumerable<Block> blocks,
+            byte[] recipientEncryptionPrivateKey32)
+        {
+            foreach (var (block, tx, plain) in ScanBlocksForNotes(blocks, recipientEncryptionPrivateKey32))
+            {
+                if (ShieldedPlainNoteCodec.TryDeserializeUtf8(plain, out var note, out _) && note != null)
+                    yield return (block, tx, note);
+            }
+        }
     }
 }

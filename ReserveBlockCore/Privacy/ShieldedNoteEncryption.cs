@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using NBitcoin;
 using NBitcoin.Crypto;
+using ReserveBlockCore.Models.Privacy;
 
 namespace ReserveBlockCore.Privacy
 {
@@ -23,6 +24,15 @@ namespace ReserveBlockCore.Privacy
             if (!ShieldedAddressCodec.TryDecodeEncryptionKey(recipientZfxAddress, out var pub33, out var err))
                 throw new ArgumentException(err ?? "Invalid zfx address.", nameof(recipientZfxAddress));
             return Seal(Encoding.UTF8.GetBytes(plaintext), pub33);
+        }
+
+        /// <summary>Seal structured <see cref="ShieldedPlainNote"/> JSON (Phase 3) to a <c>zfx_</c> recipient.</summary>
+        public static byte[] SealPlainNote(ShieldedPlainNote note, string recipientZfxAddress)
+        {
+            if (!ShieldedAddressCodec.TryDecodeEncryptionKey(recipientZfxAddress, out var pub33, out var err))
+                throw new ArgumentException(err ?? "Invalid zfx address.", nameof(recipientZfxAddress));
+            var plain = ShieldedPlainNoteCodec.SerializeToUtf8Bytes(note);
+            return Seal(plain, pub33);
         }
 
         public static byte[] Seal(ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> recipientEncryptionPubKey33)

@@ -60,12 +60,6 @@ namespace ReserveBlockCore.Privacy
                 }
 
                 var poolCol = privacyDb.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
-                var supplyBackup = new Dictionary<string, decimal>(StringComparer.Ordinal);
-                foreach (var a in affected)
-                {
-                    var existing = poolCol.FindOne(x => x.AssetType == a);
-                    supplyBackup[a] = existing?.TotalShieldedSupply ?? 0m;
-                }
 
                 foreach (var a in affected)
                     WipeAsset(privacyDb, a);
@@ -98,7 +92,8 @@ namespace ReserveBlockCore.Privacy
 
                 foreach (var a in affected)
                 {
-                    var supply = supplyBackup.TryGetValue(a, out var s) ? s : 0m;
+                    var row = poolCol.FindOne(x => x.AssetType == a);
+                    var supply = row?.TotalShieldedSupply ?? 0m;
                     var store = new ShieldedMerkleStore(a, privacyDb);
                     store.LoadLeavesFromCommitments();
                     store.RebuildAndPersistMerkleNodes();
@@ -109,7 +104,8 @@ namespace ReserveBlockCore.Privacy
                 {
                     if (privacyDb.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Count(x => x.AssetType == a) > 0)
                         continue;
-                    var supply = supplyBackup.TryGetValue(a, out var s) ? s : 0m;
+                    var row = poolCol.FindOne(x => x.AssetType == a);
+                    var supply = row?.TotalShieldedSupply ?? 0m;
                     var empty = new ShieldedMerkleStore(a, privacyDb);
                     empty.UpdatePoolStateRoot(maxHeight, supply, 0);
                 }

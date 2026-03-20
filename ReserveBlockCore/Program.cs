@@ -354,6 +354,7 @@ namespace ReserveBlockCore
             StartupService.StartupDatabase();// initializes databases
 
             _ = PLONKSetup.TryLoadParamsFromEnvironment();
+            PLONKSetup.RefreshVerificationCapability();
 
             await DbContext.CheckPoint(); //checkpoints db log files
 

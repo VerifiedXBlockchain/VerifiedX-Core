@@ -20,6 +20,9 @@ namespace ReserveBlockCore
         /// <summary>PLONK universal parameters bytes when loaded (Phase 4).</summary>
         public static byte[]? PLONKUniversalParams { get; set; }
 
+        /// <summary>When true, ZK-authorized private txs must carry a non-empty <c>proof_b64</c> (mempool / block validation).</summary>
+        public static bool EnforcePlonkProofsForZk { get; set; }
+
         /// <summary>Circuit amounts use 10^18 fixed-point (see implementation plan).</summary>
         public const long PrivacyAmountScalingFactor = 1_000_000_000_000_000_000L;
 

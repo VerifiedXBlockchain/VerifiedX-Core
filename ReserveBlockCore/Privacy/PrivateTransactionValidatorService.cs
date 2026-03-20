@@ -75,7 +75,7 @@ namespace ReserveBlockCore.Privacy
             }
             else if (PrivateTransactionTypes.IsZkAuthorizedPrivate(txRequest.TransactionType))
             {
-                var zk = ValidateZkPrivate(txRequest);
+                var zk = ValidateZkPrivate(txRequest, payload!);
                 if (!zk.ok)
                     return zk;
                 var merkle = ValidatePayloadMerkleRootRecency(payload!);
@@ -89,6 +89,10 @@ namespace ReserveBlockCore.Privacy
 
             if (!ValidateVbtcPayloadFields(txRequest.TransactionType, payload, out var vbtcErr))
                 return (false, vbtcErr ?? "Invalid vBTC private payload.");
+
+            var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads);
+            if (!plonk.ok)
+                return (false, plonk.message);
 
             if (!VerifyPrivateHash(txRequest))
                 return (false, "This transactions hash is not equal to the private hash.");
@@ -249,7 +253,7 @@ namespace ReserveBlockCore.Privacy
             return (true, "");
         }
 
-        private static (bool ok, string message) ValidateZkPrivate(Transaction txRequest)
+        private static (bool ok, string message) ValidateZkPrivate(Transaction txRequest, PrivateTxPayload payload)
         {
             if (txRequest.Fee != 0)
                 return (false, "Private ZK transactions must have Fee 0 (fee is burned inside the proof in later phases).");
@@ -259,6 +263,16 @@ namespace ReserveBlockCore.Privacy
 
             if (txRequest.FromAddress != PrivacyConstants.ShieldedPoolAddress)
                 return (false, "Private ZK transactions must use FromAddress Shielded_Pool.");
+
+            if (string.Equals(payload.Asset, "VFX", StringComparison.Ordinal))
+            {
+                if (txRequest.TransactionType == TransactionType.VFX_UNSHIELD
+                    || txRequest.TransactionType == TransactionType.VFX_PRIVATE_TRANSFER)
+                {
+                    if (payload.Fee != Globals.PrivateTxFixedFee)
+                        return (false, $"VFX private payload fee must equal fixed fee {Globals.PrivateTxFixedFee}.");
+                }
+            }
 
             switch (txRequest.TransactionType)
             {

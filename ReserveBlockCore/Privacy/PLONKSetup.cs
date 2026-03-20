@@ -8,8 +8,26 @@ namespace ReserveBlockCore.Privacy
     /// </summary>
     public static class PLONKSetup
     {
+        private static int _verificationProbe = -1;
+
         /// <summary>Environment variable pointing at a universal-params file (optional until Phase 4).</summary>
         public const string ParamsPathEnvironmentVariable = "VFX_PLONK_PARAMS_PATH";
+
+        /// <summary>
+        /// Probes <see cref="PlonkNative.plonk_verify"/> once. If it returns <see cref="PlonkNative.ErrNotImplemented"/>, native circuits are not linked yet.
+        /// </summary>
+        public static void RefreshVerificationCapability()
+        {
+            try
+            {
+                var code = PlonkNative.plonk_verify(0, new byte[] { 0xAB }, 1, new byte[] { 0x01 }, 1);
+                _verificationProbe = code == PlonkNative.ErrNotImplemented ? 0 : 1;
+            }
+            catch
+            {
+                _verificationProbe = 0;
+            }
+        }
 
         /// <summary>
         /// Loads params from <see cref="ParamsPathEnvironmentVariable"/> when set and the file exists.
@@ -43,8 +61,8 @@ namespace ReserveBlockCore.Privacy
         }
 
         /// <summary>
-        /// Whether native PLONK verification is wired to circuits (Phase 4).
+        /// Whether native PLONK verification is wired to circuits (non-stub <c>plonk_verify</c>). Call <see cref="RefreshVerificationCapability"/> at startup.
         /// </summary>
-        public static bool IsProofVerificationImplemented => false;
+        public static bool IsProofVerificationImplemented => _verificationProbe == 1;
     }
 }

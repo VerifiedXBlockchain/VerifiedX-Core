@@ -1,6 +1,7 @@
 using LiteDB;
 using Newtonsoft.Json;
 using System.Security.Cryptography;
+using ReserveBlockCore;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.Privacy;
@@ -110,7 +111,53 @@ namespace VerfiedXCore.Tests
         [Fact]
         public void PLONKSetup_IsProofVerificationNotImplemented()
         {
+            PLONKSetup.RefreshVerificationCapability();
             Assert.False(PLONKSetup.IsProofVerificationImplemented);
+        }
+
+        [Fact]
+        public void PlonkProofVerifier_VerifyRaw_IsStub()
+        {
+            var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, new byte[] { 2 });
+            Assert.Equal(PlonkVerifyResult.NotImplemented, r);
+        }
+
+        [Fact]
+        public void PlonkPublicInputsV1_BuildsTransferBlob()
+        {
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX",
+                MerkleRootB64 = Convert.ToBase64String(new byte[32]),
+                Fee = Globals.PrivateTxFixedFee,
+                NullsB64 = { Convert.ToBase64String(new byte[32]), Convert.ToBase64String(new byte[32]) },
+                Outs =
+                {
+                    new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(new byte[PlonkNative.G1CompressedSize]) },
+                    new PrivateShieldedOutput { Index = 1, CommitmentB64 = Convert.ToBase64String(new byte[PlonkNative.G1CompressedSize]) }
+                }
+            };
+            var tx = new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER, Amount = 0 };
+            Assert.True(PlonkPublicInputsV1.TryBuild(tx, payload, out var pi, out var err), err);
+            Assert.True(pi.Length > 32);
+        }
+
+        [Fact]
+        public void PlonkProofVerifier_EnforcePlonkProofsForZk_RequiresProof()
+        {
+            var prev = Globals.EnforcePlonkProofsForZk;
+            try
+            {
+                Globals.EnforcePlonkProofsForZk = true;
+                var payload = new PrivateTxPayload { Asset = "VFX", Fee = Globals.PrivateTxFixedFee };
+                var tx = new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER };
+                var r = PlonkProofVerifier.TryValidatePrivateProofs(tx, payload, blockDownloads: false);
+                Assert.False(r.ok);
+            }
+            finally
+            {
+                Globals.EnforcePlonkProofsForZk = prev;
+            }
         }
 
         [Fact]
@@ -315,7 +362,8 @@ namespace VerfiedXCore.Tests
                     }
                 },
                 NullsB64 = { Convert.ToBase64String(new byte[32]) },
-                SpentCommitmentTreePositions = { 0L }
+                SpentCommitmentTreePositions = { 0L },
+                Fee = Globals.PrivateTxFixedFee
             };
             Assert.True(payload.TryValidateStructure(out var ve), ve);
             var tx = new Transaction { Data = JsonConvert.SerializeObject(payload) };
@@ -365,10 +413,34 @@ namespace VerfiedXCore.Tests
         [Fact]
         public async Task PrivacyDbRebuildService_ReplayFromSyntheticBlocks_Works()
         {
+            var r0 = new byte[32];
+            Array.Fill(r0, (byte)1);
+            var g0 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(1, r0, g0));
+            var shieldPayload = new PrivateTxPayload
+            {
+                Asset = "VFX",
+                Kind = "t2z",
+                Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g0) } }
+            };
+            var shieldTx = new Transaction
+            {
+                Timestamp = 99,
+                FromAddress = "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ToAddress = PrivacyConstants.ShieldedPoolAddress,
+                Amount = 5.0m,
+                Fee = 0.000003m,
+                Nonce = 0,
+                TransactionType = TransactionType.VFX_SHIELD,
+                Signature = "sig",
+                Data = JsonConvert.SerializeObject(shieldPayload)
+            };
+            shieldTx.BuildPrivate();
+
             var r = new byte[32];
             Array.Fill(r, (byte)2);
             var g1 = new byte[PlonkNative.G1CompressedSize];
-            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(1, r, g1));
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(2, r, g1));
 
             var payload = new PrivateTxPayload
             {
@@ -379,7 +451,8 @@ namespace VerfiedXCore.Tests
                     new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1) }
                 },
                 NullsB64 = { Convert.ToBase64String(new byte[32]) },
-                SpentCommitmentTreePositions = { 0L }
+                SpentCommitmentTreePositions = { 0L },
+                Fee = Globals.PrivateTxFixedFee
             };
             var json = JsonConvert.SerializeObject(payload);
 
@@ -397,16 +470,21 @@ namespace VerfiedXCore.Tests
             };
             tx.BuildPrivate();
 
-            var block = new Block { Height = 3, Transactions = new List<Transaction> { tx } };
+            var blockShield = new Block { Height = 2, Transactions = new List<Transaction> { shieldTx } };
+            var blockSpend = new Block { Height = 3, Transactions = new List<Transaction> { tx } };
 
-            var (ok, msg) = await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(new[] { block }, _db);
+            var (ok, msg) = await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(new[] { blockShield, blockSpend }, _db);
             Assert.True(ok, msg);
 
             var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
-            Assert.Equal(1, commitments.Count(x => x.AssetType == "VFX"));
+            Assert.Equal(2, commitments.Count(x => x.AssetType == "VFX"));
 
             var nulls = _db.GetCollection<NullifierRecord>(PrivacyDbContext.PRIV_NULLIFIERS);
             Assert.Equal(1, nulls.Count(x => x.AssetType == "VFX"));
+
+            var pool = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindOne(x => x.AssetType == "VFX");
+            Assert.NotNull(pool);
+            Assert.Equal(5.0m - Globals.PrivateTxFixedFee, pool!.TotalShieldedSupply);
         }
 
         [Fact]
@@ -513,6 +591,10 @@ namespace VerfiedXCore.Tests
 
             var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
             Assert.Equal(1, commitments.Count(x => x.AssetType == "VFX"));
+
+            var pool = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindOne(x => x.AssetType == "VFX");
+            Assert.NotNull(pool);
+            Assert.Equal(1.0m, pool!.TotalShieldedSupply);
         }
 
         [Fact]
@@ -547,7 +629,8 @@ namespace VerfiedXCore.Tests
                 Kind = "z2z",
                 Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1) } },
                 NullsB64 = { Convert.ToBase64String(new byte[32]) },
-                SpentCommitmentTreePositions = { 0L }
+                SpentCommitmentTreePositions = { 0L },
+                Fee = Globals.PrivateTxFixedFee
             };
             var json = JsonConvert.SerializeObject(payload);
             var tx = new Transaction
@@ -567,6 +650,144 @@ namespace VerfiedXCore.Tests
             var set = new HashSet<string>();
             Assert.True(MempoolNullifierTracker.TryAddBlockScopedNullifiers(tx, set, out _));
             Assert.False(MempoolNullifierTracker.TryAddBlockScopedNullifiers(tx, set, out _), "same nullifier twice in block");
+        }
+
+        [Fact]
+        public void ShieldedPlainNoteCodec_RoundTrip()
+        {
+            var r = new byte[32];
+            RandomNumberGenerator.Fill(r);
+            var note = new ShieldedPlainNote
+            {
+                Amount = 1.234m,
+                RandomnessB64 = Convert.ToBase64String(r),
+                AssetType = "VFX",
+                Memo = "m"
+            };
+            var bytes = ShieldedPlainNoteCodec.SerializeToUtf8Bytes(note);
+            Assert.True(ShieldedPlainNoteCodec.TryDeserializeUtf8(bytes, out var back, out var err), err);
+            Assert.Equal(note.Amount, back!.Amount);
+            Assert.Equal(note.RandomnessB64, back.RandomnessB64);
+            Assert.Equal(note.AssetType, back.AssetType);
+            Assert.Equal(note.Memo, back.Memo);
+        }
+
+        [Fact]
+        public void CommitmentSelectionService_SelectsSmallestSufficient()
+        {
+            var a = new UnspentCommitment { Amount = 0.5m, TreePosition = 0, Commitment = "YQ==" };
+            var b = new UnspentCommitment { Amount = 2.0m, TreePosition = 1, Commitment = "Yg==" };
+            var fee = Globals.PrivateTxFixedFee;
+            Assert.True(CommitmentSelectionService.TrySelectInputs(new[] { a, b }, 1.0m + fee, out var sel, out var ch, out var e1), e1);
+            Assert.Single(sel);
+            Assert.Equal(1, sel[0].TreePosition);
+            Assert.Equal(2.0m - 1.0m - fee, ch);
+
+            Assert.True(CommitmentSelectionService.TrySelectInputs(new[] { a, b }, 0.2m + fee, out var sel2, out var ch2, out var e2), e2);
+            Assert.Single(sel2);
+            Assert.Equal(0, sel2[0].TreePosition);
+        }
+
+        [Fact]
+        public void VfxPrivateTransactionBuilder_Shield_ProducesValidPayload()
+        {
+            const string seedHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40";
+            var m = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 5);
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildShield(
+                "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                2.5m,
+                0.000003m,
+                0,
+                1000,
+                m.ZfxAddress,
+                "hello",
+                out var tx,
+                out var err,
+                _db), err);
+            Assert.NotNull(tx);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx!.Data, out var p, out _), "decode");
+            Assert.True(p!.TryValidateStructure(out var ve), ve);
+            Assert.Single(p.Outs);
+            Assert.NotNull(p.Outs[0].EncryptedNoteB64);
+            Assert.True(ShieldedNoteEncryption.TryOpen(Convert.FromBase64String(p.Outs[0].EncryptedNoteB64!), m.EncryptionPrivateKey32, out var plain, out _), "open");
+            Assert.True(ShieldedPlainNoteCodec.TryDeserializeUtf8(plain!, out var sn, out _), "json");
+            Assert.Equal(2.5m, sn!.Amount);
+        }
+
+        [Fact]
+        public void VfxPrivateTransactionBuilder_PrivateTransfer_BuildsNullifiersAndFee()
+        {
+            const string seedHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40";
+            var keys = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 7);
+            var recv = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 8);
+
+            Assert.True(PrivacyPedersenAmount.TryCommitAmount(10m, out var r32, out var g1, out var pcErr), pcErr);
+            var inp = new UnspentCommitment
+            {
+                Amount = 10m,
+                TreePosition = 0,
+                Commitment = Convert.ToBase64String(g1),
+                AssetType = "VFX",
+                Randomness = r32
+            };
+
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildPrivateTransfer(
+                new[] { inp },
+                1.0m,
+                recv.ZfxAddress,
+                keys,
+                2000,
+                out var tx,
+                out var err,
+                _db), err);
+            Assert.NotNull(tx);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx!.Data, out var p, out _), "decode");
+            Assert.True(p!.TryValidateStructure(out var ve), ve);
+            Assert.Single(p.NullsB64);
+            Assert.Equal(Globals.PrivateTxFixedFee, p.Fee);
+            Assert.True(p.Outs.Count is >= 1 and <= 2);
+        }
+
+        [Fact]
+        public void PrivateTxPayloadCodec_SerializeRoundTrip()
+        {
+            var p = new PrivateTxPayload { Version = 1, Asset = "VFX", Kind = "z2z", Fee = Globals.PrivateTxFixedFee };
+            var json = PrivateTxPayloadCodec.SerializeToJson(p);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(json, out var p2, out _), "decode");
+            Assert.Equal(Globals.PrivateTxFixedFee, p2!.Fee);
+        }
+
+        [Fact]
+        public void ShieldedRecoveryScanService_FindsStructuredPlainNote()
+        {
+            const string seedHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40";
+            var m = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 6);
+            var r = new byte[32];
+            Array.Fill(r, (byte)4);
+            var g1 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(9, r, g1));
+            var plain = PrivacyPedersenAmount.CreatePlainNote(9m, r, "VFX");
+            var sealedN = ShieldedNoteEncryption.SealPlainNote(plain, m.ZfxAddress);
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX",
+                Kind = "z2z",
+                Outs =
+                {
+                    new PrivateShieldedOutput
+                    {
+                        Index = 0,
+                        CommitmentB64 = Convert.ToBase64String(g1),
+                        EncryptedNoteB64 = Convert.ToBase64String(sealedN)
+                    }
+                },
+                Fee = Globals.PrivateTxFixedFee
+            };
+            var tx = new Transaction { Data = JsonConvert.SerializeObject(payload) };
+            var block = new Block { Height = 2, Transactions = new List<Transaction> { tx } };
+            var hits = ShieldedRecoveryScanService.ScanBlocksForPlainNotes(new[] { block }, m.EncryptionPrivateKey32).ToList();
+            Assert.Single(hits);
+            Assert.Equal(9m, hits[0].Note.Amount);
         }
     }
 }

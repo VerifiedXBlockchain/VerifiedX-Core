@@ -1,3 +1,4 @@
+using System;
 using System.Text;
 using Newtonsoft.Json;
 using ReserveBlockCore.Models.Privacy;
@@ -72,6 +73,14 @@ namespace ReserveBlockCore.Privacy
             }
 
             return true;
+        }
+
+        /// <summary>JSON for <see cref="Transaction.Data"/> (UTF-8 text; validators accept Base64-wrapped JSON too).</summary>
+        public static string SerializeToJson(PrivateTxPayload payload)
+        {
+            if (payload == null)
+                throw new ArgumentNullException(nameof(payload));
+            return JsonConvert.SerializeObject(payload, JsonSettings);
         }
 
         private static bool LooksLikeBase64Payload(string s)

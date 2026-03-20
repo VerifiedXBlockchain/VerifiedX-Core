@@ -32,6 +32,11 @@ namespace ReserveBlockCore.Privacy
             var height = block.Height;
             var ts = tx.Timestamp;
 
+            var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
+            var poolRow = poolCol.FindOne(x => x.AssetType == payload.Asset);
+            var supply = poolRow?.TotalShieldedSupply ?? 0m;
+            supply = ApplyVfxShieldedSupplyDelta(tx, payload, supply);
+
             for (var ni = 0; ni < payload.NullsB64.Count; ni++)
             {
                 NullifierService.TryRecordNullifier(payload.NullsB64[ni], payload.Asset, height, ts, db);
@@ -58,10 +63,22 @@ namespace ReserveBlockCore.Privacy
                 store.AppendG1Commitment(g1, height, ts);
             }
 
-            var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
-            var existing = poolCol.FindOne(x => x.AssetType == payload.Asset);
-            var supply = existing?.TotalShieldedSupply ?? 0m;
             store.UpdatePoolStateRoot(height, supply, store.LeafDigests.Count);
+        }
+
+        /// <summary>VFX shielded supply accounting (native VFX only; vBTC uses separate asset keys in later phases).</summary>
+        private static decimal ApplyVfxShieldedSupplyDelta(Transaction tx, PrivateTxPayload payload, decimal supply)
+        {
+            if (!string.Equals(payload.Asset, "VFX", StringComparison.Ordinal))
+                return supply;
+            var fee = payload.Fee ?? Globals.PrivateTxFixedFee;
+            return tx.TransactionType switch
+            {
+                TransactionType.VFX_SHIELD => supply + tx.Amount,
+                TransactionType.VFX_UNSHIELD => supply - tx.Amount - fee,
+                TransactionType.VFX_PRIVATE_TRANSFER => supply - fee,
+                _ => supply
+            };
         }
 
         private static async Task ApplyTransparentLedgerAsync(Transaction tx, Block block, PrivateTxPayload payload)
