@@ -1,6 +1,7 @@
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 
@@ -68,6 +69,9 @@ namespace ReserveBlockCore.Privacy
                 return (false, "Unknown private transaction type.");
             }
 
+            if (!ValidateVbtcPayloadFields(txRequest.TransactionType, payload, out var vbtcErr))
+                return (false, vbtcErr ?? "Invalid vBTC private payload.");
+
             if (!VerifyPrivateHash(txRequest))
                 return (false, "This transactions hash is not equal to the private hash.");
 
@@ -85,6 +89,38 @@ namespace ReserveBlockCore.Privacy
             }
 
             return (true, "Transaction has been verified.");
+        }
+
+        private static bool ValidateVbtcPayloadFields(TransactionType t, PrivateTxPayload payload, out string? err)
+        {
+            err = null;
+            if (t == TransactionType.VBTC_V2_SHIELD)
+            {
+                if (string.IsNullOrWhiteSpace(payload.VbtcContractUid))
+                {
+                    err = "VBTC_V2_SHIELD requires vbtc_uid in payload.";
+                    return false;
+                }
+                if (payload.VbtcTransparentAmount is not > 0)
+                {
+                    err = "VBTC_V2_SHIELD requires positive vbtc_amt in payload.";
+                    return false;
+                }
+            }
+            if (t == TransactionType.VBTC_V2_UNSHIELD)
+            {
+                if (string.IsNullOrWhiteSpace(payload.VbtcContractUid))
+                {
+                    err = "VBTC_V2_UNSHIELD requires vbtc_uid in payload.";
+                    return false;
+                }
+                if (payload.VbtcTransparentAmount is not > 0)
+                {
+                    err = "VBTC_V2_UNSHIELD requires positive vbtc_amt in payload.";
+                    return false;
+                }
+            }
+            return true;
         }
 
         private static bool ExpectedKindMatches(TransactionType t, string kind)

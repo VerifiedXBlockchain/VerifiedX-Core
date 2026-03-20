@@ -30,6 +30,10 @@ namespace ReserveBlockCore.Models.Privacy
         [JsonProperty("vbtc_uid")]
         public string? VbtcContractUid { get; set; }
 
+        /// <summary>Transparent vBTC amount for T→Z / Z→T (consensus); shield/unshield SC ledger uses this field.</summary>
+        [JsonProperty("vbtc_amt")]
+        public decimal? VbtcTransparentAmount { get; set; }
+
         public bool TryValidateStructure([System.Diagnostics.CodeAnalysis.NotNullWhen(false)] out string? error)
         {
             error = null;

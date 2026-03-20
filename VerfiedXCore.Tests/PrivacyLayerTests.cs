@@ -223,5 +223,41 @@ namespace VerfiedXCore.Tests
             var nulls = _db.GetCollection<NullifierRecord>(PrivacyDbContext.PRIV_NULLIFIERS);
             Assert.Equal(1, nulls.Count(x => x.AssetType == "VFX"));
         }
+
+        [Fact]
+        public async Task PrivateTxLedgerService_AppendsCommitmentsToPrivacyDb()
+        {
+            var r = new byte[32];
+            Array.Fill(r, (byte)7);
+            var g1 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(3, r, g1));
+
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX",
+                Kind = "t2z",
+                Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1) } }
+            };
+            var json = JsonConvert.SerializeObject(payload);
+            var tx = new Transaction
+            {
+                Timestamp = 50,
+                FromAddress = "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ToAddress = PrivacyConstants.ShieldedPoolAddress,
+                Amount = 1.0m,
+                Fee = 0.000003m,
+                Nonce = 0,
+                TransactionType = TransactionType.VFX_SHIELD,
+                Signature = "sig",
+                Data = json
+            };
+            tx.BuildPrivate();
+
+            var block = new Block { Height = 9, StateRoot = "sr", Transactions = new List<Transaction>() };
+            await PrivateTxLedgerService.ApplyBlockTransactionAsync(tx, block, _db);
+
+            var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            Assert.Equal(1, commitments.Count(x => x.AssetType == "VFX"));
+        }
     }
 }
