@@ -1,5 +1,6 @@
-﻿
+
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Privacy;
 using System.Security.Cryptography;
 
 namespace ReserveBlockCore.Utilities
@@ -9,6 +10,10 @@ namespace ReserveBlockCore.Utilities
         public static bool ValidateAddress(string addr)
         {
             var result = false;
+
+            if (!string.IsNullOrEmpty(addr) &&
+                addr.StartsWith(ShieldedAddressConstants.Prefix, StringComparison.Ordinal))
+                return ShieldedAddressCodec.IsWellFormed(addr);
 
 			var adnrCheck = (addr.ToLower().Contains(".rbx") || addr.ToLower().Contains(".vfx")) ? true : false;
 

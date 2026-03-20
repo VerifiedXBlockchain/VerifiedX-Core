@@ -3,6 +3,7 @@ using Newtonsoft.Json;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.Privacy;
+using ReserveBlockCore.Utilities;
 
 namespace VerfiedXCore.Tests
 {
@@ -208,6 +209,22 @@ namespace VerfiedXCore.Tests
         public void ShieldedAddressCodec_Encode_ThrowsOnWrongKeyLength()
         {
             Assert.Throws<ArgumentException>(() => ShieldedAddressCodec.EncodeEncryptionKey(new byte[32]));
+        }
+
+        [Fact]
+        public void AddressValidateUtility_AcceptsWellFormedZfx()
+        {
+            var key = new byte[ShieldedAddressConstants.EncryptionKeyLength];
+            Array.Fill(key, (byte)0xab);
+            var addr = ShieldedAddressCodec.EncodeEncryptionKey(key);
+            Assert.True(AddressValidateUtility.ValidateAddress(addr));
+        }
+
+        [Fact]
+        public void AddressValidateUtility_RejectsMalformedZfx()
+        {
+            Assert.False(AddressValidateUtility.ValidateAddress("zfx_notbase58!!!"));
+            Assert.False(AddressValidateUtility.ValidateAddress("zfx_"));
         }
 
         [Fact]
