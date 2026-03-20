@@ -860,5 +860,44 @@ namespace VerfiedXCore.Tests
             Assert.NotNull(pool);
             Assert.Equal(amt, pool!.TotalShieldedSupply);
         }
+
+        [Fact]
+        public void PrivateTransactionTypes_TakeWhilePrivateTxCap_PreservesOrderAndDropsExtraPrivate()
+        {
+            var txs = new List<Transaction>
+            {
+                new() { TransactionType = TransactionType.TX },
+                new() { TransactionType = TransactionType.VFX_SHIELD },
+                new() { TransactionType = TransactionType.VFX_UNSHIELD },
+                new() { TransactionType = TransactionType.TX },
+            };
+            var capped = PrivateTransactionTypes.TakeWhilePrivateTxCap(txs, maxPrivate: 1);
+            Assert.Equal(3, capped.Count);
+            Assert.Equal(TransactionType.TX, capped[0].TransactionType);
+            Assert.Equal(TransactionType.VFX_SHIELD, capped[1].TransactionType);
+            Assert.Equal(TransactionType.TX, capped[2].TransactionType);
+        }
+
+        [Fact]
+        public void ShieldedStateRoot_ComputeFromPools_IsDeterministic()
+        {
+            var pools = new[]
+            {
+                new ShieldedPoolState { AssetType = "VFX", CurrentMerkleRoot = "r1", TotalCommitments = 2, TotalShieldedSupply = 1.5m, LastUpdateHeight = 9 },
+                new ShieldedPoolState { AssetType = "VBTC:u", CurrentMerkleRoot = "r2", TotalCommitments = 1, TotalShieldedSupply = 0.1m, LastUpdateHeight = 9 },
+            };
+            var a = ShieldedStateRoot.ComputeFromPools(pools);
+            var b = ShieldedStateRoot.ComputeFromPools(pools.Reverse());
+            Assert.Equal(a, b);
+            Assert.False(string.IsNullOrEmpty(a));
+        }
+
+        [Fact]
+        public void PlonkProofVerifier_TryValidatePrivateProofsInBlock_EmptyBlock_Ok()
+        {
+            var block = new Block { Transactions = new List<Transaction>() };
+            var r = PlonkProofVerifier.TryValidatePrivateProofsInBlock(block, false);
+            Assert.True(r.ok);
+        }
     }
 }

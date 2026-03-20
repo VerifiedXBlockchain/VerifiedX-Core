@@ -457,6 +457,24 @@ namespace ReserveBlockCore.Services
 
                     if (block.Transactions.Count() > 0)
                     {
+                        if (block.Transactions.Count(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)) > Globals.MaxPrivateTxPerBlock)
+                        {
+                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-privateTxCap");
+                            return result;
+                        }
+
+                        if (!blockDownloads && block.Transactions.Any(t =>
+                            t.FromAddress != "Coinbase_TrxFees" && t.FromAddress != "Coinbase_BlkRwd"
+                            && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+                        {
+                            var plonkBatch = PlonkProofVerifier.TryValidatePrivateProofsInBlock(block, blockDownloads);
+                            if (!plonkBatch.ok)
+                            {
+                                DbContext.Rollback("BlockValidatorService.ValidateBlock()-privatePlonkBatch");
+                                return result;
+                            }
+                        }
+
                         //validate transactions.
                         bool rejectBlock = false;
                         // HAL-067 Fix: Track nonces per address during block validation to support multiple TXs from same sender
@@ -487,7 +505,7 @@ namespace ReserveBlockCore.Services
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
                             {
-                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces);
+                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces, skipPrivatePlonkProofVerification: !blockDownloads);
 
                                 var effectiveTxResult = txResult;
                                 if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(blkTransaction.TransactionType))
@@ -1177,6 +1195,18 @@ namespace ReserveBlockCore.Services
 
             if (block.Transactions.Count() > 0)
             {
+                if (block.Transactions.Count(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)) > Globals.MaxPrivateTxPerBlock)
+                    return result;
+
+                if (!blockDownloads && block.Transactions.Any(t =>
+                    t.FromAddress != "Coinbase_TrxFees" && t.FromAddress != "Coinbase_BlkRwd"
+                    && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+                {
+                    var plonkBatch = PlonkProofVerifier.TryValidatePrivateProofsInBlock(block, blockDownloads);
+                    if (!plonkBatch.ok)
+                        return result;
+                }
+
                 //validate transactions.
                 bool rejectBlock = false;
                 var blockPrivateNullifierKeys = new HashSet<string>();
@@ -1184,7 +1214,7 @@ namespace ReserveBlockCore.Services
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                     {
-                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads);
+                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, false, false, null, skipPrivatePlonkProofVerification: !blockDownloads);
                         var effectiveTxResult = txResult;
                         if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(transaction.TransactionType))
                         {

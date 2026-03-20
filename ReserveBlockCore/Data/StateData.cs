@@ -42,6 +42,7 @@ namespace ReserveBlockCore.Data
 
             var worldTrei = new WorldTrei {
                 StateRoot = block.StateRoot,
+                ShieldedStateRoot = global::ReserveBlockCore.Privacy.ShieldedStateRoot.Compute(),
             };
 
             var wTrei = DbContext.DB_WorldStateTrei.GetCollection<WorldTrei>(DbContext.RSRV_WSTATE_TREI);

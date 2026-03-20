@@ -14,7 +14,8 @@ namespace ReserveBlockCore.Privacy
             bool blockDownloads,
             bool blockVerify,
             bool twSkipVerify,
-            Dictionary<string, long>? processedNonces)
+            Dictionary<string, long>? processedNonces,
+            bool skipPlonkProofVerification = false)
         {
             _ = blockVerify;
             _ = twSkipVerify;
@@ -78,7 +79,7 @@ namespace ReserveBlockCore.Privacy
                 var zk = ValidateZkPrivate(txRequest, payload!);
                 if (!zk.ok)
                     return zk;
-                var merkle = ValidatePayloadMerkleRootRecency(payload!);
+                var merkle = ValidatePayloadMerkleRootRecency(payload!, blockDownloads);
                 if (!merkle.ok)
                     return merkle;
             }
@@ -90,9 +91,12 @@ namespace ReserveBlockCore.Privacy
             if (!ValidateVbtcPayloadFields(txRequest.TransactionType, payload, out var vbtcErr))
                 return (false, vbtcErr ?? "Invalid vBTC private payload.");
 
-            var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads);
-            if (!plonk.ok)
-                return (false, plonk.message);
+            if (!skipPlonkProofVerification)
+            {
+                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads);
+                if (!plonk.ok)
+                    return (false, plonk.message);
+            }
 
             if (!VerifyPrivateHash(txRequest))
                 return (false, "This transactions hash is not equal to the private hash.");
@@ -179,8 +183,11 @@ namespace ReserveBlockCore.Privacy
             };
         }
 
-        private static (bool ok, string message) ValidatePayloadMerkleRootRecency(PrivateTxPayload payload)
+        private static (bool ok, string message) ValidatePayloadMerkleRootRecency(PrivateTxPayload payload, bool blockDownloads)
         {
+            if (blockDownloads)
+                return (true, "");
+
             if (string.IsNullOrWhiteSpace(payload.MerkleRootB64))
                 return (true, "");
 
@@ -234,6 +241,20 @@ namespace ReserveBlockCore.Privacy
                 if (Globals.LastBlock.Height > Globals.TXHeightRule1
                     && payload.VbtcTransparentAmount < Globals.MinShieldAmountVBTC)
                     return (false, $"VBTC shield vbtc_amt must be at least {Globals.MinShieldAmountVBTC}.");
+
+                if (!string.IsNullOrWhiteSpace(payload.VbtcContractUid)
+                    && payload.VbtcTransparentAmount is > 0)
+                {
+                    if (!ReserveBlockCore.Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(
+                            payload.VbtcContractUid,
+                            txRequest.FromAddress,
+                            out var availableVbtc,
+                            out var vbtcBalErr))
+                        return (false, vbtcBalErr ?? "Could not resolve vBTC transparent balance for shield.");
+
+                    if (payload.VbtcTransparentAmount.Value > availableVbtc)
+                        return (false, $"Insufficient transparent vBTC for shield. Available: {availableVbtc}, requested: {payload.VbtcTransparentAmount.Value}.");
+                }
             }
 
             if (txRequest.Fee <= 0)

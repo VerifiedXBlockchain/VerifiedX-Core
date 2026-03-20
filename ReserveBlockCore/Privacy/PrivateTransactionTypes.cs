@@ -33,5 +33,28 @@ namespace ReserveBlockCore.Privacy
                 .ThenBy(t => t.Nonce)
                 .ThenBy(t => t.Hash, StringComparer.Ordinal)
                 .ToList();
+
+        /// <summary>
+        /// Preserves order; includes non-private txs; skips private txs once <paramref name="maxPrivate"/> is reached (default <see cref="Globals.MaxPrivateTxPerBlock"/>).
+        /// </summary>
+        public static List<Transaction> TakeWhilePrivateTxCap(IEnumerable<Transaction> transactions, int maxPrivate = -1)
+        {
+            if (maxPrivate < 0)
+                maxPrivate = Globals.MaxPrivateTxPerBlock;
+
+            var list = new List<Transaction>();
+            int priv = 0;
+            foreach (var t in transactions)
+            {
+                if (IsPrivateTransaction(t.TransactionType))
+                {
+                    if (priv >= maxPrivate)
+                        continue;
+                    priv++;
+                }
+                list.Add(t);
+            }
+            return list;
+        }
     }
 }

@@ -1,5 +1,6 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using ReserveBlockCore.P2P;
 using System;
@@ -114,7 +115,7 @@ namespace ReserveBlockCore.Data
                         //transactionList.Add(coinbase_tx);
                         transactionList.Add(coinbase_tx2);
 
-                        transactionList.AddRange(processedTxPool);
+                        transactionList.AddRange(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool));
 
                         //need to only delete processed mempool tx's in event new ones get added while creating block.
                         //delete after block is added, so they can't  be re-added before block is over.
@@ -239,7 +240,7 @@ namespace ReserveBlockCore.Data
                         //transactionList.Add(coinbase_tx);
                         transactionList.Add(coinbase_tx2);
 
-                        transactionList.AddRange(processedTxPool);
+                        transactionList.AddRange(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool));
 
                         //need to only delete processed mempool tx's in event new ones get added while creating block.
                         //delete after block is added, so they can't  be re-added before block is over.
@@ -380,7 +381,7 @@ namespace ReserveBlockCore.Data
 
                         //We will skip during proof generation
                         if(!skipTXs)
-                            transactionList.AddRange(processedTxPool);
+                            transactionList.AddRange(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool));
                     }
                     else
                     {
