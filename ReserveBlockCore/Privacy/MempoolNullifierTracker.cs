@@ -78,6 +78,17 @@ namespace ReserveBlockCore.Privacy
                 }
             }
 
+            if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
+                && (tx.TransactionType == TransactionType.VBTC_V2_UNSHIELD || tx.TransactionType == TransactionType.VBTC_V2_PRIVATE_TRANSFER))
+            {
+                var feeKey = MakeKey("VFX", payload.FeeInputNullifierB64);
+                if (!blockNullifierKeys.Add(feeKey))
+                {
+                    error = "Duplicate nullifier within block (VFX fee leg).";
+                    return false;
+                }
+            }
+
             return true;
         }
     }

@@ -102,7 +102,9 @@ namespace ReserveBlockCore.Privacy
             };
         }
 
-        /// <summary>Burns fixed VFX fee from the <c>VFX</c> shielded pool on vBTC Z→T / Z→Z (dual-fee leg).</summary>
+        /// <summary>
+        /// vBTC Z→T / Z→Z: either a full VFX fee leg (nullifier + spent position + optional change commitment) or legacy supply-only burn for old payloads.
+        /// </summary>
         private static void ApplyVfxFeeBurnFromVbtcZk(Transaction tx, PrivateTxPayload payload, long height, LiteDatabase db)
         {
             if (tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD && tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
@@ -111,11 +113,50 @@ namespace ReserveBlockCore.Privacy
             if (fee <= 0)
                 return;
 
+            var hasFeeLeg = !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
+                && !string.IsNullOrWhiteSpace(payload.FeeTreeMerkleRoot)
+                && payload.FeeInputSpentTreePosition.HasValue;
+
+            if (hasFeeLeg)
+            {
+                ApplyVfxFeeLegToLedger(tx, payload, height, db, fee);
+                return;
+            }
+
             var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var vfxRow = poolCol.FindOne(x => x.AssetType == "VFX");
             var vfxSupply = (vfxRow?.TotalShieldedSupply ?? 0m) - fee;
             var vfxStore = new ShieldedMerkleStore("VFX", db);
             vfxStore.LoadLeavesFromCommitments();
+            vfxStore.UpdatePoolStateRoot(height, vfxSupply, vfxStore.LeafDigests.Count);
+        }
+
+        private static void ApplyVfxFeeLegToLedger(Transaction tx, PrivateTxPayload payload, long height, LiteDatabase db, decimal fee)
+        {
+            var ts = tx.Timestamp;
+            NullifierService.TryRecordNullifier(payload.FeeInputNullifierB64!, "VFX", height, ts, db);
+            CommitmentSpendService.TryMarkSpent("VFX", payload.FeeInputSpentTreePosition!.Value, db);
+
+            var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
+            var vfxRow = poolCol.FindOne(x => x.AssetType == "VFX");
+            var vfxSupply = (vfxRow?.TotalShieldedSupply ?? 0m) - fee;
+            var vfxStore = new ShieldedMerkleStore("VFX", db);
+            vfxStore.LoadLeavesFromCommitments();
+
+            if (!string.IsNullOrWhiteSpace(payload.FeeOutputCommitmentB64))
+            {
+                try
+                {
+                    var g = Convert.FromBase64String(payload.FeeOutputCommitmentB64);
+                    if (g.Length == PlonkNative.G1CompressedSize)
+                        vfxStore.AppendG1Commitment(g, height, ts);
+                }
+                catch
+                {
+                    /* ignore malformed; structure validation should catch at ingress */
+                }
+            }
+
             vfxStore.UpdatePoolStateRoot(height, vfxSupply, vfxStore.LeafDigests.Count);
         }
 

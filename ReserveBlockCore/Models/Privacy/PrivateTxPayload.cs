@@ -57,6 +57,10 @@ namespace ReserveBlockCore.Models.Privacy
         [JsonProperty("fee_tree_merkle_root")]
         public string? FeeTreeMerkleRoot { get; set; }
 
+        /// <summary>Tree position of the VFX commitment spent as the fixed ZK fee input (vBTC Z→Z / Z→T fee leg).</summary>
+        [JsonProperty("fee_input_spent_tree_position")]
+        public long? FeeInputSpentTreePosition { get; set; }
+
         [JsonProperty("transparent_input")]
         public string? TransparentInput { get; set; }
 
@@ -190,6 +194,23 @@ namespace ReserveBlockCore.Models.Privacy
                 catch
                 {
                     error = "PrivateTxPayload nullifier is not valid Base64.";
+                    return false;
+                }
+            }
+
+            var hasFeeNull = !string.IsNullOrWhiteSpace(FeeInputNullifierB64);
+            var hasFeeRoot = !string.IsNullOrWhiteSpace(FeeTreeMerkleRoot);
+            var hasFeePos = FeeInputSpentTreePosition.HasValue;
+            if (hasFeeNull || hasFeeRoot || hasFeePos)
+            {
+                if (!hasFeeNull || !hasFeeRoot || !hasFeePos)
+                {
+                    error = "PrivateTxPayload VFX fee leg requires fee_input_nullifier_b64, fee_tree_merkle_root, and fee_input_spent_tree_position together.";
+                    return false;
+                }
+                if (FeeInputSpentTreePosition!.Value < 0)
+                {
+                    error = "PrivateTxPayload fee_input_spent_tree_position must be non-negative.";
                     return false;
                 }
             }

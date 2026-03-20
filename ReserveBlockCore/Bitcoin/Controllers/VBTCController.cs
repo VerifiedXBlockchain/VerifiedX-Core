@@ -2703,8 +2703,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (!CommitmentSelectionService.TrySelectInputs(candidates, req.TransparentVbtcAmount + fee, out var inputs, out _, out var selErr))
                     return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
 
+                var vfxCandidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var vfxFeeNote = vfxCandidates.Where(c => c.Amount >= fee).OrderBy(c => c.Amount).FirstOrDefault();
+                if (vfxFeeNote == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Need at least one shielded VFX note whose amount covers the fixed ZK fee. Co-shield VFX or consolidate notes first." });
+
                 var ts = TimeUtil.GetTime();
-                if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(req.VbtcContractUid, inputs, req.TransparentVbtcAmount, req.TransparentToAddress, keys, ts, out var tx, out var berr, DbContext.DB_Privacy))
+                if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(req.VbtcContractUid, inputs, req.TransparentVbtcAmount, req.TransparentToAddress, keys, ts, out var tx, out var berr, vfxFeeNote, DbContext.DB_Privacy))
                     return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
 
                 var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
@@ -2735,8 +2740,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (!CommitmentSelectionService.TrySelectInputs(candidates, req.PaymentAmount + fee, out var inputs, out _, out var selErr))
                     return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
 
+                var vfxCandidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var vfxFeeNote = vfxCandidates.Where(c => c.Amount >= fee).OrderBy(c => c.Amount).FirstOrDefault();
+                if (vfxFeeNote == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Need at least one shielded VFX note whose amount covers the fixed ZK fee. Co-shield VFX or consolidate notes first." });
+
                 var ts = TimeUtil.GetTime();
-                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(req.VbtcContractUid, inputs, req.PaymentAmount, req.RecipientZfxAddress, keys, ts, out var tx, out var berr, DbContext.DB_Privacy))
+                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(req.VbtcContractUid, inputs, req.PaymentAmount, req.RecipientZfxAddress, keys, ts, out var tx, out var berr, vfxFeeNote, DbContext.DB_Privacy))
                     return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
 
                 var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);

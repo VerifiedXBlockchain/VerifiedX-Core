@@ -380,6 +380,22 @@ namespace VerfiedXCore.Tests
         }
 
         [Fact]
+        public void PrivateTxPayload_TryValidateStructure_RejectsPartialVfxFeeLeg()
+        {
+            var p = new PrivateTxPayload
+            {
+                Version = 1,
+                Asset = "VBTC:x",
+                Kind = "private_transfer",
+                FeeInputNullifierB64 = Convert.ToBase64String(new byte[32]),
+                FeeTreeMerkleRoot = null,
+                FeeInputSpentTreePosition = null
+            };
+            Assert.False(p.TryValidateStructure(out var err));
+            Assert.Contains("fee leg", err ?? "", StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
         public void PrivateTxPayload_TryValidateStructure_RejectsShortNote()
         {
             var r = new byte[32];
@@ -1107,6 +1123,204 @@ namespace VerfiedXCore.Tests
             Assert.NotNull(poolAfterZ2Z);
             var fee = Globals.PrivateTxFixedFee;
             Assert.Equal(shieldAmt - fee, poolAfterZ2Z!.TotalShieldedSupply);
+        }
+
+        /// <summary>Unshield leg uses <see cref="PrivateTxLedgerService.ApplyPrivacyStore"/> only (skips transparent <see cref="StateData"/> credit).</summary>
+        [Fact]
+        public void VfxPrivacyFlow_ShieldTransferUnshield_UpdatesPoolViaApplyPrivacyStore()
+        {
+            const string seedHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40";
+            var alice = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 40);
+            var bob = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 41);
+            const string fromTransparent = "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+            const decimal shieldAmt = 10m;
+            const decimal transparentFee = 0.000003m;
+            const decimal payment = 4m;
+
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildShield(
+                    fromTransparent,
+                    shieldAmt,
+                    transparentFee,
+                    0,
+                    6000,
+                    alice.ZfxAddress,
+                    null,
+                    out var shieldTx,
+                    out var sErr,
+                    _db),
+                sErr);
+            var block1 = new Block { Height = 2000, StateRoot = "sr1", Transactions = new List<Transaction>() };
+            PrivateTxLedgerService.ApplyBlockTransactionAsync(shieldTx!, block1, _db).GetAwaiter().GetResult();
+
+            var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            var leaf0 = commitments.FindOne(x => x.AssetType == "VFX" && x.TreePosition == 0);
+            Assert.NotNull(leaf0);
+            var input = new UnspentCommitment
+            {
+                Commitment = leaf0!.Commitment,
+                AssetType = "VFX",
+                Amount = shieldAmt,
+                TreePosition = 0,
+                IsSpent = false
+            };
+
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildPrivateTransfer(
+                    new[] { input },
+                    payment,
+                    bob.ZfxAddress,
+                    alice,
+                    6001,
+                    out var z2zTx,
+                    out var zErr,
+                    _db),
+                zErr);
+            var block2 = new Block { Height = 2001, StateRoot = "sr2", Transactions = new List<Transaction>() };
+            PrivateTxLedgerService.ApplyBlockTransactionAsync(z2zTx!, block2, _db).GetAwaiter().GetResult();
+
+            var bobIn = new UnspentCommitment
+            {
+                Commitment = commitments.FindOne(x => x.AssetType == "VFX" && x.TreePosition == 1)!.Commitment,
+                AssetType = "VFX",
+                Amount = payment,
+                TreePosition = 1,
+                IsSpent = false
+            };
+            var f = Globals.PrivateTxFixedFee;
+            var transparentOut = payment - f;
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildUnshield(
+                    new[] { bobIn },
+                    transparentOut,
+                    "VFX_OUTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    bob,
+                    6002,
+                    out var unTx,
+                    out var uErr,
+                    _db),
+                uErr);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(unTx!.Data, out var up, out _), "decode unshield");
+            var block3 = new Block { Height = 2002, StateRoot = "sr3", Transactions = new List<Transaction>() };
+            PrivateTxLedgerService.ApplyPrivacyStore(unTx, block3, up!, _db);
+
+            var nulls = _db.GetCollection<NullifierRecord>(PrivacyDbContext.PRIV_NULLIFIERS);
+            Assert.Equal(2, nulls.Count(x => x.AssetType == "VFX"));
+
+            var pool = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindOne(x => x.AssetType == "VFX");
+            Assert.NotNull(pool);
+            Assert.Equal(shieldAmt - f - payment, pool!.TotalShieldedSupply);
+        }
+
+        [Fact]
+        public void VbtcPrivacyAsset_PlainVfx_IsNotVbtcContract()
+        {
+            Assert.False(VbtcPrivacyAsset.TryParseContractUid("VFX", out _));
+            Assert.False(VbtcPrivacyAsset.MatchesContract("VFX", "any"));
+            Assert.False(VbtcPrivacyAsset.IsVbtcShieldedAsset("VFX"));
+        }
+
+        /// <summary>vBTC Z→Z with full VFX fee leg: fee nullifier, VFX commitment spent, change appended, supply reduced by fixed fee.</summary>
+        [Fact]
+        public async Task PrivateTxLedgerService_VbtcPrivateTransfer_WithVfxFeeLeg_UpdatesVfxPool()
+        {
+            const string seedHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40";
+            var alice = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 50);
+            var bob = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 51);
+            const string fromTransparent = "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+            const string vbtcUid = "fee-leg-sc";
+            const decimal vfxShieldAmt = 10m;
+            const decimal vbtcShieldAmt = 0.00005m;
+            const decimal transparentFee = 0.000003m;
+            const decimal payment = 0.00002m;
+
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildShield(
+                    fromTransparent,
+                    vfxShieldAmt,
+                    transparentFee,
+                    0,
+                    8000,
+                    alice.ZfxAddress,
+                    null,
+                    out var vfxShieldTx,
+                    out var vfxErr,
+                    _db),
+                vfxErr);
+            var blockVfx = new Block { Height = 3000, StateRoot = "srvfx", Transactions = new List<Transaction>() };
+            await PrivateTxLedgerService.ApplyBlockTransactionAsync(vfxShieldTx!, blockVfx, _db);
+
+            Assert.True(VbtcPrivateTransactionBuilder.TryBuildShield(
+                    fromTransparent,
+                    vbtcUid,
+                    vbtcShieldAmt,
+                    transparentFee,
+                    0,
+                    8001,
+                    alice.ZfxAddress,
+                    null,
+                    out var vbtcShieldTx,
+                    out var vbtcErr,
+                    _db),
+                vbtcErr);
+            var blockVbtc = new Block { Height = 3001, StateRoot = "srvbtc", Transactions = new List<Transaction>() };
+            await PrivateTxLedgerService.ApplyBlockTransactionAsync(vbtcShieldTx!, blockVbtc, _db);
+
+            var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            var vfxAsset = "VFX";
+            var vbtcAsset = VbtcPrivacyAsset.FormatAssetKey(vbtcUid);
+            var vfxLeaf = commitments.FindOne(x => x.AssetType == vfxAsset && x.TreePosition == 0);
+            var vbtcLeaf = commitments.FindOne(x => x.AssetType == vbtcAsset && x.TreePosition == 0);
+            Assert.NotNull(vfxLeaf);
+            Assert.NotNull(vbtcLeaf);
+
+            var vfxFeeInput = new UnspentCommitment
+            {
+                Commitment = vfxLeaf!.Commitment,
+                AssetType = vfxAsset,
+                Amount = vfxShieldAmt,
+                TreePosition = 0,
+                IsSpent = false
+            };
+            var vbtcInput = new UnspentCommitment
+            {
+                Commitment = vbtcLeaf!.Commitment,
+                AssetType = vbtcAsset,
+                Amount = vbtcShieldAmt,
+                TreePosition = 0,
+                IsSpent = false
+            };
+
+            Assert.True(VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(
+                    vbtcUid,
+                    new[] { vbtcInput },
+                    payment,
+                    bob.ZfxAddress,
+                    alice,
+                    8002,
+                    out var z2zTx,
+                    out var zErr,
+                    vfxFeeInput,
+                    _db),
+                zErr);
+            Assert.NotNull(z2zTx);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(z2zTx!.Data, out var payload, out _), "decode");
+            Assert.NotNull(payload!.FeeInputNullifierB64);
+            Assert.True(payload.FeeInputSpentTreePosition.HasValue);
+            Assert.True(payload.TryValidateStructure(out var ve), ve);
+
+            var blockZ2Z = new Block { Height = 3002, StateRoot = "srz2z", Transactions = new List<Transaction>() };
+            await PrivateTxLedgerService.ApplyBlockTransactionAsync(z2zTx, blockZ2Z, _db);
+
+            var vfxPool = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindOne(x => x.AssetType == vfxAsset);
+            Assert.NotNull(vfxPool);
+            var zkFee = Globals.PrivateTxFixedFee;
+            Assert.Equal(vfxShieldAmt - zkFee, vfxPool!.TotalShieldedSupply);
+
+            vfxLeaf = commitments.FindOne(x => x.AssetType == vfxAsset && x.TreePosition == 0);
+            Assert.NotNull(vfxLeaf);
+            Assert.True(vfxLeaf!.IsSpent);
+
+            var nulls = _db.GetCollection<NullifierRecord>(PrivacyDbContext.PRIV_NULLIFIERS);
+            Assert.Equal(1, nulls.Count(x => x.AssetType == vfxAsset));
+
+            Assert.NotNull(commitments.FindOne(x => x.AssetType == vfxAsset && x.TreePosition == 1));
         }
     }
 }

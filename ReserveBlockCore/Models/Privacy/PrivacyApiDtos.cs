@@ -25,6 +25,13 @@ namespace ReserveBlockCore.Models.Privacy
         public decimal PaymentAmount { get; set; }
     }
 
+    /// <summary>Merges the two smallest unspent VFX notes into one via Z→Z to the same <c>zfx_</c> address (repeat to fold more dust).</summary>
+    public class ConsolidateShieldedVfxRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string? WalletPassword { get; set; }
+    }
+
     public class GenerateShieldedAddressRequest
     {
         /// <summary>When true, uses <see cref="HDWallet"/> seed from local DB (must exist).</summary>

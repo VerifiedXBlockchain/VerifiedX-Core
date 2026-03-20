@@ -120,6 +120,7 @@ namespace ReserveBlockCore.Privacy
             long timestamp,
             out Transaction? tx,
             out string? error,
+            UnspentCommitment? vfxFeeInput = null,
             LiteDB.LiteDatabase? privacyDb = null)
         {
             tx = null;
@@ -239,6 +240,15 @@ namespace ReserveBlockCore.Privacy
                 FeeTreeMerkleRoot = string.IsNullOrEmpty(merkleVfxFee) ? null : merkleVfxFee
             };
 
+            if (vfxFeeInput != null)
+            {
+                if (!TryPopulateVfxFeeLeg(payload, keys, vfxFeeInput, fee, out var feeErr))
+                {
+                    error = feeErr;
+                    return false;
+                }
+            }
+
             tx = new Transaction
             {
                 FromAddress = PrivacyConstants.ShieldedPoolAddress,
@@ -270,6 +280,7 @@ namespace ReserveBlockCore.Privacy
             long timestamp,
             out Transaction? tx,
             out string? error,
+            UnspentCommitment? vfxFeeInput = null,
             LiteDB.LiteDatabase? privacyDb = null)
         {
             tx = null;
@@ -412,6 +423,15 @@ namespace ReserveBlockCore.Privacy
                 FeeTreeMerkleRoot = string.IsNullOrEmpty(merkleVfxFee) ? null : merkleVfxFee
             };
 
+            if (vfxFeeInput != null)
+            {
+                if (!TryPopulateVfxFeeLeg(payload, keys, vfxFeeInput, fee, out var feeErr))
+                {
+                    error = feeErr;
+                    return false;
+                }
+            }
+
             tx = new Transaction
             {
                 FromAddress = PrivacyConstants.ShieldedPoolAddress,
@@ -431,6 +451,61 @@ namespace ReserveBlockCore.Privacy
                 error = plonkErr;
                 return false;
             }
+            return true;
+        }
+
+        /// <summary>Single VFX note &gt;= fixed fee; optional Pedersen change commitment to self.</summary>
+        private static bool TryPopulateVfxFeeLeg(
+            PrivateTxPayload payload,
+            ShieldedKeyMaterial keys,
+            UnspentCommitment vfxFeeInput,
+            decimal fee,
+            out string? error)
+        {
+            error = null;
+            if (!string.Equals(vfxFeeInput.AssetType, AssetVfx, StringComparison.Ordinal))
+            {
+                error = "VFX fee input must use asset VFX.";
+                return false;
+            }
+            if (vfxFeeInput.Amount < fee)
+            {
+                error = "VFX fee note amount must cover the fixed ZK fee.";
+                return false;
+            }
+            byte[] g1;
+            try
+            {
+                g1 = Convert.FromBase64String(vfxFeeInput.Commitment);
+            }
+            catch
+            {
+                error = "VFX fee input commitment is not valid Base64.";
+                return false;
+            }
+            if (g1.Length != PlonkNative.G1CompressedSize)
+            {
+                error = "VFX fee input commitment has wrong length.";
+                return false;
+            }
+
+            var n = NullifierService.DeriveNullifier(keys.ViewingKey32, g1, (ulong)vfxFeeInput.TreePosition);
+            payload.FeeInputNullifierB64 = Convert.ToBase64String(n);
+            payload.FeeInputSpentTreePosition = vfxFeeInput.TreePosition;
+
+            var vfxChange = vfxFeeInput.Amount - fee;
+            if (vfxChange > 0)
+            {
+                if (!PrivacyPedersenAmount.TryCommitAmount(vfxChange, out var rCh, out var gCh, out var perr))
+                {
+                    error = perr;
+                    return false;
+                }
+                payload.FeeOutputCommitmentB64 = Convert.ToBase64String(gCh);
+            }
+            else
+                payload.FeeOutputCommitmentB64 = null;
+
             return true;
         }
     }

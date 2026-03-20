@@ -65,6 +65,10 @@ namespace ReserveBlockCore.Privacy
                 }
             }
 
+            if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
+                && NullifierService.IsNullifierSpentInDb(payload.FeeInputNullifierB64, "VFX"))
+                return (false, "VFX fee nullifier already spent on-chain.");
+
             if (!string.IsNullOrWhiteSpace(payload.Kind) && !ExpectedKindMatches(txRequest.TransactionType, payload.Kind))
                 return (false, "PrivateTxPayload kind does not match transaction type.");
 
@@ -82,6 +86,9 @@ namespace ReserveBlockCore.Privacy
                 var merkle = ValidatePayloadMerkleRootRecency(payload!, blockDownloads);
                 if (!merkle.ok)
                     return merkle;
+                var feeMerkle = ValidateVfxFeeTreeMerkleRootRecency(payload!, blockDownloads);
+                if (!feeMerkle.ok)
+                    return feeMerkle;
             }
             else
             {
@@ -118,6 +125,14 @@ namespace ReserveBlockCore.Privacy
             {
                 if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, payload.Asset, payload.NullsB64, out var mErr))
                     return (false, mErr ?? "Mempool nullifier conflict.");
+            }
+
+            if (!blockDownloads && !blockVerify
+                && (txRequest.TransactionType == TransactionType.VBTC_V2_UNSHIELD || txRequest.TransactionType == TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+                && !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
+            {
+                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, "VFX", new[] { payload.FeeInputNullifierB64 }, out var feeMempoolErr))
+                    return (false, feeMempoolErr ?? "Mempool VFX fee nullifier conflict.");
             }
 
             return (true, "Transaction has been verified.");
@@ -206,6 +221,33 @@ namespace ReserveBlockCore.Privacy
             catch
             {
                 return (false, "Could not verify Merkle root recency against DB_Privacy.");
+            }
+        }
+
+        private static (bool ok, string message) ValidateVfxFeeTreeMerkleRootRecency(PrivateTxPayload payload, bool blockDownloads)
+        {
+            if (blockDownloads)
+                return (true, "");
+            if (string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
+                return (true, "");
+
+            try
+            {
+                var st = ShieldedPoolService.GetState("VFX");
+                if (st == null || string.IsNullOrEmpty(st.CurrentMerkleRoot))
+                    return (false, "VFX fee leg is present but shielded pool has no Merkle state for VFX.");
+
+                if (string.IsNullOrWhiteSpace(payload.FeeTreeMerkleRoot))
+                    return (false, "VFX fee leg requires fee_tree_merkle_root.");
+
+                if (!string.Equals(st.CurrentMerkleRoot.Trim(), payload.FeeTreeMerkleRoot.Trim(), StringComparison.Ordinal))
+                    return (false, "fee_tree_merkle_root does not match the current VFX shielded pool Merkle root.");
+
+                return (true, "");
+            }
+            catch
+            {
+                return (false, "Could not verify fee_tree_merkle_root against DB_Privacy.");
             }
         }
 

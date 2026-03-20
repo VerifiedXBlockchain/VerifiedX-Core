@@ -196,9 +196,64 @@ namespace ReserveBlockCore.Controllers
             }
         }
 
-        /// <summary>Per-asset shielded balances from local wallet row.</summary>
+        /// <summary>Combines the two smallest unspent VFX notes into one (Z→Z to self). Call again to merge additional pairs.</summary>
+        [HttpPost("ConsolidateShieldedVFX")]
+        public async Task<string> ConsolidateShieldedVFX([FromBody] ConsolidateShieldedVfxRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return Fail("ZfxAddress is required.");
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return Fail("No shielded wallet row for this zfx address.");
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return Fail(kmErr ?? "Keys");
+
+                var vfx = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
+                    .OrderBy(c => c!.Amount)
+                    .ThenBy(c => c!.TreePosition)
+                    .Cast<UnspentCommitment>()
+                    .ToList();
+                if (vfx.Count < 2)
+                    return Fail("Need at least two unspent VFX notes to consolidate.");
+
+                var first = vfx[0];
+                var second = vfx[1];
+                var sumAmt = first.Amount + second.Amount;
+                var fee = Globals.PrivateTxFixedFee;
+                if (sumAmt <= fee)
+                    return Fail("Combined VFX amount must exceed the fixed shielded fee.");
+                var payment = sumAmt - fee;
+                var inputs = first.TreePosition <= second.TreePosition
+                    ? new[] { first, second }
+                    : new[] { second, first };
+
+                var ts = TimeUtil.GetTime();
+                if (!VfxPrivateTransactionBuilder.TryBuildPrivateTransfer(
+                        inputs,
+                        payment,
+                        w.ShieldedAddress,
+                        keys,
+                        ts,
+                        out var tx,
+                        out var berr,
+                        DbContext.DB_Privacy))
+                    return Fail(berr ?? "Build failed.");
+
+                var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return br.json;
+            }
+            catch (Exception ex)
+            {
+                return Fail(ex.Message);
+            }
+        }
+
+        /// <summary>Per-asset shielded balances from local wallet row. Use <paramref name="includeCommitments"/> for a sanitized note list (no randomness).</summary>
         [HttpGet("GetShieldedBalance")]
-        public Task<string> GetShieldedBalance([FromQuery] string zfxAddress)
+        public Task<string> GetShieldedBalance([FromQuery] string zfxAddress, [FromQuery] bool includeCommitments = false)
         {
             try
             {
@@ -209,14 +264,37 @@ namespace ReserveBlockCore.Controllers
                     return Task.FromResult(Ok(new { ShieldedBalances = new Dictionary<string, decimal>(), UnspentCommitments = 0 }));
 
                 var sum = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent).Sum(c => c.Amount) ?? 0;
-                return Task.FromResult(Ok(new
-                {
-                    w.ShieldedBalances,
-                    UnspentCommitments = w.UnspentCommitments?.Count ?? 0,
-                    UnspentSum = sum,
-                    w.LastScannedBlock,
-                    w.IsViewOnly
-                }));
+                object payload = includeCommitments
+                    ? new
+                    {
+                        w!.ShieldedBalances,
+                        UnspentCommitments = w.UnspentCommitments?.Count ?? 0,
+                        UnspentSum = sum,
+                        w.LastScannedBlock,
+                        w.IsViewOnly,
+                        Commitments = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                            .Where(c => c != null && !c.IsSpent)
+                            .Select(c => new
+                            {
+                                c!.Commitment,
+                                c.AssetType,
+                                c.Amount,
+                                c.TreePosition,
+                                c.BlockHeight,
+                                c.IsSpent
+                            })
+                            .ToList()
+                    }
+                    : new
+                    {
+                        w!.ShieldedBalances,
+                        UnspentCommitments = w.UnspentCommitments?.Count ?? 0,
+                        UnspentSum = sum,
+                        w.LastScannedBlock,
+                        w.IsViewOnly
+                    };
+
+                return Task.FromResult(Ok(payload));
             }
             catch (Exception ex)
             {
@@ -317,12 +395,14 @@ namespace ReserveBlockCore.Controllers
                         merged.Add(u.Commitment);
                 }
                 var notesFound = 0;
+                var transactionsScanned = 0;
                 foreach (var block in blocks)
                 {
                     if (block.Transactions == null)
                         continue;
                     foreach (var tx in block.Transactions)
                     {
+                        transactionsScanned++;
                         if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                             continue;
                         if (payload?.Outs == null)
@@ -379,7 +459,15 @@ namespace ReserveBlockCore.Controllers
                 w.LastScannedBlock = Math.Max(w.LastScannedBlock, req.ToHeight);
                 ShieldedWalletService.Upsert(w);
 
-                return Task.FromResult(Ok(new { NotesFound = notesFound, LastScannedBlock = w.LastScannedBlock }));
+                return Task.FromResult(Ok(new
+                {
+                    NotesFound = notesFound,
+                    LastScannedBlock = w.LastScannedBlock,
+                    BlocksScanned = blocks.Count,
+                    TransactionsScanned = transactionsScanned,
+                    FromHeight = req.FromHeight,
+                    ToHeight = req.ToHeight
+                }));
             }
             catch (Exception ex)
             {
