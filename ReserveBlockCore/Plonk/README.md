@@ -8,6 +8,7 @@ The FFI crate lives in the **`plonk`** workspace (sibling repo), not inside Veri
 
 - `plonk/plonk-ffi/` — build + copy paths in `README.md`
 - `plonk/plonk-ffi/DEPLOYMENT.md` — step-by-step placement into this `Plonk/` folder
+- [`PARAMS.md`](PARAMS.md) — universal parameters file + `VFX_PLONK_PARAMS_PATH` (Phase 4 prep)
 
 ## How binaries get here
 

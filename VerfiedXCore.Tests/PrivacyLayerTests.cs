@@ -108,5 +108,59 @@ namespace VerfiedXCore.Tests
         {
             Assert.False(PLONKSetup.IsProofVerificationImplemented);
         }
+
+        [Fact]
+        public void CommitmentMerkleTree_InclusionProof_RoundTrips()
+        {
+            var store = new ShieldedMerkleStore("VFX", _db);
+            for (var i = 0; i < 3; i++)
+            {
+                var r = new byte[32];
+                r[0] = (byte)(i + 1);
+                var g1 = new byte[PlonkNative.G1CompressedSize];
+                Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit((ulong)(10 + i), r, g1));
+                store.AppendG1Commitment(g1, 1, 100 + i);
+            }
+
+            Assert.True(store.TryGetInclusionProof(1, out var proof, out var root));
+            var rec1 = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
+                .FindOne(x => x.AssetType == "VFX" && x.TreePosition == 1);
+            Assert.NotNull(rec1);
+            var leaf = CommitmentMerkleTree.LeafDigest(Convert.FromBase64String(rec1!.Commitment));
+
+            Assert.True(CommitmentMerkleTree.VerifyInclusionProof(leaf, 1, 3, proof, root));
+            Assert.Equal(0, PrivacyMerklePolicy.GetExpectedProofSizeBytes(1));
+            Assert.Equal(32 * 2, PrivacyMerklePolicy.GetExpectedProofSizeBytes(3));
+        }
+
+        [Fact]
+        public void PlonkNative_PedersenCommitmentAdd_Succeeds()
+        {
+            var r1 = new byte[32];
+            r1[0] = 9;
+            var r2 = new byte[32];
+            r2[0] = 11;
+            var c1 = new byte[PlonkNative.G1CompressedSize];
+            var c2 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(5, r1, c1));
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(7, r2, c2));
+            var sum = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commitment_add(c1, c2, sum));
+        }
+
+        [Fact]
+        public async Task PrivacyDbRebuildService_RebuildMerkleFromDb_Works()
+        {
+            var store = new ShieldedMerkleStore("VFX", _db);
+            var r = new byte[32];
+            Array.Fill(r, (byte)2);
+            var g1 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(1, r, g1));
+            store.AppendG1Commitment(g1, 1, 1);
+
+            var (ok, msg) = await PrivacyDbRebuildService.TryRebuildMerkleStateFromDbAsync("VFX", _db);
+            Assert.True(ok, msg);
+            Assert.Contains("commitments=1", msg);
+        }
     }
 }

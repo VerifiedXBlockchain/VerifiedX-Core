@@ -1,7 +1,10 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace ReserveBlockCore.Privacy
 {
     /// <summary>
     /// Poseidon-based Merkle helpers (native). Leaf = Poseidon(G1 commitment bytes); parent = Poseidon(left||right).
+    /// Proof format matches <c>plonk_ffi</c> <see cref="PlonkNative.merkle_tree_prove"/> (sibling digests bottom-up).
     /// </summary>
     public static class CommitmentMerkleTree
     {
@@ -27,6 +30,105 @@ namespace ReserveBlockCore.Privacy
             if (code != PlonkNative.Success)
                 throw new InvalidOperationException($"poseidon_hash failed: {code}");
             return out32;
+        }
+
+        /// <summary>
+        /// Builds a Merkle inclusion proof for <paramref name="leafIndex"/> over the given leaf digests (32 bytes each).
+        /// </summary>
+        public static bool TryBuildProof(IReadOnlyList<byte[]> leafDigests32, long leafIndex, [NotNullWhen(true)] out byte[]? proofBytes)
+        {
+            proofBytes = null;
+            var n = leafDigests32.Count;
+            if (n == 0 || leafIndex < 0 || leafIndex >= n)
+                return false;
+            if ((ulong)n > PrivacyMerklePolicy.MaxLeafCount)
+                return false;
+
+            var proof = new List<byte>(PrivacyMerklePolicy.GetExpectedProofSizeBytes((ulong)n));
+            int idx = (int)leafIndex;
+            var level = new List<byte[]>(n);
+            foreach (var d in leafDigests32)
+            {
+                if (d.Length != PrivacyMerklePolicy.DigestSizeBytes)
+                    throw new ArgumentException("Each leaf digest must be 32 bytes.", nameof(leafDigests32));
+                level.Add((byte[])d.Clone());
+            }
+
+            while (level.Count > 1)
+            {
+                int siblingIdx = (idx % 2 == 0) ? idx + 1 : idx - 1;
+                var sibling = siblingIdx < level.Count ? level[siblingIdx] : level[idx];
+                proof.AddRange(sibling);
+                var next = new List<byte[]>();
+                for (int i = 0; i < level.Count; i += 2)
+                {
+                    var left = level[i];
+                    var right = (i + 1 < level.Count) ? level[i + 1] : left;
+                    next.Add(Combine(left, right));
+                }
+                level = next;
+                idx /= 2;
+            }
+
+            proofBytes = proof.ToArray();
+            return true;
+        }
+
+        /// <summary>
+        /// Recomputes the Merkle root from a leaf digest and sibling path (same semantics as proof builder).
+        /// </summary>
+        public static bool TryComputeRootFromProof(
+            ReadOnlySpan<byte> leafDigest32,
+            long leafIndex,
+            long leafCount,
+            ReadOnlySpan<byte> proof,
+            [NotNullWhen(true)] out byte[]? rootOut)
+        {
+            rootOut = null;
+            if (leafDigest32.Length != PrivacyMerklePolicy.DigestSizeBytes)
+                return false;
+            if (leafCount <= 0 || leafIndex < 0 || leafIndex >= leafCount)
+                return false;
+            if ((ulong)leafCount > PrivacyMerklePolicy.MaxLeafCount)
+                return false;
+
+            var expectedLen = PrivacyMerklePolicy.GetExpectedProofSizeBytes((ulong)leafCount);
+            if (proof.Length != expectedLen)
+                return false;
+
+            var cur = leafDigest32.ToArray();
+            long idx = leafIndex;
+            long count = leafCount;
+            int offset = 0;
+            while (count > 1)
+            {
+                var sib = proof.Slice(offset, PrivacyMerklePolicy.DigestSizeBytes);
+                offset += PrivacyMerklePolicy.DigestSizeBytes;
+                if ((idx & 1) == 0)
+                    cur = Combine(cur, sib);
+                else
+                    cur = Combine(sib, cur);
+                idx /= 2;
+                count = (count + 1) / 2;
+            }
+
+            rootOut = cur;
+            return true;
+        }
+
+        /// <summary>
+        /// Returns true if <paramref name="proof"/> proves <paramref name="leafDigest32"/> is under <paramref name="expectedRoot32"/>.
+        /// </summary>
+        public static bool VerifyInclusionProof(
+            ReadOnlySpan<byte> leafDigest32,
+            long leafIndex,
+            long leafCount,
+            ReadOnlySpan<byte> proof,
+            ReadOnlySpan<byte> expectedRoot32)
+        {
+            if (!TryComputeRootFromProof(leafDigest32, leafIndex, leafCount, proof, out var root) || root == null)
+                return false;
+            return expectedRoot32.SequenceEqual(root);
         }
     }
 }

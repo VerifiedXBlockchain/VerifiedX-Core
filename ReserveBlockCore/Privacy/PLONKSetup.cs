@@ -8,8 +8,20 @@ namespace ReserveBlockCore.Privacy
     /// </summary>
     public static class PLONKSetup
     {
+        /// <summary>Environment variable pointing at a universal-params file (optional until Phase 4).</summary>
+        public const string ParamsPathEnvironmentVariable = "VFX_PLONK_PARAMS_PATH";
+
         /// <summary>
-        /// If <paramref name="paramsPath"/> exists, loads bytes into <see cref="Globals.PLonKUniversalParams"/> (memory only).
+        /// Loads params from <see cref="ParamsPathEnvironmentVariable"/> when set and the file exists.
+        /// </summary>
+        public static bool TryLoadParamsFromEnvironment()
+        {
+            var path = Environment.GetEnvironmentVariable(ParamsPathEnvironmentVariable);
+            return !string.IsNullOrWhiteSpace(path) && TryLoadParamsFile(path);
+        }
+
+        /// <summary>
+        /// If <paramref name="paramsPath"/> exists, loads bytes into <see cref="Globals.PLONKUniversalParams"/> (memory only).
         /// </summary>
         public static bool TryLoadParamsFile(string paramsPath)
         {

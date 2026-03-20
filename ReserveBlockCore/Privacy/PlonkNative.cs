@@ -29,6 +29,10 @@ namespace ReserveBlockCore.Privacy
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int pedersen_verify(byte[] commitment, ulong amountScaled, byte[] randomness);
 
+        /// <summary>G1 point addition on compressed Pedersen commitments (homomorphic: C(a,r)+C(b,s)=C(a+b,r+s) in Fr).</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int pedersen_commitment_add(byte[] commitmentA, byte[] commitmentB, byte[] commitmentOut);
+
         /// <summary>Variable-length input; hashes as sequence of 32-byte big-endian field elements.</summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int poseidon_hash(byte[] inputs, nuint inputsLen, byte[] hashOut);

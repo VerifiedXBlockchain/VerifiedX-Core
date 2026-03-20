@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using LiteDB;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models.Privacy;
@@ -62,6 +63,24 @@ namespace ReserveBlockCore.Privacy
             _leafDigests.Add(CommitmentMerkleTree.LeafDigest(g1Compressed));
             RebuildAndPersistMerkleNodes();
             return pos;
+        }
+
+        /// <summary>
+        /// Builds an inclusion proof for the leaf at <paramref name="treePosition"/> against the current in-memory leaf list.
+        /// </summary>
+        public bool TryGetInclusionProof(long treePosition, [NotNullWhen(true)] out byte[]? proof, [NotNullWhen(true)] out byte[]? root32)
+        {
+            proof = null;
+            root32 = null;
+            if (treePosition < 0 || treePosition >= _leafDigests.Count)
+                return false;
+            if (!CommitmentMerkleTree.TryBuildProof(_leafDigests, treePosition, out proof))
+                return false;
+            var root = GetRootBytes();
+            if (root == null)
+                return false;
+            root32 = root;
+            return true;
         }
 
         public byte[]? GetRootBytes()
