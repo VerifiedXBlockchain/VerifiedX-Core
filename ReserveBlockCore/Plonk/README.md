@@ -44,7 +44,7 @@ The committed library exposes **Pedersen**, **Poseidon** (plonk-hashing–aligne
 
 1. **Parameters** — proving/verification keys generated in **`plonk`**, loaded via `plonk_load_params` (see [`PARAMS.md`](PARAMS.md)).
 2. **Circuits** — implement Transfer / Shield / Unshield / Fee in **`plonk`**; align public-input encoding with [`PlonkPublicInputsV1`](../Privacy/PlonkPublicInputsV1.cs).
-3. **`plonk_verify`** — implement in **`plonk`**; no C# signature change required. [`PLONKSetup.RefreshVerificationCapability`](../Privacy/PLONKSetup.cs) will detect non-stub behavior.
+3. **`plonk_verify`** — VFXPI1 parsing + layout checks ship in `plonk-ffi` (`vfxpi1.rs`); full proof verification when circuits + SRS are wired (set capability bit **`PLONK_CAP_VERIFY_V1`** / C# [`PlonkNative.CapVerifyV1`](../Privacy/PlonkNative.cs)). [`PLONKSetup.RefreshVerificationCapability`](../Privacy/PLONKSetup.cs) uses [`plonk_capabilities()`](../Privacy/PlonkNative.cs), not a `plonk_verify` probe (avoids false “implemented” on `ERR_PARAM`).
 4. **Optional FFI** — `plonk_prove_*` / `plonk_batch_verify` from the plan can be added to [`PlonkNative.cs`](../Privacy/PlonkNative.cs) when exported.
 
 See `Privacy_Layer_Implementation_Plan.md` for phased detail.

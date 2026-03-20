@@ -14,14 +14,16 @@ namespace ReserveBlockCore.Privacy
         public const string ParamsPathEnvironmentVariable = "VFX_PLONK_PARAMS_PATH";
 
         /// <summary>
-        /// Probes <see cref="PlonkNative.plonk_verify"/> once. If it returns <see cref="PlonkNative.ErrNotImplemented"/>, native circuits are not linked yet.
+        /// Reads <see cref="PlonkNative.plonk_capabilities"/>. Bit <see cref="PlonkNative.CapVerifyV1"/> means
+        /// non-stub PLONK verification (SRS + circuits) is available — not merely public-input parsing.
+        /// Older <c>plonk_ffi</c> builds without <c>plonk_capabilities</c> fall back to “not implemented.”
         /// </summary>
         public static void RefreshVerificationCapability()
         {
             try
             {
-                var code = PlonkNative.plonk_verify(0, new byte[] { 0xAB }, 1, new byte[] { 0x01 }, 1);
-                _verificationProbe = code == PlonkNative.ErrNotImplemented ? 0 : 1;
+                var caps = PlonkNative.plonk_capabilities();
+                _verificationProbe = (caps & PlonkNative.CapVerifyV1) != 0 ? 1 : 0;
             }
             catch
             {

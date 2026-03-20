@@ -116,9 +116,30 @@ namespace VerfiedXCore.Tests
         }
 
         [Fact]
-        public void PlonkProofVerifier_VerifyRaw_IsStub()
+        public void PlonkProofVerifier_VerifyRaw_InvalidPublicInputs_IsNativeError()
         {
             var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, new byte[] { 2 });
+            Assert.Equal(PlonkVerifyResult.NativeError, r);
+        }
+
+        [Fact]
+        public void PlonkProofVerifier_VerifyRaw_ValidPi_CryptoStillStub()
+        {
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX",
+                MerkleRootB64 = Convert.ToBase64String(new byte[32]),
+                Fee = Globals.PrivateTxFixedFee,
+                NullsB64 = { Convert.ToBase64String(new byte[32]), Convert.ToBase64String(new byte[32]) },
+                Outs =
+                {
+                    new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(new byte[PlonkNative.G1CompressedSize]) },
+                    new PrivateShieldedOutput { Index = 1, CommitmentB64 = Convert.ToBase64String(new byte[PlonkNative.G1CompressedSize]) }
+                }
+            };
+            var tx = new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER, Amount = 0 };
+            Assert.True(PlonkPublicInputsV1.TryBuild(tx, payload, out var pi, out var err), err);
+            var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, pi);
             Assert.Equal(PlonkVerifyResult.NotImplemented, r);
         }
 

@@ -20,6 +20,15 @@ namespace ReserveBlockCore.Privacy
         public const int ErrParam = -5;
         public const int ErrNotImplemented = -6;
 
+        /// <summary>Bit 0: full PLONK verify (circuits + SRS) wired in native — see <see cref="PLONKSetup.IsProofVerificationImplemented"/>.</summary>
+        public const uint CapVerifyV1 = 1;
+
+        /// <summary>Bit 1: <c>public_inputs</c> v1 (VFXPI1) layout validation in native.</summary>
+        public const uint CapParsePublicInputsV1 = 2;
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint plonk_capabilities();
+
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         public static extern int plonk_load_params(string? paramsPath);
 
