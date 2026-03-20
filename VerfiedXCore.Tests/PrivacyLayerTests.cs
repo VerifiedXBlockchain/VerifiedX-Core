@@ -166,6 +166,51 @@ namespace VerfiedXCore.Tests
         }
 
         [Fact]
+        public void ShieldedAddressCodec_RoundTrip_EncodeDecode()
+        {
+            var key = new byte[ShieldedAddressConstants.EncryptionKeyLength];
+            for (var i = 0; i < key.Length; i++)
+                key[i] = (byte)(i + 1);
+
+            var addr = ShieldedAddressCodec.EncodeEncryptionKey(key);
+            Assert.StartsWith(ShieldedAddressConstants.Prefix, addr, StringComparison.Ordinal);
+
+            Assert.True(ShieldedAddressCodec.TryDecodeEncryptionKey(addr, out var decoded, out var err), err);
+            Assert.NotNull(decoded);
+            Assert.Equal(key, decoded);
+            Assert.True(ShieldedAddressCodec.IsWellFormed(addr));
+        }
+
+        [Fact]
+        public void ShieldedAddressCodec_TryDecode_RejectsWrongPrefix()
+        {
+            var key = new byte[ShieldedAddressConstants.EncryptionKeyLength];
+            Array.Fill(key, (byte)7);
+            var good = ShieldedAddressCodec.EncodeEncryptionKey(key);
+            var bad = "zbx_" + good.Substring(ShieldedAddressConstants.Prefix.Length);
+            Assert.False(ShieldedAddressCodec.TryDecodeEncryptionKey(bad, out _, out var e));
+            Assert.Contains("zfx_", e, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void ShieldedAddressCodec_TryDecode_RejectsBadChecksum()
+        {
+            var key = new byte[ShieldedAddressConstants.EncryptionKeyLength];
+            Array.Fill(key, (byte)42);
+            var good = ShieldedAddressCodec.EncodeEncryptionKey(key);
+            var last = good[^1];
+            var tampered = good[..^1] + (char)(last == '1' ? '2' : '1');
+            Assert.False(ShieldedAddressCodec.TryDecodeEncryptionKey(tampered, out _, out var e));
+            Assert.NotNull(e);
+        }
+
+        [Fact]
+        public void ShieldedAddressCodec_Encode_ThrowsOnWrongKeyLength()
+        {
+            Assert.Throws<ArgumentException>(() => ShieldedAddressCodec.EncodeEncryptionKey(new byte[32]));
+        }
+
+        [Fact]
         public void PrivateTxPayloadCodec_DecodesJsonAndBase64()
         {
             var inner = "{\"v\":1,\"asset\":\"VFX\",\"outs\":[{\"i\":0,\"c\":\"dGVzdA==\"}]}";
