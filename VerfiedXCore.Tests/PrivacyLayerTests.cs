@@ -965,5 +965,70 @@ namespace VerfiedXCore.Tests
             var r = PlonkProofVerifier.TryValidatePrivateProofsInBlock(block, false);
             Assert.True(r.ok);
         }
+
+        [Fact]
+        public void Transaction_BuildPrivate_Shield_IsStableAcrossRepeatedCalls()
+        {
+            var tx = new Transaction
+            {
+                Timestamp = 1,
+                TransactionType = TransactionType.VFX_SHIELD,
+                Data = "{\"version\":1,\"asset\":\"VFX\"}",
+                FromAddress = "VFX_FROM",
+                Amount = 1.0m,
+                Nonce = 2
+            };
+            var h1 = tx.BuildPrivate();
+            var h2 = tx.BuildPrivate();
+            Assert.Equal(h1, h2);
+            Assert.Equal(h1, tx.Hash);
+        }
+
+        [Fact]
+        public void VfxPrivateTransactionBuilder_Shield_PicksSeededPoolMerkleRoot()
+        {
+            var store = new ShieldedMerkleStore("VFX", _db);
+            var r = new byte[32];
+            Array.Fill(r, (byte)19);
+            var g1 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(50, r, g1));
+            store.AppendG1Commitment(g1, 1, 300);
+            store.UpdatePoolStateRoot(1, 50m, 1);
+            var pool = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindOne(x => x.AssetType == "VFX");
+            Assert.NotNull(pool);
+            var expectedRoot = pool!.CurrentMerkleRoot;
+
+            const string seedHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40";
+            var m = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, ShieldedAddressConstants.DefaultBip44CoinType, 5);
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildShield(
+                "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                2.5m,
+                0.000003m,
+                0,
+                1000,
+                m.ZfxAddress,
+                null,
+                out var tx,
+                out var err,
+                _db), err);
+            Assert.NotNull(tx);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx!.Data, out var p, out _), "decode");
+            Assert.Equal(expectedRoot, p!.MerkleRootB64);
+        }
+
+        [Fact]
+        public void PrivacyApiHelper_ViewOnlyWallet_CannotUnwrapSpendingKey()
+        {
+            var w = new ShieldedWallet
+            {
+                ShieldedAddress = "zfx_test",
+                IsViewOnly = true,
+                SpendingKey = null,
+                ViewingKey = new byte[32]
+            };
+            Assert.False(PrivacyApiHelper.TryGetKeyMaterial(w, "pw", out _, out var e));
+            Assert.NotNull(e);
+            Assert.Contains("view-only", e, StringComparison.OrdinalIgnoreCase);
+        }
     }
 }
