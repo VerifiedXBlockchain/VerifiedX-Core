@@ -117,6 +117,37 @@ namespace VerfiedXCore.Tests
         }
 
         [Fact]
+        public void PrivateTxPlonkV0_TryPopulate_NoProveCap_LeavesTxUnchanged()
+        {
+            PLONKSetup.RefreshVerificationCapability();
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX",
+                MerkleRootB64 = Convert.ToBase64String(new byte[32]),
+                Fee = Globals.PrivateTxFixedFee,
+                NullsB64 = { Convert.ToBase64String(new byte[32]), Convert.ToBase64String(new byte[32]) },
+                Outs =
+                {
+                    new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(new byte[PlonkNative.G1CompressedSize]) },
+                    new PrivateShieldedOutput { Index = 1, CommitmentB64 = Convert.ToBase64String(new byte[PlonkNative.G1CompressedSize]) }
+                }
+            };
+            var tx = new Transaction
+            {
+                TransactionType = TransactionType.VFX_PRIVATE_TRANSFER,
+                Amount = 0,
+                Data = PrivateTxPayloadCodec.SerializeToJson(payload)
+            };
+            tx.BuildPrivate();
+            var hashBefore = tx.Hash;
+            var dataBefore = tx.Data;
+            Assert.True(PrivateTxPlonkV0.TryPopulateV0Proofs(tx, out var err), err);
+            Assert.Null(err);
+            Assert.Equal(dataBefore, tx.Data);
+            Assert.Equal(hashBefore, tx.Hash);
+        }
+
+        [Fact]
         public void PlonkProverV0_TryProve_WithoutVxplnk02_ReturnsNotImplemented()
         {
             var pi = new byte[240]; // valid Transfer VFXPI1 length; content irrelevant without params

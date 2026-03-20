@@ -5,7 +5,7 @@ namespace ReserveBlockCore.Privacy
 {
     /// <summary>
     /// vBTC V2 private TX payloads (Phase 5). Uses <see cref="VbtcPrivacyAsset"/> for <see cref="PrivateTxPayload.Asset"/>.
-    /// Dual-proof fields (<c>fee_proof_b64</c>, <c>fee_tree_merkle_root</c>) are populated when <paramref name="privacyDb"/> is available; PLONK bytes remain optional until circuits ship.
+    /// Dual-proof fields (<c>fee_proof_b64</c>, <c>fee_tree_merkle_root</c>) are populated when <paramref name="privacyDb"/> is available. When <see cref="PlonkProverV0.IsProveAvailable"/>, <see cref="PrivateTxPlonkV0.TryPopulateV0Proofs"/> fills v0 <c>proof_b64</c> / <c>fee_proof_b64</c>.
     /// </summary>
     public static class VbtcPrivateTransactionBuilder
     {
@@ -102,6 +102,12 @@ namespace ReserveBlockCore.Privacy
                 Signature = ""
             };
             tx.BuildPrivate();
+            if (!PrivateTxPlonkV0.TryPopulateV0Proofs(tx, out var plonkErr))
+            {
+                tx = null;
+                error = plonkErr;
+                return false;
+            }
             return true;
         }
 
@@ -413,6 +419,12 @@ namespace ReserveBlockCore.Privacy
                 Signature = PrivacyConstants.PlonkSignatureSentinel
             };
             tx.BuildPrivate();
+            if (!PrivateTxPlonkV0.TryPopulateV0Proofs(tx, out var plonkErr))
+            {
+                tx = null;
+                error = plonkErr;
+                return false;
+            }
             return true;
         }
     }

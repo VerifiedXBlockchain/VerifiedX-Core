@@ -4,7 +4,7 @@ using ReserveBlockCore.Models.Privacy;
 namespace ReserveBlockCore.Privacy
 {
     /// <summary>
-    /// Constructs VFX private <see cref="Transaction"/> + <see cref="PrivateTxPayload"/> (Phase 3). PLONK <c>proof_b64</c> is left empty until Phase 4.
+    /// Constructs VFX private <see cref="Transaction"/> + <see cref="PrivateTxPayload"/> (Phase 3). When native proving is available (<see cref="PlonkProverV0.IsProveAvailable"/>), <see cref="PrivateTxPlonkV0.TryPopulateV0Proofs"/> fills v0 <c>proof_b64</c>.
     /// </summary>
     public static class VfxPrivateTransactionBuilder
     {
@@ -98,6 +98,12 @@ namespace ReserveBlockCore.Privacy
                 Signature = ""
             };
             tx.BuildPrivate();
+            if (!PrivateTxPlonkV0.TryPopulateV0Proofs(tx, out var plonkErr))
+            {
+                tx = null;
+                error = plonkErr;
+                return false;
+            }
             return true;
         }
 
@@ -226,6 +232,12 @@ namespace ReserveBlockCore.Privacy
                 Signature = PrivacyConstants.PlonkSignatureSentinel
             };
             tx.BuildPrivate();
+            if (!PrivateTxPlonkV0.TryPopulateV0Proofs(tx, out var plonkErr))
+            {
+                tx = null;
+                error = plonkErr;
+                return false;
+            }
             return true;
         }
 
@@ -376,6 +388,12 @@ namespace ReserveBlockCore.Privacy
                 Signature = PrivacyConstants.PlonkSignatureSentinel
             };
             tx.BuildPrivate();
+            if (!PrivateTxPlonkV0.TryPopulateV0Proofs(tx, out var plonkErr))
+            {
+                tx = null;
+                error = plonkErr;
+                return false;
+            }
             return true;
         }
     }
