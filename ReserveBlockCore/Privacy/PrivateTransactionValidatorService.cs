@@ -9,8 +9,6 @@ namespace ReserveBlockCore.Privacy
 {
     public static class PrivateTransactionValidatorService
     {
-        public const int MaxPrivateDataLength = 200_000;
-
         public static async Task<(bool ok, string message)> VerifyPrivateTX(
             Transaction txRequest,
             bool blockDownloads,
@@ -21,8 +19,8 @@ namespace ReserveBlockCore.Privacy
             _ = blockVerify;
             _ = twSkipVerify;
 
-            if (txRequest.Data != null && txRequest.Data.Length > MaxPrivateDataLength)
-                return (false, "Private transaction Data is too large.");
+            if (txRequest.Data != null && txRequest.Data.Length > Globals.MaxPrivateTxDataSize)
+                return (false, $"Private transaction Data exceeds MaxPrivateTxDataSize ({Globals.MaxPrivateTxDataSize}).");
 
             if (!blockDownloads)
             {
@@ -71,7 +69,7 @@ namespace ReserveBlockCore.Privacy
 
             if (PrivateTransactionTypes.IsTransparentShield(txRequest.TransactionType))
             {
-                var shield = ValidateTransparentShield(txRequest, processedNonces);
+                var shield = ValidateTransparentShield(txRequest, payload!, processedNonces);
                 if (!shield.ok)
                     return shield;
             }
@@ -80,6 +78,9 @@ namespace ReserveBlockCore.Privacy
                 var zk = ValidateZkPrivate(txRequest);
                 if (!zk.ok)
                     return zk;
+                var merkle = ValidatePayloadMerkleRootRecency(payload!);
+                if (!merkle.ok)
+                    return merkle;
             }
             else
             {
@@ -158,8 +159,32 @@ namespace ReserveBlockCore.Privacy
             };
         }
 
+        private static (bool ok, string message) ValidatePayloadMerkleRootRecency(PrivateTxPayload payload)
+        {
+            if (string.IsNullOrWhiteSpace(payload.MerkleRootB64))
+                return (true, "");
+
+            try
+            {
+                var st = ShieldedPoolService.GetState(payload.Asset);
+                if (st == null || string.IsNullOrEmpty(st.CurrentMerkleRoot))
+                    return (false, "Private payload merkle_root is set but shielded pool has no Merkle state for this asset.");
+
+                if (!string.Equals(st.CurrentMerkleRoot.Trim(), payload.MerkleRootB64.Trim(), StringComparison.Ordinal))
+                    return (false, "Private payload merkle_root does not match the current shielded pool Merkle root.");
+
+                // Recency vs chain tip requires anchoring roots per block height (Phase 3). Globals.MaxMerkleRootAge reserved for that.
+                return (true, "");
+            }
+            catch
+            {
+                return (false, "Could not verify Merkle root recency against DB_Privacy.");
+            }
+        }
+
         private static (bool ok, string message) ValidateTransparentShield(
             Transaction txRequest,
+            PrivateTxPayload payload,
             Dictionary<string, long>? processedNonces)
         {
             if (txRequest.FromAddress == "Coinbase_BlkRwd" || txRequest.FromAddress == "Coinbase_TrxFees")
@@ -174,8 +199,22 @@ namespace ReserveBlockCore.Privacy
             if (Globals.LastBlock.Height > Globals.TXHeightRule1 && txRequest.Amount <= 0.0M)
                 return (false, "Amount cannot be less than or equal to zero.");
 
-            if (txRequest.TransactionType == TransactionType.VBTC_V2_SHIELD && txRequest.Amount != 0.0M)
-                return (false, "VBTC shield must carry token amount in Data payload; transparent Amount must be 0.");
+            if (txRequest.TransactionType == TransactionType.VFX_SHIELD
+                && Globals.LastBlock.Height > Globals.TXHeightRule1
+                && txRequest.Amount < Globals.MinShieldAmountVFX)
+                return (false, $"VFX shield amount must be at least {Globals.MinShieldAmountVFX}.");
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_SHIELD)
+            {
+                if (txRequest.Amount != 0.0M)
+                    return (false, "VBTC shield must carry token amount in Data payload; transparent Amount must be 0.");
+                if (Globals.LastBlock.Height > Globals.TXHeightRule1
+                    && payload.VbtcTransparentAmount is not > 0)
+                    return (false, "VBTC shield requires positive vbtc_amt in payload.");
+                if (Globals.LastBlock.Height > Globals.TXHeightRule1
+                    && payload.VbtcTransparentAmount < Globals.MinShieldAmountVBTC)
+                    return (false, $"VBTC shield vbtc_amt must be at least {Globals.MinShieldAmountVBTC}.");
+            }
 
             if (txRequest.Fee <= 0)
                 return (false, "Fee cannot be less than or equal to zero.");

@@ -26,13 +26,18 @@ namespace ReserveBlockCore.Privacy
             await ApplyTransparentLedgerAsync(tx, block, payload).ConfigureAwait(false);
         }
 
-        private static void ApplyPrivacyStore(Transaction tx, Block block, PrivateTxPayload payload, LiteDatabase db)
+        /// <summary>Applies nullifiers, marks spent commitments, appends outputs, refreshes pool Merkle row.</summary>
+        public static void ApplyPrivacyStore(Transaction tx, Block block, PrivateTxPayload payload, LiteDatabase db)
         {
             var height = block.Height;
             var ts = tx.Timestamp;
 
-            foreach (var n in payload.NullsB64)
-                NullifierService.TryRecordNullifier(n, payload.Asset, height, ts, db);
+            for (var ni = 0; ni < payload.NullsB64.Count; ni++)
+            {
+                NullifierService.TryRecordNullifier(payload.NullsB64[ni], payload.Asset, height, ts, db);
+                if (payload.SpentCommitmentTreePositions.Count == payload.NullsB64.Count)
+                    CommitmentSpendService.TryMarkSpent(payload.Asset, payload.SpentCommitmentTreePositions[ni], db);
+            }
 
             var store = new ShieldedMerkleStore(payload.Asset, db);
             store.LoadLeavesFromCommitments();

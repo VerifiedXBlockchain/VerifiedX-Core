@@ -18,10 +18,18 @@ namespace ReserveBlockCore.Privacy
 
         public const int PayloadLength = VersionByteLength + EncryptionKeyLength;
 
-        /// <summary>BIP32-style path segment for shielded derivation (wallet integration).</summary>
+        /// <summary>BIP32-style path segment name (documentation only; on-wire path uses numeric <c>1'</c> chain — see <see cref="ShieldedHdDerivation"/>).</summary>
         public const string HdPathShieldedSegment = "shielded";
 
-        /// <summary>Coin type and account structure per implementation plan (string form for wallet docs).</summary>
-        public const string HdPathTemplate = "m/44'/VFX'/0'/1/{index}/shielded";
+        /// <summary>
+        /// BIP-44 coin type (hardened) for the shielded branch. Must stay consensus-stable across wallets; register on SLIP-44 when finalized.
+        /// </summary>
+        public const uint DefaultBip44CoinType = 889;
+
+        /// <summary>
+        /// Path pattern compatible with <see cref="global::ReserveBlockCore.BIP32.BIP32"/>: only hardened numeric segments.
+        /// Replace <c>{coinType}</c> and <c>{index}</c> with decimal integers, e.g. <c>m/44'/889'/0'/1'/0'</c>.
+        /// </summary>
+        public const string HdPathPatternDescription = "m/44'/{coinType}'/0'/1'/{index}'";
     }
 }
