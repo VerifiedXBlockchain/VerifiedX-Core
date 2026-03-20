@@ -1,4 +1,4 @@
-﻿using NBitcoin.Protocol;
+using NBitcoin.Protocol;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Arbiter;
@@ -8,6 +8,7 @@ using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.DST;
 using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.P2P;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using Spectre.Console;
 using System;
@@ -31,6 +32,9 @@ namespace ReserveBlockCore.Services
             var badNFTTx = Globals.BadNFTTxList.Exists(x => x == txRequest.Hash);
             if (badNFTTx) 
                 return (true, "");
+
+            if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
+                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces);
 
             var accStTrei = StateData.GetAccountStateTrei();
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);

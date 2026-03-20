@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Data;
@@ -514,7 +514,13 @@ namespace ReserveBlockCore.Services
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
-                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
+                                    blkTransaction.TransactionType != TransactionType.VFX_SHIELD &&
+                                    blkTransaction.TransactionType != TransactionType.VFX_UNSHIELD &&
+                                    blkTransaction.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_SHIELD &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
                                 {
                                     if (blkTransaction.Data != null)
                                     {

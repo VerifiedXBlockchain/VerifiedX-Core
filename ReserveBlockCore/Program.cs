@@ -1,4 +1,4 @@
-﻿global using ReserveBlockCore.Extensions;
+global using ReserveBlockCore.Extensions;
 
 using ReserveBlockCore.Commands;
 using ReserveBlockCore.Data;
@@ -23,6 +23,7 @@ using System.Reflection;
 using ReserveBlockCore.DST;
 using ReserveBlockCore.Engines;
 using ReserveBlockCore.Config;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Bitcoin.Utilities;
 using ReserveBlockCore.Bitcoin.Integrations;
 using ElmahCore.Mvc;
@@ -351,6 +352,8 @@ namespace ReserveBlockCore
             StartupService.AnotherInstanceCheck(); //checks for another instance
 
             StartupService.StartupDatabase();// initializes databases
+
+            _ = PLONKSetup.TryLoadParamsFromEnvironment();
 
             await DbContext.CheckPoint(); //checkpoints db log files
 

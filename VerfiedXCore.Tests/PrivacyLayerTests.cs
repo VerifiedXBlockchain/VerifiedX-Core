@@ -1,4 +1,6 @@
 using LiteDB;
+using Newtonsoft.Json;
+using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.Privacy;
 
@@ -161,6 +163,65 @@ namespace VerfiedXCore.Tests
             var (ok, msg) = await PrivacyDbRebuildService.TryRebuildMerkleStateFromDbAsync("VFX", _db);
             Assert.True(ok, msg);
             Assert.Contains("commitments=1", msg);
+        }
+
+        [Fact]
+        public void PrivateTxPayloadCodec_DecodesJsonAndBase64()
+        {
+            var inner = "{\"v\":1,\"asset\":\"VFX\",\"outs\":[{\"i\":0,\"c\":\"dGVzdA==\"}]}";
+            Assert.True(PrivateTxPayloadCodec.TryDecode(inner, out var p1, out _), "json");
+            Assert.NotNull(p1);
+            Assert.Equal("VFX", p1!.Asset);
+
+            var b64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(inner));
+            Assert.True(PrivateTxPayloadCodec.TryDecode(b64, out var p2, out _), "b64");
+            Assert.Equal("VFX", p2!.Asset);
+        }
+
+        [Fact]
+        public async Task PrivacyDbRebuildService_ReplayFromSyntheticBlocks_Works()
+        {
+            var r = new byte[32];
+            Array.Fill(r, (byte)2);
+            var g1 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(1, r, g1));
+
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX",
+                Kind = "z2z",
+                Outs =
+                {
+                    new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1) }
+                },
+                NullsB64 = { Convert.ToBase64String(new byte[32]) }
+            };
+            var json = JsonConvert.SerializeObject(payload);
+
+            var tx = new Transaction
+            {
+                Timestamp = 100,
+                FromAddress = PrivacyConstants.ShieldedPoolAddress,
+                ToAddress = PrivacyConstants.ShieldedPoolAddress,
+                Amount = 0,
+                Fee = 0,
+                Nonce = 0,
+                TransactionType = TransactionType.VFX_PRIVATE_TRANSFER,
+                Signature = PrivacyConstants.PlonkSignatureSentinel,
+                Data = json
+            };
+            tx.BuildPrivate();
+
+            var block = new Block { Height = 3, Transactions = new List<Transaction> { tx } };
+
+            var (ok, msg) = await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(new[] { block }, _db);
+            Assert.True(ok, msg);
+
+            var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            Assert.Equal(1, commitments.Count(x => x.AssetType == "VFX"));
+
+            var nulls = _db.GetCollection<NullifierRecord>(PrivacyDbContext.PRIV_NULLIFIERS);
+            Assert.Equal(1, nulls.Count(x => x.AssetType == "VFX"));
         }
     }
 }
