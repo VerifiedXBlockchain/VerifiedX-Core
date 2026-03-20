@@ -113,6 +113,20 @@ namespace VerfiedXCore.Tests
         {
             PLONKSetup.RefreshVerificationCapability();
             Assert.False(PLONKSetup.IsProofVerificationImplemented);
+            Assert.False(PLONKSetup.IsProofProvingImplemented);
+        }
+
+        [Fact]
+        public void PlonkProverV0_TryProve_WithoutVxplnk02_ReturnsNotImplemented()
+        {
+            var pi = new byte[240]; // valid Transfer VFXPI1 length; content irrelevant without params
+            var magic = System.Text.Encoding.ASCII.GetBytes("VFXPI1");
+            Buffer.BlockCopy(magic, 0, pi, 0, 6);
+            pi[6] = 1;
+            pi[7] = (byte)PlonkCircuitType.Transfer;
+            var code = PlonkProverV0.TryProve(PlonkCircuitType.Transfer, pi, out var proof);
+            Assert.Equal(PlonkNative.ErrNotImplemented, code);
+            Assert.Null(proof);
         }
 
         [Fact]

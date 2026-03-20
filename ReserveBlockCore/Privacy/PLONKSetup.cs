@@ -9,6 +9,7 @@ namespace ReserveBlockCore.Privacy
     public static class PLONKSetup
     {
         private static int _verificationProbe = -1;
+        private static int _proveProbe = -1;
 
         /// <summary>Environment variable pointing at a universal-params file (optional until Phase 4).</summary>
         public const string ParamsPathEnvironmentVariable = "VFX_PLONK_PARAMS_PATH";
@@ -66,5 +67,10 @@ namespace ReserveBlockCore.Privacy
         /// Whether native PLONK verification is wired to circuits (non-stub <c>plonk_verify</c>). Call <see cref="RefreshVerificationCapability"/> at startup.
         /// </summary>
         public static bool IsProofVerificationImplemented => _verificationProbe == 1;
+
+        /// <summary>
+        /// Whether v0 native proving (<see cref="PlonkNative.plonk_prove_v0"/>) is available — <b>VXPLNK02</b> params with prover key loaded.
+        /// </summary>
+        public static bool IsProofProvingImplemented => _proveProbe == 1;
     }
 }

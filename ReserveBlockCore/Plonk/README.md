@@ -40,11 +40,11 @@ Plonk/
 
 ## Roadmap (beyond Phase 1 FFI)
 
-The committed library exposes **Pedersen**, **Poseidon** (plonk-hashing–aligned), **Merkle**, **nullifiers**, and **`plonk_load_params` / `plonk_verify`**. **C# Phase 4** wires [`PlonkProofVerifier`](../Privacy/PlonkProofVerifier.cs) + [`PlonkPublicInputsV1`](../Privacy/PlonkPublicInputsV1.cs) into validation; the Rust **`plonk_verify` body** is still a stub until the sibling **`plonk`** repo ships circuits and refreshed binaries are dropped here.
+The committed library exposes **Pedersen**, **Poseidon** (plonk-hashing–aligned), **Merkle**, **nullifiers**, **`plonk_load_params` / `plonk_verify`**, and **`plonk_prove_v0`** (when params include a prover key — **`VXPLNK02`**). **C# Phase 4** wires [`PlonkProofVerifier`](../Privacy/PlonkProofVerifier.cs) + [`PlonkPublicInputsV1`](../Privacy/PlonkPublicInputsV1.cs) into validation; [`PlonkProverV0`](../Privacy/PlonkProverV0.cs) exposes proving when [`PLONKSetup.IsProofProvingImplemented`](../Privacy/PLONKSetup.cs) is true.
 
-1. **Parameters** — proving/verification keys generated in **`plonk`**, loaded via `plonk_load_params` (see [`PARAMS.md`](PARAMS.md)).
+1. **Parameters** — proving/verification keys generated in **`plonk`**, loaded via `plonk_load_params` (see [`PARAMS.md`](PARAMS.md)); use **`VXPLNK02`** (or current setup output) for wallets/nodes that must prove.
 2. **Circuits** — implement Transfer / Shield / Unshield / Fee in **`plonk`**; align public-input encoding with [`PlonkPublicInputsV1`](../Privacy/PlonkPublicInputsV1.cs).
 3. **`plonk_verify`** — VFXPI1 parsing + layout checks ship in `plonk-ffi` (`vfxpi1.rs`); full proof verification when circuits + SRS are wired (set capability bit **`PLONK_CAP_VERIFY_V1`** / C# [`PlonkNative.CapVerifyV1`](../Privacy/PlonkNative.cs)). [`PLONKSetup.RefreshVerificationCapability`](../Privacy/PLONKSetup.cs) uses [`plonk_capabilities()`](../Privacy/PlonkNative.cs), not a `plonk_verify` probe (avoids false “implemented” on `ERR_PARAM`).
-4. **Optional FFI** — `plonk_prove_*` / `plonk_batch_verify` from the plan can be added to [`PlonkNative.cs`](../Privacy/PlonkNative.cs) when exported.
+4. **`plonk_prove_v0`** — exported in `plonk-ffi`; C# [`PlonkNative.plonk_prove_v0`](../Privacy/PlonkNative.cs) + [`CapProveV1`](../Privacy/PlonkNative.cs). **`plonk_batch_verify`** remains future work if needed.
 
 See `Privacy_Layer_Implementation_Plan.md` for phased detail.

@@ -4,7 +4,7 @@ namespace ReserveBlockCore.Privacy
 {
     /// <summary>
     /// P/Invoke for <c>plonk_ffi</c> native library (Pedersen, Poseidon, Merkle, nullifiers).
-    /// PLONK prove/verify return <see cref="ErrNotImplemented"/> until Phase 4 circuits ship.
+    /// v0 PLONK verify/prove when <c>VXPLNK02</c> params are loaded (sibling <c>plonk</c> repo); otherwise verify may return <see cref="ErrNotImplemented"/> after layout checks.
     /// </summary>
     public static class PlonkNative
     {
@@ -25,6 +25,9 @@ namespace ReserveBlockCore.Privacy
 
         /// <summary>Bit 1: <c>public_inputs</c> v1 (VFXPI1) layout validation in native.</summary>
         public const uint CapParsePublicInputsV1 = 2;
+
+        /// <summary>Bit 2: v0 <see cref="plonk_prove_v0"/> available (<b>VXPLNK02</b> params include prover key).</summary>
+        public const uint CapProveV1 = 4;
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint plonk_capabilities();
@@ -57,5 +60,9 @@ namespace ReserveBlockCore.Privacy
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_verify(byte circuitType, byte[] proof, nuint proofLen, byte[] publicInputs, nuint publicInputsLen);
+
+        /// <summary>v0 prove: <paramref name="proofOut"/> must hold at least <paramref name="proofOutLen"/> bytes (in/out; grows if <see cref="ErrParam"/>).</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int plonk_prove_v0(byte circuitType, byte[] publicInputs, nuint publicInputsLen, byte[] proofOut, ref nuint proofOutLen);
     }
 }
