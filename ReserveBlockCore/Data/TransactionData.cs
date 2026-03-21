@@ -760,86 +760,104 @@ namespace ReserveBlockCore.Data
 
                             if (reject == false)
                             {
-                                var signature = tx.Signature;
-                                var sigCheck = SignatureService.VerifySignature(tx.FromAddress, tx.Hash, signature);
-                                if (sigCheck)
+                                // ZK-authorized private TXs (z2z, z2t) use PLONK sentinel signature
+                                // and FromAddress = Shielded_Pool — skip ECDSA sig + balance check.
+                                // VerifyTX delegates to PrivateTransactionValidatorService for proof verification.
+                                bool isZkPrivate = PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType);
+
+                                bool passedPreCheck;
+                                if (isZkPrivate)
                                 {
-                                    var balance = AccountStateTrei.GetAccountBalance(tx.FromAddress);
-
-                                    var totalSend = (tx.Amount + tx.Fee);
-                                    if (balance >= totalSend)
+                                    passedPreCheck = true; // skip ECDSA + balance
+                                }
+                                else
+                                {
+                                    var signature = tx.Signature;
+                                    var sigCheck = SignatureService.VerifySignature(tx.FromAddress, tx.Hash, signature);
+                                    if (sigCheck)
                                     {
-                                        var dblspndChk = await DoubleSpendReplayCheck(tx);
-                                        var isCraftedIntoBlock = await HasTxBeenCraftedIntoBlock(tx);
-                                        var txVerify = await TransactionValidatorService.VerifyTX(tx);
+                                        var balance = AccountStateTrei.GetAccountBalance(tx.FromAddress);
+                                        var totalSend = (tx.Amount + tx.Fee);
+                                        passedPreCheck = balance >= totalSend;
+                                    }
+                                    else
+                                    {
+                                        passedPreCheck = false;
+                                    }
+                                }
 
-                                        if (txVerify.Item1 && !dblspndChk && !isCraftedIntoBlock)
+                                if (passedPreCheck)
+                                {
+                                    var dblspndChk = await DoubleSpendReplayCheck(tx);
+                                    var isCraftedIntoBlock = await HasTxBeenCraftedIntoBlock(tx);
+                                    var txVerify = await TransactionValidatorService.VerifyTX(tx);
+
+                                    if (txVerify.Item1 && !dblspndChk && !isCraftedIntoBlock)
+                                    {
+                                        // HAL-067 Fix: RBF + Nonce Ordering (only after TXHeightRule4 activation)
+                                        if (Globals.LastBlock.Height > Globals.TXHeightRule4)
                                         {
-                                            // HAL-067 Fix: RBF + Nonce Ordering (only after TXHeightRule4 activation)
-                                            if (Globals.LastBlock.Height > Globals.TXHeightRule4)
+                                            // Get current expected nonce for this account
+                                            var expectedNonce = AccountStateTrei.GetNextNonce(tx.FromAddress);
+                                            
+                                            // Check if there are already approved TXs from this address
+                                            var approvedTxsFromSender = approvedMemPoolList
+                                                .Where(x => x.FromAddress == tx.FromAddress)
+                                                .OrderBy(x => x.Nonce)
+                                                .ToList();
+
+                                            // If there are approved TXs, the next expected nonce is the highest nonce + 1
+                                            if (approvedTxsFromSender.Count > 0)
                                             {
-                                                // Get current expected nonce for this account
-                                                var expectedNonce = AccountStateTrei.GetNextNonce(tx.FromAddress);
-                                                
-                                                // Check if there are already approved TXs from this address
-                                                var approvedTxsFromSender = approvedMemPoolList
-                                                    .Where(x => x.FromAddress == tx.FromAddress)
-                                                    .OrderBy(x => x.Nonce)
-                                                    .ToList();
+                                                expectedNonce = approvedTxsFromSender.Last().Nonce + 1;
+                                            }
 
-                                                // If there are approved TXs, the next expected nonce is the highest nonce + 1
-                                                if (approvedTxsFromSender.Count > 0)
+                                            // Check for duplicate nonce (RBF scenario)
+                                            var existingTx = approvedMemPoolList.FirstOrDefault(x => 
+                                                x.FromAddress == tx.FromAddress && 
+                                                x.Nonce == tx.Nonce
+                                            );
+
+                                            if (existingTx != null)
+                                            {
+                                                // RBF: Replace with higher fee transaction
+                                                if (tx.Fee > existingTx.Fee)
                                                 {
-                                                    expectedNonce = approvedTxsFromSender.Last().Nonce + 1;
-                                                }
+                                                    approvedMemPoolList.Remove(existingTx);
+                                                    await collection.DeleteManySafeAsync(x => x.Hash == existingTx.Hash);
 
-                                                // Check for duplicate nonce (RBF scenario)
-                                                var existingTx = approvedMemPoolList.FirstOrDefault(x => 
-                                                    x.FromAddress == tx.FromAddress && 
-                                                    x.Nonce == tx.Nonce
-                                                );
-
-                                                if (existingTx != null)
-                                                {
-                                                    // RBF: Replace with higher fee transaction
-                                                    if (tx.Fee > existingTx.Fee)
+                                                    // Mark old TX as replaced locally
+                                                    var localTxDb = TransactionData.GetAll();
+                                                    var localTx = localTxDb.FindOne(x => x.Hash == existingTx.Hash);
+                                                    if (localTx != null)
                                                     {
-                                                        approvedMemPoolList.Remove(existingTx);
-                                                        await collection.DeleteManySafeAsync(x => x.Hash == existingTx.Hash);
-
-                                                        // Mark old TX as replaced locally
-                                                        var localTxDb = TransactionData.GetAll();
-                                                        var localTx = localTxDb.FindOne(x => x.Hash == existingTx.Hash);
-                                                        if (localTx != null)
-                                                        {
-                                                            localTx.TransactionStatus = TransactionStatus.ReplacedByFee;
-                                                            await localTxDb.UpdateSafeAsync(localTx);
-                                                        }
-
-                                                        approvedMemPoolList.Add(tx);
+                                                        localTx.TransactionStatus = TransactionStatus.ReplacedByFee;
+                                                        await localTxDb.UpdateSafeAsync(localTx);
                                                     }
-                                                    else
-                                                    {
-                                                        // Keep existing (higher fee), reject this one
-                                                        await collection.DeleteManySafeAsync(x => x.Hash == tx.Hash);
-                                                    }
-                                                }
-                                                else if (tx.Nonce == expectedNonce)
-                                                {
-                                                    // Nonce is sequential - accept it
+
                                                     approvedMemPoolList.Add(tx);
                                                 }
                                                 else
                                                 {
-                                                    // Nonce is out of order (gap or stale) - keep in mempool but don't approve yet
-                                                    // This allows future nonces to wait for earlier ones
-                                                    // Don't delete it - it may become valid when earlier nonces arrive
+                                                    // Keep existing (higher fee), reject this one
+                                                    await collection.DeleteManySafeAsync(x => x.Hash == tx.Hash);
                                                 }
+                                            }
+                                            else if (tx.Nonce == expectedNonce)
+                                            {
+                                                // Nonce is sequential - accept it
+                                                approvedMemPoolList.Add(tx);
                                             }
                                             else
                                             {
-                                                approvedMemPoolList.Add(tx);
+                                                // Nonce is out of order (gap or stale) - keep in mempool but don't approve yet
+                                                // This allows future nonces to wait for earlier ones
+                                                // Don't delete it - it may become valid when earlier nonces arrive
                                             }
+                                        }
+                                        else
+                                        {
+                                            approvedMemPoolList.Add(tx);
                                         }
                                     }
                                     else
