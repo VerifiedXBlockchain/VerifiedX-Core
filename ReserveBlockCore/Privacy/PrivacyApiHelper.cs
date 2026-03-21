@@ -10,6 +10,36 @@ namespace ReserveBlockCore.Privacy
     /// <summary>Shared helpers for privacy REST controllers (Phase 7).</summary>
     public static class PrivacyApiHelper
     {
+        /// <summary>
+        /// Derives viewing-only key material (encryption private key) from the wallet's stored viewing key.
+        /// Does NOT require the spending key password — suitable for scanning / note decryption.
+        /// </summary>
+        public static bool TryGetViewingKeyMaterial(ShieldedWallet w, [NotNullWhen(true)] out ShieldedKeyMaterial? keys, out string? error)
+        {
+            keys = null;
+            error = null;
+            if (w.ViewingKey == null || w.ViewingKey.Length != 32)
+            {
+                error = "No 32-byte viewing key on wallet row.";
+                return false;
+            }
+            if (!ShieldedAddressCodec.TryDecodeEncryptionKey(w.ShieldedAddress, out var pub33, out var derr) || pub33 == null)
+            {
+                error = derr ?? "Invalid zfx address.";
+                return false;
+            }
+            var encPriv = ShieldedHdDerivation.DeriveEncryptionPrivateKeyFromViewingKey(w.ViewingKey);
+            keys = new ShieldedKeyMaterial
+            {
+                SpendingKey32 = Array.Empty<byte>(),   // not available without password
+                ViewingKey32 = w.ViewingKey,
+                EncryptionPrivateKey32 = encPriv,
+                EncryptionPublicKey33 = pub33,
+                ZfxAddress = w.ShieldedAddress
+            };
+            return true;
+        }
+
         public static bool TryGetKeyMaterial(ShieldedWallet w, string? walletPassword, [NotNullWhen(true)] out ShieldedKeyMaterial? keys, out string? error)
         {
             keys = null;

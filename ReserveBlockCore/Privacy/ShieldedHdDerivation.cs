@@ -66,6 +66,17 @@ namespace ReserveBlockCore.Privacy
             };
         }
 
+        /// <summary>
+        /// Derives the 32-byte encryption private key from a 32-byte viewing key.
+        /// This allows note decryption (scanning) without needing the spending key password.
+        /// </summary>
+        public static byte[] DeriveEncryptionPrivateKeyFromViewingKey(byte[] viewingKey32)
+        {
+            if (viewingKey32 == null || viewingKey32.Length != 32)
+                throw new ArgumentException("Viewing key must be 32 bytes.", nameof(viewingKey32));
+            return DeriveValidPrivateKeyScalar(viewingKey32, EncPrivDomain);
+        }
+
         /// <summary>33-byte compressed secp256k1 encryption pubkey (same bytes as inside <c>zfx_</c>).</summary>
         public static byte[] DeriveZfxEncryptionKeyMaterial33(string walletSeedHex, uint coinType, uint addressIndex) =>
             DeriveShieldedKeyMaterial(walletSeedHex, coinType, addressIndex).EncryptionPublicKey33;

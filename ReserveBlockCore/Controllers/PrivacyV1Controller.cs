@@ -377,8 +377,22 @@ namespace ReserveBlockCore.Controllers
                 var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
                 if (w == null)
                     return Task.FromResult(Fail("No shielded wallet row for this zfx address."));
-                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
-                    return Task.FromResult(Fail(kmErr ?? "Keys"));
+
+                // Scanning only needs the encryption private key (derived from viewing key).
+                // Fall back to full key material if password is provided (backwards compat).
+                ShieldedKeyMaterial keys;
+                if (!string.IsNullOrEmpty(req.WalletPassword))
+                {
+                    if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var fullKeys, out var kmErr))
+                        return Task.FromResult(Fail(kmErr ?? "Keys"));
+                    keys = fullKeys;
+                }
+                else
+                {
+                    if (!PrivacyApiHelper.TryGetViewingKeyMaterial(w, out var viewKeys, out var vkErr))
+                        return Task.FromResult(Fail(vkErr ?? "Cannot derive viewing keys."));
+                    keys = viewKeys;
+                }
 
                 var blocks = new List<Block>();
                 for (var h = req.FromHeight; h <= req.ToHeight; h++)

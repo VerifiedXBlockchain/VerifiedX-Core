@@ -57,9 +57,12 @@ namespace ReserveBlockCore.Privacy
                 return false;
             try
             {
+                Console.WriteLine($"PLONKSetup: Loading params from {paramsPath}");
                 var code = PlonkNative.plonk_load_params(paramsPath);
                 if (code != PlonkNative.Success)
                     return false;
+
+                Console.WriteLine("PLONKSetup: Params loaded successfully");
                 // Store file size for diagnostics; native FFI holds the actual data.
                 Globals.PLONKParamsFileSize = new FileInfo(paramsPath).Length;
                 return true;
@@ -72,14 +75,15 @@ namespace ReserveBlockCore.Privacy
         }
 
         /// <summary>
-        /// Whether native PLONK verification is wired to circuits (non-stub <c>plonk_verify</c>). Call <see cref="RefreshVerificationCapability"/> at startup.
+        /// Whether native PLONK verification is available (v0 <c>CapVerifyV1</c> OR v1 <c>CapV1Circuits</c>).
+        /// Call <see cref="RefreshVerificationCapability"/> at startup.
         /// </summary>
-        public static bool IsProofVerificationImplemented => _verificationProbe == 1;
+        public static bool IsProofVerificationImplemented => _verificationProbe == 1 || _v1CircuitsProbe == 1;
 
         /// <summary>
-        /// Whether v0 native proving (<see cref="PlonkNative.plonk_prove_v0"/>) is available — <b>VXPLNK02</b> params with prover key loaded.
+        /// Whether native PLONK proving is available (v0 <c>CapProveV1</c> OR v1 <c>CapV1Prove</c>).
         /// </summary>
-        public static bool IsProofProvingImplemented => _proveProbe == 1;
+        public static bool IsProofProvingImplemented => _proveProbe == 1 || _v1ProveProbe == 1;
 
         /// <summary>
         /// Whether v1 real circuit verification keys are loaded (<b>VXPLNK03</b>). When true, <see cref="PlonkNative.plonk_verify"/>

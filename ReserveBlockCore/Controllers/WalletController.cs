@@ -870,8 +870,11 @@ namespace ReserveBlockCore.Controllers
                 var w = ShieldedWalletService.FindByZfxAddress(zfxAddress);
                 if (w == null)
                     return Ok(new { success = false, message = "No shielded wallet row for this zfx address." });
-                if (!PrivacyApiHelper.TryGetKeyMaterial(w, password, out var keys, out var kmErr))
-                    return Ok(new { success = false, message = kmErr ?? "Cannot unwrap keys." });
+
+                // Scanning only needs the encryption private key (derived from viewing key).
+                // No spending-key password required.
+                if (!PrivacyApiHelper.TryGetViewingKeyMaterial(w, out var keys, out var kmErr))
+                    return Ok(new { success = false, message = kmErr ?? "Cannot derive viewing keys." });
 
                 long scanFrom = fromBlock ?? w.LastScannedBlock;
                 long scanTo = toBlock ?? Globals.LastBlock.Height;
