@@ -353,11 +353,22 @@ namespace ReserveBlockCore
 
             StartupService.StartupDatabase();// initializes databases
 
-            // PLONK params: auto-download if not present, then load into native FFI
-            var plonkParamsPath = await PLONKParamsDownloader.EnsureParamsAvailableAsync();
-            if (!string.IsNullOrEmpty(plonkParamsPath))
-                PLONKSetup.TryLoadParamsFile(plonkParamsPath);
-            PLONKSetup.RefreshVerificationCapability();
+            // PLONK params: auto-download if not present, then load into native FFI (background — non-blocking)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var plonkParamsPath = await PLONKParamsDownloader.EnsureParamsAvailableAsync();
+                    if (!string.IsNullOrEmpty(plonkParamsPath))
+                        PLONKSetup.TryLoadParamsFile(plonkParamsPath);
+                    PLONKSetup.RefreshVerificationCapability();
+                    LogUtility.Log("PLONK params loaded successfully in background.", "Program.Main()");
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Background PLONK load failed: {ex}", "Program.Main()");
+                }
+            });
 
             await DbContext.CheckPoint(); //checkpoints db log files
 

@@ -46,7 +46,7 @@ namespace ReserveBlockCore.Controllers
                     ProofVerificationImplemented = PLONKSetup.IsProofVerificationImplemented,
                     ProofProvingImplemented = PLONKSetup.IsProofProvingImplemented,
                     EnforcePlonkProofsForZk = Globals.EnforcePlonkProofsForZk,
-                    ParamsBytesMirrored = Globals.PLONKUniversalParams?.Length ?? 0,
+                    ParamsBytesMirrored = Globals.PLONKParamsFileSize,
                     ParamsPathEnvSet = envSet,
                     NativeCapabilities = caps,
                     CapVerifyV1 = (caps & PlonkNative.CapVerifyV1) != 0,

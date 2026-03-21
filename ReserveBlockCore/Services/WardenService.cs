@@ -67,9 +67,9 @@ namespace ReserveBlockCore.Services
                     // Start child process
                     await StartChildProcess(argsList.ToArray());
 
-                    // Wait 120 seconds before starting health checks
-                    LogUtility.Log("Waiting 60 seconds before starting health checks...", "WardenService.StartWarden()");
-                    await Task.Delay(60000);
+                    // Wait 180 seconds before starting health checks (allows PLONK params download + load on slow machines)
+                    LogUtility.Log("Waiting 180 seconds before starting health checks...", "WardenService.StartWarden()");
+                    await Task.Delay(180000);
 
                     // Monitor child process
                     while (_childProcess != null && !_childProcess.HasExited)

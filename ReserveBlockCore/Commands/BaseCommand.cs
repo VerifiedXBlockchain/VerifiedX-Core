@@ -127,7 +127,7 @@ namespace ReserveBlockCore.Commands
                     break;
                 case "/backupwallet":
                     //BackupUtil.BackupWalletData("Not Yet Added.");
-                    Console.WriteLine("Reserve Block Wallet has been backed up.");
+                    Console.WriteLine("VerifiedX Wallet has been backed up.");
                     break;
                 case "/mempool":
                     Console.WriteLine("Printing Mempool Results: ");

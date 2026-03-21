@@ -963,7 +963,7 @@ namespace ReserveBlockCore.Controllers
                     proofProvingImplemented = PLONKSetup.IsProofProvingImplemented,
                     enforcePlonkProofsForZk = Globals.EnforcePlonkProofsForZk,
                     nativeCapabilities = caps,
-                    paramsBytesMirrored = Globals.PLONKUniversalParams?.Length ?? 0
+                    paramsBytesMirrored = Globals.PLONKParamsFileSize
                 });
             }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }

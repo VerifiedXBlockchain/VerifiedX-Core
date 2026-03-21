@@ -125,7 +125,7 @@ namespace ReserveBlockCore.Services
         }
         internal static void StartupDatabase()
         {
-            ConsoleWriterService.Output("Initializing Reserve Block Database...");
+            ConsoleWriterService.Output("Initializing VerifiedX Database...");
             DbContext.Initialize();
             var peerDb = Peers.GetAll();
             Globals.BannedIPs = new ConcurrentDictionary<string, Peers>(

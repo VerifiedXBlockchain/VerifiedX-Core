@@ -49,7 +49,7 @@ namespace ReserveBlockCore.Privacy
         }
 
         /// <summary>
-        /// If <paramref name="paramsPath"/> exists, loads bytes into <see cref="Globals.PLONKUniversalParams"/> (memory only).
+        /// If <paramref name="paramsPath"/> exists, loads params via native FFI and records file size in <see cref="Globals.PLONKParamsFileSize"/>.
         /// </summary>
         public static bool TryLoadParamsFile(string paramsPath)
         {
@@ -60,7 +60,8 @@ namespace ReserveBlockCore.Privacy
                 var code = PlonkNative.plonk_load_params(paramsPath);
                 if (code != PlonkNative.Success)
                     return false;
-                Globals.PLONKUniversalParams = File.ReadAllBytes(paramsPath);
+                // Store file size for diagnostics; native FFI holds the actual data.
+                Globals.PLONKParamsFileSize = new FileInfo(paramsPath).Length;
                 return true;
             }
             catch (Exception ex)

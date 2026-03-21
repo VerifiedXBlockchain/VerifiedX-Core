@@ -17,8 +17,8 @@ namespace ReserveBlockCore
         /// <summary>Nullifier (Base64) -> consuming TX hash.</summary>
         public static ConcurrentDictionary<string, string> MempoolNullifiers { get; } = new();
 
-        /// <summary>PLONK universal parameters bytes when loaded (Phase 4).</summary>
-        public static byte[]? PLONKUniversalParams { get; set; }
+        /// <summary>Size in bytes of the loaded PLONK params file (diagnostic only — native FFI holds the actual data).</summary>
+        public static long PLONKParamsFileSize { get; set; }
 
         /// <summary>When true, ZK-authorized private txs must carry a non-empty <c>proof_b64</c> (mempool / block validation).</summary>
         public static bool EnforcePlonkProofsForZk { get; set; }
