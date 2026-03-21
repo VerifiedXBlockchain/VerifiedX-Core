@@ -627,6 +627,41 @@ namespace ReserveBlockCore.Controllers
         // ═══════════════════════════════════════════════════════════════════════════
 
         /// <summary>
+        /// List all shielded addresses stored in the local privacy DB.
+        /// </summary>
+        [HttpGet("api/privacy/addresses")]
+        public IActionResult GetShieldedAddresses()
+        {
+            try
+            {
+                var wallets = ShieldedWalletService.GetAll();
+                if (wallets == null || !wallets.Any())
+                    return Ok(Array.Empty<object>());
+
+                var result = wallets.Select(w =>
+                {
+                    var vfxBal = (w.UnspentCommitments ?? new List<Models.Privacy.UnspentCommitment>())
+                        .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
+                        .Sum(c => c.Amount);
+
+                    return new
+                    {
+                        zfxAddress = w.ShieldedAddress,
+                        transparentSourceAddress = w.TransparentSourceAddress ?? "",
+                        vfxShieldedBalance = vfxBal,
+                        unspentNotes = (w.UnspentCommitments ?? new List<Models.Privacy.UnspentCommitment>())
+                            .Count(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)),
+                        lastScannedBlock = w.LastScannedBlock,
+                        isViewOnly = w.IsViewOnly
+                    };
+                });
+
+                return Ok(result);
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
         /// Create a shielded address (zfx_) derived from the account's private key.
         /// Works for both single accounts and HD-derived accounts.
         /// <paramref name="address"/> is the transparent VFX address to associate.
@@ -641,15 +676,13 @@ namespace ReserveBlockCore.Controllers
                 if (account == null)
                     return Ok(new { success = false, message = $"Transparent address {address} not in local wallet." });
 
-                var hdw = HDWallet.HDWalletData.GetHDWallet();
-                if (hdw == null)
-                    return Ok(new { success = false, message = "No local HD wallet found." });
+                // Derive shielded key material from the account's own private key.
+                // This works for both single accounts and HD-derived accounts.
+                var accountKey = account.GetKey;
+                if (string.IsNullOrWhiteSpace(accountKey))
+                    return Ok(new { success = false, message = "Cannot access account private key. Is the wallet locked?" });
 
-                var seedHex = hdw.WalletSeed;
-                if (string.IsNullOrWhiteSpace(seedHex))
-                    return Ok(new { success = false, message = "HD wallet seed is empty." });
-
-                var keyMat = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, 0, 0);
+                var keyMat = ShieldedHdDerivation.DeriveFromPrivateKey(accountKey);
                 var wallet = ShieldedWalletService.CreateFromKeyMaterial(keyMat, address, password);
                 ShieldedWalletService.Upsert(wallet);
 
@@ -2046,15 +2079,36 @@ var knownZfx=[];var selZfx=null;
 
 function loadPrivacy(){
   loadPlonkAndPool();
-  if(knownZfx.length>0){
-    loadZfxBalance(selZfx||knownZfx[0]);
-  }else{
-    el('priv-bal-num').innerHTML='-- <span>VFX</span>';
-    el('priv-notes').textContent='No shielded address created yet';
-    el('priv-zfx-addr').textContent='';
-    el('priv-actions').style.display='none';
-    el('priv-zfx-sel-wrap').style.display='none';
-  }
+  fetch('/wallet/api/privacy/addresses').then(function(r){return r.json();}).then(function(data){
+    if(data&&data.length){
+      knownZfx=[];
+      data.forEach(function(w){
+        if(w.zfxAddress&&knownZfx.indexOf(w.zfxAddress)===-1)knownZfx.push(w.zfxAddress);
+      });
+      updateZfxSel();
+      if(!selZfx||knownZfx.indexOf(selZfx)===-1)selZfx=knownZfx[0];
+      el('priv-zfx-sel').value=selZfx;
+      el('priv-zfx-sel-wrap').style.display='block';
+      el('priv-actions').style.display='block';
+      loadZfxBalance(selZfx);
+    }else{
+      el('priv-bal-num').innerHTML='-- <span>VFX</span>';
+      el('priv-notes').textContent='No shielded address created yet';
+      el('priv-zfx-addr').textContent='';
+      el('priv-actions').style.display='none';
+      el('priv-zfx-sel-wrap').style.display='none';
+    }
+  }).catch(function(){
+    if(knownZfx.length>0){
+      loadZfxBalance(selZfx||knownZfx[0]);
+    }else{
+      el('priv-bal-num').innerHTML='-- <span>VFX</span>';
+      el('priv-notes').textContent='No shielded address created yet';
+      el('priv-zfx-addr').textContent='';
+      el('priv-actions').style.display='none';
+      el('priv-zfx-sel-wrap').style.display='none';
+    }
+  });
 }
 
 function loadPlonkAndPool(){

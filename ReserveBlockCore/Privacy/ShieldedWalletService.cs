@@ -20,6 +20,14 @@ namespace ReserveBlockCore.Privacy
             col.Upsert(wallet);
         }
 
+        /// <summary>Returns all shielded wallet rows from the privacy DB.</summary>
+        public static List<ShieldedWallet> GetAll(LiteDatabase? db = null)
+        {
+            var target = db ?? PrivacyDbContext.GetPrivacyDb();
+            return target.GetCollection<ShieldedWallet>(PrivacyDbContext.PRIV_WALLETS)
+                .FindAll().ToList();
+        }
+
         public static ShieldedWallet? FindByZfxAddress(string zfxAddress, LiteDatabase? db = null)
         {
             var target = db ?? PrivacyDbContext.GetPrivacyDb();

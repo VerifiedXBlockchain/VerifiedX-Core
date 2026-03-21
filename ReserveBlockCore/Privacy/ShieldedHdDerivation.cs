@@ -73,6 +73,39 @@ namespace ReserveBlockCore.Privacy
         public static string DeriveZfxAddress(string walletSeedHex, uint coinType, uint addressIndex) =>
             DeriveShieldedKeyMaterial(walletSeedHex, coinType, addressIndex).ZfxAddress;
 
+        /// <summary>
+        /// Derive shielded key material directly from an account's private key (hex).
+        /// Works for both single accounts and HD-derived accounts — no HD wallet seed required.
+        /// </summary>
+        public static ShieldedKeyMaterial DeriveFromPrivateKey(string privateKeyHex)
+        {
+            if (string.IsNullOrWhiteSpace(privateKeyHex))
+                throw new ArgumentException("Private key hex is required.", nameof(privateKeyHex));
+
+            var rawBytes = Convert.FromHexString(privateKeyHex);
+            var spendingKey = ToValidNbitcoinKey(rawBytes, SpendFixDomain);
+            var spendBytes = spendingKey.ToBytes();
+
+            var vbuf = new byte[ViewingDomain.Length + 32];
+            ViewingDomain.CopyTo(vbuf, 0);
+            Buffer.BlockCopy(spendBytes, 0, vbuf, ViewingDomain.Length, 32);
+            var viewing = SHA256.HashData(vbuf);
+
+            var encPriv = DeriveValidPrivateKeyScalar(viewing, EncPrivDomain);
+            var encKey = new Key(encPriv);
+            var pub33 = encKey.PubKey.ToBytes();
+            var zfx = ShieldedAddressCodec.EncodeEncryptionKey(pub33);
+
+            return new ShieldedKeyMaterial
+            {
+                SpendingKey32 = spendBytes,
+                ViewingKey32 = viewing,
+                EncryptionPrivateKey32 = encPriv,
+                EncryptionPublicKey33 = pub33,
+                ZfxAddress = zfx
+            };
+        }
+
         private static Key ToValidNbitcoinKey(byte[] candidate32, ReadOnlySpan<byte> fixDomain)
         {
             try
