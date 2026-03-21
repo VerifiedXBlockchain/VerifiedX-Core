@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -6,7 +6,9 @@ using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Controllers;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Collections.Concurrent;
@@ -2622,6 +2624,179 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
             }
         }
+
+        #region Privacy (vBTC shielded pool, Phase 7)
+
+        /// <summary>Transparent vBTC → shielded (T→Z). Optional co-shield warning when local wallet has little shielded VFX for future fees.</summary>
+        [HttpPost("ShieldVBTC")]
+        public async Task<string> ShieldVBTC([FromBody] ShieldVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.FromAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress required." });
+                if (!AddressValidateUtility.ValidateAddress(req.FromAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid FromAddress." });
+                var account = AccountData.GetSingleAccount(req.FromAddress);
+                if (account == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress not in local wallet." });
+
+                var sw = PrivacyDbContext.Wallets().FindOne(x => x.TransparentSourceAddress == req.FromAddress);
+                var vfxUnspent = PrivacyApiHelper.SumVfxUnspent(sw);
+                string? coShieldWarning = vfxUnspent < Globals.PrivateTxFixedFee * 2
+                    ? "Low or no shielded VFX for future ZK fees; consider also shielding VFX."
+                    : null;
+
+                var nonce = AccountStateTrei.GetNextNonce(req.FromAddress);
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildShield(
+                        req.FromAddress,
+                        req.VbtcContractUid,
+                        req.VbtcAmount,
+                        Globals.MinFeePerKB,
+                        nonce,
+                        ts,
+                        req.RecipientZfxAddress,
+                        req.Memo,
+                        out var tx,
+                        out var err,
+                        DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = err ?? "Build failed." });
+
+                tx!.Fee = req.TransparentFee ?? FeeCalcService.CalculateTXFee(tx);
+                tx.BuildPrivate();
+                var pk = account.GetPrivKey;
+                if (pk == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cannot sign (wallet locked?)." });
+                var sig = SignatureService.CreateSignature(tx.Hash, pk, account.PublicKey);
+                if (sig == "ERROR")
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Signature failed." });
+                tx.Signature = sig;
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+                if (!ok)
+                    return json;
+                return JsonConvert.SerializeObject(new { Success = true, Hash = tx.Hash, Message = "Broadcast.", CoShieldWarning = coShieldWarning });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpPost("UnshieldVBTC")]
+        public async Task<string> UnshieldVBTC([FromBody] UnshieldVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "ZfxAddress required." });
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No shielded wallet for zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = kmErr ?? "Keys" });
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var candidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var fee = Globals.PrivateTxFixedFee;
+                if (!CommitmentSelectionService.TrySelectInputs(candidates, req.TransparentVbtcAmount + fee, out var inputs, out _, out var selErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
+
+                var vfxCandidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var vfxFeeNote = vfxCandidates.Where(c => c.Amount >= fee).OrderBy(c => c.Amount).FirstOrDefault();
+                if (vfxFeeNote == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Need at least one shielded VFX note whose amount covers the fixed ZK fee. Co-shield VFX or consolidate notes first." });
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(req.VbtcContractUid, inputs, req.TransparentVbtcAmount, req.TransparentToAddress, keys, ts, out var tx, out var berr, vfxFeeNote, DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return ok ? JsonConvert.SerializeObject(new { Success = true, Hash = tx!.Hash, Message = "Broadcast." }) : json;
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpPost("PrivateTransferVBTC")]
+        public async Task<string> PrivateTransferVBTC([FromBody] PrivateTransferVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "ZfxAddress required." });
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No shielded wallet for zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = kmErr ?? "Keys" });
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var candidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var fee = Globals.PrivateTxFixedFee;
+                if (!CommitmentSelectionService.TrySelectInputs(candidates, req.PaymentAmount + fee, out var inputs, out _, out var selErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
+
+                var vfxCandidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var vfxFeeNote = vfxCandidates.Where(c => c.Amount >= fee).OrderBy(c => c.Amount).FirstOrDefault();
+                if (vfxFeeNote == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Need at least one shielded VFX note whose amount covers the fixed ZK fee. Co-shield VFX or consolidate notes first." });
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(req.VbtcContractUid, inputs, req.PaymentAmount, req.RecipientZfxAddress, keys, ts, out var tx, out var berr, vfxFeeNote, DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return ok ? JsonConvert.SerializeObject(new { Success = true, Hash = tx!.Hash, Message = "Broadcast." }) : json;
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpGet("GetShieldedVBTCBalance")]
+        public Task<string> GetShieldedVBTCBalance([FromQuery] string zfxAddress, [FromQuery] string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(zfxAddress) || string.IsNullOrWhiteSpace(scUID))
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "zfxAddress and scUID required." }));
+                var w = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (w == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Balance = 0.0m }));
+                var asset = VbtcPrivacyAsset.FormatAssetKey(scUID);
+                var sum = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).Sum(c => c.Amount) ?? 0;
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Balance = sum, Asset = asset }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        [HttpGet("GetShieldedVBTCPoolState/{scUID}")]
+        public Task<string> GetShieldedVBTCPoolState(string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(scUID))
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "scUID required." }));
+                var st = VBTCPrivacyService.GetPoolState(scUID);
+                if (st == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Asset = VbtcPrivacyAsset.FormatAssetKey(scUID), CurrentMerkleRoot = (string?)null, TotalCommitments = 0L, TotalShieldedSupply = 0.0M, LastUpdateHeight = 0L }));
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, st.AssetType, st.CurrentMerkleRoot, st.TotalCommitments, st.TotalShieldedSupply, st.LastUpdateHeight }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        #endregion
 
         #endregion
     }

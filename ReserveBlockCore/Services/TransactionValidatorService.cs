@@ -1,4 +1,4 @@
-﻿using NBitcoin.Protocol;
+using NBitcoin.Protocol;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Arbiter;
@@ -8,6 +8,7 @@ using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.DST;
 using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.P2P;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using Spectre.Console;
 using System;
@@ -19,7 +20,7 @@ namespace ReserveBlockCore.Services
 {
     public class TransactionValidatorService
     {
-        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null)
+        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false)
         {
             bool txResult = false;
             bool runReserveCheck = true;
@@ -31,6 +32,9 @@ namespace ReserveBlockCore.Services
             var badNFTTx = Globals.BadNFTTxList.Exists(x => x == txRequest.Hash);
             if (badNFTTx) 
                 return (true, "");
+
+            if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
+                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification);
 
             var accStTrei = StateData.GetAccountStateTrei();
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);
@@ -160,6 +164,7 @@ namespace ReserveBlockCore.Services
                 if (mempool.Count() > 0)
                 {
                     mempool.DeleteManySafe(x => x.Hash == txRequest.Hash);
+                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txRequest.Hash);
                 }
                 return (txResult, "This transactions has already been sent.");
             }

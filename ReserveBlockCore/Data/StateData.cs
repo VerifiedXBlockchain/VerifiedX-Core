@@ -1,4 +1,4 @@
-﻿using ReserveBlockCore.Extensions;
+using ReserveBlockCore.Extensions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Models;
@@ -11,6 +11,7 @@ using LiteDB;
 using System.Net;
 using System.Security.Principal;
 using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Privacy;
 using NBitcoin.JsonConverters;
 using ReserveBlockCore.Models.DST;
 using System;
@@ -41,6 +42,7 @@ namespace ReserveBlockCore.Data
 
             var worldTrei = new WorldTrei {
                 StateRoot = block.StateRoot,
+                ShieldedStateRoot = global::ReserveBlockCore.Privacy.ShieldedStateRoot.Compute(),
             };
 
             var wTrei = DbContext.DB_WorldStateTrei.GetCollection<WorldTrei>(DbContext.RSRV_WSTATE_TREI);
@@ -78,7 +80,9 @@ namespace ReserveBlockCore.Data
                     }
                     else
                     {
-                        if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd")
+                        // ZK private txs use FromAddress Shielded_Pool with nonce 0 — skip AccountStateTrei from updates.
+                        if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd"
+                            && !PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
                         {
                             var from = GetSpecificAccountStateTrei(tx.FromAddress);
 
@@ -523,9 +527,12 @@ namespace ReserveBlockCore.Data
                                             break;
                                     }
                                 }
-                            }
                         }
                     }
+                }
+
+                    if (PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
+                        await PrivateTxLedgerService.ApplyBlockTransactionAsync(tx, block);
 
                     txTreiUpdateSuccessCount += 1;
                 }

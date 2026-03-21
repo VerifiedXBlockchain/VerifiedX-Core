@@ -1,5 +1,6 @@
-﻿using ReserveBlockCore.Extensions;
+using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Privacy;
 using System;
 using System.Collections.Generic;
 using System.IO.Compression;
@@ -44,6 +45,7 @@ namespace ReserveBlockCore.Data
         public static LiteDatabase DB_VBTCWithdrawalRequests { set; get; }
         public static LiteDatabase DB_vBTC { set; get; } // stores vBTC V2 data (validators, contracts, cancellations)
         public static LiteDatabase DB_Shares { set; get; }
+        public static LiteDatabase DB_Privacy { set; get; }
 
 
         //Database names
@@ -74,6 +76,7 @@ namespace ReserveBlockCore.Data
         public const string RSRV_DB_VBTC_WITHDRAWAL_REQUESTS = @"rsrvvbtcwithdrawalrequests.db";
         public const string RSRV_DB_VBTC = @"rsrvvbtc.db";
         public const string RSRV_DB_SHARES = @"rsrvshares.db";
+        public const string RSRV_DB_PRIVACY = @"DB_Privacy.db";
 
         //Database tables
         public const string RSRV_BLOCKCHAIN = "rsrv_blockchain";
@@ -174,6 +177,9 @@ namespace ReserveBlockCore.Data
             DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+
+            PrivacyDbContext.EnsurePrivacyIndexes(DB_Privacy);
 
             var blocks = DB.GetCollection<Block>(RSRV_BLOCKS);
             blocks.EnsureIndexSafe(x => x.Height);
@@ -263,6 +269,7 @@ namespace ReserveBlockCore.Data
             DB_VBTCWithdrawalRequests.Commit();
             DB_vBTC.Commit();
             DB_Shares.Commit();
+            DB_Privacy.Commit();
         }
 
         public static void Rollback(string location = "", string message = "")
@@ -300,6 +307,7 @@ namespace ReserveBlockCore.Data
             DB_Vote.Rollback();
             //DB_Settings.Rollback();
             DB_Reserve.Rollback();
+            DB_Privacy.Rollback();
         }
 
         public static void DeleteCorruptDb()
@@ -345,6 +353,7 @@ namespace ReserveBlockCore.Data
             DB_VBTCWithdrawalRequests.Commit();
             DB_vBTC.Commit();
             DB_Shares.Commit();
+            DB_Privacy.Commit();
 
             //dispose connection to DB
             CloseDB();
@@ -395,6 +404,7 @@ namespace ReserveBlockCore.Data
             File.Delete(path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS);
             File.Delete(path + RSRV_DB_VBTC);
             File.Delete(path + RSRV_DB_SHARES);
+            File.Delete(path + RSRV_DB_PRIVACY);
 
             var mapper = new BsonMapper();
             mapper.RegisterType<DateTime>(
@@ -432,6 +442,9 @@ namespace ReserveBlockCore.Data
             DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
+            DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+
+            PrivacyDbContext.EnsurePrivacyIndexes(DB_Privacy);
 
             DB_Assets.Pragma("UTC_DATE", true);
             DB_AssetQueue.Pragma("UTC_DATE", true);
@@ -469,6 +482,7 @@ namespace ReserveBlockCore.Data
             DB_VBTCWithdrawalRequests.Dispose();
             DB_vBTC.Dispose();
             DB_Shares.Dispose();
+            DB_Privacy.Dispose();
         }
 
         public static async Task CheckPoint()
@@ -601,6 +615,11 @@ namespace ReserveBlockCore.Data
             try
             {
                 DB_Shares.Checkpoint();
+            }
+            catch { }
+            try
+            {
+                DB_Privacy.Checkpoint();
             }
             catch { }
         }

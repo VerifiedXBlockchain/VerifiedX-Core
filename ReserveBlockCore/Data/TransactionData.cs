@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using ReserveBlockCore.Utilities;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.EllipticCurve;
 using ReserveBlockCore.Services;
@@ -330,6 +331,10 @@ namespace ReserveBlockCore.Data
             await TransactionPool.InsertSafeAsync(transaction);
         }
 
+        /// <summary>Call when a transaction is removed from the mempool so private nullifier reservations can be cleared.</summary>
+        public static void ReleasePrivateMempoolNullifiersForTx(string txHash) =>
+            MempoolNullifierTracker.ReleaseClaimsForTxHash(txHash);
+
         public static LiteDB.ILiteCollection<Transaction> GetPool()
         {
             try
@@ -465,7 +470,13 @@ namespace ReserveBlockCore.Data
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
-                                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
+                                tx.TransactionType != TransactionType.VFX_SHIELD &&
+                                tx.TransactionType != TransactionType.VFX_UNSHIELD &&
+                                tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
+                                tx.TransactionType != TransactionType.VBTC_V2_SHIELD &&
+                                tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
+                                tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
                             {
                                 var scInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
                                 if (!scInfo.Item1)
@@ -1007,7 +1018,13 @@ namespace ReserveBlockCore.Data
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
-                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
+                tx.TransactionType != TransactionType.VFX_SHIELD &&
+                tx.TransactionType != TransactionType.VFX_UNSHIELD &&
+                tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
+                tx.TransactionType != TransactionType.VBTC_V2_SHIELD &&
+                tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
+                tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
             {
                 if(tx.Data != null)
                 {

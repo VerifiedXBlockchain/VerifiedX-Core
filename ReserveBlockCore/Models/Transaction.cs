@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -48,6 +48,29 @@ namespace ReserveBlockCore.Models
                 Timestamp + FromAddress + ToAddress + Amount + Fee + Nonce + TransactionType + Data + UnlockTime;
             return HashingService.GenerateHash(HashingService.GenerateHash(data));
         }
+
+        /// <summary>Hash for privacy transaction types; see privacy implementation plan.</summary>
+        public string BuildPrivate()
+        {
+            var data = GetPrivateHashInput();
+            Hash = HashingService.GenerateHash(HashingService.GenerateHash(data));
+            return Hash;
+        }
+
+        private string GetPrivateHashInput()
+        {
+            var sb = new StringBuilder();
+            sb.Append(Timestamp);
+            sb.Append(TransactionType);
+            sb.Append(Data ?? "");
+            if (TransactionType == TransactionType.VFX_SHIELD || TransactionType == TransactionType.VBTC_V2_SHIELD)
+            {
+                sb.Append(FromAddress);
+                sb.Append(Amount);
+                sb.Append(Nonce);
+            }
+            return sb.ToString();
+        }
         public static void Add(Transaction transaction)
         {
             var transactions = GetAll();
@@ -91,7 +114,13 @@ namespace ReserveBlockCore.Models
         VBTC_V2_WITHDRAWAL_REQUEST,      // Request withdrawal to BTC
         VBTC_V2_WITHDRAWAL_COMPLETE,     // Complete withdrawal
         VBTC_V2_WITHDRAWAL_CANCEL,       // Request cancellation
-        VBTC_V2_WITHDRAWAL_VOTE          // Validator votes on cancellation
+        VBTC_V2_WITHDRAWAL_VOTE,         // Validator votes on cancellation
+        VFX_SHIELD,
+        VFX_UNSHIELD,
+        VFX_PRIVATE_TRANSFER,
+        VBTC_V2_SHIELD,
+        VBTC_V2_UNSHIELD,
+        VBTC_V2_PRIVATE_TRANSFER
     }
 
     public enum ReserveTransactionType

@@ -1,4 +1,4 @@
-﻿using ImageMagick;
+using ImageMagick;
 using Microsoft.AspNetCore.SignalR;
 using ReserveBlockCore.Bitcoin.ElectrumX;
 using ReserveBlockCore.Bitcoin.Models;
@@ -16,7 +16,7 @@ using System.Security;
 
 namespace ReserveBlockCore
 {
-    public static class Globals
+    public static partial class Globals
     {
         static Globals()
         {

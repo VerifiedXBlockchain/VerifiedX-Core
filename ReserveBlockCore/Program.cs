@@ -1,4 +1,4 @@
-﻿global using ReserveBlockCore.Extensions;
+global using ReserveBlockCore.Extensions;
 
 using ReserveBlockCore.Commands;
 using ReserveBlockCore.Data;
@@ -23,6 +23,7 @@ using System.Reflection;
 using ReserveBlockCore.DST;
 using ReserveBlockCore.Engines;
 using ReserveBlockCore.Config;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Bitcoin.Utilities;
 using ReserveBlockCore.Bitcoin.Integrations;
 using ElmahCore.Mvc;
@@ -351,6 +352,12 @@ namespace ReserveBlockCore
             StartupService.AnotherInstanceCheck(); //checks for another instance
 
             StartupService.StartupDatabase();// initializes databases
+
+            // PLONK params: auto-download if not present, then load into native FFI
+            var plonkParamsPath = await PLONKParamsDownloader.EnsureParamsAvailableAsync();
+            if (!string.IsNullOrEmpty(plonkParamsPath))
+                PLONKSetup.TryLoadParamsFile(plonkParamsPath);
+            PLONKSetup.RefreshVerificationCapability();
 
             await DbContext.CheckPoint(); //checkpoints db log files
 

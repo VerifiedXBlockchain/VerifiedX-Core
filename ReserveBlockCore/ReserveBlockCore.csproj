@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
@@ -121,12 +121,30 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <Link>libfrost_ffi.dylib</Link>
     </None>
+    <None Update="Plonk\win\plonk_ffi.dll" Condition="Exists('Plonk\win\plonk_ffi.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>plonk_ffi.dll</Link>
+    </None>
+    <None Update="Plonk\linux\libplonk_ffi.so" Condition="Exists('Plonk\linux\libplonk_ffi.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>libplonk_ffi.so</Link>
+    </None>
+    <None Update="Plonk\mac\libplonk_ffi.dylib" Condition="Exists('Plonk\mac\libplonk_ffi.dylib')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>libplonk_ffi.dylib</Link>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
     <Folder Include="Frost\linux\" />
     <Folder Include="Frost\mac\" />
     <Folder Include="Frost\win\" />
+    <Folder Include="Plonk\win\" />
+    <Folder Include="Plonk\linux\" />
+    <Folder Include="Plonk\mac\" />
   </ItemGroup>
 
 </Project>

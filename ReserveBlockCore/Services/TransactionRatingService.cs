@@ -1,6 +1,7 @@
-﻿using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 
 namespace ReserveBlockCore.Services
@@ -68,6 +69,11 @@ namespace ReserveBlockCore.Services
                 }
 
                 // vBTC V2 transaction types — all rated A (high priority, fee-free by design)
+                if (PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
+                {
+                    rating = TransactionRating.A;
+                }
+
                 if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER ||
                     tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE ||
                     tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER ||

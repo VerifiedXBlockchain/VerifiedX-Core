@@ -11,6 +11,7 @@ using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace ReserveBlockCore.Bitcoin.Services
@@ -20,6 +21,56 @@ namespace ReserveBlockCore.Bitcoin.Services
     /// </summary>
     public class VBTCService
     {
+        /// <summary>
+        /// Spendable transparent vBTC for <paramref name="fromAddress"/> on contract <paramref name="scUid"/>:
+        /// owner = BTC deposit balance + tokenization ledger; non-owner = ledger only (matches <see cref="TransferVBTC"/>).
+        /// </summary>
+        public static bool TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress, out decimal availableBalance, out string? error)
+        {
+            availableBalance = 0M;
+            error = null;
+            try
+            {
+                var vbtcContract = VBTCContractV2.GetContract(scUid);
+                if (vbtcContract == null)
+                {
+                    error = $"vBTC V2 contract not found: {scUid}";
+                    return false;
+                }
+
+                var scState = SmartContractStateTrei.GetSmartContractState(scUid);
+                if (scState == null)
+                {
+                    error = $"Smart contract state not found: {scUid}";
+                    return false;
+                }
+
+                decimal ledgerBalance = 0M;
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var transactions = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                        .ToList();
+
+                    if (transactions.Any())
+                    {
+                        var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
+                        var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
+                        ledgerBalance = received + sent;
+                    }
+                }
+
+                bool isOwner = vbtcContract.OwnerAddress == fromAddress;
+                availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
         #region Deposit Balance Scanning
 
         /// <summary>
@@ -295,44 +346,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Account not found: {fromAddress}");
                 }
 
-                // Get contract and validate
-                var vbtcContract = VBTCContractV2.GetContract(scUID);
-                if (vbtcContract == null)
+                if (!TryGetAvailableTransparentVbtcBalance(scUID, fromAddress, out var availableBalance, out var balErr))
                 {
-                    SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.TransferVBTC()");
-                    return (false, $"vBTC V2 contract not found: {scUID}");
+                    SCLogUtility.Log(balErr ?? "Balance lookup failed", "VBTCService.TransferVBTC()");
+                    return (false, balErr ?? "Could not resolve vBTC transparent balance.");
                 }
 
-                // Get smart contract state
-                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
-                if (scState == null)
-                {
-                    SCLogUtility.Log($"Smart contract state not found: {scUID}", "VBTCService.TransferVBTC()");
-                    return (false, $"Smart contract state not found: {scUID}");
-                }
-
-                // Calculate balance using v1 pattern: owner gets deposit balance + ledger, non-owner gets just ledger
-                decimal ledgerBalance = 0M;
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                {
-                    var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                        .ToList();
-
-                    if (transactions.Any())
-                    {
-                        var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
-                        var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                        ledgerBalance = received + sent;
-                    }
-                }
-
-                // Owner's available = BTC deposit balance + ledger (ledger goes negative as owner sends)
-                // Non-owner's available = just ledger (received - sent)
-                bool isOwner = vbtcContract.OwnerAddress == fromAddress;
-                decimal availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
-
-                // Check sufficient balance
                 if (availableBalance < amount)
                 {
                     SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.TransferVBTC()");
@@ -433,14 +452,6 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Account not found: {requestorAddress}");
                 }
 
-                // Get contract and validate
-                var vbtcContract = VBTCContractV2.GetContract(scUID);
-                if (vbtcContract == null)
-                {
-                    SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"vBTC V2 contract not found: {scUID}");
-                }
-
                 // FIND-003 FIX: Check if THIS USER already has an active withdrawal request (per-user tracking)
                 var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requestorAddress, scUID);
                 if (existingRequest != null)
@@ -449,36 +460,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"You already have an active withdrawal request. Complete it before starting a new one. Request Hash: {existingRequest.TransactionHash}");
                 }
 
-                // Get smart contract state and validate balance
-                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
-                if (scState == null)
+                if (!TryGetAvailableTransparentVbtcBalance(scUID, requestorAddress, out var availableBalance, out var balErr))
                 {
-                    SCLogUtility.Log($"Smart contract state not found: {scUID}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"Smart contract state not found: {scUID}");
+                    SCLogUtility.Log(balErr ?? "Balance lookup failed", "VBTCService.RequestWithdrawal()");
+                    return (false, balErr ?? "Could not resolve vBTC transparent balance.");
                 }
 
-                // Calculate balance using v1 pattern: owner gets deposit balance + ledger
-                decimal ledgerBalance = 0M;
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                {
-                    var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == requestorAddress || x.ToAddress == requestorAddress)
-                        .ToList();
-
-                    if (transactions.Any())
-                    {
-                        var received = transactions.Where(x => x.ToAddress == requestorAddress).Sum(x => x.Amount);
-                        var sent = transactions.Where(x => x.FromAddress == requestorAddress).Sum(x => x.Amount);
-                        ledgerBalance = received + sent;
-                    }
-                }
-
-                // Owner's available = BTC deposit balance + ledger
-                // Non-owner's available = just ledger
-                bool isOwner = vbtcContract.OwnerAddress == requestorAddress;
-                decimal availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
-
-                // Check sufficient balance
                 if (availableBalance < amount)
                 {
                     SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.RequestWithdrawal()");
