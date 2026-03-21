@@ -6,6 +6,8 @@ using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.Models.Privacy;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 
@@ -618,6 +620,341 @@ namespace ReserveBlockCore.Controllers
             public string FromAddress { get; set; } = "";
             public string ToAddress { get; set; } = "";
             public string Amount { get; set; } = "";
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        //  VFX Privacy / Shielded Endpoints
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Create a shielded address (zfx_) derived from the local HD wallet seed.
+        /// <paramref name="address"/> is the transparent VFX address to associate.
+        /// <paramref name="password"/> protects the spending key at rest (min 8 chars).
+        /// </summary>
+        [HttpGet("api/privacy/createShieldedAddress/{address}/{password}")]
+        public IActionResult CreateShieldedAddress(string address, string password)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(address);
+                if (account == null)
+                    return Ok(new { success = false, message = $"Transparent address {address} not in local wallet." });
+
+                var hdw = HDWallet.HDWalletData.GetHDWallet();
+                if (hdw == null)
+                    return Ok(new { success = false, message = "No local HD wallet found." });
+
+                var seedHex = hdw.WalletSeed;
+                if (string.IsNullOrWhiteSpace(seedHex))
+                    return Ok(new { success = false, message = "HD wallet seed is empty." });
+
+                var keyMat = ShieldedHdDerivation.DeriveShieldedKeyMaterial(seedHex, 0, 0);
+                var wallet = ShieldedWalletService.CreateFromKeyMaterial(keyMat, address, password);
+                ShieldedWalletService.Upsert(wallet);
+
+                return Ok(new { success = true, zfxAddress = keyMat.ZfxAddress, transparentSourceAddress = address });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
+        /// Get the shielded VFX balance for a zfx_ address.
+        /// </summary>
+        [HttpGet("api/privacy/balance/{zfxAddress}")]
+        public IActionResult GetShieldedBalance(string zfxAddress)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(zfxAddress) || !zfxAddress.StartsWith("zfx_"))
+                    return Ok(new { success = false, message = "Invalid zfx_ address." });
+
+                var wallet = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (wallet == null)
+                    return Ok(new { success = false, message = "Wallet not found." });
+
+                var vfxNotes = (wallet.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList();
+
+                return Ok(new
+                {
+                    success = true,
+                    zfxAddress,
+                    vfxShieldedBalance = vfxNotes.Sum(c => c.Amount),
+                    unspentNotes = vfxNotes.Count
+                });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
+        /// Shield VFX: transparent → shielded (T→Z).
+        /// </summary>
+        [HttpGet("api/privacy/shield/{fromAddress}/{zfxAddress}/{amount}")]
+        public async Task<IActionResult> ShieldVFX(string fromAddress, string zfxAddress, decimal amount)
+        {
+            try
+            {
+                if (!AddressValidateUtility.ValidateAddress(fromAddress))
+                    return Ok(new { success = false, message = "Invalid FromAddress." });
+                var account = AccountData.GetSingleAccount(fromAddress);
+                if (account == null)
+                    return Ok(new { success = false, message = $"Transparent address {fromAddress} not in local wallet." });
+
+                var nonce = AccountStateTrei.GetNextNonce(fromAddress);
+                var ts = TimeUtil.GetTime();
+                if (!VfxPrivateTransactionBuilder.TryBuildShield(
+                        fromAddress,
+                        amount,
+                        Globals.MinFeePerKB,
+                        nonce,
+                        ts,
+                        zfxAddress,
+                        null,
+                        out var tx,
+                        out var buildErr,
+                        DbContext.DB_Privacy))
+                    return Ok(new { success = false, message = buildErr ?? "Failed to build shield TX." });
+
+                tx!.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.BuildPrivate();
+                var pk = account.GetPrivKey;
+                if (pk == null)
+                    return Ok(new { success = false, message = "Cannot sign (wallet locked?)." });
+                var sig = SignatureService.CreateSignature(tx.Hash, pk, account.PublicKey);
+                if (sig == "ERROR")
+                    return Ok(new { success = false, message = "Signature failed." });
+                tx.Signature = sig;
+
+                var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+                return Ok(new { success = broadcastOk, hash = tx.Hash, type = "VFX_SHIELD", amount, fromAddress, zfxAddress, detail = json });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
+        /// Unshield VFX: shielded → transparent (Z→T).
+        /// Password defaults to empty string when not supplied.
+        /// </summary>
+        [HttpGet("api/privacy/unshield/{zfxAddress}/{toAddress}/{amount}")]
+        public async Task<IActionResult> UnshieldVFX(string zfxAddress, string toAddress, decimal amount, [FromQuery] string? password = null)
+        {
+            try
+            {
+                if (!AddressValidateUtility.ValidateAddress(toAddress))
+                    return Ok(new { success = false, message = $"Invalid transparent to-address: {toAddress}" });
+
+                var w = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (w == null)
+                    return Ok(new { success = false, message = "No shielded wallet row for this zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, password, out var keys, out var kmErr))
+                    return Ok(new { success = false, message = kmErr ?? "Cannot unwrap keys." });
+
+                var fee = Globals.PrivateTxFixedFee;
+                if (!CommitmentSelectionService.TrySelectInputs(
+                        w.UnspentCommitments ?? (IReadOnlyList<UnspentCommitment>)Array.Empty<UnspentCommitment>(),
+                        amount + fee,
+                        out var inputs,
+                        out _,
+                        out var selErr))
+                    return Ok(new { success = false, message = selErr ?? "Input selection failed." });
+
+                var ts = TimeUtil.GetTime();
+                if (!VfxPrivateTransactionBuilder.TryBuildUnshield(
+                        inputs,
+                        amount,
+                        toAddress,
+                        keys,
+                        ts,
+                        out var tx,
+                        out var buildErr,
+                        DbContext.DB_Privacy))
+                    return Ok(new { success = false, message = buildErr ?? "Failed to build unshield TX." });
+
+                var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return Ok(new { success = broadcastOk, hash = tx!.Hash, type = "VFX_UNSHIELD", amount, zfxAddress, toAddress, detail = json });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
+        /// Private transfer VFX: shielded → shielded (Z→Z).
+        /// Password defaults to empty string when not supplied.
+        /// </summary>
+        [HttpGet("api/privacy/transfer/{fromZfxAddress}/{toZfxAddress}/{amount}")]
+        public async Task<IActionResult> PrivateTransferVFX(string fromZfxAddress, string toZfxAddress, decimal amount, [FromQuery] string? password = null)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(toZfxAddress) || !toZfxAddress.StartsWith("zfx_"))
+                    return Ok(new { success = false, message = "Invalid recipient zfx_ address." });
+
+                var w = ShieldedWalletService.FindByZfxAddress(fromZfxAddress);
+                if (w == null)
+                    return Ok(new { success = false, message = "No shielded wallet row for this zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, password, out var keys, out var kmErr))
+                    return Ok(new { success = false, message = kmErr ?? "Cannot unwrap keys." });
+
+                var fee = Globals.PrivateTxFixedFee;
+                if (!CommitmentSelectionService.TrySelectInputs(
+                        w.UnspentCommitments ?? (IReadOnlyList<UnspentCommitment>)Array.Empty<UnspentCommitment>(),
+                        amount + fee,
+                        out var inputs,
+                        out _,
+                        out var selErr))
+                    return Ok(new { success = false, message = selErr ?? "Input selection failed." });
+
+                var ts = TimeUtil.GetTime();
+                if (!VfxPrivateTransactionBuilder.TryBuildPrivateTransfer(
+                        inputs,
+                        amount,
+                        toZfxAddress,
+                        keys,
+                        ts,
+                        out var tx,
+                        out var buildErr,
+                        DbContext.DB_Privacy))
+                    return Ok(new { success = false, message = buildErr ?? "Failed to build private transfer TX." });
+
+                var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return Ok(new { success = broadcastOk, hash = tx!.Hash, type = "VFX_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, detail = json });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
+        /// Scan blockchain for owned shielded VFX commitments.
+        /// Password defaults to empty string when not supplied.
+        /// </summary>
+        [HttpGet("api/privacy/scan/{zfxAddress}")]
+        public IActionResult ScanShieldedVFX(string zfxAddress, [FromQuery] string? password = null, [FromQuery] long? fromBlock = null, [FromQuery] long? toBlock = null)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(zfxAddress) || !zfxAddress.StartsWith("zfx_"))
+                    return Ok(new { success = false, message = "Invalid zfx_ address." });
+
+                var w = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (w == null)
+                    return Ok(new { success = false, message = "No shielded wallet row for this zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, password, out var keys, out var kmErr))
+                    return Ok(new { success = false, message = kmErr ?? "Cannot unwrap keys." });
+
+                long scanFrom = fromBlock ?? w.LastScannedBlock;
+                long scanTo = toBlock ?? Globals.LastBlock.Height;
+                int blocksScanned = 0, txsScanned = 0, newNotes = 0;
+
+                var merged = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var u in w.UnspentCommitments ?? new List<UnspentCommitment>())
+                {
+                    if (!string.IsNullOrEmpty(u.Commitment))
+                        merged.Add(u.Commitment);
+                }
+
+                for (long h = scanFrom; h <= scanTo; h++)
+                {
+                    var block = BlockchainData.GetBlockByHeight(h);
+                    if (block?.Transactions == null) continue;
+                    blocksScanned++;
+                    foreach (var tx in block.Transactions)
+                    {
+                        txsScanned++;
+                        if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                            continue;
+                        if (payload?.Outs == null)
+                            continue;
+                        foreach (var o in payload.Outs)
+                        {
+                            if (string.IsNullOrWhiteSpace(o.EncryptedNoteB64))
+                                continue;
+                            byte[] enc;
+                            try { enc = Convert.FromBase64String(o.EncryptedNoteB64); }
+                            catch { continue; }
+                            if (!ShieldedNoteEncryption.TryOpen(enc, keys.EncryptionPrivateKey32, out var plain, out _))
+                                continue;
+                            if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(plain, out var note, out _) || note == null)
+                                continue;
+                            var c = o.CommitmentB64;
+                            if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                                continue;
+                            merged.Add(c);
+                            newNotes++;
+                            byte[] r32 = Array.Empty<byte>();
+                            if (!string.IsNullOrEmpty(note.RandomnessB64))
+                            {
+                                try { r32 = Convert.FromBase64String(note.RandomnessB64); }
+                                catch { /* ignore */ }
+                            }
+                            w.UnspentCommitments ??= new List<UnspentCommitment>();
+                            w.UnspentCommitments.Add(new UnspentCommitment
+                            {
+                                Commitment = c,
+                                AssetType = note.AssetType ?? "",
+                                Amount = note.Amount,
+                                Randomness = r32,
+                                TreePosition = 0,
+                                BlockHeight = block.Height,
+                                IsSpent = false
+                            });
+                            var key = note.AssetType ?? "";
+                            if (!w.ShieldedBalances.ContainsKey(key))
+                                w.ShieldedBalances[key] = 0;
+                            w.ShieldedBalances[key] += note.Amount;
+                        }
+                    }
+                }
+                w.LastScannedBlock = Math.Max(w.LastScannedBlock, scanTo);
+                ShieldedWalletService.Upsert(w);
+
+                return Ok(new { success = true, zfxAddress, blocksScanned, transactionsScanned = txsScanned, newNotesFound = newNotes, fromHeight = scanFrom, toHeight = scanTo });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
+        /// Get PLONK native library status and capabilities.
+        /// </summary>
+        [HttpGet("api/privacy/plonkStatus")]
+        public IActionResult GetPlonkStatus()
+        {
+            try
+            {
+                PLONKSetup.RefreshVerificationCapability();
+                uint caps = 0;
+                try { caps = PlonkNative.plonk_capabilities(); } catch { }
+
+                return Ok(new
+                {
+                    success = true,
+                    proofVerificationImplemented = PLONKSetup.IsProofVerificationImplemented,
+                    proofProvingImplemented = PLONKSetup.IsProofProvingImplemented,
+                    enforcePlonkProofsForZk = Globals.EnforcePlonkProofsForZk,
+                    nativeCapabilities = caps,
+                    paramsBytesMirrored = Globals.PLONKUniversalParams?.Length ?? 0
+                });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
+        /// Get the VFX shielded pool state.
+        /// </summary>
+        [HttpGet("api/privacy/poolState")]
+        public IActionResult GetShieldedPoolState()
+        {
+            try
+            {
+                var pool = ShieldedPoolService.GetOrCreateState("VFX");
+                return Ok(new
+                {
+                    success = true,
+                    assetType = pool.AssetType,
+                    totalCommitments = pool.TotalCommitments,
+                    totalShieldedSupply = pool.TotalShieldedSupply,
+                    currentMerkleRoot = pool.CurrentMerkleRoot,
+                    lastUpdateHeight = pool.LastUpdateHeight
+                });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
         // ── Embedded HTML ─────────────────────────────────────────────────────────
