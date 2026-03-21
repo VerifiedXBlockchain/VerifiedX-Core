@@ -64,8 +64,13 @@ namespace ReserveBlockCore
             //    options.DefaultApiVersion = new Microsoft.AspNetCore.Mvc.ApiVersion(1, 0);
             //});
             services.AddSwaggerGen(c => {
-                c.CustomSchemaIds(type => type.ToString());
-                c.CustomSchemaIds(type => $"{type.Name}_{System.Guid.NewGuid().ToString().Replace("-", "")}");
+                c.CustomSchemaIds(type => type.FullName);
+                c.DocInclusionPredicate((docName, apiDesc) =>
+                {
+                    if (docName == "rest")
+                        return apiDesc.RelativePath?.StartsWith("api/rest/") == true;
+                    return !apiDesc.RelativePath?.StartsWith("api/rest/") ?? true;
+                });
                 c.SwaggerDoc("v1", new OpenApiInfo { Title = "ReserveBlock CLI API", Version = "v1" });
                 c.SwaggerDoc("rest", new OpenApiInfo
                 {
