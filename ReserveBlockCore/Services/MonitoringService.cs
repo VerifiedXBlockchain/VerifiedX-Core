@@ -228,13 +228,36 @@ namespace ReserveBlockCore.Services
                     // Warden will detect this and restart the process
                     Globals.StopAllTimers = true;
                     Console.WriteLine("Closing and Exiting Wallet Application.");
+                    
+                    // Wait for Treis to stop updating, but timeout after 30 seconds
+                    var treisWaitStart = DateTime.UtcNow;
                     while (Globals.TreisUpdating)
                     {
                         await Task.Delay(100);
-                        //waiting for treis to stop
+                        if ((DateTime.UtcNow - treisWaitStart).TotalSeconds > 30)
+                        {
+                            LogUtility.Log("Timed out waiting for TreisUpdating after 30 seconds. Forcing exit.", 
+                                "MonitoringService.CheckForHighCpu()");
+                            break;
+                        }
                     }
 
-                    await Settings.InitiateShutdownUpdate();
+                    // Run shutdown update with a 30-second timeout
+                    try
+                    {
+                        var shutdownTask = Settings.InitiateShutdownUpdate();
+                        if (await Task.WhenAny(shutdownTask, Task.Delay(30000)) != shutdownTask)
+                        {
+                            LogUtility.Log("Timed out waiting for InitiateShutdownUpdate after 30 seconds. Forcing exit.", 
+                                "MonitoringService.CheckForHighCpu()");
+                        }
+                    }
+                    catch (Exception shutdownEx)
+                    {
+                        ErrorLogUtility.LogError($"Error during shutdown update: {shutdownEx.Message}", 
+                            "MonitoringService.CheckForHighCpu()");
+                    }
+
                     Environment.Exit(0);
                 }
             }

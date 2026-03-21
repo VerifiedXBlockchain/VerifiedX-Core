@@ -273,15 +273,22 @@ namespace ReserveBlockCore.Beacon
             string buff_Length = "";
             while ((b = ns.ReadByte()) != 4)
             {
+                if (b == -1)
+                    throw new IOException("Connection closed while reading stream length.");
                 buff_Length += (char)b;
+                if (buff_Length.Length > 10)
+                    throw new FormatException($"Stream length prefix too long (possible malformed data): '{buff_Length}'");
             }
-            int data_Length = Convert.ToInt32(buff_Length);
+            if (!int.TryParse(buff_Length, out int data_Length) || data_Length < 0)
+                throw new FormatException($"Invalid stream length value: '{buff_Length}'");
             data_buff = new byte[data_Length];
             int byte_Read = 0;
             int byte_Offset = 0;
             while (byte_Offset < data_Length)
             {
                 byte_Read = ns.Read(data_buff, byte_Offset, data_Length - byte_Offset);
+                if (byte_Read == 0)
+                    throw new IOException("Connection closed while reading stream data.");
                 byte_Offset += byte_Read;
             }
 
