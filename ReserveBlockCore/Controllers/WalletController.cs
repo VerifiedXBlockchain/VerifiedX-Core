@@ -627,7 +627,8 @@ namespace ReserveBlockCore.Controllers
         // ═══════════════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Create a shielded address (zfx_) derived from the local HD wallet seed.
+        /// Create a shielded address (zfx_) derived from the account's private key.
+        /// Works for both single accounts and HD-derived accounts.
         /// <paramref name="address"/> is the transparent VFX address to associate.
         /// <paramref name="password"/> protects the spending key at rest (min 8 chars).
         /// </summary>
@@ -1122,6 +1123,7 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
   <button class='tab-btn' onclick='switchTab(""vbtc"",this)'>vBTC</button>
   <button class='tab-btn' onclick='switchTab(""btc"",this)'>Bitcoin</button>
   <button class='tab-btn' onclick='switchTab(""history"",this)'>History</button>
+  <button class='tab-btn' onclick='switchTab(""privacy"",this)'>&#128274; Privacy</button>
 </nav>
 <main class='main'>
   <!-- Overview -->
@@ -1159,6 +1161,36 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
   <div id='p-history' class='panel'>
     <div class='sec-hdr'><span class='sec-ttl'>Transaction History</span></div>
     <div id='hist-content'><div class='ld'><span class='spin'></span>Loading transactions...</div></div>
+  </div>
+  <!-- Privacy -->
+  <div id='p-privacy' class='panel'>
+    <div id='priv-hero' class='bal-hero' style='background:linear-gradient(135deg,#161b22 0%,#1a1833 100%)'>
+      <div class='bal-main'>
+        <div class='bal-lbl'>&#128274; Shielded VFX Balance</div>
+        <div class='bal-num' id='priv-bal-num'>-- <span>VFX</span></div>
+        <div id='priv-notes' class='muted' style='font-size:12px;margin-top:4px'></div>
+        <div id='priv-zfx-addr' class='bal-addr'></div>
+      </div>
+      <div style='display:flex;flex-direction:column;gap:8px'>
+        <button class='send-btn' onclick='openCreateZfx()' style='background:linear-gradient(135deg,#6e40c9,#bc8cff)'>+ Create Shielded Address</button>
+        <button class='send-btn' onclick='openShield()'>&#8595; Shield VFX</button>
+      </div>
+    </div>
+    <div id='priv-zfx-sel-wrap' style='margin-bottom:16px;display:none'>
+      <div class='form-grp'>
+        <label>Shielded Address</label>
+        <select id='priv-zfx-sel' class='addr-sel' onchange='onZfxChange()' style='max-width:600px'><option value=''>No shielded addresses</option></select>
+      </div>
+    </div>
+    <div id='priv-actions' style='display:none;margin-bottom:20px'>
+      <div class='nft-actions'>
+        <button class='act-btn prim' onclick='openUnshield()'>&#8593; Unshield</button>
+        <button class='act-btn prim' onclick='openPrivTransfer()'>&#8596; Private Transfer</button>
+        <button class='act-btn sec' onclick='doScanZfx()'>&#128269; Scan for Notes</button>
+      </div>
+    </div>
+    <div class='sec-hdr'><span class='sec-ttl'>System Status</span></div>
+    <div id='priv-status-content'><div class='ld'><span class='spin'></span>Loading privacy status...</div></div>
   </div>
 </main>
 
@@ -1340,6 +1372,121 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
   </div>
 </div>
 
+<!-- Create Shielded Address Modal -->
+<div class='overlay' id='czfx-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#128274; Create Shielded Address</div>
+      <button class='modal-close' onclick='closeCZfx()'>&#215;</button>
+    </div>
+    <div class='form-grp'>
+      <label>Transparent VFX Address</label>
+      <select id='czfx-addr' class='form-inp' style='cursor:pointer'></select>
+    </div>
+    <div class='form-grp'>
+      <label>Password (min 8 chars, protects spending key)</label>
+      <input class='form-inp' id='czfx-pwd' type='password' placeholder='Enter password...'>
+    </div>
+    <div style='padding:12px;background:rgba(188,140,255,.1);border:1px solid rgba(188,140,255,.2);border-radius:8px;font-size:13px;color:var(--purple);margin-bottom:12px'>
+      This derives a <code>zfx_</code> shielded address from your account. The password encrypts your spending key at rest.
+    </div>
+    <div class='msg' id='czfx-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeCZfx()'>Cancel</button>
+      <button class='btn-prim' id='czfx-btn' onclick='doCreateZfx()'>Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Shield VFX Modal -->
+<div class='overlay' id='shield-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8595; Shield VFX (T&#8594;Z)</div>
+      <button class='modal-close' onclick='closeShield()'>&#215;</button>
+    </div>
+    <div class='form-grp'>
+      <label>From Transparent Address</label>
+      <select id='sh-from' class='form-inp' style='cursor:pointer'></select>
+    </div>
+    <div class='form-grp'>
+      <label>To Shielded Address (zfx_)</label>
+      <input class='form-inp' id='sh-zfx' type='text' placeholder='zfx_...'>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (VFX)</label>
+      <input class='form-inp' id='sh-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='msg' id='sh-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeShield()'>Cancel</button>
+      <button class='btn-prim' id='sh-btn' onclick='doShield()'>Shield</button>
+    </div>
+  </div>
+</div>
+
+<!-- Unshield VFX Modal -->
+<div class='overlay' id='unshield-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8593; Unshield VFX (Z&#8594;T)</div>
+      <button class='modal-close' onclick='closeUnshield()'>&#215;</button>
+    </div>
+    <div class='form-grp'>
+      <label>From Shielded Address</label>
+      <input class='form-inp' id='ush-zfx' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>To Transparent Address</label>
+      <select id='ush-to' class='form-inp' style='cursor:pointer'></select>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (VFX)</label>
+      <input class='form-inp' id='ush-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='form-grp'>
+      <label>Spending Password</label>
+      <input class='form-inp' id='ush-pwd' type='password' placeholder='Password used when creating shielded address'>
+    </div>
+    <div class='msg' id='ush-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeUnshield()'>Cancel</button>
+      <button class='btn-prim' id='ush-btn' onclick='doUnshield()'>Unshield</button>
+    </div>
+  </div>
+</div>
+
+<!-- Private Transfer Modal -->
+<div class='overlay' id='ptx-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8596; Private Transfer (Z&#8594;Z)</div>
+      <button class='modal-close' onclick='closePTx()'>&#215;</button>
+    </div>
+    <div class='form-grp'>
+      <label>From Shielded Address</label>
+      <input class='form-inp' id='ptx-from' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>To Shielded Address (zfx_)</label>
+      <input class='form-inp' id='ptx-to' type='text' placeholder='zfx_...'>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (VFX)</label>
+      <input class='form-inp' id='ptx-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='form-grp'>
+      <label>Spending Password</label>
+      <input class='form-inp' id='ptx-pwd' type='password' placeholder='Password used when creating shielded address'>
+    </div>
+    <div class='msg' id='ptx-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closePTx()'>Cancel</button>
+      <button class='btn-prim' id='ptx-btn' onclick='doPrivTransfer()'>Send</button>
+    </div>
+  </div>
+</div>
+
 <!-- Send BTC Modal -->
 <div class='overlay' id='btc-overlay'>
   <div class='modal'>
@@ -1441,6 +1588,7 @@ function loadTab(tab){
   else if(tab==='vbtc')loadVBTC();
   else if(tab==='btc')loadBTC();
   else if(tab==='history')loadHistory();
+  else if(tab==='privacy')loadPrivacy();
 }
 
 /* ---- Overview ---- */
@@ -1891,6 +2039,268 @@ window.doSendBTC=function(){
       btn.disabled=false;btn.textContent='Send BTC';
       showMsg('btc-s-msg',e.message||'Request failed.','err');
     });
+};
+
+/* ---- Privacy ---- */
+var knownZfx=[];var selZfx=null;
+
+function loadPrivacy(){
+  loadPlonkAndPool();
+  if(knownZfx.length>0){
+    loadZfxBalance(selZfx||knownZfx[0]);
+  }else{
+    el('priv-bal-num').innerHTML='-- <span>VFX</span>';
+    el('priv-notes').textContent='No shielded address created yet';
+    el('priv-zfx-addr').textContent='';
+    el('priv-actions').style.display='none';
+    el('priv-zfx-sel-wrap').style.display='none';
+  }
+}
+
+function loadPlonkAndPool(){
+  var html='';
+  Promise.all([
+    fetch('/wallet/api/privacy/plonkStatus').then(function(r){return r.json();}).catch(function(){return null;}),
+    fetch('/wallet/api/privacy/poolState').then(function(r){return r.json();}).catch(function(){return null;})
+  ]).then(function(results){
+    var plonk=results[0];var pool=results[1];
+    html+='<div class=""stat-row"">';
+    if(plonk&&plonk.success){
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Proof Verification</div><div class=""stat-val '+(plonk.proofVerificationImplemented?'grn':'red')+'"">'+(plonk.proofVerificationImplemented?'Available':'Unavailable')+'</div></div>';
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Proof Proving</div><div class=""stat-val '+(plonk.proofProvingImplemented?'grn':'org')+'"">'+(plonk.proofProvingImplemented?'Available':'Unavailable')+'</div></div>';
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Enforce PLONK</div><div class=""stat-val '+(plonk.enforcePlonkProofsForZk?'grn':'org')+'"">'+(plonk.enforcePlonkProofsForZk?'Yes':'No')+'</div></div>';
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Native Caps</div><div class=""stat-val acc"">'+plonk.nativeCapabilities+'</div></div>';
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Params Mirror</div><div class=""stat-val acc"">'+(plonk.paramsBytesMirrored>0?Math.round(plonk.paramsBytesMirrored/1024)+' KB':'None')+'</div></div>';
+    }else{
+      html+='<div class=""stat-card""><div class=""stat-lbl"">PLONK Status</div><div class=""stat-val red"">Error</div></div>';
+    }
+    if(pool&&pool.success){
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Pool Asset</div><div class=""stat-val acc"">'+esc(pool.assetType)+'</div></div>';
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Total Commitments</div><div class=""stat-val grn"">'+pool.totalCommitments+'</div></div>';
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Shielded Supply</div><div class=""stat-val org"">'+fmtBal(pool.totalShieldedSupply)+' VFX</div></div>';
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Last Update</div><div class=""stat-val acc"">#'+pool.lastUpdateHeight+'</div></div>';
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Merkle Root</div><div class=""stat-val muted"" style=""font-size:11px;word-break:break-all"">'+(pool.currentMerkleRoot?shn(pool.currentMerkleRoot,20):'Empty')+'</div></div>';
+    }else{
+      html+='<div class=""stat-card""><div class=""stat-lbl"">Pool State</div><div class=""stat-val red"">Error</div></div>';
+    }
+    html+='</div>';
+    el('priv-status-content').innerHTML=html;
+  });
+}
+
+function loadZfxBalance(zfx){
+  if(!zfx)return;
+  selZfx=zfx;
+  el('priv-zfx-addr').textContent=zfx;
+  fetch('/wallet/api/privacy/balance/'+encodeURIComponent(zfx))
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.success){
+        el('priv-bal-num').innerHTML=fmtBal(d.vfxShieldedBalance)+'<span>VFX</span>';
+        el('priv-notes').textContent=d.unspentNotes+' unspent note'+(d.unspentNotes!==1?'s':'');
+      }else{
+        el('priv-bal-num').innerHTML='-- <span>VFX</span>';
+        el('priv-notes').textContent=d.message||'Error';
+      }
+    }).catch(function(){
+      el('priv-bal-num').innerHTML='-- <span>VFX</span>';
+      el('priv-notes').textContent='Failed to load balance';
+    });
+}
+
+function addZfxAddr(zfx){
+  if(knownZfx.indexOf(zfx)===-1)knownZfx.push(zfx);
+  updateZfxSel();
+  selZfx=zfx;
+  el('priv-zfx-sel').value=zfx;
+  el('priv-zfx-sel-wrap').style.display='block';
+  el('priv-actions').style.display='block';
+}
+
+function updateZfxSel(){
+  var sel=el('priv-zfx-sel');
+  sel.innerHTML='';
+  knownZfx.forEach(function(z){
+    var opt=document.createElement('option');
+    opt.value=z;opt.textContent=z;
+    sel.appendChild(opt);
+  });
+}
+
+window.onZfxChange=function(){
+  selZfx=el('priv-zfx-sel').value;
+  loadZfxBalance(selZfx);
+};
+
+function populateAddrSelect(selId){
+  var sel=el(selId);sel.innerHTML='';
+  accounts.forEach(function(a){
+    var opt=document.createElement('option');
+    opt.value=a.address;
+    opt.textContent=a.address.substring(0,20)+'... | '+fmtBal(a.balance)+' VFX';
+    sel.appendChild(opt);
+  });
+}
+
+/* ---- Create Shielded Address ---- */
+window.openCreateZfx=function(){
+  populateAddrSelect('czfx-addr');
+  el('czfx-pwd').value='';
+  hideMsg('czfx-msg');
+  el('czfx-overlay').classList.add('on');
+};
+window.closeCZfx=function(){el('czfx-overlay').classList.remove('on');};
+
+window.doCreateZfx=function(){
+  var addr=el('czfx-addr').value;
+  var pwd=el('czfx-pwd').value;
+  if(!addr){showMsg('czfx-msg','Select a VFX address.','err');return;}
+  if(!pwd||pwd.length<8){showMsg('czfx-msg','Password must be at least 8 characters.','err');return;}
+  var btn=el('czfx-btn');
+  btn.disabled=true;btn.textContent='Creating...';
+  fetch('/wallet/api/privacy/createShieldedAddress/'+encodeURIComponent(addr)+'/'+encodeURIComponent(pwd))
+    .then(function(r){return r.json();}).then(function(d){
+      btn.disabled=false;btn.textContent='Create';
+      if(d.success){
+        showMsg('czfx-msg','Shielded address created: '+d.zfxAddress,'ok');
+        addZfxAddr(d.zfxAddress);
+        loadZfxBalance(d.zfxAddress);
+        setTimeout(function(){closeCZfx();},2500);
+      }else{
+        showMsg('czfx-msg',d.message||'Creation failed.','err');
+      }
+    }).catch(function(e){
+      btn.disabled=false;btn.textContent='Create';
+      showMsg('czfx-msg',e.message||'Request failed.','err');
+    });
+};
+
+/* ---- Shield VFX ---- */
+window.openShield=function(){
+  populateAddrSelect('sh-from');
+  el('sh-zfx').value=selZfx||'';
+  el('sh-amount').value='';
+  hideMsg('sh-msg');
+  el('shield-overlay').classList.add('on');
+};
+window.closeShield=function(){el('shield-overlay').classList.remove('on');};
+
+window.doShield=function(){
+  var from=el('sh-from').value;
+  var zfx=el('sh-zfx').value.trim();
+  var amt=el('sh-amount').value.trim();
+  if(!from||!zfx||!amt){showMsg('sh-msg','Please fill all fields.','err');return;}
+  if(!zfx.startsWith('zfx_')){showMsg('sh-msg','Shielded address must start with zfx_','err');return;}
+  var btn=el('sh-btn');
+  btn.disabled=true;btn.textContent='Shielding...';
+  fetch('/wallet/api/privacy/shield/'+encodeURIComponent(from)+'/'+encodeURIComponent(zfx)+'/'+encodeURIComponent(amt))
+    .then(function(r){return r.json();}).then(function(d){
+      btn.disabled=false;btn.textContent='Shield';
+      if(d.success){
+        showMsg('sh-msg','Shield TX broadcast! Hash: '+(d.hash||''),'ok');
+        addZfxAddr(zfx);
+        setTimeout(function(){closeShield();loadAccounts();loadZfxBalance(zfx);},2500);
+      }else{
+        showMsg('sh-msg',d.message||'Shield failed.','err');
+      }
+    }).catch(function(e){
+      btn.disabled=false;btn.textContent='Shield';
+      showMsg('sh-msg',e.message||'Request failed.','err');
+    });
+};
+
+/* ---- Unshield VFX ---- */
+window.openUnshield=function(){
+  if(!selZfx){showMsg('priv-notes','No shielded address selected.','err');return;}
+  el('ush-zfx').value=selZfx;
+  populateAddrSelect('ush-to');
+  el('ush-amount').value='';
+  el('ush-pwd').value='';
+  hideMsg('ush-msg');
+  el('unshield-overlay').classList.add('on');
+};
+window.closeUnshield=function(){el('unshield-overlay').classList.remove('on');};
+
+window.doUnshield=function(){
+  var zfx=el('ush-zfx').value;
+  var to=el('ush-to').value;
+  var amt=el('ush-amount').value.trim();
+  var pwd=el('ush-pwd').value;
+  if(!zfx||!to||!amt){showMsg('ush-msg','Please fill all fields.','err');return;}
+  var btn=el('ush-btn');
+  btn.disabled=true;btn.textContent='Unshielding...';
+  var url='/wallet/api/privacy/unshield/'+encodeURIComponent(zfx)+'/'+encodeURIComponent(to)+'/'+encodeURIComponent(amt);
+  if(pwd)url+='?password='+encodeURIComponent(pwd);
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Unshield';
+    if(d.success){
+      showMsg('ush-msg','Unshield TX broadcast! Hash: '+(d.hash||''),'ok');
+      setTimeout(function(){closeUnshield();loadAccounts();loadZfxBalance(zfx);},2500);
+    }else{
+      showMsg('ush-msg',d.message||'Unshield failed.','err');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.textContent='Unshield';
+    showMsg('ush-msg',e.message||'Request failed.','err');
+  });
+};
+
+/* ---- Private Transfer ---- */
+window.openPrivTransfer=function(){
+  if(!selZfx){return;}
+  el('ptx-from').value=selZfx;
+  el('ptx-to').value='';
+  el('ptx-amount').value='';
+  el('ptx-pwd').value='';
+  hideMsg('ptx-msg');
+  el('ptx-overlay').classList.add('on');
+};
+window.closePTx=function(){el('ptx-overlay').classList.remove('on');};
+
+window.doPrivTransfer=function(){
+  var from=el('ptx-from').value;
+  var to=el('ptx-to').value.trim();
+  var amt=el('ptx-amount').value.trim();
+  var pwd=el('ptx-pwd').value;
+  if(!from||!to||!amt){showMsg('ptx-msg','Please fill all fields.','err');return;}
+  if(!to.startsWith('zfx_')){showMsg('ptx-msg','Recipient must be a zfx_ address.','err');return;}
+  var btn=el('ptx-btn');
+  btn.disabled=true;btn.textContent='Sending...';
+  var url='/wallet/api/privacy/transfer/'+encodeURIComponent(from)+'/'+encodeURIComponent(to)+'/'+encodeURIComponent(amt);
+  if(pwd)url+='?password='+encodeURIComponent(pwd);
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Send';
+    if(d.success){
+      showMsg('ptx-msg','Private transfer broadcast! Hash: '+(d.hash||''),'ok');
+      setTimeout(function(){closePTx();loadZfxBalance(from);},2500);
+    }else{
+      showMsg('ptx-msg',d.message||'Transfer failed.','err');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.textContent='Send';
+    showMsg('ptx-msg',e.message||'Request failed.','err');
+  });
+};
+
+/* ---- Scan for Notes ---- */
+window.doScanZfx=function(){
+  if(!selZfx)return;
+  var scanBtn=document.querySelector('#priv-actions .act-btn.sec');
+  if(scanBtn){scanBtn.disabled=true;scanBtn.textContent='Scanning...';}
+  var url='/wallet/api/privacy/scan/'+encodeURIComponent(selZfx);
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan for Notes';}
+    if(d.success){
+      var msg='Scanned '+d.blocksScanned+' blocks, '+d.transactionsScanned+' TXs. Found '+d.newNotesFound+' new note'+(d.newNotesFound!==1?'s':'')+'.';
+      el('priv-notes').textContent=msg;
+      loadZfxBalance(selZfx);
+    }else{
+      el('priv-notes').textContent=d.message||'Scan failed.';
+    }
+  }).catch(function(){
+    if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan for Notes';}
+    el('priv-notes').textContent='Scan request failed.';
+  });
 };
 
 /* ---- Helpers ---- */
