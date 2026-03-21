@@ -10,6 +10,8 @@ namespace ReserveBlockCore.Privacy
     {
         private static int _verificationProbe = -1;
         private static int _proveProbe = -1;
+        private static int _v1CircuitsProbe = -1;
+        private static int _v1ProveProbe = -1;
 
         /// <summary>Environment variable pointing at a universal-params file (optional until Phase 4).</summary>
         public const string ParamsPathEnvironmentVariable = "VFX_PLONK_PARAMS_PATH";
@@ -25,11 +27,15 @@ namespace ReserveBlockCore.Privacy
                 var caps = PlonkNative.plonk_capabilities();
                 _verificationProbe = (caps & PlonkNative.CapVerifyV1) != 0 ? 1 : 0;
                 _proveProbe = (caps & PlonkNative.CapProveV1) != 0 ? 1 : 0;
+                _v1CircuitsProbe = (caps & PlonkNative.CapV1Circuits) != 0 ? 1 : 0;
+                _v1ProveProbe = (caps & PlonkNative.CapV1Prove) != 0 ? 1 : 0;
             }
             catch
             {
                 _verificationProbe = 0;
                 _proveProbe = 0;
+                _v1CircuitsProbe = 0;
+                _v1ProveProbe = 0;
             }
         }
 
@@ -73,5 +79,17 @@ namespace ReserveBlockCore.Privacy
         /// Whether v0 native proving (<see cref="PlonkNative.plonk_prove_v0"/>) is available — <b>VXPLNK02</b> params with prover key loaded.
         /// </summary>
         public static bool IsProofProvingImplemented => _proveProbe == 1;
+
+        /// <summary>
+        /// Whether v1 real circuit verification keys are loaded (<b>VXPLNK03</b>). When true, <see cref="PlonkNative.plonk_verify"/>
+        /// dispatches to real shield/transfer/unshield/fee circuit verifiers instead of the v0 digest-binding stub.
+        /// </summary>
+        public static bool IsV1CircuitsLoaded => _v1CircuitsProbe == 1;
+
+        /// <summary>
+        /// Whether v1 real circuit prover keys are loaded (<b>VXPLNK03</b> with prover keys).
+        /// When true, <see cref="PlonkProverV1"/> can generate real shield/transfer/unshield/fee proofs.
+        /// </summary>
+        public static bool IsV1ProvingAvailable => _v1ProveProbe == 1;
     }
 }

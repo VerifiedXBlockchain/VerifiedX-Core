@@ -61,6 +61,10 @@ namespace ReserveBlockCore.Models.Privacy
         [JsonProperty("fee_input_spent_tree_position")]
         public long? FeeInputSpentTreePosition { get; set; }
 
+        /// <summary>Optional note hash (Base64, 32 bytes) for the VFX fee change output.</summary>
+        [JsonProperty("fee_out_note_hash")]
+        public string? FeeOutputNoteHashB64 { get; set; }
+
         [JsonProperty("transparent_input")]
         public string? TransparentInput { get; set; }
 
@@ -333,6 +337,13 @@ namespace ReserveBlockCore.Models.Privacy
         /// <summary>G1 compressed Pedersen commitment, Base64.</summary>
         [JsonProperty("c")]
         public string CommitmentB64 { get; set; } = "";
+
+        /// <summary>
+        /// Poseidon note hash (32 bytes, Base64): <c>Poseidon(amount_scaled, randomness)</c>.
+        /// Used as the Merkle leaf and for in-circuit amount binding.
+        /// </summary>
+        [JsonProperty("nh")]
+        public string? NoteHashB64 { get; set; }
 
         /// <summary>Optional sealed note ciphertext for this output (Base64) — <see cref="ShieldedNoteEncryption"/>.</summary>
         [JsonProperty("note")]

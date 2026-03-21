@@ -64,6 +64,11 @@ namespace ReserveBlockCore.Privacy
                 return false;
             }
 
+            // Compute note hash for the output (v2 Merkle leaf + in-circuit amount binding)
+            string? noteHashB64 = null;
+            if (PrivacyPedersenAmount.TryToScaledU64(shieldAmount, out var scaledAmt, out _))
+                noteHashB64 = NoteHashService.ComputeBase64(scaledAmt, r32);
+
             var merkle = ShieldedPoolService.GetCurrentMerkleRootB64(AssetVfx, privacyDb);
             var payload = new PrivateTxPayload
             {
@@ -77,6 +82,7 @@ namespace ReserveBlockCore.Privacy
                     {
                         Index = 0,
                         CommitmentB64 = Convert.ToBase64String(g1),
+                        NoteHashB64 = noteHashB64,
                         EncryptedNoteB64 = Convert.ToBase64String(sealedNote)
                     }
                 },
@@ -155,23 +161,13 @@ namespace ReserveBlockCore.Privacy
             var positions = new List<long>();
             foreach (var inp in inputs.OrderBy(x => x.TreePosition))
             {
-                byte[] g1;
-                try
+                var nh = DeriveNullifierFromInput(inp, keys.ViewingKey32, out var nB64, out var nErr);
+                if (nB64 == null)
                 {
-                    g1 = Convert.FromBase64String(inp.Commitment);
-                }
-                catch
-                {
-                    error = "Input commitment Base64 invalid.";
+                    error = nErr ?? "Nullifier derivation failed.";
                     return false;
                 }
-                if (g1.Length != PlonkNative.G1CompressedSize)
-                {
-                    error = "Input commitment has wrong length.";
-                    return false;
-                }
-                var n = NullifierService.DeriveNullifier(keys.ViewingKey32, g1, (ulong)inp.TreePosition);
-                nulls.Add(Convert.ToBase64String(n));
+                nulls.Add(nB64);
                 positions.Add(inp.TreePosition);
             }
 
@@ -184,6 +180,10 @@ namespace ReserveBlockCore.Privacy
                     error = perr;
                     return false;
                 }
+                string? chNoteHash = null;
+                if (PrivacyPedersenAmount.TryToScaledU64(change, out var chScaled, out _))
+                    chNoteHash = NoteHashService.ComputeBase64(chScaled, rCh);
+
                 var plainCh = PrivacyPedersenAmount.CreatePlainNote(change, rCh, AssetVfx);
                 byte[] sealedCh;
                 try
@@ -199,6 +199,7 @@ namespace ReserveBlockCore.Privacy
                 {
                     Index = idx++,
                     CommitmentB64 = Convert.ToBase64String(gCh),
+                    NoteHashB64 = chNoteHash,
                     EncryptedNoteB64 = Convert.ToBase64String(sealedCh)
                 });
             }
@@ -283,23 +284,13 @@ namespace ReserveBlockCore.Privacy
             var positions = new List<long>();
             foreach (var inp in inputs.OrderBy(x => x.TreePosition))
             {
-                byte[] g1;
-                try
+                DeriveNullifierFromInput(inp, keys.ViewingKey32, out var nB64, out var nErr);
+                if (nB64 == null)
                 {
-                    g1 = Convert.FromBase64String(inp.Commitment);
-                }
-                catch
-                {
-                    error = "Input commitment Base64 invalid.";
+                    error = nErr ?? "Nullifier derivation failed.";
                     return false;
                 }
-                if (g1.Length != PlonkNative.G1CompressedSize)
-                {
-                    error = "Input commitment has wrong length.";
-                    return false;
-                }
-                var n = NullifierService.DeriveNullifier(keys.ViewingKey32, g1, (ulong)inp.TreePosition);
-                nulls.Add(Convert.ToBase64String(n));
+                nulls.Add(nB64);
                 positions.Add(inp.TreePosition);
             }
 
@@ -320,12 +311,18 @@ namespace ReserveBlockCore.Privacy
                 return false;
             }
 
+            // Compute note hash for payment output
+            string? payNoteHash = null;
+            if (PrivacyPedersenAmount.TryToScaledU64(paymentAmount, out var payScaled, out _))
+                payNoteHash = NoteHashService.ComputeBase64(payScaled, rPay);
+
             var outs = new List<PrivateShieldedOutput>
             {
                 new()
                 {
                     Index = 0,
                     CommitmentB64 = Convert.ToBase64String(gPay),
+                    NoteHashB64 = payNoteHash,
                     EncryptedNoteB64 = Convert.ToBase64String(sealedPay)
                 }
             };
@@ -337,6 +334,10 @@ namespace ReserveBlockCore.Privacy
                     error = perr2;
                     return false;
                 }
+                string? chNoteHash = null;
+                if (PrivacyPedersenAmount.TryToScaledU64(change, out var chScaled, out _))
+                    chNoteHash = NoteHashService.ComputeBase64(chScaled, rCh);
+
                 var plainCh = PrivacyPedersenAmount.CreatePlainNote(change, rCh, AssetVfx);
                 try
                 {
@@ -345,6 +346,7 @@ namespace ReserveBlockCore.Privacy
                     {
                         Index = 1,
                         CommitmentB64 = Convert.ToBase64String(gCh),
+                        NoteHashB64 = chNoteHash,
                         EncryptedNoteB64 = Convert.ToBase64String(sealedCh)
                     });
                 }
@@ -395,6 +397,51 @@ namespace ReserveBlockCore.Privacy
                 return false;
             }
             return true;
+        }
+
+        // ─── Shared helpers ────────────────────────────────────────────
+
+        /// <summary>
+        /// Derives a nullifier for the given input using v2 note-hash derivation (preferred) with
+        /// fallback to legacy G1-based derivation when the note hash cannot be computed.
+        /// </summary>
+        private static byte[]? DeriveNullifierFromInput(UnspentCommitment inp, byte[] viewingKey32, out string? nullifierB64, out string? error)
+        {
+            nullifierB64 = null;
+            error = null;
+
+            // v2 path: derive from note hash (amount + randomness)
+            if (inp.Randomness.Length == PlonkNative.ScalarSize
+                && PrivacyPedersenAmount.TryToScaledU64(inp.Amount, out var scaled, out _))
+            {
+                var nh = NoteHashService.Compute(scaled, inp.Randomness);
+                if (nh != null && nh.Length == PlonkNative.ScalarSize)
+                {
+                    var n = NullifierService.DeriveFromNoteHash(viewingKey32, nh, (ulong)inp.TreePosition);
+                    nullifierB64 = Convert.ToBase64String(n);
+                    return n;
+                }
+            }
+
+            // Legacy fallback: derive from G1 commitment bytes
+            byte[] g1;
+            try
+            {
+                g1 = Convert.FromBase64String(inp.Commitment);
+            }
+            catch
+            {
+                error = "Input commitment Base64 invalid.";
+                return null;
+            }
+            if (g1.Length != PlonkNative.G1CompressedSize)
+            {
+                error = "Input commitment has wrong length.";
+                return null;
+            }
+            var nLegacy = NullifierService.DeriveNullifier(viewingKey32, g1, (ulong)inp.TreePosition);
+            nullifierB64 = Convert.ToBase64String(nLegacy);
+            return nLegacy;
         }
     }
 }
