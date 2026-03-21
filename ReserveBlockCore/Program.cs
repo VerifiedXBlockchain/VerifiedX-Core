@@ -353,7 +353,10 @@ namespace ReserveBlockCore
 
             StartupService.StartupDatabase();// initializes databases
 
-            _ = PLONKSetup.TryLoadParamsFromEnvironment();
+            // PLONK params: auto-download if not present, then load into native FFI
+            var plonkParamsPath = await PLONKParamsDownloader.EnsureParamsAvailableAsync();
+            if (!string.IsNullOrEmpty(plonkParamsPath))
+                PLONKSetup.TryLoadParamsFile(plonkParamsPath);
             PLONKSetup.RefreshVerificationCapability();
 
             await DbContext.CheckPoint(); //checkpoints db log files

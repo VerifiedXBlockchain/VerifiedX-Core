@@ -194,6 +194,42 @@ namespace ReserveBlockCore.Utilities
         }
 
 
+        public static string GetPlonkParamsPath()
+        {
+            string path = "";
+
+            var paramsLocation = Globals.IsTestNet != true ? "PlonkParams" : "PlonkParamsTestNet";
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                string homeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                path = homeDirectory + Path.DirectorySeparatorChar + MainFolder.ToLower() + Path.DirectorySeparatorChar + paramsLocation + Path.DirectorySeparatorChar;
+            }
+            else
+            {
+                if (Debugger.IsAttached)
+                {
+                    path = Directory.GetCurrentDirectory() + Path.DirectorySeparatorChar + "DBs" + Path.DirectorySeparatorChar + paramsLocation + Path.DirectorySeparatorChar;
+                }
+                else
+                {
+                    path = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + Path.DirectorySeparatorChar + MainFolder + Path.DirectorySeparatorChar + paramsLocation + Path.DirectorySeparatorChar;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(Globals.CustomPath))
+            {
+                path = Globals.CustomPath + MainFolder + Path.DirectorySeparatorChar + paramsLocation + Path.DirectorySeparatorChar;
+            }
+
+            if (!Directory.Exists(path))
+            {
+                Directory.CreateDirectory(path);
+            }
+
+            return path;
+        }
+
         public static string GetTrilliumPath()
         {
             var trilliumLocation = Globals.IsTestNet != true ? "Trillium" : "TrilliumTestNet";

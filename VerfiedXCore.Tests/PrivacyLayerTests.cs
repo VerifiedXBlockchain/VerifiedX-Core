@@ -243,7 +243,7 @@ namespace VerfiedXCore.Tests
             var rec1 = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
                 .FindOne(x => x.AssetType == "VFX" && x.TreePosition == 1);
             Assert.NotNull(rec1);
-            var leaf = CommitmentMerkleTree.LeafDigest(Convert.FromBase64String(rec1!.Commitment));
+            var leaf = CommitmentMerkleTree.LeafDigestLegacy(Convert.FromBase64String(rec1!.Commitment));
 
             Assert.True(CommitmentMerkleTree.VerifyInclusionProof(leaf, 1, 3, proof, root));
             Assert.Equal(0, PrivacyMerklePolicy.GetExpectedProofSizeBytes(1));

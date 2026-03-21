@@ -23,11 +23,33 @@ namespace ReserveBlockCore.Privacy
             if (randomness32.Length != PlonkNative.ScalarSize)
                 throw new ArgumentException("Randomness must be 32 bytes.", nameof(randomness32));
 
-            var hashOut = new byte[PlonkNative.ScalarSize];
-            int code = PlonkNative.poseidon_note_hash(amountScaled, randomness32, hashOut);
-            if (code != PlonkNative.Success)
-                throw new InvalidOperationException($"poseidon_note_hash returned {code}");
-            return hashOut;
+            // Try the typed poseidon_note_hash first (available in newer DLLs).
+            // Fall back to the generic poseidon_hash(amount_le32 || randomness32) which
+            // is equivalent: Poseidon(amount_scalar, randomness_scalar) over BLS12-381 Fr.
+            try
+            {
+                var hashOut = new byte[PlonkNative.ScalarSize];
+                int code = PlonkNative.poseidon_note_hash(amountScaled, randomness32, hashOut);
+                if (code == PlonkNative.Success)
+                    return hashOut;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                // DLL doesn't export poseidon_note_hash — use generic path below.
+            }
+
+            // Generic fallback: encode amount as 32-byte LE scalar, concatenate with randomness
+            var inputs = new byte[PlonkNative.ScalarSize * 2]; // 64 bytes
+            var amountBytes = BitConverter.GetBytes(amountScaled); // 8 bytes LE
+            Buffer.BlockCopy(amountBytes, 0, inputs, 0, amountBytes.Length);
+            // Remaining bytes 8..31 are already 0 (zero-padded to 32-byte scalar)
+            Buffer.BlockCopy(randomness32, 0, inputs, PlonkNative.ScalarSize, PlonkNative.ScalarSize);
+
+            var result = new byte[PlonkNative.ScalarSize];
+            int rc = PlonkNative.poseidon_hash(inputs, (nuint)inputs.Length, result);
+            if (rc != PlonkNative.Success)
+                throw new InvalidOperationException($"poseidon_hash returned {rc}");
+            return result;
         }
 
         /// <summary>

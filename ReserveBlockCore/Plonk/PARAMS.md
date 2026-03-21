@@ -11,13 +11,14 @@
 
 ## Configuration
 
-- **Environment variable** `VFX_PLONK_PARAMS_PATH`: optional absolute path to a params file. Call `PLONKSetup.TryLoadParamsFromEnvironment()` during startup if you want zero config-file wiring.
-- **Versioning**: when you rotate SRS/params, bump a constant or config value in one place and document the expected filename in release notes so nodes stay compatible.
+- **Auto-download (default)**: on startup, [`PLONKParamsDownloader.EnsureParamsAvailableAsync`](../Privacy/PLONKParamsDownloader.cs) checks for a cached params file in `{DataPath}/PlonkParams/vfx_plonk_v1.params`. If missing, it downloads from [GitHub Releases](https://github.com/VerifiedXBlockchain/plonk/releases/download/v1/vfx_plonk_v1.params) (~253 MB, one-time), verifies the SHA-256 hash (`e4ea423e068eb949c5b1321908da1b263fd472700272e879058dc5f55166d85c`), and caches permanently. Progress is printed to console.
+- **Environment variable** `VFX_PLONK_PARAMS_PATH`: optional absolute path override. When set and the file exists, the auto-download is skipped and this path is used directly. Useful for CI, air-gapped nodes, or custom param builds.
+- **Versioning**: when you rotate SRS/params, bump the download URL, SHA-256 hash, and filename in [`PLONKParamsDownloader`](../Privacy/PLONKParamsDownloader.cs) and document the expected filename in release notes so nodes stay compatible.
 
 ## Operational checklist (when circuits exist)
 
 1. Run trusted setup (or import a known SRS) in the **`plonk`** repo; export the blob your verifier expects.
-2. Ship the file out-of-band or embed distribution policy (e.g. download URL + hash).
+2. Upload the params file to GitHub Releases (auto-download handles distribution).
 3. Ship real `plonk_verify` + proving keys from **`plonk`**; set the native **`PLONK_CAP_VERIFY_V1`** bit so [`PLONKSetup.IsProofVerificationImplemented`](../Privacy/PLONKSetup.cs) becomes true; optionally set [`Globals.EnforcePlonkProofsForZk`](../GlobalsPrivacy.cs) for strict ZK mempool rules.
 
 See also [`Plonk/README.md`](README.md) for native library layout.
