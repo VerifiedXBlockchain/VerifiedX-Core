@@ -3,12 +3,32 @@ using System.Diagnostics.CodeAnalysis;
 namespace ReserveBlockCore.Privacy
 {
     /// <summary>
-    /// Poseidon-based Merkle helpers (native). Leaf = Poseidon(G1 commitment bytes); parent = Poseidon(left||right).
+    /// Poseidon-based Merkle helpers (native). Leaf = Poseidon note hash (amount, randomness); parent = Poseidon(left||right).
     /// Proof format matches <c>plonk_ffi</c> <see cref="PlonkNative.merkle_tree_prove"/> (sibling digests bottom-up).
+    /// <para>
+    /// <b>v2 (note-hash leaves):</b> The Merkle leaf is <c>Poseidon(amount_scaled, randomness)</c> computed by
+    /// <see cref="NoteHashService"/>. This binds amounts to commitments in-circuit and prevents inflation attacks.
+    /// The legacy <see cref="LeafDigestLegacy"/> (Poseidon of G1 bytes) is retained for backward compatibility
+    /// during migration but should not be used for new commitments.
+    /// </para>
     /// </summary>
     public static class CommitmentMerkleTree
     {
-        public static byte[] LeafDigest(ReadOnlySpan<byte> g1CommitmentCompressed)
+        /// <summary>
+        /// Preferred leaf digest: the Poseidon note hash itself (already 32 bytes).
+        /// <para>Use <see cref="NoteHashService.Compute"/> to produce the note hash, then pass it here.</para>
+        /// </summary>
+        public static byte[] LeafDigest(ReadOnlySpan<byte> noteHash32)
+        {
+            if (noteHash32.Length != PlonkNative.ScalarSize)
+                throw new ArgumentException("Note hash must be 32 bytes.", nameof(noteHash32));
+            return noteHash32.ToArray();
+        }
+
+        /// <summary>
+        /// Legacy leaf digest: <c>Poseidon(G1 commitment bytes)</c>. Retained for backward compatibility only.
+        /// </summary>
+        public static byte[] LeafDigestLegacy(ReadOnlySpan<byte> g1CommitmentCompressed)
         {
             var buf = g1CommitmentCompressed.ToArray();
             var out32 = new byte[PlonkNative.ScalarSize];

@@ -37,6 +37,7 @@ namespace ReserveBlockCore.Privacy
         {
             var commitments = db.GetCollection<CommitmentRecord>(PRIV_COMMITMENTS);
             commitments.EnsureIndexSafe(x => x.Commitment, false);
+            commitments.EnsureIndexSafe(x => x.NoteHash, false);
             commitments.EnsureIndexSafe(x => x.AssetType, false);
             commitments.EnsureIndexSafe(x => x.TreePosition, false);
 

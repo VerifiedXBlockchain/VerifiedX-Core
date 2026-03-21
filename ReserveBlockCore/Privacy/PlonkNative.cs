@@ -58,6 +58,13 @@ namespace ReserveBlockCore.Privacy
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int nullifier_derive(byte[] viewingKey, byte[] commitment, ulong treePosition, byte[] nullifierOut);
 
+        /// <summary>
+        /// Compute Poseidon note hash: <c>note_hash = Poseidon(amount_scaled, randomness_fr)</c>.
+        /// This 32-byte digest is used as the Merkle leaf and for in-circuit amount binding.
+        /// </summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int poseidon_note_hash(ulong amountScaled, byte[] randomness, byte[] hashOut);
+
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_verify(byte circuitType, byte[] proof, nuint proofLen, byte[] publicInputs, nuint publicInputsLen);
 

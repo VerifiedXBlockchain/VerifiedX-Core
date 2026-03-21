@@ -60,6 +60,21 @@ namespace ReserveBlockCore.Privacy
                 }
                 if (g1.Length != PlonkNative.G1CompressedSize)
                     continue;
+
+                // v2: use note hash as Merkle leaf when available
+                if (!string.IsNullOrEmpty(o.NoteHashB64))
+                {
+                    try
+                    {
+                        var nh = Convert.FromBase64String(o.NoteHashB64);
+                        if (nh.Length == PlonkNative.ScalarSize)
+                        {
+                            store.AppendCommitment(g1, nh, height, ts);
+                            continue;
+                        }
+                    }
+                    catch { /* fall through to legacy */ }
+                }
                 store.AppendG1Commitment(g1, height, ts);
             }
 
@@ -149,7 +164,29 @@ namespace ReserveBlockCore.Privacy
                 {
                     var g = Convert.FromBase64String(payload.FeeOutputCommitmentB64);
                     if (g.Length == PlonkNative.G1CompressedSize)
-                        vfxStore.AppendG1Commitment(g, height, ts);
+                    {
+                        // v2: use fee output note hash when available
+                        if (!string.IsNullOrEmpty(payload.FeeOutputNoteHashB64))
+                        {
+                            try
+                            {
+                                var feeNh = Convert.FromBase64String(payload.FeeOutputNoteHashB64);
+                                if (feeNh.Length == PlonkNative.ScalarSize)
+                                {
+                                    vfxStore.AppendCommitment(g, feeNh, height, ts);
+                                }
+                                else
+                                {
+                                    vfxStore.AppendG1Commitment(g, height, ts);
+                                }
+                            }
+                            catch { vfxStore.AppendG1Commitment(g, height, ts); }
+                        }
+                        else
+                        {
+                            vfxStore.AppendG1Commitment(g, height, ts);
+                        }
+                    }
                 }
                 catch
                 {

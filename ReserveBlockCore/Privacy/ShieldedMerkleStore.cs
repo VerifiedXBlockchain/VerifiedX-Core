@@ -31,7 +31,10 @@ namespace ReserveBlockCore.Privacy
         private ILiteCollection<ShieldedPoolState> PoolState() =>
             _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
 
-        /// <summary>Replays leaves from <see cref="CommitmentRecord"/> ordered by <see cref="CommitmentRecord.TreePosition"/>.</summary>
+        /// <summary>
+        /// Replays leaves from <see cref="CommitmentRecord"/> ordered by <see cref="CommitmentRecord.TreePosition"/>.
+        /// Uses <see cref="CommitmentRecord.NoteHash"/> when available (v2); falls back to legacy G1 Poseidon digest.
+        /// </summary>
         public void LoadLeavesFromCommitments()
         {
             var col = Commitments();
@@ -39,11 +42,52 @@ namespace ReserveBlockCore.Privacy
             _leafDigests.Clear();
             foreach (var r in rows)
             {
-                var g1 = Convert.FromBase64String(r.Commitment);
-                _leafDigests.Add(CommitmentMerkleTree.LeafDigest(g1));
+                if (!string.IsNullOrEmpty(r.NoteHash))
+                {
+                    var nh = Convert.FromBase64String(r.NoteHash);
+                    _leafDigests.Add(CommitmentMerkleTree.LeafDigest(nh));
+                }
+                else
+                {
+                    // Legacy: Poseidon of G1 bytes
+                    var g1 = Convert.FromBase64String(r.Commitment);
+                    _leafDigests.Add(CommitmentMerkleTree.LeafDigestLegacy(g1));
+                }
             }
         }
 
+        /// <summary>
+        /// Appends a commitment with its Poseidon note hash as the Merkle leaf.
+        /// This is the preferred v2 path — the note hash binds amounts in-circuit.
+        /// </summary>
+        public long AppendCommitment(byte[] g1Compressed, byte[] noteHash32, long blockHeight, long timestamp)
+        {
+            if (g1Compressed == null || g1Compressed.Length != PlonkNative.G1CompressedSize)
+                throw new ArgumentException($"G1 commitment must be {PlonkNative.G1CompressedSize} bytes.", nameof(g1Compressed));
+            if (noteHash32 == null || noteHash32.Length != PlonkNative.ScalarSize)
+                throw new ArgumentException("Note hash must be 32 bytes.", nameof(noteHash32));
+
+            var pos = (long)_leafDigests.Count;
+            var rec = new CommitmentRecord
+            {
+                Commitment = Convert.ToBase64String(g1Compressed),
+                NoteHash = Convert.ToBase64String(noteHash32),
+                AssetType = _assetType,
+                TreePosition = pos,
+                BlockHeight = blockHeight,
+                Timestamp = timestamp,
+                IsSpent = false
+            };
+            Commitments().InsertSafe(rec);
+            _leafDigests.Add(CommitmentMerkleTree.LeafDigest(noteHash32));
+            RebuildAndPersistMerkleNodes();
+            return pos;
+        }
+
+        /// <summary>
+        /// Legacy: appends using G1 commitment bytes as leaf (Poseidon of G1).
+        /// Retained for backward compatibility during migration.
+        /// </summary>
         public long AppendG1Commitment(byte[] g1Compressed, long blockHeight, long timestamp)
         {
             if (g1Compressed == null || g1Compressed.Length != PlonkNative.G1CompressedSize)
@@ -60,7 +104,7 @@ namespace ReserveBlockCore.Privacy
                 IsSpent = false
             };
             Commitments().InsertSafe(rec);
-            _leafDigests.Add(CommitmentMerkleTree.LeafDigest(g1Compressed));
+            _leafDigests.Add(CommitmentMerkleTree.LeafDigestLegacy(g1Compressed));
             RebuildAndPersistMerkleNodes();
             return pos;
         }
