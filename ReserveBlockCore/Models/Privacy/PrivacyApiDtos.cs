@@ -49,6 +49,14 @@ namespace ReserveBlockCore.Models.Privacy
         public long ToHeight { get; set; }
     }
 
+    /// <summary>Wipes cached notes/balances and rescans from FromHeight to rebuild. Fixes corrupted balances.</summary>
+    public class ResyncShieldedWalletRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public long FromHeight { get; set; }
+        public long ToHeight { get; set; }
+    }
+
     public class ExportViewingKeyRequest
     {
         public string ZfxAddress { get; set; } = "";

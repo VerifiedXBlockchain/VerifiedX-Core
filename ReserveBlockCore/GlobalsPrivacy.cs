@@ -23,8 +23,8 @@ namespace ReserveBlockCore
         /// <summary>When true, ZK-authorized private txs must carry a non-empty <c>proof_b64</c> (mempool / block validation).</summary>
         public static bool EnforcePlonkProofsForZk { get; set; }
 
-        /// <summary>Circuit amounts use 10^18 fixed-point (see implementation plan).</summary>
-        public const long PrivacyAmountScalingFactor = 1_000_000_000_000_000_000L;
+        /// <summary>Circuit amounts use 10^8 fixed-point, matching VFX's 8 decimal places.</summary>
+        public const long PrivacyAmountScalingFactor = 100_000_000L;
 
         public static BigInteger ToCircuitAmount(decimal amount) =>
             (BigInteger)(amount * PrivacyAmountScalingFactor);

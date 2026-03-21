@@ -204,6 +204,7 @@ namespace ReserveBlockCore.Privacy
                 });
             }
 
+            var spentCommitments = inputs.OrderBy(x => x.TreePosition).Select(x => x.Commitment).ToList();
             var merkle = ShieldedPoolService.GetCurrentMerkleRootB64(AssetVfx, privacyDb);
             var payload = new PrivateTxPayload
             {
@@ -213,6 +214,7 @@ namespace ReserveBlockCore.Privacy
                 Asset = AssetVfx,
                 NullsB64 = nulls,
                 SpentCommitmentTreePositions = positions,
+                SpentCommitmentB64s = spentCommitments,
                 Outs = outs,
                 TransparentOutput = transparentToAddress,
                 TransparentAmount = transparentAmountOut,
@@ -363,6 +365,7 @@ namespace ReserveBlockCore.Privacy
                 return false;
             }
 
+            var spentCommitments = inputs.OrderBy(x => x.TreePosition).Select(x => x.Commitment).ToList();
             var merkle = ShieldedPoolService.GetCurrentMerkleRootB64(AssetVfx, privacyDb);
             var payload = new PrivateTxPayload
             {
@@ -372,6 +375,7 @@ namespace ReserveBlockCore.Privacy
                 Asset = AssetVfx,
                 NullsB64 = nulls,
                 SpentCommitmentTreePositions = positions,
+                SpentCommitmentB64s = spentCommitments,
                 Outs = outs,
                 Fee = fee,
                 MerkleRootB64 = string.IsNullOrEmpty(merkle) ? null : merkle

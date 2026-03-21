@@ -11,11 +11,9 @@ namespace ReserveBlockCore.Privacy
     /// Must stay aligned with the <c>plonk</c> workspace circuits when those ship.
     /// </summary>
     /// <remarks>
-    /// Amount fields use little-endian <see cref="ulong"/> scaled by <see cref="Globals.PrivacyAmountScalingFactor"/> (10^18),
-    /// via <see cref="PrivacyPedersenAmount.TryToScaledU64"/>. That matches the current Pedersen FFI and is safe for typical
-    /// fee/supply values today. The privacy plan allows a wider theoretical range (e.g. up to ~2×10^26 in fixed-point units),
-    /// which does not fit in <c>u64</c>; if circuits must represent full max supply (e.g. 200M×10^18), bump this layout to
-    /// <c>u128</c> or multi-limb encoding in both C# and Rust when wiring real PLONK public inputs.
+    /// Amount fields use little-endian <see cref="ulong"/> scaled by <see cref="Globals.PrivacyAmountScalingFactor"/> (10^8),
+    /// via <see cref="PrivacyPedersenAmount.TryToScaledU64"/>. That matches the current Pedersen FFI and VFX's 8 decimal
+    /// places, supporting amounts up to ~184 billion VFX within <c>u64</c>.
     /// </remarks>
     public static class PlonkPublicInputsV1
     {

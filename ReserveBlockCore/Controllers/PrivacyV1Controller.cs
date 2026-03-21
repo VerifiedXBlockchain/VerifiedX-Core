@@ -131,6 +131,9 @@ namespace ReserveBlockCore.Controllers
                         out var selErr))
                     return Fail(selErr ?? "Input selection failed.");
 
+                // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
+
                 var ts = TimeUtil.GetTime();
                 if (!VfxPrivateTransactionBuilder.TryBuildUnshield(
                         inputs,
@@ -141,9 +144,20 @@ namespace ReserveBlockCore.Controllers
                         out var tx,
                         out var berr,
                         DbContext.DB_Privacy))
+                {
+                    // Rollback: unmark spent inputs on failure
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
                     return Fail(berr ?? "Build failed.");
+                }
 
                 var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+                if (!br.ok)
+                {
+                    // Rollback: unmark spent inputs on broadcast failure
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
+                }
+
                 return br.json;
             }
             catch (Exception ex)
@@ -175,6 +189,9 @@ namespace ReserveBlockCore.Controllers
                         out var selErr))
                     return Fail(selErr ?? "Input selection failed.");
 
+                // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
+
                 var ts = TimeUtil.GetTime();
                 if (!VfxPrivateTransactionBuilder.TryBuildPrivateTransfer(
                         inputs,
@@ -185,9 +202,20 @@ namespace ReserveBlockCore.Controllers
                         out var tx,
                         out var berr,
                         DbContext.DB_Privacy))
+                {
+                    // Rollback: unmark spent inputs on failure
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
                     return Fail(berr ?? "Build failed.");
+                }
 
                 var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+                if (!br.ok)
+                {
+                    // Rollback: unmark spent inputs on broadcast failure
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
+                }
+
                 return br.json;
             }
             catch (Exception ex)
@@ -230,6 +258,9 @@ namespace ReserveBlockCore.Controllers
                     ? new[] { first, second }
                     : new[] { second, first };
 
+                // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), "VFX");
+
                 var ts = TimeUtil.GetTime();
                 if (!VfxPrivateTransactionBuilder.TryBuildPrivateTransfer(
                         inputs,
@@ -240,9 +271,16 @@ namespace ReserveBlockCore.Controllers
                         out var tx,
                         out var berr,
                         DbContext.DB_Privacy))
+                {
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), "VFX");
                     return Fail(berr ?? "Build failed.");
+                }
 
                 var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+                if (!br.ok)
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), "VFX");
+
                 return br.json;
             }
             catch (Exception ex)
@@ -263,17 +301,17 @@ namespace ReserveBlockCore.Controllers
                 if (w == null)
                     return Task.FromResult(Ok(new { ShieldedBalances = new Dictionary<string, decimal>(), UnspentCommitments = 0 }));
 
-                var sum = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent).Sum(c => c.Amount) ?? 0;
+                var unspentOnly = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent).ToList() ?? new List<UnspentCommitment>();
+                var sum = unspentOnly.Sum(c => c.Amount);
                 object payload = includeCommitments
                     ? new
                     {
                         w!.ShieldedBalances,
-                        UnspentCommitments = w.UnspentCommitments?.Count ?? 0,
+                        UnspentCommitments = unspentOnly.Count,
                         UnspentSum = sum,
                         w.LastScannedBlock,
                         w.IsViewOnly,
-                        Commitments = (w.UnspentCommitments ?? new List<UnspentCommitment>())
-                            .Where(c => c != null && !c.IsSpent)
+                        Commitments = unspentOnly
                             .Select(c => new
                             {
                                 c!.Commitment,
@@ -288,7 +326,7 @@ namespace ReserveBlockCore.Controllers
                     : new
                     {
                         w!.ShieldedBalances,
-                        UnspentCommitments = w.UnspentCommitments?.Count ?? 0,
+                        UnspentCommitments = unspentOnly.Count,
                         UnspentSum = sum,
                         w.LastScannedBlock,
                         w.IsViewOnly
@@ -408,7 +446,16 @@ namespace ReserveBlockCore.Controllers
                     if (!string.IsNullOrEmpty(u.Commitment))
                         merged.Add(u.Commitment);
                 }
+
+                // Build a set of wallet commitment strings for spent detection
+                var walletCommitmentStrings = new HashSet<string>(
+                    (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                        .Where(uc => uc != null && !uc.IsSpent && !string.IsNullOrEmpty(uc.Commitment))
+                        .Select(uc => uc.Commitment),
+                    StringComparer.Ordinal);
+
                 var notesFound = 0;
+                var notesMarkedSpent = 0;
                 var transactionsScanned = 0;
                 foreach (var block in blocks)
                 {
@@ -419,7 +466,37 @@ namespace ReserveBlockCore.Controllers
                         transactionsScanned++;
                         if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                             continue;
-                        if (payload?.Outs == null)
+                        if (payload == null)
+                            continue;
+
+                        // --- Mark wallet notes consumed by this tx's nullifiers ---
+                        // Use commitment-string matching: look up CommitmentRecord by tree position
+                        // to get its commitment string, then match against wallet commitment strings.
+                        if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                        {
+                            var spentCommitmentStrings = PrivacyApiHelper.LookupCommitmentStringsByTreePositions(
+                                payload.SpentCommitmentTreePositions, payload.Asset);
+
+                            if (spentCommitmentStrings.Count > 0)
+                            {
+                                foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
+                                {
+                                    if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                        continue;
+                                    if (spentCommitmentStrings.Contains(uc.Commitment))
+                                    {
+                                        uc.IsSpent = true;
+                                        notesMarkedSpent++;
+                                        var assetKey = uc.AssetType ?? "";
+                                        if (w.ShieldedBalances.ContainsKey(assetKey))
+                                            w.ShieldedBalances[assetKey] -= uc.Amount;
+                                    }
+                                }
+                            }
+                        }
+
+                        // --- Detect new incoming notes ---
+                        if (payload.Outs == null)
                             continue;
                         foreach (var o in payload.Outs)
                         {
@@ -452,6 +529,10 @@ namespace ReserveBlockCore.Controllers
                                 }
                                 catch { /* ignore */ }
                             }
+
+                            // Look up the actual tree position from the global CommitmentRecord
+                            long treePos = PrivacyApiHelper.LookupTreePositionByCommitment(c, note.AssetType ?? "");
+
                             w.UnspentCommitments ??= new List<UnspentCommitment>();
                             w.UnspentCommitments.Add(new UnspentCommitment
                             {
@@ -459,7 +540,7 @@ namespace ReserveBlockCore.Controllers
                                 AssetType = note.AssetType ?? "",
                                 Amount = note.Amount,
                                 Randomness = r32,
-                                TreePosition = 0,
+                                TreePosition = treePos,
                                 BlockHeight = block.Height,
                                 IsSpent = false
                             });
@@ -476,11 +557,51 @@ namespace ReserveBlockCore.Controllers
                 return Task.FromResult(Ok(new
                 {
                     NotesFound = notesFound,
+                    NotesMarkedSpent = notesMarkedSpent,
                     LastScannedBlock = w.LastScannedBlock,
                     BlocksScanned = blocks.Count,
                     TransactionsScanned = transactionsScanned,
                     FromHeight = req.FromHeight,
                     ToHeight = req.ToHeight
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ex.Message));
+            }
+        }
+
+        /// <summary>
+        /// Wipes the wallet's cached notes and balances, then rescans from <paramref name="req"/>.FromHeight
+        /// to current chain height, rebuilding from scratch. Use this to fix corrupted/inflated balances.
+        /// </summary>
+        [HttpPost("ResyncShieldedWallet")]
+        public Task<string> ResyncShieldedWallet([FromBody] ResyncShieldedWalletRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return Task.FromResult(Fail("ZfxAddress required."));
+
+                long toHeight = req.ToHeight > 0 ? req.ToHeight : Globals.LastBlock.Height;
+                long fromHeight = req.FromHeight >= 0 ? req.FromHeight : 0;
+
+                var result = PrivacyApiHelper.ResyncShieldedWallet(req.ZfxAddress, fromHeight, toHeight);
+
+                if (!result.Success)
+                    return Task.FromResult(Fail(result.Error ?? "Resync failed."));
+
+                return Task.FromResult(Ok(new
+                {
+                    result.BlocksScanned,
+                    result.TransactionsScanned,
+                    result.NotesFound,
+                    result.NotesMarkedSpent,
+                    result.LastScannedBlock,
+                    result.FinalBalance,
+                    result.FinalUnspentCount,
+                    FromHeight = fromHeight,
+                    ToHeight = toHeight
                 }));
             }
             catch (Exception ex)

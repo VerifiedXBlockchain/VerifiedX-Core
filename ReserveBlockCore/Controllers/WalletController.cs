@@ -948,6 +948,43 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// Resync a shielded wallet: wipes cached notes/balances and rescans from fromHeight.
+        /// Use this to fix corrupted or inflated balances.
+        /// </summary>
+        [HttpGet("api/privacy/resync/{zfxAddress}/{fromHeight}")]
+        public IActionResult ResyncShieldedWallet(string zfxAddress, long fromHeight, [FromQuery] long? toHeight = null)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(zfxAddress) || !zfxAddress.StartsWith("zfx_"))
+                    return Ok(new { success = false, message = "Invalid zfx_ address." });
+
+                long to = toHeight ?? Globals.LastBlock.Height;
+
+                var result = PrivacyApiHelper.ResyncShieldedWallet(zfxAddress, fromHeight, to);
+
+                if (!result.Success)
+                    return Ok(new { success = false, message = result.Error ?? "Resync failed." });
+
+                return Ok(new
+                {
+                    success = true,
+                    zfxAddress,
+                    blocksScanned = result.BlocksScanned,
+                    transactionsScanned = result.TransactionsScanned,
+                    notesFound = result.NotesFound,
+                    notesMarkedSpent = result.NotesMarkedSpent,
+                    lastScannedBlock = result.LastScannedBlock,
+                    finalBalance = result.FinalBalance,
+                    finalUnspentNotes = result.FinalUnspentCount,
+                    fromHeight,
+                    toHeight = to
+                });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        /// <summary>
         /// Get PLONK native library status and capabilities.
         /// </summary>
         [HttpGet("api/privacy/plonkStatus")]

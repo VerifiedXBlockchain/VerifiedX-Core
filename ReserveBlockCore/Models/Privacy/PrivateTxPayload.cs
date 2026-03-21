@@ -36,6 +36,13 @@ namespace ReserveBlockCore.Models.Privacy
         [JsonProperty("spent_tree_positions")]
         public List<long> SpentCommitmentTreePositions { get; set; } = new();
 
+        /// <summary>
+        /// Parallel to <see cref="NullsB64"/>: Base64 commitment strings of the inputs being spent.
+        /// Added in v1.1 for reliable local wallet spent-tracking (older TXs may not have this field).
+        /// </summary>
+        [JsonProperty("spent_commitments", NullValueHandling = NullValueHandling.Ignore)]
+        public List<string>? SpentCommitmentB64s { get; set; }
+
         /// <summary>Expected shielded Merkle root (Base64), for proof wiring + recency checks.</summary>
         [JsonProperty("merkle_root")]
         public string? MerkleRootB64 { get; set; }

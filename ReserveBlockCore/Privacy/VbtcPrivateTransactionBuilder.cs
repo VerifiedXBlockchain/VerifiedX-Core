@@ -221,6 +221,7 @@ namespace ReserveBlockCore.Privacy
                 }
             }
 
+            var spentCommitments = inputs.OrderBy(x => x.TreePosition).Select(x => x.Commitment).ToList();
             var merkleVbtc = VBTCPrivacyService.GetCurrentMerkleRootB64(vbtcContractUid, privacyDb);
             var merkleVfxFee = ShieldedPoolService.GetCurrentMerkleRootB64(AssetVfx, privacyDb);
             var payload = new PrivateTxPayload
@@ -232,6 +233,7 @@ namespace ReserveBlockCore.Privacy
                 VbtcContractUid = vbtcContractUid,
                 NullsB64 = nulls,
                 SpentCommitmentTreePositions = positions,
+                SpentCommitmentB64s = spentCommitments,
                 Outs = outs,
                 TransparentOutput = transparentToAddress,
                 TransparentAmount = transparentVbtcOut,
@@ -407,6 +409,7 @@ namespace ReserveBlockCore.Privacy
                 return false;
             }
 
+            var spentCommitments = inputs.OrderBy(x => x.TreePosition).Select(x => x.Commitment).ToList();
             var merkleVbtc = VBTCPrivacyService.GetCurrentMerkleRootB64(vbtcContractUid, privacyDb);
             var merkleVfxFee = ShieldedPoolService.GetCurrentMerkleRootB64(AssetVfx, privacyDb);
             var payload = new PrivateTxPayload
@@ -418,6 +421,7 @@ namespace ReserveBlockCore.Privacy
                 VbtcContractUid = vbtcContractUid,
                 NullsB64 = nulls,
                 SpentCommitmentTreePositions = positions,
+                SpentCommitmentB64s = spentCommitments,
                 Outs = outs,
                 Fee = fee,
                 MerkleRootB64 = string.IsNullOrEmpty(merkleVbtc) ? null : merkleVbtc,

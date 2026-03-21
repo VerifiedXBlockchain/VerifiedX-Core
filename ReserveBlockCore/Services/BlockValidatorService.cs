@@ -1086,6 +1086,16 @@ namespace ReserveBlockCore.Services
 
                     }
 
+                    // Auto-detect shielded notes for local wallets in real-time
+                    try
+                    {
+                        ShieldedNoteAutoScanner.ProcessBlockForLocalWallets(block);
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Shielded auto-scan error: {ex.Message}", "BlockValidatorService.ValidateBlock()");
+                    }
+
                     await TransactionData.UpdateWalletTXTask();
 
                     //DbContext.Commit();

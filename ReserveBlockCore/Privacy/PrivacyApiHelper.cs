@@ -87,6 +87,264 @@ namespace ReserveBlockCore.Privacy
             return (true, Newtonsoft.Json.JsonConvert.SerializeObject(new { Success = true, Message = "Broadcast.", Hash = tx.Hash }));
         }
 
+        /// <summary>
+        /// Marks the given inputs as spent on the local wallet row and deducts from ShieldedBalances.
+        /// Reloads the wallet fresh from DB to avoid overwriting concurrent auto-scanner changes.
+        /// Persists immediately.
+        /// </summary>
+        public static void MarkInputsSpentLocally(string zfxAddress, IReadOnlyList<UnspentCommitment> spentInputs, string assetType)
+        {
+            if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
+                return;
+
+            // Reload fresh from DB to pick up any changes made by the auto-scanner
+            var fresh = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+            if (fresh == null)
+                return;
+
+            var spentCommitments = new HashSet<string>(
+                spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
+                StringComparer.Ordinal);
+
+            foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
+            {
+                if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                    continue;
+                if (spentCommitments.Contains(uc.Commitment))
+                {
+                    uc.IsSpent = true;
+                    if (fresh.ShieldedBalances.ContainsKey(assetType))
+                        fresh.ShieldedBalances[assetType] -= uc.Amount;
+                }
+            }
+
+            ShieldedWalletService.Upsert(fresh);
+        }
+
+        /// <summary>
+        /// Rollback: unmarks previously spent inputs if build or broadcast fails.
+        /// Reloads wallet fresh from DB.
+        /// </summary>
+        public static void UnmarkInputsSpentLocally(string zfxAddress, IReadOnlyList<UnspentCommitment> spentInputs, string assetType)
+        {
+            if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
+                return;
+
+            var fresh = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+            if (fresh == null)
+                return;
+
+            var commitmentSet = new HashSet<string>(
+                spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
+                StringComparer.Ordinal);
+
+            foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
+            {
+                if (uc == null || !uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                    continue;
+                if (commitmentSet.Contains(uc.Commitment))
+                {
+                    uc.IsSpent = false;
+                    if (fresh.ShieldedBalances.ContainsKey(assetType))
+                        fresh.ShieldedBalances[assetType] += uc.Amount;
+                }
+            }
+
+            ShieldedWalletService.Upsert(fresh);
+        }
+
+        /// <summary>
+        /// Looks up commitment strings from the global CommitmentRecord table by tree positions.
+        /// Used by manual scanner to match spent notes by commitment string.
+        /// </summary>
+        public static HashSet<string> LookupCommitmentStringsByTreePositions(
+            IReadOnlyList<long> treePositions, string assetType)
+        {
+            var result = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                var db = PrivacyDbContext.GetPrivacyDb();
+                var col = db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+                foreach (var pos in treePositions)
+                {
+                    var rec = col.FindOne(x => x.AssetType == assetType && x.TreePosition == pos);
+                    if (rec != null && !string.IsNullOrEmpty(rec.Commitment))
+                        result.Add(rec.Commitment);
+                }
+            }
+            catch { /* Privacy DB not available */ }
+            return result;
+        }
+
+        /// <summary>
+        /// Looks up the actual tree position for a commitment string from the global CommitmentRecord table.
+        /// Returns 0 if not found.
+        /// </summary>
+        public static long LookupTreePositionByCommitment(string commitmentB64, string assetType)
+        {
+            try
+            {
+                var db = PrivacyDbContext.GetPrivacyDb();
+                var col = db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+                var rec = col.FindOne(x => x.AssetType == assetType && x.Commitment == commitmentB64);
+                if (rec != null)
+                    return rec.TreePosition;
+            }
+            catch { /* Privacy DB not available */ }
+            return 0;
+        }
+
+        /// <summary>
+        /// Wipes the wallet's UnspentCommitments and ShieldedBalances, then rescans from
+        /// <paramref name="fromHeight"/> to <paramref name="toHeight"/> rebuilding from scratch.
+        /// Returns a result object with stats.
+        /// </summary>
+        public static ResyncResult ResyncShieldedWallet(string zfxAddress, long fromHeight, long toHeight)
+        {
+            var result = new ResyncResult();
+
+            var w = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+            if (w == null)
+            {
+                result.Error = "No shielded wallet row for this zfx address.";
+                return result;
+            }
+
+            if (!TryGetViewingKeyMaterial(w, out var keys, out var kmErr))
+            {
+                result.Error = kmErr ?? "Cannot derive viewing keys.";
+                return result;
+            }
+
+            // Wipe existing state
+            w.UnspentCommitments = new List<UnspentCommitment>();
+            w.ShieldedBalances = new Dictionary<string, decimal>();
+
+            var merged = new HashSet<string>(StringComparer.Ordinal);
+
+            for (long h = fromHeight; h <= toHeight; h++)
+            {
+                var block = BlockchainData.GetBlockByHeight(h);
+                if (block?.Transactions == null)
+                    continue;
+                result.BlocksScanned++;
+
+                foreach (var tx in block.Transactions)
+                {
+                    result.TransactionsScanned++;
+                    if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                        continue;
+                    if (payload == null)
+                        continue;
+
+                    // --- Mark wallet notes consumed by this tx's spent positions ---
+                    if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                    {
+                        HashSet<string> spentCommitmentStrings;
+                        if (payload.SpentCommitmentB64s != null && payload.SpentCommitmentB64s.Count > 0)
+                        {
+                            // v1.1+ TX: commitment strings stored directly in payload
+                            spentCommitmentStrings = new HashSet<string>(payload.SpentCommitmentB64s, StringComparer.Ordinal);
+                        }
+                        else
+                        {
+                            // Legacy TX: look up by tree position (may fail for corrupted positions)
+                            spentCommitmentStrings = LookupCommitmentStringsByTreePositions(
+                                payload.SpentCommitmentTreePositions, payload.Asset);
+                        }
+
+                        if (spentCommitmentStrings.Count > 0)
+                        {
+                            foreach (var uc in w.UnspentCommitments)
+                            {
+                                if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                    continue;
+                                if (spentCommitmentStrings.Contains(uc.Commitment))
+                                {
+                                    uc.IsSpent = true;
+                                    result.NotesMarkedSpent++;
+                                    var assetKey = uc.AssetType ?? "";
+                                    if (w.ShieldedBalances.ContainsKey(assetKey))
+                                        w.ShieldedBalances[assetKey] -= uc.Amount;
+                                }
+                            }
+                        }
+                    }
+
+                    // --- Detect new incoming notes ---
+                    if (payload.Outs == null)
+                        continue;
+
+                    foreach (var o in payload.Outs)
+                    {
+                        if (string.IsNullOrWhiteSpace(o.EncryptedNoteB64))
+                            continue;
+                        byte[] enc;
+                        try { enc = Convert.FromBase64String(o.EncryptedNoteB64); }
+                        catch { continue; }
+
+                        if (!ShieldedNoteEncryption.TryOpen(enc, keys.EncryptionPrivateKey32, out var plain, out _))
+                            continue;
+                        if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(plain, out var note, out _) || note == null)
+                            continue;
+
+                        var c = o.CommitmentB64;
+                        if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                            continue;
+                        merged.Add(c);
+                        result.NotesFound++;
+
+                        byte[] r32 = Array.Empty<byte>();
+                        if (!string.IsNullOrEmpty(note.RandomnessB64))
+                        {
+                            try { r32 = Convert.FromBase64String(note.RandomnessB64); }
+                            catch { /* ignore */ }
+                        }
+
+                        long treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
+
+                        w.UnspentCommitments.Add(new UnspentCommitment
+                        {
+                            Commitment = c,
+                            AssetType = note.AssetType ?? "",
+                            Amount = note.Amount,
+                            Randomness = r32,
+                            TreePosition = treePos,
+                            BlockHeight = block.Height,
+                            IsSpent = false
+                        });
+
+                        var key = note.AssetType ?? "";
+                        if (!w.ShieldedBalances.ContainsKey(key))
+                            w.ShieldedBalances[key] = 0;
+                        w.ShieldedBalances[key] += note.Amount;
+                    }
+                }
+            }
+
+            w.LastScannedBlock = Math.Max(w.LastScannedBlock, toHeight);
+            ShieldedWalletService.Upsert(w);
+
+            result.Success = true;
+            result.LastScannedBlock = w.LastScannedBlock;
+            result.FinalBalance = w.ShieldedBalances;
+            result.FinalUnspentCount = w.UnspentCommitments.Count(uc => uc != null && !uc.IsSpent);
+            return result;
+        }
+
+        public class ResyncResult
+        {
+            public bool Success { get; set; }
+            public string? Error { get; set; }
+            public int BlocksScanned { get; set; }
+            public int TransactionsScanned { get; set; }
+            public int NotesFound { get; set; }
+            public int NotesMarkedSpent { get; set; }
+            public long LastScannedBlock { get; set; }
+            public Dictionary<string, decimal>? FinalBalance { get; set; }
+            public int FinalUnspentCount { get; set; }
+        }
+
         /// <summary>Approximate VFX shielded balance for co-shield UX warnings.</summary>
         public static decimal SumVfxUnspent(ShieldedWallet? w)
         {
