@@ -1,3 +1,4 @@
+using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.Privacy;
 
@@ -95,8 +96,8 @@ namespace ReserveBlockCore.Privacy
             {
                 FromAddress = fromTransparentAddress,
                 ToAddress = PrivacyConstants.ShieldedPoolAddress,
-                Amount = shieldAmount,
-                Fee = transparentFee,
+                Amount = shieldAmount.ToNormalizeDecimal(),
+                Fee = transparentFee.ToNormalizeDecimal(),
                 Nonce = nonce,
                 Timestamp = timestamp,
                 TransactionType = TransactionType.VFX_SHIELD,
@@ -226,8 +227,8 @@ namespace ReserveBlockCore.Privacy
             {
                 FromAddress = PrivacyConstants.ShieldedPoolAddress,
                 ToAddress = transparentToAddress,
-                Amount = transparentAmountOut,
-                Fee = 0,
+                Amount = transparentAmountOut.ToNormalizeDecimal(),
+                Fee = 0M.ToNormalizeDecimal(),
                 Nonce = 0,
                 Timestamp = timestamp,
                 TransactionType = TransactionType.VFX_UNSHIELD,
@@ -385,8 +386,8 @@ namespace ReserveBlockCore.Privacy
             {
                 FromAddress = PrivacyConstants.ShieldedPoolAddress,
                 ToAddress = PrivacyConstants.ShieldedPoolAddress,
-                Amount = 0,
-                Fee = 0,
+                Amount = 0M.ToNormalizeDecimal(),
+                Fee = 0M.ToNormalizeDecimal(),
                 Nonce = 0,
                 Timestamp = timestamp,
                 TransactionType = TransactionType.VFX_PRIVATE_TRANSFER,

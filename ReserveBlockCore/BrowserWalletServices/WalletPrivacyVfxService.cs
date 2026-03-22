@@ -1,4 +1,5 @@
 using ReserveBlockCore.Data;
+using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.Privacy;
@@ -95,7 +96,7 @@ namespace ReserveBlockCore.BrowserWalletServices
                     DbContext.DB_Privacy))
                 return new { success = false, message = buildErr ?? "Failed to build shield TX." };
 
-            tx!.Fee = FeeCalcService.CalculateTXFee(tx);
+            tx!.Fee = FeeCalcService.CalculateTXFee(tx).ToNormalizeDecimal();
             tx.BuildPrivate();
             var pk = account.GetPrivKey;
             if (pk == null)
