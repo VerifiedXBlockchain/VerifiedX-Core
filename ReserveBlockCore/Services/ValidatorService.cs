@@ -292,13 +292,15 @@ namespace ReserveBlockCore.Services
                 var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
 
                 // Create VBTC_V2_VALIDATOR_REGISTER transaction
+                // Normalize Amount/Fee/ToAddress BEFORE Build() so the hash matches
+                // what remote nodes compute after deserializing (prevents "hash not equal" errors)
                 var registerTx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = validator.Address,
-                    ToAddress = validator.Address,
-                    Amount = 0M,
-                    Fee = 0M,
+                    ToAddress = validator.Address.ToAddressNormalize(),
+                    Amount = 0M.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
                     Nonce = sTreiAcct.Nonce,
                     TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER,
                     Data = JsonConvert.SerializeObject(new
@@ -319,8 +321,6 @@ namespace ReserveBlockCore.Services
 
                 try
                 {
-                    registerTx.ToAddress = registerTx.ToAddress.ToAddressNormalize();
-                    registerTx.Amount = registerTx.Amount.ToNormalizeDecimal();
                     var result = await TransactionValidatorService.VerifyTX(registerTx);
 
                     if (result.Item1 == true)
@@ -418,13 +418,15 @@ namespace ReserveBlockCore.Services
                 var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
 
                 // Create VBTC_V2_VALIDATOR_HEARTBEAT transaction for reactivation / IP update
+                // Normalize Amount/Fee/ToAddress BEFORE Build() so the hash matches
+                // what remote nodes compute after deserializing (prevents "hash not equal" errors)
                 var reactivationTx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = validator.Address,
-                    ToAddress = validator.Address,
-                    Amount = 0M,
-                    Fee = 0M,
+                    ToAddress = validator.Address.ToAddressNormalize(),
+                    Amount = 0M.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
                     Nonce = sTreiAcct.Nonce,
                     TransactionType = TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT,
                     Data = JsonConvert.SerializeObject(new
@@ -446,8 +448,6 @@ namespace ReserveBlockCore.Services
 
                 try
                 {
-                    reactivationTx.ToAddress = reactivationTx.ToAddress.ToAddressNormalize();
-                    reactivationTx.Amount = reactivationTx.Amount.ToNormalizeDecimal();
                     var result = await TransactionValidatorService.VerifyTX(reactivationTx);
 
                     if (result.Item1 == true)
@@ -951,13 +951,15 @@ namespace ReserveBlockCore.Services
                 }
 
                 // Create VBTC_V2_VALIDATOR_EXIT transaction
+                // Normalize Amount/Fee/ToAddress BEFORE Build() so the hash matches
+                // what remote nodes compute after deserializing (prevents "hash not equal" errors)
                 var exitTx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = validator.Address,
-                    ToAddress = validator.Address,  // Self transaction
-                    Amount = 0M,
-                    Fee = 0M,  // FREE transaction
+                    ToAddress = validator.Address.ToAddressNormalize(),
+                    Amount = 0M.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
                     Nonce = from.Nonce,
                     TransactionType = TransactionType.VBTC_V2_VALIDATOR_EXIT,
                     Data = JsonConvert.SerializeObject(new

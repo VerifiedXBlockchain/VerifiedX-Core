@@ -328,9 +328,9 @@ namespace ReserveBlockCore.Services
                 {
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = validator.Address,
-                    ToAddress = validator.Address,
-                    Amount = 0M,
-                    Fee = 0M,
+                    ToAddress = validator.Address.ToAddressNormalize(),
+                    Amount = 0M.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
                     Nonce = sTreiAcct.Nonce,
                     TransactionType = TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT,
                     Data = JsonConvert.SerializeObject(new
@@ -344,14 +344,14 @@ namespace ReserveBlockCore.Services
                     })
                 };
 
+                // Normalize BEFORE Build() so the hash matches what remote nodes compute
+                // after deserializing the TX (Amount "0" vs "0.0" caused hash mismatch)
                 heartbeatTx.Build();
                 var privateKey = AccountData.GetPrivateKey(validator);
                 var txHash = heartbeatTx.Hash;
                 var valTxSignature = SignatureService.CreateSignature(txHash, privateKey, validator.PublicKey);
                 heartbeatTx.Signature = valTxSignature;
 
-                heartbeatTx.ToAddress = heartbeatTx.ToAddress.ToAddressNormalize();
-                heartbeatTx.Amount = heartbeatTx.Amount.ToNormalizeDecimal();
                 var result = await TransactionValidatorService.VerifyTX(heartbeatTx);
 
                 if (result.Item1)
