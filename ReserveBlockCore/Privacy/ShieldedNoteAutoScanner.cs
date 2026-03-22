@@ -63,6 +63,27 @@ namespace ReserveBlockCore.Privacy
             // Track which wallets were modified so we only persist those
             var modifiedWallets = new HashSet<string>(StringComparer.Ordinal);
 
+            // Acquire per-wallet locks to prevent concurrent API writes from clobbering state
+            var lockedAddresses = new List<string>(walletKeys.Count);
+            foreach (var (w, _) in walletKeys)
+            {
+                ShieldedWalletLock.Wait(w.ShieldedAddress);
+                lockedAddresses.Add(w.ShieldedAddress);
+            }
+
+            // Reload wallets inside the lock to get the freshest DB state
+            var freshWalletKeys = new List<(ShieldedWallet wallet, ShieldedKeyMaterial keys)>(walletKeys.Count);
+            foreach (var (w, keys) in walletKeys)
+            {
+                var fresh = ShieldedWalletService.FindByZfxAddress(w.ShieldedAddress);
+                if (fresh != null)
+                    freshWalletKeys.Add((fresh, keys));
+            }
+            walletKeys = freshWalletKeys;
+
+            try
+            {
+
             foreach (var tx in block.Transactions)
             {
                 if (!PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
@@ -147,6 +168,68 @@ namespace ReserveBlockCore.Privacy
                     }
                 }
 
+                // --- Detect VFX fee change notes (vBTC Z→Z / Z→T fee leg) ---
+                if (!string.IsNullOrWhiteSpace(payload.FeeOutputEncryptedNoteB64)
+                    && !string.IsNullOrWhiteSpace(payload.FeeOutputCommitmentB64))
+                {
+                    byte[] feeEnc;
+                    try { feeEnc = Convert.FromBase64String(payload.FeeOutputEncryptedNoteB64); }
+                    catch { feeEnc = null!; }
+
+                    if (feeEnc != null)
+                    {
+                        foreach (var (w, keys) in walletKeys)
+                        {
+                            if (!ShieldedNoteEncryption.TryOpen(feeEnc, keys.EncryptionPrivateKey32, out var feePlain, out _))
+                                continue;
+                            if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(feePlain, out var feeNote, out _) || feeNote == null)
+                                continue;
+
+                            var feeC = payload.FeeOutputCommitmentB64;
+                            if (string.IsNullOrEmpty(feeC))
+                                continue;
+
+                            w.UnspentCommitments ??= new List<UnspentCommitment>();
+                            bool feeAlreadyExists = false;
+                            foreach (var existing in w.UnspentCommitments)
+                            {
+                                if (existing != null && string.Equals(existing.Commitment, feeC, StringComparison.Ordinal))
+                                { feeAlreadyExists = true; break; }
+                            }
+                            if (feeAlreadyExists)
+                                break;
+
+                            byte[] feeR32 = Array.Empty<byte>();
+                            if (!string.IsNullOrEmpty(feeNote.RandomnessB64))
+                            {
+                                try { feeR32 = Convert.FromBase64String(feeNote.RandomnessB64); }
+                                catch { /* ignore */ }
+                            }
+
+                            long feeTreePos = LookupTreePositionByCommitment(feeC, feeNote.AssetType ?? "VFX");
+
+                            w.UnspentCommitments.Add(new UnspentCommitment
+                            {
+                                Commitment = feeC,
+                                AssetType = feeNote.AssetType ?? "VFX",
+                                Amount = feeNote.Amount,
+                                Randomness = feeR32,
+                                TreePosition = feeTreePos,
+                                BlockHeight = block.Height,
+                                IsSpent = false
+                            });
+
+                            var feeAssetKey = feeNote.AssetType ?? "VFX";
+                            if (!w.ShieldedBalances.ContainsKey(feeAssetKey))
+                                w.ShieldedBalances[feeAssetKey] = 0;
+                            w.ShieldedBalances[feeAssetKey] += feeNote.Amount;
+
+                            modifiedWallets.Add(w.ShieldedAddress);
+                            break; // matched this wallet
+                        }
+                    }
+                }
+
                 // --- Detect new incoming notes via trial decryption ---
                 if (payload.Outs == null || payload.Outs.Count == 0)
                     continue;
@@ -202,6 +285,12 @@ namespace ReserveBlockCore.Privacy
 
                         // Look up the actual tree position from the global CommitmentRecord
                         long treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
+                        if (treePos == 0)
+                        {
+                            // Retry once — the ledger service may not have flushed yet
+                            Thread.Sleep(50);
+                            treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
+                        }
 
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
@@ -243,6 +332,14 @@ namespace ReserveBlockCore.Privacy
 
                 w.LastScannedBlock = Math.Max(w.LastScannedBlock, block.Height);
                 ShieldedWalletService.Upsert(w);
+            }
+
+            } // end try
+            finally
+            {
+                // Release all per-wallet locks
+                foreach (var addr in lockedAddresses)
+                    ShieldedWalletLock.Release(addr);
             }
         }
 

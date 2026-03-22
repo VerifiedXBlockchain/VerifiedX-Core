@@ -97,28 +97,36 @@ namespace ReserveBlockCore.Privacy
             if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
                 return;
 
-            // Reload fresh from DB to pick up any changes made by the auto-scanner
-            var fresh = ShieldedWalletService.FindByZfxAddress(zfxAddress);
-            if (fresh == null)
-                return;
-
-            var spentCommitments = new HashSet<string>(
-                spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
-                StringComparer.Ordinal);
-
-            foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
+            ShieldedWalletLock.Wait(zfxAddress);
+            try
             {
-                if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                    continue;
-                if (spentCommitments.Contains(uc.Commitment))
-                {
-                    uc.IsSpent = true;
-                    if (fresh.ShieldedBalances.ContainsKey(assetType))
-                        fresh.ShieldedBalances[assetType] -= uc.Amount;
-                }
-            }
+                // Reload fresh from DB to pick up any changes made by the auto-scanner
+                var fresh = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (fresh == null)
+                    return;
 
-            ShieldedWalletService.Upsert(fresh);
+                var spentCommitments = new HashSet<string>(
+                    spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
+                    StringComparer.Ordinal);
+
+                foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
+                {
+                    if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                        continue;
+                    if (spentCommitments.Contains(uc.Commitment))
+                    {
+                        uc.IsSpent = true;
+                        if (fresh.ShieldedBalances.ContainsKey(assetType))
+                            fresh.ShieldedBalances[assetType] -= uc.Amount;
+                    }
+                }
+
+                ShieldedWalletService.Upsert(fresh);
+            }
+            finally
+            {
+                ShieldedWalletLock.Release(zfxAddress);
+            }
         }
 
         /// <summary>
@@ -130,27 +138,35 @@ namespace ReserveBlockCore.Privacy
             if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
                 return;
 
-            var fresh = ShieldedWalletService.FindByZfxAddress(zfxAddress);
-            if (fresh == null)
-                return;
-
-            var commitmentSet = new HashSet<string>(
-                spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
-                StringComparer.Ordinal);
-
-            foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
+            ShieldedWalletLock.Wait(zfxAddress);
+            try
             {
-                if (uc == null || !uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                    continue;
-                if (commitmentSet.Contains(uc.Commitment))
-                {
-                    uc.IsSpent = false;
-                    if (fresh.ShieldedBalances.ContainsKey(assetType))
-                        fresh.ShieldedBalances[assetType] += uc.Amount;
-                }
-            }
+                var fresh = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (fresh == null)
+                    return;
 
-            ShieldedWalletService.Upsert(fresh);
+                var commitmentSet = new HashSet<string>(
+                    spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
+                    StringComparer.Ordinal);
+
+                foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
+                {
+                    if (uc == null || !uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                        continue;
+                    if (commitmentSet.Contains(uc.Commitment))
+                    {
+                        uc.IsSpent = false;
+                        if (fresh.ShieldedBalances.ContainsKey(assetType))
+                            fresh.ShieldedBalances[assetType] += uc.Amount;
+                    }
+                }
+
+                ShieldedWalletService.Upsert(fresh);
+            }
+            finally
+            {
+                ShieldedWalletLock.Release(zfxAddress);
+            }
         }
 
         /// <summary>
@@ -216,6 +232,12 @@ namespace ReserveBlockCore.Privacy
                 return result;
             }
 
+            ShieldedWalletLock.Wait(zfxAddress);
+            try
+            {
+            // Re-fetch inside lock for freshest state
+            w = ShieldedWalletService.FindByZfxAddress(zfxAddress)!;
+
             // Wipe existing state
             w.UnspentCommitments = new List<UnspentCommitment>();
             w.ShieldedBalances = new Dictionary<string, decimal>();
@@ -267,6 +289,53 @@ namespace ReserveBlockCore.Privacy
                                     if (w.ShieldedBalances.ContainsKey(assetKey))
                                         w.ShieldedBalances[assetKey] -= uc.Amount;
                                 }
+                            }
+                        }
+                    }
+
+                    // --- Detect VFX fee change notes (vBTC Z→Z / Z→T fee leg) ---
+                    if (!string.IsNullOrWhiteSpace(payload.FeeOutputEncryptedNoteB64)
+                        && !string.IsNullOrWhiteSpace(payload.FeeOutputCommitmentB64))
+                    {
+                        byte[] feeEnc;
+                        try { feeEnc = Convert.FromBase64String(payload.FeeOutputEncryptedNoteB64); }
+                        catch { feeEnc = null!; }
+
+                        if (feeEnc != null
+                            && ShieldedNoteEncryption.TryOpen(feeEnc, keys.EncryptionPrivateKey32, out var feePlain, out _)
+                            && ShieldedPlainNoteCodec.TryDeserializeUtf8(feePlain, out var feeNote, out _)
+                            && feeNote != null)
+                        {
+                            var feeC = payload.FeeOutputCommitmentB64;
+                            if (!string.IsNullOrEmpty(feeC) && !merged.Contains(feeC))
+                            {
+                                merged.Add(feeC);
+                                result.NotesFound++;
+
+                                byte[] feeR32 = Array.Empty<byte>();
+                                if (!string.IsNullOrEmpty(feeNote.RandomnessB64))
+                                {
+                                    try { feeR32 = Convert.FromBase64String(feeNote.RandomnessB64); }
+                                    catch { /* ignore */ }
+                                }
+
+                                long feeTreePos = LookupTreePositionByCommitment(feeC, feeNote.AssetType ?? "VFX");
+
+                                w.UnspentCommitments.Add(new UnspentCommitment
+                                {
+                                    Commitment = feeC,
+                                    AssetType = feeNote.AssetType ?? "VFX",
+                                    Amount = feeNote.Amount,
+                                    Randomness = feeR32,
+                                    TreePosition = feeTreePos,
+                                    BlockHeight = block.Height,
+                                    IsSpent = false
+                                });
+
+                                var feeKey = feeNote.AssetType ?? "VFX";
+                                if (!w.ShieldedBalances.ContainsKey(feeKey))
+                                    w.ShieldedBalances[feeKey] = 0;
+                                w.ShieldedBalances[feeKey] += feeNote.Amount;
                             }
                         }
                     }
@@ -329,6 +398,13 @@ namespace ReserveBlockCore.Privacy
             result.LastScannedBlock = w.LastScannedBlock;
             result.FinalBalance = w.ShieldedBalances;
             result.FinalUnspentCount = w.UnspentCommitments.Count(uc => uc != null && !uc.IsSpent);
+
+            } // end try
+            finally
+            {
+                ShieldedWalletLock.Release(zfxAddress);
+            }
+
             return result;
         }
 

@@ -175,6 +175,14 @@ namespace ReserveBlockCore.Privacy
                     return false;
                 }
             }
+            if (t is TransactionType.VBTC_V2_UNSHIELD or TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+            {
+                if (string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
+                {
+                    err = "vBTC private transactions require a VFX fee input nullifier (fee must be paid in VFX).";
+                    return false;
+                }
+            }
             if (t is TransactionType.VBTC_V2_SHIELD or TransactionType.VBTC_V2_UNSHIELD or TransactionType.VBTC_V2_PRIVATE_TRANSFER)
             {
                 if (!VbtcPrivacyAsset.MatchesContract(payload.Asset, payload.VbtcContractUid))

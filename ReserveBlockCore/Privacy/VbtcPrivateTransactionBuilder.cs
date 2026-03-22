@@ -164,12 +164,17 @@ namespace ReserveBlockCore.Privacy
 
             var fee = Globals.PrivateTxFixedFee;
             var sumIn = inputs.Sum(i => i.Amount);
-            if (sumIn < transparentVbtcOut + fee)
+            if (sumIn < transparentVbtcOut)
             {
-                error = "Input sum must cover vBTC out + fixed VFX fee.";
+                error = "vBTC input sum must cover the unshield amount.";
                 return false;
             }
-            var change = sumIn - transparentVbtcOut - fee;
+            if (vfxFeeInput == null)
+            {
+                error = "A VFX fee input is required to cover the fixed ZK fee.";
+                return false;
+            }
+            var change = sumIn - transparentVbtcOut;
             if (change < 0)
             {
                 error = "Negative change.";
@@ -321,12 +326,17 @@ namespace ReserveBlockCore.Privacy
 
             var fee = Globals.PrivateTxFixedFee;
             var sumIn = inputs.Sum(i => i.Amount);
-            if (sumIn < paymentAmount + fee)
+            if (sumIn < paymentAmount)
             {
-                error = "Input sum must cover payment + fixed VFX fee.";
+                error = "vBTC input sum must cover the payment amount.";
                 return false;
             }
-            var change = sumIn - paymentAmount - fee;
+            if (vfxFeeInput == null)
+            {
+                error = "A VFX fee input is required to cover the fixed ZK fee.";
+                return false;
+            }
+            var change = sumIn - paymentAmount;
 
             var nulls = new List<string>();
             var positions = new List<long>();
@@ -518,9 +528,25 @@ namespace ReserveBlockCore.Privacy
                 // v2: note hash for fee change output
                 if (PrivacyPedersenAmount.TryToScaledU64(vfxChange, out var feeChScaled, out _))
                     payload.FeeOutputNoteHashB64 = NoteHashService.ComputeBase64(feeChScaled, rCh);
+
+                // Seal an encrypted note so the auto-scanner can recover VFX fee change
+                try
+                {
+                    var plainFeeChange = PrivacyPedersenAmount.CreatePlainNote(vfxChange, rCh, AssetVfx);
+                    var sealedFeeChange = ShieldedNoteEncryption.SealPlainNote(plainFeeChange, keys.ZfxAddress);
+                    payload.FeeOutputEncryptedNoteB64 = Convert.ToBase64String(sealedFeeChange);
+                }
+                catch
+                {
+                    // Non-fatal: the commitment is still recorded; scanner just won't auto-detect the change
+                    payload.FeeOutputEncryptedNoteB64 = null;
+                }
             }
             else
+            {
                 payload.FeeOutputCommitmentB64 = null;
+                payload.FeeOutputEncryptedNoteB64 = null;
+            }
 
             return true;
         }

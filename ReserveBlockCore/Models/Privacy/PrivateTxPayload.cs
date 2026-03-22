@@ -72,6 +72,10 @@ namespace ReserveBlockCore.Models.Privacy
         [JsonProperty("fee_out_note_hash")]
         public string? FeeOutputNoteHashB64 { get; set; }
 
+        /// <summary>Optional encrypted note for the VFX fee change output (Base64), enabling auto-scanner recovery.</summary>
+        [JsonProperty("fee_out_note", NullValueHandling = NullValueHandling.Ignore)]
+        public string? FeeOutputEncryptedNoteB64 { get; set; }
+
         [JsonProperty("transparent_input")]
         public string? TransparentInput { get; set; }
 

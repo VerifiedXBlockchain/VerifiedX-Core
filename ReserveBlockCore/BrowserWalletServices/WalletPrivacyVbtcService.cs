@@ -111,17 +111,18 @@ namespace ReserveBlockCore.BrowserWalletServices
                     out var selErr))
                 return new { success = false, message = selErr ?? "vBTC input selection failed." };
 
-            // Optionally select a VFX fee input (single note >= fee)
-            UnspentCommitment? vfxFeeInput = null;
+            // Select a VFX fee input (single note >= fee) — required for vBTC transactions
             var vfxNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())
                 .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
                 .OrderByDescending(c => c.Amount)
                 .ToList();
-            if (vfxNotes.Any(n => n.Amount >= fee))
-                vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
+            if (!vfxNotes.Any(n => n.Amount >= fee))
+                return new { success = false, message = $"No VFX note with sufficient balance to cover the fixed ZK fee of {fee} VFX." };
+            var vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
 
             // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
             PrivacyApiHelper.MarkInputsSpentLocally(zfxAddress, inputs, asset);
+            PrivacyApiHelper.MarkInputsSpentLocally(zfxAddress, new[] { vfxFeeInput }, "VFX");
 
             var ts = TimeUtil.GetTime();
             if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(
@@ -138,6 +139,7 @@ namespace ReserveBlockCore.BrowserWalletServices
             {
                 // Rollback: unmark spent inputs on build failure
                 PrivacyApiHelper.UnmarkInputsSpentLocally(zfxAddress, inputs, asset);
+                PrivacyApiHelper.UnmarkInputsSpentLocally(zfxAddress, new[] { vfxFeeInput }, "VFX");
                 return new { success = false, message = buildErr ?? "Failed to build vBTC unshield TX." };
             }
 
@@ -147,6 +149,7 @@ namespace ReserveBlockCore.BrowserWalletServices
             {
                 // Rollback: unmark spent inputs on broadcast failure
                 PrivacyApiHelper.UnmarkInputsSpentLocally(zfxAddress, inputs, asset);
+                PrivacyApiHelper.UnmarkInputsSpentLocally(zfxAddress, new[] { vfxFeeInput }, "VFX");
             }
 
             return new { success = broadcastOk, hash = tx!.Hash, type = "VBTC_UNSHIELD", amount, zfxAddress, toAddress, scUID, detail = json };
@@ -181,17 +184,18 @@ namespace ReserveBlockCore.BrowserWalletServices
                     out var selErr))
                 return new { success = false, message = selErr ?? "vBTC input selection failed." };
 
-            // Optionally select a VFX fee input
-            UnspentCommitment? vfxFeeInput = null;
+            // Select a VFX fee input (single note >= fee) — required for vBTC transactions
             var vfxNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())
                 .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
                 .OrderByDescending(c => c.Amount)
                 .ToList();
-            if (vfxNotes.Any(n => n.Amount >= fee))
-                vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
+            if (!vfxNotes.Any(n => n.Amount >= fee))
+                return new { success = false, message = $"No VFX note with sufficient balance to cover the fixed ZK fee of {fee} VFX." };
+            var vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
 
             // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
             PrivacyApiHelper.MarkInputsSpentLocally(fromZfxAddress, inputs, asset);
+            PrivacyApiHelper.MarkInputsSpentLocally(fromZfxAddress, new[] { vfxFeeInput }, "VFX");
 
             var ts = TimeUtil.GetTime();
             if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(
@@ -208,6 +212,7 @@ namespace ReserveBlockCore.BrowserWalletServices
             {
                 // Rollback: unmark spent inputs on build failure
                 PrivacyApiHelper.UnmarkInputsSpentLocally(fromZfxAddress, inputs, asset);
+                PrivacyApiHelper.UnmarkInputsSpentLocally(fromZfxAddress, new[] { vfxFeeInput }, "VFX");
                 return new { success = false, message = buildErr ?? "Failed to build vBTC private transfer TX." };
             }
 
@@ -217,6 +222,7 @@ namespace ReserveBlockCore.BrowserWalletServices
             {
                 // Rollback: unmark spent inputs on broadcast failure
                 PrivacyApiHelper.UnmarkInputsSpentLocally(fromZfxAddress, inputs, asset);
+                PrivacyApiHelper.UnmarkInputsSpentLocally(fromZfxAddress, new[] { vfxFeeInput }, "VFX");
             }
 
             return new { success = broadcastOk, hash = tx!.Hash, type = "VBTC_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, scUID, detail = json };
