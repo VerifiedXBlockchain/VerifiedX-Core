@@ -142,6 +142,7 @@
     <Folder Include="Frost\linux\" />
     <Folder Include="Frost\mac\" />
     <Folder Include="Frost\win\" />
+    <Folder Include="BrowserWalletServices\" />
     <Folder Include="Plonk\win\" />
     <Folder Include="Plonk\linux\" />
     <Folder Include="Plonk\mac\" />
