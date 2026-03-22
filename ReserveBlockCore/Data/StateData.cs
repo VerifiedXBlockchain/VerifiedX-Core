@@ -2724,14 +2724,6 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Get the contract
-                var contract = VBTCContractV2.GetContract(scUID);
-                if (contract == null)
-                {
-                    ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal failed: Contract not found - {scUID}", "StateData.RequestVBTCV2Withdrawal()");
-                    return;
-                }
-
                 // FIND-002 FIX: Create per-user withdrawal request record
                 // This allows tracking of who requested the withdrawal and prevents
                 // unauthorized parties from completing another user's withdrawal
@@ -2752,6 +2744,7 @@ namespace ReserveBlockCore.Data
                 };
 
                 // Save the withdrawal request to the per-user tracking database
+                // This is consensus-critical and must succeed on ALL nodes
                 var saved = VBTCWithdrawalRequest.Save(withdrawalRequest);
                 if (!saved)
                 {
@@ -2759,17 +2752,19 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Also update contract-level tracking for backward compatibility
-                // Note: Contract-level tracking is informational; per-user tracking is authoritative
-                contract.WithdrawalStatus = VBTCWithdrawalStatus.Requested;
-                contract.ActiveWithdrawalRequestHash = tx.Hash;
-                contract.ActiveWithdrawalAmount = amount.Value;
-                contract.ActiveWithdrawalBTCDestination = btcAddress;
-                contract.ActiveWithdrawalFeeRate = feeRate.Value;
-                contract.ActiveWithdrawalRequestTime = tx.Timestamp;
-
-                // Save updated contract
-                VBTCContractV2.UpdateContract(contract);
+                // Also update contract-level tracking for backward compatibility (local DB only — informational)
+                // Remote nodes won't have VBTCContractV2 locally, so this is conditional.
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract != null)
+                {
+                    contract.WithdrawalStatus = VBTCWithdrawalStatus.Requested;
+                    contract.ActiveWithdrawalRequestHash = tx.Hash;
+                    contract.ActiveWithdrawalAmount = amount.Value;
+                    contract.ActiveWithdrawalBTCDestination = btcAddress;
+                    contract.ActiveWithdrawalFeeRate = feeRate.Value;
+                    contract.ActiveWithdrawalRequestTime = tx.Timestamp;
+                    VBTCContractV2.UpdateContract(contract);
+                }
 
                 SCLogUtility.Log($"RequestVBTCV2Withdrawal completed: SCUID={scUID}, Requester={requesterAddress}, Amount={amount.Value} BTC, Destination={btcAddress}, TxHash={tx.Hash}", 
                     "StateData.RequestVBTCV2Withdrawal()");
@@ -2829,52 +2824,43 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Get the contract
-                var contract = VBTCContractV2.GetContract(scUID);
-                if (contract == null)
-                {
-                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Contract not found - {scUID}", "StateData.CompleteVBTCV2Withdrawal()");
-                    return;
-                }
-
-                // Mark the withdrawal request as completed
+                // Mark the withdrawal request as completed (consensus-critical — runs on ALL nodes)
                 withdrawalRequest.Status = VBTCWithdrawalStatus.Completed;
                 withdrawalRequest.IsCompleted = true;
                 withdrawalRequest.BTCTxHash = btcTxHash;
                 VBTCWithdrawalRequest.Save(withdrawalRequest, true);
 
-                // Create withdrawal history entry
-                var historyEntry = new VBTCWithdrawalHistory
+                // Update local contract tracking if available (informational — only on nodes with local contract)
+                // Remote nodes won't have VBTCContractV2 locally, so this is conditional.
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract != null)
                 {
-                    RequestHash = withdrawalRequestHash,
-                    CompletionHash = tx.Hash,
-                    BTCTransactionHash = btcTxHash,
-                    Amount = storedAmount,  // FIND-002 FIX: Use stored amount
-                    BTCDestination = withdrawalRequest.BTCDestination,
-                    RequestTime = withdrawalRequest.Timestamp,
-                    CompletionTime = tx.Timestamp,
-                    FeeRate = withdrawalRequest.FeeRate
-                };
+                    var historyEntry = new VBTCWithdrawalHistory
+                    {
+                        RequestHash = withdrawalRequestHash,
+                        CompletionHash = tx.Hash,
+                        BTCTransactionHash = btcTxHash,
+                        Amount = storedAmount,
+                        BTCDestination = withdrawalRequest.BTCDestination,
+                        RequestTime = withdrawalRequest.Timestamp,
+                        CompletionTime = tx.Timestamp,
+                        FeeRate = withdrawalRequest.FeeRate
+                    };
 
-                // Add to history
-                if (contract.WithdrawalHistory == null)
-                {
-                    contract.WithdrawalHistory = new List<VBTCWithdrawalHistory>();
+                    if (contract.WithdrawalHistory == null)
+                        contract.WithdrawalHistory = new List<VBTCWithdrawalHistory>();
+                    contract.WithdrawalHistory.Add(historyEntry);
+
+                    contract.WithdrawalStatus = VBTCWithdrawalStatus.Completed;
+                    contract.ActiveWithdrawalRequestHash = null;
+                    contract.ActiveWithdrawalAmount = 0;
+                    contract.ActiveWithdrawalBTCDestination = null;
+                    contract.ActiveWithdrawalFeeRate = 0;
+                    contract.ActiveWithdrawalRequestTime = 0;
+                    VBTCContractV2.UpdateContract(contract);
                 }
-                contract.WithdrawalHistory.Add(historyEntry);
 
-                // Update contract status to Completed and clear active withdrawal fields
-                contract.WithdrawalStatus = VBTCWithdrawalStatus.Completed;
-                contract.ActiveWithdrawalRequestHash = null;
-                contract.ActiveWithdrawalAmount = 0;
-                contract.ActiveWithdrawalBTCDestination = null;
-                contract.ActiveWithdrawalFeeRate = 0;
-                contract.ActiveWithdrawalRequestTime = 0;
-
-                // Save updated contract
-                VBTCContractV2.UpdateContract(contract);
-
-                // CRITICAL: Burn the withdrawn tokens in state trei
+                // CRITICAL: Burn the withdrawn tokens in state trei (CONSENSUS-CRITICAL — must run on ALL nodes)
                 // FIND-002 FIX: Use storedAmount (from request record), NOT tx.Data.Amount
                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                 if (scStateTreiRec != null)

@@ -25,26 +25,17 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// Spendable transparent vBTC for <paramref name="fromAddress"/> on contract <paramref name="scUid"/>:
         /// owner = BTC deposit balance + tokenization ledger; non-owner = ledger only (matches <see cref="TransferVBTC"/>).
         /// </summary>
-        public static bool TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress, out decimal availableBalance, out string? error)
+        public static async Task<(bool success, decimal availableBalance, string? error)> TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress)
         {
-            availableBalance = 0M;
-            error = null;
             try
             {
-                var vbtcContract = VBTCContractV2.GetContract(scUid);
-                if (vbtcContract == null)
-                {
-                    error = $"vBTC V2 contract not found: {scUid}";
-                    return false;
-                }
-
                 var scState = SmartContractStateTrei.GetSmartContractState(scUid);
                 if (scState == null)
                 {
-                    error = $"Smart contract state not found: {scUid}";
-                    return false;
+                    return (false, 0M, $"Smart contract state not found: {scUid}");
                 }
 
+                // Calculate ledger balance from tokenization TXes (consensus data, available on all nodes)
                 decimal ledgerBalance = 0M;
                 if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                 {
@@ -60,14 +51,91 @@ namespace ReserveBlockCore.Bitcoin.Services
                     }
                 }
 
-                bool isOwner = vbtcContract.OwnerAddress == fromAddress;
-                availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
-                return true;
+                // Determine owner address and deposit address.
+                // Try local DB first; fall back to State Trei + in-memory decompile for remote nodes.
+                string? ownerAddress = null;
+                string? depositAddress = null;
+                decimal localCachedBalance = 0M;
+
+                var vbtcContract = VBTCContractV2.GetContract(scUid);
+                if (vbtcContract != null)
+                {
+                    ownerAddress = vbtcContract.OwnerAddress;
+                    depositAddress = vbtcContract.DepositAddress;
+                    localCachedBalance = vbtcContract.Balance;
+                }
+                else
+                {
+                    // Remote node fallback: owner address from State Trei, deposit address from contract code
+                    ownerAddress = scState.OwnerAddress;
+
+                    if (!string.IsNullOrEmpty(scState.ContractData))
+                    {
+                        try
+                        {
+                            var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                            if (scMainDecompile?.Features != null)
+                            {
+                                var tknzFeature = scMainDecompile.Features
+                                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                    .Select(x => x.FeatureFeatures)
+                                    .FirstOrDefault();
+
+                                if (tknzFeature is TokenizationV2Feature tknz)
+                                {
+                                    depositAddress = tknz.DepositAddress;
+                                }
+                            }
+                        }
+                        catch (Exception decompileEx)
+                        {
+                            ErrorLogUtility.LogError($"Failed to decompile contract {scUid} for deposit address: {decompileEx.Message}",
+                                "VBTCService.TryGetAvailableTransparentVbtcBalance()");
+                        }
+                    }
+                }
+
+                bool isOwner = !string.IsNullOrEmpty(ownerAddress) && ownerAddress == fromAddress;
+
+                if (!isOwner)
+                {
+                    // Non-owner: balance is purely from the tokenization ledger (works on all nodes)
+                    return (true, ledgerBalance, null);
+                }
+
+                // Owner: must verify actual BTC deposit balance to prevent inflation.
+                // Query Electrum for real-time balance of the deposit address.
+                decimal btcDepositBalance = 0M;
+                if (!string.IsNullOrEmpty(depositAddress))
+                {
+                    try
+                    {
+                        using var client = await ReserveBlockCore.Bitcoin.Bitcoin.ElectrumXClient();
+                        if (client != null)
+                        {
+                            var balance = await client.GetBalance(depositAddress, false);
+                            btcDepositBalance = balance.Confirmed / 100_000_000M;
+                        }
+                        else
+                        {
+                            // Electrum unavailable — fall back to locally cached balance if we have it
+                            btcDepositBalance = localCachedBalance;
+                        }
+                    }
+                    catch (Exception elxEx)
+                    {
+                        // Electrum query failed — fall back to locally cached balance
+                        ErrorLogUtility.LogError($"ElectrumX query failed for deposit balance, using cached: {elxEx.Message}",
+                            "VBTCService.TryGetAvailableTransparentVbtcBalance()");
+                        btcDepositBalance = localCachedBalance;
+                    }
+                }
+
+                return (true, btcDepositBalance + ledgerBalance, null);
             }
             catch (Exception ex)
             {
-                error = ex.Message;
-                return false;
+                return (false, 0M, ex.Message);
             }
         }
 
@@ -346,16 +414,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Account not found: {fromAddress}");
                 }
 
-                if (!TryGetAvailableTransparentVbtcBalance(scUID, fromAddress, out var availableBalance, out var balErr))
+                var balResult = await TryGetAvailableTransparentVbtcBalance(scUID, fromAddress);
+                if (!balResult.success)
                 {
-                    SCLogUtility.Log(balErr ?? "Balance lookup failed", "VBTCService.TransferVBTC()");
-                    return (false, balErr ?? "Could not resolve vBTC transparent balance.");
+                    SCLogUtility.Log(balResult.error ?? "Balance lookup failed", "VBTCService.TransferVBTC()");
+                    return (false, balResult.error ?? "Could not resolve vBTC transparent balance.");
                 }
 
-                if (availableBalance < amount)
+                if (balResult.availableBalance < amount)
                 {
-                    SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.TransferVBTC()");
-                    return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
+                    SCLogUtility.Log($"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}", "VBTCService.TransferVBTC()");
+                    return (false, $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}");
                 }
 
                 toAddress = toAddress.ToAddressNormalize();
@@ -460,16 +529,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"You already have an active withdrawal request. Complete it before starting a new one. Request Hash: {existingRequest.TransactionHash}");
                 }
 
-                if (!TryGetAvailableTransparentVbtcBalance(scUID, requestorAddress, out var availableBalance, out var balErr))
+                var balResult = await TryGetAvailableTransparentVbtcBalance(scUID, requestorAddress);
+                if (!balResult.success)
                 {
-                    SCLogUtility.Log(balErr ?? "Balance lookup failed", "VBTCService.RequestWithdrawal()");
-                    return (false, balErr ?? "Could not resolve vBTC transparent balance.");
+                    SCLogUtility.Log(balResult.error ?? "Balance lookup failed", "VBTCService.RequestWithdrawal()");
+                    return (false, balResult.error ?? "Could not resolve vBTC transparent balance.");
                 }
 
-                if (availableBalance < amount)
+                if (balResult.availableBalance < amount)
                 {
-                    SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
+                    SCLogUtility.Log($"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}");
                 }
 
                 btcAddress = btcAddress.ToBTCAddressNormalize();

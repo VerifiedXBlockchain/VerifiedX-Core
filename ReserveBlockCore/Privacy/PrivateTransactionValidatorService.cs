@@ -74,7 +74,7 @@ namespace ReserveBlockCore.Privacy
 
             if (PrivateTransactionTypes.IsTransparentShield(txRequest.TransactionType))
             {
-                var shield = ValidateTransparentShield(txRequest, payload!, processedNonces);
+                var shield = await ValidateTransparentShield(txRequest, payload!, processedNonces);
                 if (!shield.ok)
                     return shield;
             }
@@ -251,7 +251,7 @@ namespace ReserveBlockCore.Privacy
             }
         }
 
-        private static (bool ok, string message) ValidateTransparentShield(
+        private static async Task<(bool ok, string message)> ValidateTransparentShield(
             Transaction txRequest,
             PrivateTxPayload payload,
             Dictionary<string, long>? processedNonces)
@@ -289,15 +289,14 @@ namespace ReserveBlockCore.Privacy
                 if (!string.IsNullOrWhiteSpace(payload.VbtcContractUid)
                     && payload.VbtcTransparentAmount is > 0)
                 {
-                    if (!ReserveBlockCore.Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(
+                    var vbtcBalResult = await ReserveBlockCore.Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(
                             payload.VbtcContractUid,
-                            txRequest.FromAddress,
-                            out var availableVbtc,
-                            out var vbtcBalErr))
-                        return (false, vbtcBalErr ?? "Could not resolve vBTC transparent balance for shield.");
+                            txRequest.FromAddress);
+                    if (!vbtcBalResult.success)
+                        return (false, vbtcBalResult.error ?? "Could not resolve vBTC transparent balance for shield.");
 
-                    if (payload.VbtcTransparentAmount.Value > availableVbtc)
-                        return (false, $"Insufficient transparent vBTC for shield. Available: {availableVbtc}, requested: {payload.VbtcTransparentAmount.Value}.");
+                    if (payload.VbtcTransparentAmount.Value > vbtcBalResult.availableBalance)
+                        return (false, $"Insufficient transparent vBTC for shield. Available: {vbtcBalResult.availableBalance}, requested: {payload.VbtcTransparentAmount.Value}.");
                 }
             }
 
