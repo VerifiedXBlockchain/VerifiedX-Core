@@ -131,6 +131,9 @@ namespace ReserveBlockCore.Services
                     await Task.Delay(1000);
                 }
                 
+                // Scan recent blocks first to rebuild accurate validator state from consensus
+                await VBTCValidatorHeartbeatService.ScanRecentBlocksForValidatorState();
+
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
                 Globals.IsFrostValidator = true; // Enable FROST server for validator nodes
@@ -166,20 +169,23 @@ namespace ReserveBlockCore.Services
                         // Check if IP address has changed since last registration
                         if (!string.IsNullOrEmpty(currentIp) && currentIp != existingValidator.IPAddress)
                         {
-                            LogUtility.Log($"Validator {Globals.ValidatorAddress} IP changed from {existingValidator.IPAddress} to {currentIp}. Sending reactivation TX with updated IP...",
+                            LogUtility.Log($"Validator {Globals.ValidatorAddress} IP changed from {existingValidator.IPAddress} to {currentIp}. Sending heartbeat TX with updated IP...",
                                 "ValidatorService.SendVBTCV2RegistrationTx()");
                             await SendVBTCV2ReactivationTx(existingValidator);
                             return;
                         }
 
-                        // Active and same IP — nothing to do
-                        LogUtility.Log($"Validator {Globals.ValidatorAddress} already registered and active in vBTC V2 database. No registration TX needed.",
+                        // ALWAYS send a heartbeat TX on startup to ensure network convergence.
+                        // The local DB may show IsActive=true but other nodes may have marked us inactive.
+                        // On-chain heartbeat is the only way to guarantee all nodes agree.
+                        LogUtility.Log($"Validator {Globals.ValidatorAddress} appears active locally. Sending startup heartbeat TX to ensure network-wide convergence...",
                             "ValidatorService.SendVBTCV2RegistrationTx()");
+                        await SendVBTCV2ReactivationTx(existingValidator);
                         return;
                     }
                     else
                     {
-                        // Validator was marked inactive (e.g., went offline for 30+ minutes).
+                        // Validator was marked inactive (e.g., went offline for extended period).
                         // Send a VBTC_V2_VALIDATOR_HEARTBEAT TX to reactivate on the network.
                         LogUtility.Log($"Validator {Globals.ValidatorAddress} found in vBTC V2 database but is INACTIVE. Sending reactivation TX...",
                             "ValidatorService.SendVBTCV2RegistrationTx()");
@@ -346,9 +352,9 @@ namespace ReserveBlockCore.Services
                     await Task.Delay(5000);
                 }
 
-                // Wait for 5 new blocks (shorter than initial registration since we're already known)
-                var reactivationBlockTarget = Globals.LastBlock.Height + 5;
-                LogUtility.Log($"Waiting for 5 blocks before vBTC V2 reactivation (target height: {reactivationBlockTarget})...",
+                // Wait for 2 new blocks — fast startup to let the network know we're back quickly
+                var reactivationBlockTarget = Globals.LastBlock.Height + VBTCValidatorHeartbeatService.STARTUP_HEARTBEAT_BLOCK_WAIT;
+                LogUtility.Log($"Waiting for {VBTCValidatorHeartbeatService.STARTUP_HEARTBEAT_BLOCK_WAIT} blocks before vBTC V2 reactivation (target height: {reactivationBlockTarget})...",
                     "ValidatorService.SendVBTCV2ReactivationTx()");
                 while (Globals.LastBlock.Height < reactivationBlockTarget)
                 {

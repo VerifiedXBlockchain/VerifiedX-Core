@@ -119,6 +119,9 @@ namespace ReserveBlockCore.BrowserWalletServices
             if (vfxNotes.Any(n => n.Amount >= fee))
                 vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
 
+            // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
+            PrivacyApiHelper.MarkInputsSpentLocally(zfxAddress, inputs, asset);
+
             var ts = TimeUtil.GetTime();
             if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(
                     scUID,
@@ -131,9 +134,20 @@ namespace ReserveBlockCore.BrowserWalletServices
                     out var buildErr,
                     vfxFeeInput,
                     DbContext.DB_Privacy))
+            {
+                // Rollback: unmark spent inputs on build failure
+                PrivacyApiHelper.UnmarkInputsSpentLocally(zfxAddress, inputs, asset);
                 return new { success = false, message = buildErr ?? "Failed to build vBTC unshield TX." };
+            }
 
             var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+            if (!broadcastOk)
+            {
+                // Rollback: unmark spent inputs on broadcast failure
+                PrivacyApiHelper.UnmarkInputsSpentLocally(zfxAddress, inputs, asset);
+            }
+
             return new { success = broadcastOk, hash = tx!.Hash, type = "VBTC_UNSHIELD", amount, zfxAddress, toAddress, scUID, detail = json };
         }
 
@@ -175,6 +189,9 @@ namespace ReserveBlockCore.BrowserWalletServices
             if (vfxNotes.Any(n => n.Amount >= fee))
                 vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
 
+            // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
+            PrivacyApiHelper.MarkInputsSpentLocally(fromZfxAddress, inputs, asset);
+
             var ts = TimeUtil.GetTime();
             if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(
                     scUID,
@@ -187,9 +204,20 @@ namespace ReserveBlockCore.BrowserWalletServices
                     out var buildErr,
                     vfxFeeInput,
                     DbContext.DB_Privacy))
+            {
+                // Rollback: unmark spent inputs on build failure
+                PrivacyApiHelper.UnmarkInputsSpentLocally(fromZfxAddress, inputs, asset);
                 return new { success = false, message = buildErr ?? "Failed to build vBTC private transfer TX." };
+            }
 
             var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+            if (!broadcastOk)
+            {
+                // Rollback: unmark spent inputs on broadcast failure
+                PrivacyApiHelper.UnmarkInputsSpentLocally(fromZfxAddress, inputs, asset);
+            }
+
             return new { success = broadcastOk, hash = tx!.Hash, type = "VBTC_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, scUID, detail = json };
         }
 

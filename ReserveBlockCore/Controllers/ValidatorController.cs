@@ -310,9 +310,10 @@ namespace ReserveBlockCore.Controllers
         {
             try
             {
-                // Get validators with recent heartbeat (within 1000 blocks)
+                // Get validators using blockchain-based staleness check
                 var currentBlock = Globals.LastBlock.Height;
-                var activeValidators = Bitcoin.Models.VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
+                var activeValidators = Bitcoin.Models.VBTCValidator.GetActiveValidatorsWithStalenessCheck(
+                    currentBlock, Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
 
                 return JsonConvert.SerializeObject(new
                 {

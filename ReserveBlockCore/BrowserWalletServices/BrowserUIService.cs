@@ -29,6 +29,9 @@ namespace ReserveBlockCore.BrowserWalletServices
             BuildUnshieldModal() +
             BuildPrivateTransferModal() +
             BuildSendBtcModal() +
+            BuildShieldVbtcModal() +
+            BuildUnshieldVbtcModal() +
+            BuildPrivateTransferVbtcModal() +
             BuildScript() +
             BuildFooter();
 
@@ -286,6 +289,32 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
         <button class='act-btn sec' onclick='doScanZfx()'>&#128269; Scan for Notes</button>
       </div>
     </div>
+    <hr style='border:none;border-top:1px solid var(--border);margin:24px 0'>
+    <div id='vbtc-priv-hero' class='bal-hero' style='background:linear-gradient(135deg,#161b22 0%,#1a2219 100%)'>
+      <div class='bal-main'>
+        <div class='bal-lbl'>&#8383; Shielded vBTC Balance</div>
+        <div class='bal-num' id='vbtc-priv-bal-num'>-- <span>vBTC</span></div>
+        <div id='vbtc-priv-notes' class='muted' style='font-size:12px;margin-top:4px'>Select a vBTC contract below</div>
+      </div>
+      <div style='display:flex;flex-direction:column;gap:8px'>
+        <button class='send-btn' onclick='openShieldVbtc()' style='background:linear-gradient(135deg,#e3b341,#f0883e)'>&#8595; Shield vBTC</button>
+      </div>
+    </div>
+    <div id='vbtc-priv-sel-wrap' style='margin-bottom:16px;display:none'>
+      <div class='form-grp'>
+        <label>vBTC Contract</label>
+        <select id='vbtc-priv-sc-sel' class='addr-sel' onchange='onVbtcPrivScChange()' style='max-width:600px'><option value=''>No vBTC contracts</option></select>
+      </div>
+    </div>
+    <div id='vbtc-priv-actions' style='display:none;margin-bottom:20px'>
+      <div class='nft-actions'>
+        <button class='act-btn prim' onclick='openUnshieldVbtc()'>&#8593; Unshield vBTC</button>
+        <button class='act-btn prim' onclick='openPrivTransferVbtc()'>&#8596; Private Transfer vBTC</button>
+        <button class='act-btn sec' onclick='doScanVbtc()'>&#128269; Scan vBTC Notes</button>
+      </div>
+    </div>
+    <div id='vbtc-priv-pool-content'></div>
+    <hr style='border:none;border-top:1px solid var(--border);margin:24px 0'>
     <div class='sec-hdr'><span class='sec-ttl'>System Status</span></div>
     <div id='priv-status-content'><div class='ld'><span class='spin'></span>Loading privacy status...</div></div>
   </div>";
@@ -632,6 +661,113 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
     <div class='modal-foot'>
       <button class='btn-sec' onclick='closeBtcSend()'>Cancel</button>
       <button class='btn-prim' id='btc-s-btn' onclick='doSendBTC()'>Send BTC</button>
+    </div>
+  </div>
+</div>";
+
+        // ── Shield vBTC Modal ────────────────────────────────────────────────
+        private static string BuildShieldVbtcModal() => @"
+<!-- Shield vBTC Modal -->
+<div class='overlay' id='shvbtc-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8595; Shield vBTC (T&#8594;Z)</div>
+      <button class='modal-close' onclick='closeShieldVbtc()'>&#215;</button>
+    </div>
+    <div class='form-grp'>
+      <label>From Transparent Address</label>
+      <select id='shvbtc-from' class='form-inp' style='cursor:pointer'></select>
+    </div>
+    <div class='form-grp'>
+      <label>To Shielded Address (zfx_)</label>
+      <input class='form-inp' id='shvbtc-zfx' type='text' placeholder='zfx_...'>
+    </div>
+    <div class='form-grp'>
+      <label>vBTC Contract</label>
+      <select id='shvbtc-sc' class='form-inp' style='cursor:pointer'></select>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (vBTC)</label>
+      <input class='form-inp' id='shvbtc-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='msg' id='shvbtc-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeShieldVbtc()'>Cancel</button>
+      <button class='btn-prim' id='shvbtc-btn' onclick='doShieldVbtc()'>Shield vBTC</button>
+    </div>
+  </div>
+</div>";
+
+        // ── Unshield vBTC Modal ──────────────────────────────────────────────
+        private static string BuildUnshieldVbtcModal() => @"
+<!-- Unshield vBTC Modal -->
+<div class='overlay' id='ushvbtc-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8593; Unshield vBTC (Z&#8594;T)</div>
+      <button class='modal-close' onclick='closeUnshieldVbtc()'>&#215;</button>
+    </div>
+    <div class='form-grp'>
+      <label>From Shielded Address</label>
+      <input class='form-inp' id='ushvbtc-zfx' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>To Transparent Address</label>
+      <select id='ushvbtc-to' class='form-inp' style='cursor:pointer'></select>
+    </div>
+    <div class='form-grp'>
+      <label>vBTC Contract</label>
+      <input class='form-inp' id='ushvbtc-sc' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (vBTC)</label>
+      <input class='form-inp' id='ushvbtc-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='form-grp'>
+      <label>Spending Password</label>
+      <input class='form-inp' id='ushvbtc-pwd' type='password' placeholder='Password used when creating shielded address'>
+    </div>
+    <div class='msg' id='ushvbtc-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeUnshieldVbtc()'>Cancel</button>
+      <button class='btn-prim' id='ushvbtc-btn' onclick='doUnshieldVbtc()'>Unshield vBTC</button>
+    </div>
+  </div>
+</div>";
+
+        // ── Private Transfer vBTC Modal ──────────────────────────────────────
+        private static string BuildPrivateTransferVbtcModal() => @"
+<!-- Private Transfer vBTC Modal -->
+<div class='overlay' id='ptxvbtc-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#8596; Private Transfer vBTC (Z&#8594;Z)</div>
+      <button class='modal-close' onclick='closePTxVbtc()'>&#215;</button>
+    </div>
+    <div class='form-grp'>
+      <label>From Shielded Address</label>
+      <input class='form-inp' id='ptxvbtc-from' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>To Shielded Address (zfx_)</label>
+      <input class='form-inp' id='ptxvbtc-to' type='text' placeholder='zfx_...'>
+    </div>
+    <div class='form-grp'>
+      <label>vBTC Contract</label>
+      <input class='form-inp' id='ptxvbtc-sc' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (vBTC)</label>
+      <input class='form-inp' id='ptxvbtc-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='form-grp'>
+      <label>Spending Password</label>
+      <input class='form-inp' id='ptxvbtc-pwd' type='password' placeholder='Password used when creating shielded address'>
+    </div>
+    <div class='msg' id='ptxvbtc-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closePTxVbtc()'>Cancel</button>
+      <button class='btn-prim' id='ptxvbtc-btn' onclick='doPrivTransferVbtc()'>Send vBTC</button>
     </div>
   </div>
 </div>";
@@ -1178,6 +1314,7 @@ function loadPrivacy(){
       el('priv-zfx-sel-wrap').style.display='block';
       el('priv-actions').style.display='block';
       loadZfxBalance(selZfx);
+      loadVbtcPrivacy();
     }else{
       el('priv-bal-num').innerHTML='-- <span>VFX</span>';
       el('priv-notes').textContent='No shielded address created yet';
@@ -1188,6 +1325,7 @@ function loadPrivacy(){
   }).catch(function(){
     if(knownZfx.length>0){
       loadZfxBalance(selZfx||knownZfx[0]);
+      loadVbtcPrivacy();
     }else{
       el('priv-bal-num').innerHTML='-- <span>VFX</span>';
       el('priv-notes').textContent='No shielded address created yet';
@@ -1441,6 +1579,232 @@ window.doScanZfx=function(){
   }).catch(function(){
     if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan for Notes';}
     el('priv-notes').textContent='Scan request failed.';
+  });
+};
+
+/* ======== vBTC Privacy ======== */
+var vbtcPrivContracts=[];var selVbtcPrivSc=null;
+
+function loadVbtcPrivacy(){
+  if(!selAddr||!selZfx)return;
+  fetch('/wallet/api/vbtc/'+encodeURIComponent(selAddr)).then(function(r){return r.json();}).then(function(contracts){
+    vbtcPrivContracts=contracts||[];
+    var sel=el('vbtc-priv-sc-sel');
+    sel.innerHTML='';
+    if(!vbtcPrivContracts.length){
+      sel.innerHTML='<option value="">No vBTC contracts</option>';
+      el('vbtc-priv-sel-wrap').style.display='none';
+      el('vbtc-priv-actions').style.display='none';
+      el('vbtc-priv-bal-num').innerHTML='-- <span>vBTC</span>';
+      el('vbtc-priv-notes').textContent='No vBTC contracts found for this address';
+      return;
+    }
+    vbtcPrivContracts.forEach(function(c){
+      var opt=document.createElement('option');
+      opt.value=c.scUID;
+      opt.textContent=c.scUID.substring(0,24)+'... | '+fmtBal(c.balance)+' vBTC';
+      sel.appendChild(opt);
+    });
+    selVbtcPrivSc=vbtcPrivContracts[0].scUID;
+    el('vbtc-priv-sel-wrap').style.display='block';
+    el('vbtc-priv-actions').style.display='block';
+    loadVbtcPrivBalance(selZfx,selVbtcPrivSc);
+    loadVbtcPoolState(selVbtcPrivSc);
+  }).catch(function(){
+    el('vbtc-priv-bal-num').innerHTML='-- <span>vBTC</span>';
+    el('vbtc-priv-notes').textContent='Failed to load vBTC contracts';
+  });
+}
+
+window.onVbtcPrivScChange=function(){
+  selVbtcPrivSc=el('vbtc-priv-sc-sel').value;
+  if(selZfx&&selVbtcPrivSc){
+    loadVbtcPrivBalance(selZfx,selVbtcPrivSc);
+    loadVbtcPoolState(selVbtcPrivSc);
+  }
+};
+
+function loadVbtcPrivBalance(zfx,scUID){
+  if(!zfx||!scUID)return;
+  fetch('/wallet/api/privacy/vbtc/balance/'+encodeURIComponent(zfx)+'/'+encodeURIComponent(scUID))
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.success){
+        el('vbtc-priv-bal-num').innerHTML=fmtBal(d.vbtcShieldedBalance)+'<span>vBTC</span>';
+        el('vbtc-priv-notes').textContent=d.unspentNotes+' unspent note'+(d.unspentNotes!==1?'s':'')+' ('+d.assetKey+')';
+      }else{
+        el('vbtc-priv-bal-num').innerHTML='-- <span>vBTC</span>';
+        el('vbtc-priv-notes').textContent=d.message||'Error';
+      }
+    }).catch(function(){
+      el('vbtc-priv-bal-num').innerHTML='-- <span>vBTC</span>';
+      el('vbtc-priv-notes').textContent='Failed to load vBTC shielded balance';
+    });
+}
+
+function loadVbtcPoolState(scUID){
+  if(!scUID)return;
+  fetch('/wallet/api/privacy/vbtc/poolState/'+encodeURIComponent(scUID))
+    .then(function(r){return r.json();})
+    .then(function(pool){
+      if(!pool||!pool.success){el('vbtc-priv-pool-content').innerHTML='';return;}
+      var h='<div class=""stat-row"">';
+      h+='<div class=""stat-card""><div class=""stat-lbl"">vBTC Pool Asset</div><div class=""stat-val acc"">'+esc(pool.assetType)+'</div></div>';
+      h+='<div class=""stat-card""><div class=""stat-lbl"">Total Commitments</div><div class=""stat-val grn"">'+pool.totalCommitments+'</div></div>';
+      h+='<div class=""stat-card""><div class=""stat-lbl"">Shielded Supply</div><div class=""stat-val org"">'+fmtBal(pool.totalShieldedSupply)+' vBTC</div></div>';
+      h+='<div class=""stat-card""><div class=""stat-lbl"">Last Update</div><div class=""stat-val acc"">#'+pool.lastUpdateHeight+'</div></div>';
+      h+='</div>';
+      el('vbtc-priv-pool-content').innerHTML=h;
+    }).catch(function(){el('vbtc-priv-pool-content').innerHTML='';});
+}
+
+function populateVbtcScSelect(selId){
+  var sel=el(selId);sel.innerHTML='';
+  vbtcPrivContracts.forEach(function(c){
+    var opt=document.createElement('option');
+    opt.value=c.scUID;
+    opt.textContent=c.scUID.substring(0,24)+'... | '+fmtBal(c.balance)+' vBTC';
+    sel.appendChild(opt);
+  });
+}
+
+/* ---- Shield vBTC ---- */
+window.openShieldVbtc=function(){
+  populateAddrSelect('shvbtc-from');
+  el('shvbtc-zfx').value=selZfx||'';
+  populateVbtcScSelect('shvbtc-sc');
+  el('shvbtc-amount').value='';
+  hideMsg('shvbtc-msg');
+  el('shvbtc-overlay').classList.add('on');
+};
+window.closeShieldVbtc=function(){el('shvbtc-overlay').classList.remove('on');};
+
+window.doShieldVbtc=function(){
+  var from=el('shvbtc-from').value;
+  var zfx=el('shvbtc-zfx').value.trim();
+  var scUID=el('shvbtc-sc').value;
+  var amt=el('shvbtc-amount').value.trim();
+  if(!from||!zfx||!scUID||!amt){showMsg('shvbtc-msg','Please fill all fields.','err');return;}
+  if(!zfx.startsWith('zfx_')){showMsg('shvbtc-msg','Shielded address must start with zfx_','err');return;}
+  var btn=el('shvbtc-btn');
+  btn.disabled=true;btn.textContent='Shielding...';
+  fetch('/wallet/api/privacy/vbtc/shield',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({FromAddress:from,ZfxAddress:zfx,ScUID:scUID,Amount:amt})
+  }).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Shield vBTC';
+    if(d.success){
+      showMsg('shvbtc-msg','Shield TX broadcast! Hash: '+(d.hash||''),'ok');
+      setTimeout(function(){closeShieldVbtc();loadAccounts();if(selZfx&&selVbtcPrivSc)loadVbtcPrivBalance(selZfx,selVbtcPrivSc);},2500);
+    }else{
+      showMsg('shvbtc-msg',d.message||'Shield failed.','err');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.textContent='Shield vBTC';
+    showMsg('shvbtc-msg',e.message||'Request failed.','err');
+  });
+};
+
+/* ---- Unshield vBTC ---- */
+window.openUnshieldVbtc=function(){
+  if(!selZfx||!selVbtcPrivSc){return;}
+  el('ushvbtc-zfx').value=selZfx;
+  populateAddrSelect('ushvbtc-to');
+  el('ushvbtc-sc').value=selVbtcPrivSc;
+  el('ushvbtc-amount').value='';
+  el('ushvbtc-pwd').value='';
+  hideMsg('ushvbtc-msg');
+  el('ushvbtc-overlay').classList.add('on');
+};
+window.closeUnshieldVbtc=function(){el('ushvbtc-overlay').classList.remove('on');};
+
+window.doUnshieldVbtc=function(){
+  var zfx=el('ushvbtc-zfx').value;
+  var to=el('ushvbtc-to').value;
+  var scUID=el('ushvbtc-sc').value;
+  var amt=el('ushvbtc-amount').value.trim();
+  var pwd=el('ushvbtc-pwd').value;
+  if(!zfx||!to||!scUID||!amt){showMsg('ushvbtc-msg','Please fill all fields.','err');return;}
+  var btn=el('ushvbtc-btn');
+  btn.disabled=true;btn.textContent='Unshielding...';
+  fetch('/wallet/api/privacy/vbtc/unshield',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ZfxAddress:zfx,ToAddress:to,ScUID:scUID,Amount:amt,Password:pwd||null})
+  }).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Unshield vBTC';
+    if(d.success){
+      showMsg('ushvbtc-msg','Unshield TX broadcast! Hash: '+(d.hash||''),'ok');
+      setTimeout(function(){closeUnshieldVbtc();loadAccounts();loadVbtcPrivBalance(zfx,scUID);},2500);
+    }else{
+      showMsg('ushvbtc-msg',d.message||'Unshield failed.','err');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.textContent='Unshield vBTC';
+    showMsg('ushvbtc-msg',e.message||'Request failed.','err');
+  });
+};
+
+/* ---- Private Transfer vBTC ---- */
+window.openPrivTransferVbtc=function(){
+  if(!selZfx||!selVbtcPrivSc){return;}
+  el('ptxvbtc-from').value=selZfx;
+  el('ptxvbtc-to').value='';
+  el('ptxvbtc-sc').value=selVbtcPrivSc;
+  el('ptxvbtc-amount').value='';
+  el('ptxvbtc-pwd').value='';
+  hideMsg('ptxvbtc-msg');
+  el('ptxvbtc-overlay').classList.add('on');
+};
+window.closePTxVbtc=function(){el('ptxvbtc-overlay').classList.remove('on');};
+
+window.doPrivTransferVbtc=function(){
+  var from=el('ptxvbtc-from').value;
+  var to=el('ptxvbtc-to').value.trim();
+  var scUID=el('ptxvbtc-sc').value;
+  var amt=el('ptxvbtc-amount').value.trim();
+  var pwd=el('ptxvbtc-pwd').value;
+  if(!from||!to||!scUID||!amt){showMsg('ptxvbtc-msg','Please fill all fields.','err');return;}
+  if(!to.startsWith('zfx_')){showMsg('ptxvbtc-msg','Recipient must be a zfx_ address.','err');return;}
+  var btn=el('ptxvbtc-btn');
+  btn.disabled=true;btn.textContent='Sending...';
+  fetch('/wallet/api/privacy/vbtc/transfer',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({FromZfxAddress:from,ToZfxAddress:to,ScUID:scUID,Amount:amt,Password:pwd||null})
+  }).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Send vBTC';
+    if(d.success){
+      showMsg('ptxvbtc-msg','Private transfer broadcast! Hash: '+(d.hash||''),'ok');
+      setTimeout(function(){closePTxVbtc();loadVbtcPrivBalance(from,scUID);},2500);
+    }else{
+      showMsg('ptxvbtc-msg',d.message||'Transfer failed.','err');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.textContent='Send vBTC';
+    showMsg('ptxvbtc-msg',e.message||'Request failed.','err');
+  });
+};
+
+/* ---- Scan vBTC Notes ---- */
+window.doScanVbtc=function(){
+  if(!selZfx||!selVbtcPrivSc)return;
+  var scanBtn=document.querySelector('#vbtc-priv-actions .act-btn.sec');
+  if(scanBtn){scanBtn.disabled=true;scanBtn.textContent='Scanning...';}
+  var url='/wallet/api/privacy/vbtc/scan/'+encodeURIComponent(selZfx)+'/'+encodeURIComponent(selVbtcPrivSc);
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan vBTC Notes';}
+    if(d.success){
+      var msg='Scanned '+d.blocksScanned+' blocks, '+d.transactionsScanned+' TXs. Found '+d.newNotesFound+' new note'+(d.newNotesFound!==1?'s':'')+'. Balance: '+fmtBal(d.vbtcShieldedBalance)+' vBTC';
+      el('vbtc-priv-notes').textContent=msg;
+      loadVbtcPrivBalance(selZfx,selVbtcPrivSc);
+    }else{
+      el('vbtc-priv-notes').textContent=d.message||'Scan failed.';
+    }
+  }).catch(function(){
+    if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan vBTC Notes';}
+    el('vbtc-priv-notes').textContent='Scan request failed.';
   });
 };
 

@@ -184,6 +184,32 @@ namespace ReserveBlockCore.Bitcoin.Models
             return 0;
         }
 
+        /// <summary>
+        /// Gets active validators using blockchain-based staleness detection.
+        /// A validator is considered active if:
+        /// 1. IsActive == true in the local DB, AND
+        /// 2. LastHeartbeatBlock is within the staleThreshold of the current block height.
+        /// This ensures all nodes converge on the same view since LastHeartbeatBlock is
+        /// updated by on-chain HEARTBEAT transactions processed by every node.
+        /// </summary>
+        /// <param name="currentBlock">Current blockchain height</param>
+        /// <param name="staleThreshold">Number of blocks before a validator is considered stale (default: 1500 blocks ~4.2 hours)</param>
+        public static List<VBTCValidator>? GetActiveValidatorsWithStalenessCheck(long currentBlock, long staleThreshold = 1500)
+        {
+            var validators = GetDb();
+            if (validators != null)
+            {
+                var minHeartbeatBlock = currentBlock - staleThreshold;
+                var validatorList = validators.Find(x => x.IsActive && x.LastHeartbeatBlock >= minHeartbeatBlock).ToList();
+                if (validatorList.Any())
+                {
+                    return validatorList;
+                }
+            }
+
+            return null;
+        }
+
         public static void DeleteValidator(string validatorAddress)
         {
             try
