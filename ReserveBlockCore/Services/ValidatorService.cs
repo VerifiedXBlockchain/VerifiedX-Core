@@ -134,6 +134,10 @@ namespace ReserveBlockCore.Services
                 // Scan recent blocks first to rebuild accurate validator state from consensus
                 await VBTCValidatorHeartbeatService.ScanRecentBlocksForValidatorState();
 
+                // Clean stale validator TXs from mempool before sending new ones
+                // This prevents nonce conflicts and duplicate TXs after restart
+                CleanStaleValidatorTxsFromMempool();
+
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
                 Globals.IsFrostValidator = true; // Enable FROST server for validator nodes
@@ -144,6 +148,48 @@ namespace ReserveBlockCore.Services
 
                 // Send vBTC V2 registration TX in the background after everything is loaded
                 _ = SendVBTCV2RegistrationTx();
+            }
+        }
+
+        /// <summary>
+        /// Removes stale validator lifecycle TXs from the mempool on startup.
+        /// When a validator restarts, old heartbeat/register TXs may still be in the mempool.
+        /// These can conflict with new TXs (same nonce) and cause block validation failures (-13 rollback).
+        /// </summary>
+        private static void CleanStaleValidatorTxsFromMempool()
+        {
+            try
+            {
+                var mempool = TransactionData.GetPool();
+                if (mempool == null || mempool.Count() == 0) return;
+
+                var staleTxTypes = new[]
+                {
+                    TransactionType.VBTC_V2_VALIDATOR_REGISTER,
+                    TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT,
+                    TransactionType.VBTC_V2_VALIDATOR_EXIT
+                };
+
+                var staleTxs = mempool.FindAll()
+                    .Where(x => x.FromAddress == Globals.ValidatorAddress && staleTxTypes.Contains(x.TransactionType))
+                    .ToList();
+
+                if (staleTxs.Any())
+                {
+                    foreach (var tx in staleTxs)
+                    {
+                        mempool.DeleteManySafe(x => x.Hash == tx.Hash);
+                        LogUtility.Log($"Cleaned stale validator TX from mempool: {tx.Hash} (Type: {tx.TransactionType}, Nonce: {tx.Nonce})",
+                            "ValidatorService.CleanStaleValidatorTxsFromMempool()");
+                    }
+                    LogUtility.Log($"Cleaned {staleTxs.Count} stale validator TX(s) from mempool on startup",
+                        "ValidatorService.CleanStaleValidatorTxsFromMempool()");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error cleaning stale validator TXs from mempool: {ex}",
+                    "ValidatorService.CleanStaleValidatorTxsFromMempool()");
             }
         }
 

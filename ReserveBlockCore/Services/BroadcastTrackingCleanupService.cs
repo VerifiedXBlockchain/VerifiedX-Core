@@ -82,7 +82,7 @@ namespace ReserveBlockCore.Services
 
                 // Cleanup BroadcastedTrxDict (check mempool)
                 var mempool = TransactionData.GetMempool();
-                var mempoolHashes = new HashSet<string>(mempool.Select(x => x.Hash));
+                var mempoolHashes = new HashSet<string>(mempool?.Select(x => x.Hash) ?? Enumerable.Empty<string>());
                 
                 var oldTxs = Globals.BroadcastedTrxDict.Keys
                     .Where(hash => !mempoolHashes.Contains(hash))

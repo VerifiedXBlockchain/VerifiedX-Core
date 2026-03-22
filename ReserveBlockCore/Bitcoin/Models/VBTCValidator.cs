@@ -200,7 +200,25 @@ namespace ReserveBlockCore.Bitcoin.Models
             if (validators != null)
             {
                 var minHeartbeatBlock = currentBlock - staleThreshold;
-                var validatorList = validators.Find(x => x.IsActive && x.LastHeartbeatBlock >= minHeartbeatBlock).ToList();
+                var allValidators = validators.FindAll().ToList();
+                var validatorList = allValidators.Where(x => x.IsActive && x.LastHeartbeatBlock >= minHeartbeatBlock).ToList();
+                
+                // Diagnostic logging: show which validators are filtered out and why
+                var filteredOut = allValidators.Where(x => !validatorList.Contains(x)).ToList();
+                if (filteredOut.Any())
+                {
+                    foreach (var v in filteredOut)
+                    {
+                        var reason = !v.IsActive 
+                            ? $"IsActive=false" 
+                            : $"Stale (LastHeartbeatBlock: {v.LastHeartbeatBlock}, MinRequired: {minHeartbeatBlock}, Gap: {currentBlock - v.LastHeartbeatBlock})";
+                        LogUtility.Log($"Validator {v.ValidatorAddress} excluded from active check: {reason} (IP: {v.IPAddress})",
+                            "VBTCValidator.GetActiveValidatorsWithStalenessCheck()");
+                    }
+                    LogUtility.Log($"Active validator staleness check: {validatorList.Count} active of {allValidators.Count} total (currentBlock: {currentBlock}, staleThreshold: {staleThreshold})",
+                        "VBTCValidator.GetActiveValidatorsWithStalenessCheck()");
+                }
+                
                 if (validatorList.Any())
                 {
                     return validatorList;

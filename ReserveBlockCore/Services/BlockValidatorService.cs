@@ -477,6 +477,8 @@ namespace ReserveBlockCore.Services
 
                         //validate transactions.
                         bool rejectBlock = false;
+                        string rejectBlockReason = "";
+                        string rejectBlockTxHash = "";
                         // HAL-067 Fix: Track nonces per address during block validation to support multiple TXs from same sender
                         // Initialize dictionary with current state nonces for all addresses in block
                         var processedNonces = new Dictionary<string, long>();
@@ -516,7 +518,10 @@ namespace ReserveBlockCore.Services
 
                                 if(effectiveTxResult.Item1 == false)
                                 {
-                                    //testing
+                                    rejectBlockReason = effectiveTxResult.Item2 ?? "Unknown validation failure";
+                                    rejectBlockTxHash = blkTransaction.Hash;
+                                    ErrorLogUtility.LogError($"TX validation failed in block {block.Height}. TX: {blkTransaction.Hash}, Type: {blkTransaction.TransactionType}, From: {blkTransaction.FromAddress}, Nonce: {blkTransaction.Nonce}, Reason: {rejectBlockReason}",
+                                        "BlockValidatorService.ValidateBlock()");
                                 }
                                 if(!Globals.GUI && !Globals.BasicCLI && !blockDownloads)
                                 {
@@ -810,7 +815,7 @@ namespace ReserveBlockCore.Services
 
                         if (rejectBlock)
                         {
-                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-13");
+                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-13", $"Bad TX: {rejectBlockTxHash} | Reason: {rejectBlockReason}");
                             return result;//block rejected due to bad transaction(s)
                         }
 

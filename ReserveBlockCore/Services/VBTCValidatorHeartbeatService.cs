@@ -286,6 +286,25 @@ namespace ReserveBlockCore.Services
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
                     return false;
 
+                // Guard: Check if there's already a pending heartbeat TX in the mempool
+                // This prevents duplicate TXs (same nonce) which cause block validation failures (-13 rollback)
+                var mempool = TransactionData.GetPool();
+                if (mempool != null)
+                {
+                    var pendingHeartbeat = mempool.FindAll()
+                        .Where(x => x.FromAddress == Globals.ValidatorAddress && 
+                               (x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT ||
+                                x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER))
+                        .FirstOrDefault();
+                    
+                    if (pendingHeartbeat != null)
+                    {
+                        LogUtility.Log($"Skipping heartbeat TX - already have pending TX in mempool: {pendingHeartbeat.Hash} (Type: {pendingHeartbeat.TransactionType})",
+                            "VBTCValidatorHeartbeatService.SendHeartbeatTransaction()");
+                        return true; // Return true since we already have one pending
+                    }
+                }
+
                 var validator = AccountData.GetSingleAccount(Globals.ValidatorAddress);
                 if (validator == null) return false;
 
