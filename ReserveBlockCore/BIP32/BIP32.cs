@@ -41,11 +41,15 @@ namespace ReserveBlockCore.BIP32
 
                 var leftSide = BigInteger.Parse("00" + il.ToStringHex(), NumberStyles.AllowHexSpecifier);
                 var parent = BigInteger.Parse("00" + key.ToStringHex(), NumberStyles.AllowHexSpecifier);
-                var childPrivateKeyLength = ((leftSide + parent) % curveN).ToString("x").Length;
                 var childPrivateKeyHex = ((leftSide + parent) % curveN).ToString("x");
+
+                // Ensure even-length hex (BigInteger.ToString("x") may drop leading zero)
+                if (childPrivateKeyHex.Length % 2 != 0)
+                    childPrivateKeyHex = "0" + childPrivateKeyHex;
+
                 var childPrivateKey = childPrivateKeyHex.HexToByteArray();
 
-                if (childPrivateKeyLength > 64)
+                if (childPrivateKeyHex.Length > 64)
                 {
                     var childPrivateKeyTrimmed = childPrivateKeyHex.Remove(0, 1);
                     childPrivateKey = childPrivateKeyTrimmed.HexToByteArray();

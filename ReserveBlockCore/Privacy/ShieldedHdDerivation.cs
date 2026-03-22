@@ -93,6 +93,10 @@ namespace ReserveBlockCore.Privacy
             if (string.IsNullOrWhiteSpace(privateKeyHex))
                 throw new ArgumentException("Private key hex is required.", nameof(privateKeyHex));
 
+            // Ensure even-length hex string (leading zero may be dropped by BigInteger.ToString("x"))
+            if (privateKeyHex.Length % 2 != 0)
+                privateKeyHex = "0" + privateKeyHex;
+
             var rawBytes = Convert.FromHexString(privateKeyHex);
             var spendingKey = ToValidNbitcoinKey(rawBytes, SpendFixDomain);
             var spendBytes = spendingKey.ToBytes();
