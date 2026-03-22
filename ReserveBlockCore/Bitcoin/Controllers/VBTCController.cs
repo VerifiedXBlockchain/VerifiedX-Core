@@ -224,14 +224,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 ceremony.ProgressPercentage = 5;
 
                 var currentBlock = Globals.LastBlock.Height;
-                var activeValidators = VBTCValidator.GetActiveValidatorsWithStalenessCheck(currentBlock, Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
+                var activeValidators = VBTCValidator.GetActiveValidatorsWithStalenessCheck(currentBlock, ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
                 var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
 
                 if (activeValidators == null || !activeValidators.Any())
                 {
                     ceremony.Status = CeremonyStatus.Failed;
                     ceremony.ErrorMessage = $"No active validators available for vBTC V2 contract creation. Total registered: {totalRegisteredValidators}. " +
-                        $"Validators may be stale (no on-chain heartbeat within {Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks).";
+                        $"Validators may be stale (no on-chain heartbeat within {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks).";
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
@@ -246,7 +246,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                         : "N/A";
                     ceremony.Status = CeremonyStatus.Failed;
                     ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}. " +
-                        $"Stale threshold: {Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks. Validators: [{valDetails}]";
+                        $"Stale threshold: {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks. Validators: [{valDetails}]";
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
@@ -652,14 +652,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
             // Step 1: Get list of active validators (using blockchain-based staleness check)
             var currentBlock = Globals.LastBlock.Height;
-            var activeValidators = VBTCValidator.GetActiveValidatorsWithStalenessCheck(currentBlock, Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
+            var activeValidators = VBTCValidator.GetActiveValidatorsWithStalenessCheck(currentBlock, ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
             var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
 
             if (activeValidators == null || !activeValidators.Any())
             {
                 ceremony.Status = CeremonyStatus.Failed;
                 ceremony.ErrorMessage = $"No active validators available for vBTC V2 contract creation. Total registered: {totalRegisteredValidators}. " +
-                    $"Validators may be stale (no on-chain heartbeat within {Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks).";
+                    $"Validators may be stale (no on-chain heartbeat within {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks).";
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
@@ -673,7 +673,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     : "N/A";
                 ceremony.Status = CeremonyStatus.Failed;
                 ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}. " +
-                    $"Stale threshold: {Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks. Validators: [{valDetails}]";
+                    $"Stale threshold: {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks. Validators: [{valDetails}]";
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
