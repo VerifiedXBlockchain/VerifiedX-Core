@@ -211,9 +211,19 @@ namespace ReserveBlockCore.P2P
                 _ = PortCheckCacheService.CheckAndDisconnectIfClosed(
                     peerIP,
                     Globals.ValPort,
-                    async () => await EndOnConnect(peerIP,
-                        $"Port: {Globals.ValPort} was not detected as open.",
-                        $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}."),
+                    async () =>
+                    {
+                        try
+                        {
+                            await EndOnConnect(peerIP,
+                                $"Port: {Globals.ValPort} was not detected as open.",
+                                $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}.");
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // Hub already disposed, connection is already gone - nothing to do
+                        }
+                    },
                     "P2PValidatorServer"
                 );
 

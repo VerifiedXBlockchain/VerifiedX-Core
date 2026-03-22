@@ -265,7 +265,9 @@ namespace ReserveBlockCore.Privacy
             if (txRequest.ToAddress != PrivacyConstants.ShieldedPoolAddress)
                 return (false, "Shield transaction ToAddress must be Shielded_Pool.");
 
-            if (Globals.LastBlock.Height > Globals.TXHeightRule1 && txRequest.Amount <= 0.0M)
+            if (Globals.LastBlock.Height > Globals.TXHeightRule1
+                && txRequest.TransactionType != TransactionType.VBTC_V2_SHIELD
+                && txRequest.Amount <= 0.0M)
                 return (false, "Amount cannot be less than or equal to zero.");
 
             if (txRequest.TransactionType == TransactionType.VFX_SHIELD

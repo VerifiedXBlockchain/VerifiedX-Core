@@ -118,6 +118,10 @@ namespace ReserveBlockCore.Services
 
                     await CleanupExpiredEntries();
                 }
+                catch (ObjectDisposedException)
+                {
+                    // Server/connection already disposed - peer is already disconnected, nothing to do
+                }
                 catch (Exception ex)
                 {
                     ErrorLogUtility.LogError($"HAL-022: Error during async port check for {peerIP}: {ex.Message}", $"{serverType}.CheckAndDisconnectIfClosed");
