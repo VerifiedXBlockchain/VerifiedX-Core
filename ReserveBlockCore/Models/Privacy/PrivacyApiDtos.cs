@@ -97,4 +97,30 @@ namespace ReserveBlockCore.Models.Privacy
         public string RecipientZfxAddress { get; set; } = "";
         public decimal PaymentAmount { get; set; }
     }
+
+    /// <summary>Merges the two smallest unspent vBTC notes into one via Z→Z to the same <c>zfx_</c> address.</summary>
+    public class ConsolidateShieldedVbtcRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string? WalletPassword { get; set; }
+        public string VbtcContractUid { get; set; } = "";
+    }
+
+    public class ScanShieldedVbtcRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string? WalletPassword { get; set; }
+        public string VbtcContractUid { get; set; } = "";
+        public long FromHeight { get; set; }
+        public long ToHeight { get; set; }
+    }
+
+    /// <summary>Wipes cached vBTC notes/balances for a specific contract and rescans from FromHeight.</summary>
+    public class ResyncShieldedVbtcRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string VbtcContractUid { get; set; } = "";
+        public long FromHeight { get; set; }
+        public long ToHeight { get; set; }
+    }
 }

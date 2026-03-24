@@ -671,5 +671,616 @@ namespace ReserveBlockCore.Controllers
                 return Task.FromResult(Fail(ex.Message));
             }
         }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        //  vBTC Shielded Pool Operations
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        /// <summary>Transparent vBTC → shielded (T→Z). Burns vBTC on the transparent side and creates a shielded commitment.</summary>
+        [HttpPost("ShieldVBTC")]
+        public async Task<string> ShieldVBTC([FromBody] ShieldVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.FromAddress))
+                    return Fail("FromAddress is required.");
+                if (string.IsNullOrWhiteSpace(req.VbtcContractUid))
+                    return Fail("VbtcContractUid is required.");
+                if (!AddressValidateUtility.ValidateAddress(req.FromAddress))
+                    return Fail("Invalid FromAddress.");
+                var account = AccountData.GetSingleAccount(req.FromAddress);
+                if (account == null)
+                    return Fail("FromAddress not found in local wallet.");
+
+                var nonce = AccountStateTrei.GetNextNonce(req.FromAddress);
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildShield(
+                        req.FromAddress,
+                        req.VbtcContractUid,
+                        req.VbtcAmount,
+                        Globals.MinFeePerKB,
+                        nonce,
+                        ts,
+                        req.RecipientZfxAddress,
+                        req.Memo,
+                        out var tx,
+                        out var err,
+                        DbContext.DB_Privacy))
+                    return Fail(err ?? "Build failed.");
+
+                tx!.Fee = req.TransparentFee ?? FeeCalcService.CalculateTXFee(tx);
+                tx.BuildPrivate();
+                var pk = account.GetPrivKey;
+                if (pk == null)
+                    return Fail("Cannot sign (wallet locked?).");
+                var sig = SignatureService.CreateSignature(tx.Hash, pk, account.PublicKey);
+                if (sig == "ERROR")
+                    return Fail("Signature failed.");
+                tx.Signature = sig;
+
+                var (_, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+                return json;
+            }
+            catch (Exception ex)
+            {
+                return Fail(ex.Message);
+            }
+        }
+
+        /// <summary>Shielded vBTC → transparent (Z→T). Requires both vBTC inputs and a VFX fee input.</summary>
+        [HttpPost("UnshieldVBTC")]
+        public async Task<string> UnshieldVBTC([FromBody] UnshieldVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return Fail("ZfxAddress is required.");
+                if (string.IsNullOrWhiteSpace(req.VbtcContractUid))
+                    return Fail("VbtcContractUid is required.");
+                if (string.IsNullOrWhiteSpace(req.TransparentToAddress))
+                    return Fail("TransparentToAddress is required.");
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return Fail("No shielded wallet row for this zfx address.");
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return Fail(kmErr ?? "Keys");
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var fee = Globals.PrivateTxFixedFee;
+
+                // Select vBTC inputs for the amount
+                var vbtcCommitments = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal))
+                    .ToList();
+
+                if (!CommitmentSelectionService.TrySelectInputs(
+                        vbtcCommitments,
+                        req.TransparentVbtcAmount,
+                        out var inputs,
+                        out _,
+                        out var selErr))
+                    return Fail(selErr ?? "vBTC input selection failed.");
+
+                // Select a VFX fee input (single note >= fee)
+                var vfxNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
+                    .OrderByDescending(c => c.Amount)
+                    .ToList();
+                if (!vfxNotes.Any(n => n.Amount >= fee))
+                    return Fail($"No VFX note with sufficient balance to cover the fixed ZK fee of {fee} VFX.");
+                var vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
+
+                // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(
+                        req.VbtcContractUid,
+                        inputs,
+                        req.TransparentVbtcAmount,
+                        req.TransparentToAddress,
+                        keys,
+                        ts,
+                        out var tx,
+                        out var berr,
+                        vfxFeeInput,
+                        DbContext.DB_Privacy))
+                {
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                    return Fail(berr ?? "Build failed.");
+                }
+
+                var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+                if (!br.ok)
+                {
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                }
+
+                return br.json;
+            }
+            catch (Exception ex)
+            {
+                return Fail(ex.Message);
+            }
+        }
+
+        /// <summary>Shielded vBTC → shielded vBTC (Z→Z). Requires both vBTC inputs and a VFX fee input.</summary>
+        [HttpPost("PrivateTransferVBTC")]
+        public async Task<string> PrivateTransferVBTC([FromBody] PrivateTransferVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return Fail("ZfxAddress is required.");
+                if (string.IsNullOrWhiteSpace(req.VbtcContractUid))
+                    return Fail("VbtcContractUid is required.");
+                if (string.IsNullOrWhiteSpace(req.RecipientZfxAddress))
+                    return Fail("RecipientZfxAddress is required.");
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return Fail("No shielded wallet row for this zfx address.");
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return Fail(kmErr ?? "Keys");
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var fee = Globals.PrivateTxFixedFee;
+
+                // Select vBTC inputs
+                var vbtcCommitments = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal))
+                    .ToList();
+
+                if (!CommitmentSelectionService.TrySelectInputs(
+                        vbtcCommitments,
+                        req.PaymentAmount,
+                        out var inputs,
+                        out _,
+                        out var selErr))
+                    return Fail(selErr ?? "vBTC input selection failed.");
+
+                // Select a VFX fee input (single note >= fee)
+                var vfxNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
+                    .OrderByDescending(c => c.Amount)
+                    .ToList();
+                if (!vfxNotes.Any(n => n.Amount >= fee))
+                    return Fail($"No VFX note with sufficient balance to cover the fixed ZK fee of {fee} VFX.");
+                var vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
+
+                // Mark spent inputs BEFORE broadcast to prevent race with auto-scanner
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(
+                        req.VbtcContractUid,
+                        inputs,
+                        req.PaymentAmount,
+                        req.RecipientZfxAddress,
+                        keys,
+                        ts,
+                        out var tx,
+                        out var berr,
+                        vfxFeeInput,
+                        DbContext.DB_Privacy))
+                {
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                    return Fail(berr ?? "Build failed.");
+                }
+
+                var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+                if (!br.ok)
+                {
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                }
+
+                return br.json;
+            }
+            catch (Exception ex)
+            {
+                return Fail(ex.Message);
+            }
+        }
+
+        /// <summary>Combines the two smallest unspent vBTC notes into one (Z→Z to self). Requires a VFX fee input. Call again to merge additional pairs.</summary>
+        [HttpPost("ConsolidateShieldedVBTC")]
+        public async Task<string> ConsolidateShieldedVBTC([FromBody] ConsolidateShieldedVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return Fail("ZfxAddress is required.");
+                if (string.IsNullOrWhiteSpace(req.VbtcContractUid))
+                    return Fail("VbtcContractUid is required.");
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return Fail("No shielded wallet row for this zfx address.");
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return Fail(kmErr ?? "Keys");
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var fee = Globals.PrivateTxFixedFee;
+
+                var vbtcNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal))
+                    .OrderBy(c => c!.Amount)
+                    .ThenBy(c => c!.TreePosition)
+                    .Cast<UnspentCommitment>()
+                    .ToList();
+                if (vbtcNotes.Count < 2)
+                    return Fail("Need at least two unspent vBTC notes to consolidate.");
+
+                var first = vbtcNotes[0];
+                var second = vbtcNotes[1];
+                var sumAmt = first.Amount + second.Amount;
+                var inputs = first.TreePosition <= second.TreePosition
+                    ? new[] { first, second }
+                    : new[] { second, first };
+
+                // Select a VFX fee input (single note >= fee)
+                var vfxNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
+                    .OrderByDescending(c => c.Amount)
+                    .ToList();
+                if (!vfxNotes.Any(n => n.Amount >= fee))
+                    return Fail($"No VFX note with sufficient balance to cover the fixed ZK fee of {fee} VFX.");
+                var vfxFeeInput = vfxNotes.First(n => n.Amount >= fee);
+
+                // Mark spent inputs BEFORE broadcast
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), asset);
+                PrivacyApiHelper.MarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(
+                        req.VbtcContractUid,
+                        inputs,
+                        sumAmt,
+                        w.ShieldedAddress,
+                        keys,
+                        ts,
+                        out var tx,
+                        out var berr,
+                        vfxFeeInput,
+                        DbContext.DB_Privacy))
+                {
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), asset);
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                    return Fail(berr ?? "Build failed.");
+                }
+
+                var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+                if (!br.ok)
+                {
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), asset);
+                    PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                }
+
+                return br.json;
+            }
+            catch (Exception ex)
+            {
+                return Fail(ex.Message);
+            }
+        }
+
+        /// <summary>Per-asset shielded vBTC balance from local wallet row for a specific contract UID.</summary>
+        [HttpGet("GetShieldedVbtcBalance")]
+        public Task<string> GetShieldedVbtcBalance([FromQuery] string zfxAddress, [FromQuery] string vbtcContractUid, [FromQuery] bool includeCommitments = false)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(zfxAddress))
+                    return Task.FromResult(Fail("zfxAddress query required."));
+                if (string.IsNullOrWhiteSpace(vbtcContractUid))
+                    return Task.FromResult(Fail("vbtcContractUid query required."));
+                var w = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (w == null)
+                    return Task.FromResult(Ok(new { ShieldedVbtcBalance = 0M, UnspentCommitments = 0 }));
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(vbtcContractUid);
+                var unspentOnly = (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal))
+                    .ToList();
+                var sum = unspentOnly.Sum(c => c.Amount);
+
+                object payload = includeCommitments
+                    ? new
+                    {
+                        VbtcContractUid = vbtcContractUid,
+                        AssetKey = asset,
+                        ShieldedVbtcBalance = sum,
+                        UnspentCommitments = unspentOnly.Count,
+                        w.LastScannedBlock,
+                        w.IsViewOnly,
+                        Commitments = unspentOnly
+                            .Select(c => new
+                            {
+                                c!.Commitment,
+                                c.AssetType,
+                                c.Amount,
+                                c.TreePosition,
+                                c.BlockHeight,
+                                c.IsSpent
+                            })
+                            .ToList()
+                    }
+                    : new
+                    {
+                        VbtcContractUid = vbtcContractUid,
+                        AssetKey = asset,
+                        ShieldedVbtcBalance = sum,
+                        UnspentCommitments = unspentOnly.Count,
+                        w.LastScannedBlock,
+                        w.IsViewOnly
+                    };
+
+                return Task.FromResult(Ok(payload));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ex.Message));
+            }
+        }
+
+        /// <summary>Pool state for a vBTC contract (asset key <c>VBTC:{uid}</c>).</summary>
+        [HttpGet("GetVbtcShieldedPoolState")]
+        public Task<string> GetVbtcShieldedPoolState([FromQuery] string vbtcContractUid)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(vbtcContractUid))
+                    return Task.FromResult(Fail("vbtcContractUid query required."));
+                var asset = VbtcPrivacyAsset.FormatAssetKey(vbtcContractUid);
+                var st = ShieldedPoolService.GetState(asset);
+                if (st == null)
+                    return Task.FromResult(Ok(new { VbtcContractUid = vbtcContractUid, AssetType = asset, CurrentMerkleRoot = (string?)null, TotalCommitments = 0L, TotalShieldedSupply = 0.0M, LastUpdateHeight = 0L }));
+                return Task.FromResult(Ok(new
+                {
+                    VbtcContractUid = vbtcContractUid,
+                    st.AssetType,
+                    st.CurrentMerkleRoot,
+                    st.TotalCommitments,
+                    st.TotalShieldedSupply,
+                    st.LastUpdateHeight
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ex.Message));
+            }
+        }
+
+        /// <summary>Scan blocks for vBTC notes decryptable with wallet encryption key; updates local wallet row. Scoped to a specific vBTC contract UID.</summary>
+        [HttpPost("ScanShieldedVBTC")]
+        public Task<string> ScanShieldedVBTC([FromBody] ScanShieldedVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return Task.FromResult(Fail("ZfxAddress required."));
+                if (string.IsNullOrWhiteSpace(req.VbtcContractUid))
+                    return Task.FromResult(Fail("VbtcContractUid required."));
+                if (req.ToHeight < req.FromHeight)
+                    return Task.FromResult(Fail("ToHeight must be >= FromHeight."));
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return Task.FromResult(Fail("No shielded wallet row for this zfx address."));
+
+                ShieldedKeyMaterial keys;
+                if (!string.IsNullOrEmpty(req.WalletPassword))
+                {
+                    if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var fullKeys, out var kmErr))
+                        return Task.FromResult(Fail(kmErr ?? "Keys"));
+                    keys = fullKeys;
+                }
+                else
+                {
+                    if (!PrivacyApiHelper.TryGetViewingKeyMaterial(w, out var viewKeys, out var vkErr))
+                        return Task.FromResult(Fail(vkErr ?? "Cannot derive viewing keys."));
+                    keys = viewKeys;
+                }
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var blocks = new List<Block>();
+                for (var h = req.FromHeight; h <= req.ToHeight; h++)
+                {
+                    var b = BlockchainData.GetBlockByHeight(h);
+                    if (b != null)
+                        blocks.Add(b);
+                }
+
+                var merged = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var u in w.UnspentCommitments ?? new List<UnspentCommitment>())
+                {
+                    if (!string.IsNullOrEmpty(u.Commitment))
+                        merged.Add(u.Commitment);
+                }
+
+                var walletCommitmentStrings = new HashSet<string>(
+                    (w.UnspentCommitments ?? new List<UnspentCommitment>())
+                        .Where(uc => uc != null && !uc.IsSpent && !string.IsNullOrEmpty(uc.Commitment)
+                            && string.Equals(uc.AssetType, asset, StringComparison.Ordinal))
+                        .Select(uc => uc.Commitment),
+                    StringComparer.Ordinal);
+
+                var notesFound = 0;
+                var notesMarkedSpent = 0;
+                var transactionsScanned = 0;
+                foreach (var block in blocks)
+                {
+                    if (block.Transactions == null)
+                        continue;
+                    foreach (var tx in block.Transactions)
+                    {
+                        transactionsScanned++;
+                        if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                            continue;
+                        if (payload == null)
+                            continue;
+
+                        // Mark wallet notes consumed by this tx's nullifiers
+                        if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                        {
+                            var spentCommitmentStrings = PrivacyApiHelper.LookupCommitmentStringsByTreePositions(
+                                payload.SpentCommitmentTreePositions, payload.Asset);
+
+                            if (spentCommitmentStrings.Count > 0)
+                            {
+                                foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
+                                {
+                                    if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                        continue;
+                                    if (!string.Equals(uc.AssetType, asset, StringComparison.Ordinal))
+                                        continue;
+                                    if (spentCommitmentStrings.Contains(uc.Commitment))
+                                    {
+                                        uc.IsSpent = true;
+                                        notesMarkedSpent++;
+                                        var assetKey = uc.AssetType ?? "";
+                                        if (w.ShieldedBalances.ContainsKey(assetKey))
+                                            w.ShieldedBalances[assetKey] -= uc.Amount;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Detect new incoming vBTC notes
+                        if (payload.Outs == null)
+                            continue;
+                        foreach (var o in payload.Outs)
+                        {
+                            if (string.IsNullOrWhiteSpace(o.EncryptedNoteB64))
+                                continue;
+                            byte[] enc;
+                            try
+                            {
+                                enc = Convert.FromBase64String(o.EncryptedNoteB64);
+                            }
+                            catch
+                            {
+                                continue;
+                            }
+                            if (!ShieldedNoteEncryption.TryOpen(enc, keys.EncryptionPrivateKey32, out var plain, out _))
+                                continue;
+                            if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(plain, out var note, out _) || note == null)
+                                continue;
+                            // Only collect notes matching this vBTC asset key
+                            if (!string.Equals(note.AssetType, asset, StringComparison.Ordinal))
+                                continue;
+                            var c = o.CommitmentB64;
+                            if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                                continue;
+                            merged.Add(c);
+                            notesFound++;
+                            byte[] r32 = Array.Empty<byte>();
+                            if (!string.IsNullOrEmpty(note.RandomnessB64))
+                            {
+                                try
+                                {
+                                    r32 = Convert.FromBase64String(note.RandomnessB64);
+                                }
+                                catch { /* ignore */ }
+                            }
+
+                            long treePos = PrivacyApiHelper.LookupTreePositionByCommitment(c, note.AssetType ?? "");
+
+                            w.UnspentCommitments ??= new List<UnspentCommitment>();
+                            w.UnspentCommitments.Add(new UnspentCommitment
+                            {
+                                Commitment = c,
+                                AssetType = note.AssetType ?? "",
+                                Amount = note.Amount,
+                                Randomness = r32,
+                                TreePosition = treePos,
+                                BlockHeight = block.Height,
+                                IsSpent = false
+                            });
+                            var key = note.AssetType ?? "";
+                            if (!w.ShieldedBalances.ContainsKey(key))
+                                w.ShieldedBalances[key] = 0;
+                            w.ShieldedBalances[key] += note.Amount;
+                        }
+                    }
+                }
+                w.LastScannedBlock = Math.Max(w.LastScannedBlock, req.ToHeight);
+                ShieldedWalletService.Upsert(w);
+
+                decimal vbtcBalance = 0;
+                if (w.ShieldedBalances.ContainsKey(asset))
+                    vbtcBalance = w.ShieldedBalances[asset];
+
+                return Task.FromResult(Ok(new
+                {
+                    VbtcContractUid = req.VbtcContractUid,
+                    AssetKey = asset,
+                    NotesFound = notesFound,
+                    NotesMarkedSpent = notesMarkedSpent,
+                    LastScannedBlock = w.LastScannedBlock,
+                    BlocksScanned = blocks.Count,
+                    TransactionsScanned = transactionsScanned,
+                    ShieldedVbtcBalance = vbtcBalance,
+                    FromHeight = req.FromHeight,
+                    ToHeight = req.ToHeight
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ex.Message));
+            }
+        }
+
+        /// <summary>
+        /// Wipes the wallet's cached vBTC notes and balances for a specific contract, then rescans from
+        /// <paramref name="req"/>.FromHeight to rebuild from scratch.
+        /// </summary>
+        [HttpPost("ResyncShieldedVBTC")]
+        public Task<string> ResyncShieldedVBTC([FromBody] ResyncShieldedVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return Task.FromResult(Fail("ZfxAddress required."));
+                if (string.IsNullOrWhiteSpace(req.VbtcContractUid))
+                    return Task.FromResult(Fail("VbtcContractUid required."));
+
+                long toHeight = req.ToHeight > 0 ? req.ToHeight : Globals.LastBlock.Height;
+                long fromHeight = req.FromHeight >= 0 ? req.FromHeight : 0;
+
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return Task.FromResult(Fail("No shielded wallet row for this zfx address."));
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+
+                // Wipe only the vBTC notes for this contract
+                if (w.UnspentCommitments != null)
+                    w.UnspentCommitments.RemoveAll(c => string.Equals(c.AssetType, asset, StringComparison.Ordinal));
+                if (w.ShieldedBalances.ContainsKey(asset))
+                    w.ShieldedBalances.Remove(asset);
+                ShieldedWalletService.Upsert(w);
+
+                // Now rescan using the ScanShieldedVBTC logic
+                var scanReq = new ScanShieldedVbtcRequest
+                {
+                    ZfxAddress = req.ZfxAddress,
+                    VbtcContractUid = req.VbtcContractUid,
+                    FromHeight = fromHeight,
+                    ToHeight = toHeight
+                };
+                return ScanShieldedVBTC(scanReq);
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ex.Message));
+            }
+        }
     }
 }
