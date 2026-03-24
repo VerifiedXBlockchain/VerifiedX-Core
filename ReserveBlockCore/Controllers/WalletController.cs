@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using ReserveBlockCore.BrowserWalletServices;
+using ReserveBlockCore.Bitcoin.Models;
 
 namespace ReserveBlockCore.Controllers
 {
@@ -63,6 +64,31 @@ namespace ReserveBlockCore.Controllers
         {
             try { return Ok(WalletVbtcService.GetBitcoinAccounts()); }
             catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+        }
+
+        /// <summary>ETH + vBTC.b on Base for each BTC account that has a linked EVM address (Nethereum read; respects Globals.IsTestNet defaults).</summary>
+        [HttpGet("api/btc/base-balances")]
+        public async Task<IActionResult> GetBitcoinBaseBalances()
+        {
+            try { return Ok(await WalletBtcBaseService.GetLinkedBaseBalancesAsync()); }
+            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+        }
+
+        [HttpPost("api/btc/link-evm")]
+        public IActionResult LinkBtcEvm([FromBody] BtcLinkEvmRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.BtcAddress))
+                    return BadRequest(new { success = false, message = "btcAddress is required." });
+
+                var ok = BitcoinAccount.SetLinkedEvmAddress(req.BtcAddress, req.EvmAddress);
+                if (!ok)
+                    return BadRequest(new { success = false, message = "Invalid BTC address or EVM address format (expect 0x + 40 hex)." });
+
+                return Ok(new { success = true, message = "Linked EVM address updated." });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
         [HttpGet("api/vbtc/{address}")]

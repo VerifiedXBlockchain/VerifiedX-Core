@@ -55,4 +55,10 @@ namespace ReserveBlockCore.BrowserWalletServices
         public string Amount { get; set; } = "";
         public string? Password { get; set; }
     }
+
+    public class BtcLinkEvmRequest
+    {
+        public string BtcAddress { get; set; } = "";
+        public string? EvmAddress { get; set; }
+    }
 }

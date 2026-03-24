@@ -557,8 +557,14 @@ namespace ReserveBlockCore
             MessageLocksCleanupService.Start();
             BroadcastTrackingCleanupService.Start();
 
+            // Base Bridge: Load configuration from environment variables
+            Bitcoin.Services.BaseBridgeService.LoadConfig();
+
             // vBTC V2: Start deposit balance scan loop (scans owned contracts via Electrum)
             _ = Task.Run(Bitcoin.Services.VBTCService.VBTCV2BalanceScanLoop);
+
+            // Base bridge-back: poll ExitBurned logs (burnForExit) and unlock VFX bridge locks
+            _ = Task.Run(Bitcoin.Services.BaseBridgeExitWatchService.BridgeExitScanLoop);
 
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;

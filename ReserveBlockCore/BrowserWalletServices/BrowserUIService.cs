@@ -949,8 +949,17 @@ function renderVBTC(contracts){
 /* ---- Bitcoin ---- */
 function loadBTC(){
   el('btc-content').innerHTML='<div class=""ld""><span class=""spin""></span>Loading Bitcoin accounts...</div>';
-  fetch('/wallet/api/btc').then(function(r){return r.json();}).then(function(accs){
-    btcAccounts=accs||[];
+  Promise.all([
+    fetch('/wallet/api/btc').then(function(r){return r.json();}),
+    fetch('/wallet/api/btc/base-balances').then(function(r){return r.json();}).catch(function(){return[];})
+  ]).then(function(pair){
+    var accs=pair[0]||[];
+    var baseRows=pair[1]||[];
+    var baseByBtc={};
+    baseRows.forEach(function(b){ if(b&&b.btcAddress) baseByBtc[b.btcAddress]=b; });
+    btcAccounts=accs.map(function(a){
+      return { address:a.address, adnr:a.adnr, balance:a.balance, isValidating:a.isValidating, linkedEvmAddress:a.linkedEvmAddress, base: baseByBtc[a.address] };
+    });
     var sel=el('btc-sel');
     sel.innerHTML='';
     if(!btcAccounts.length){
@@ -970,10 +979,39 @@ function loadBTC(){
   });
 }
 
+window.linkBtcEvm=function(btcAddr){
+  var cur='';
+  try{
+    var acc=(btcAccounts||[]).filter(function(a){return a.address===btcAddr;})[0];
+    if(acc&&acc.linkedEvmAddress) cur=acc.linkedEvmAddress;
+  }catch(e){}
+  var evm=prompt('Paste Base EVM address (0x...) for this Bitcoin account. Leave empty and OK to clear:',cur);
+  if(evm===null)return;
+  evm=(''+evm).trim();
+  fetch('/wallet/api/btc/link-evm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({btcAddress:btcAddr,evmAddress:evm||null})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.success) loadBTC();
+      else alert(d.message||'Failed to link');
+    }).catch(function(){ alert('Request failed'); });
+};
+
 window.onBtcChange=function(){
   selBtcAddr=el('btc-sel').value;
   renderBTC(selBtcAddr?btcAccounts.filter(function(a){return a.address===selBtcAddr;}):btcAccounts);
 };
+
+function baseNodeConfigHints(b){
+  if(!b)return'';
+  var h='';
+  if(b.canReadEth===false){
+    h+='<div class=""cfg-hint"" style=""font-size:11px;color:#c9a227;margin-top:6px;line-height:1.35""><strong>Node:</strong> set <code style=""font-size:10px"">BASE_BRIDGE_RPC_URL</code> to read native ETH on '+esc(b.network||'Base')+'.</div>';
+  }
+  if(b.canReadVbtc===false){
+    h+='<div class=""cfg-hint"" style=""font-size:11px;color:#c9a227;margin-top:4px;line-height:1.35""><strong>Node:</strong> set <code style=""font-size:10px"">BASE_BRIDGE_CONTRACT</code> (and RPC) to read vBTC.b.</div>';
+  }
+  return h;
+}
 
 function renderBTC(accs){
   if(!accs||!accs.length){
@@ -981,12 +1019,32 @@ function renderBTC(accs){
     return;
   }
   var cards=accs.map(function(a){
+    var baseHtml='';
+    if(a.base){
+      if(a.base.linkedEvmAddress){
+        baseHtml='<div class=""muted"" style=""font-size:11px;margin-top:10px"">Base &mdash; '+esc(a.base.network||'')+'</div>'+
+          baseNodeConfigHints(a.base)+
+          '<div style=""font-family:monospace;font-size:11px;word-break:break-all;color:var(--text);margin-top:6px"">'+esc(a.base.linkedEvmAddress)+'</div>'+
+          (a.base.canReadEth!==false&&a.base.ethBalance!=null?'<div class=""vbtc-row""><span class=""k"">ETH</span><span class=""v"">'+fmtBal(a.base.ethBalance)+'</span></div>':'')+
+          (a.base.canReadEth!==false&&a.base.ethBalance==null&&a.base.ethMessage?'<div class=""muted"" style=""font-size:11px"">ETH: '+esc(a.base.ethMessage)+'</div>':'')+
+          (a.base.canReadVbtc!==false&&a.base.vbtcBBalance!=null?'<div class=""vbtc-row""><span class=""k"">vBTC.b</span><span class=""v"">'+fmtBal(a.base.vbtcBBalance)+'</span></div>':'')+
+          (a.base.canReadVbtc!==false&&a.base.vbtcBBalance==null&&a.base.vbtcMessage?'<div class=""muted"" style=""font-size:11px"">vBTC.b: '+esc(a.base.vbtcMessage)+'</div>':'');
+      }else{
+        baseHtml='<div class=""muted"" style=""font-size:11px;margin-top:10px"">Base &mdash; '+esc(a.base.network||'')+'</div>'+
+          baseNodeConfigHints(a.base)+
+          '<div class=""muted"" style=""font-size:12px;margin-top:8px"">'+esc(a.base.message||'Link an EVM address to view ETH and vBTC.b')+'</div>';
+      }
+    }
     return '<div class=""btc-card"">'+
       '<div class=""muted"" style=""font-size:11px"">Bitcoin Address</div>'+
       '<div class=""btc-bal"">'+fmtBal(a.balance)+'<span>BTC</span></div>'+
       '<div style=""font-family:monospace;font-size:12px;word-break:break-all;color:var(--text)"">'+esc(a.address||'N/A')+'</div>'+
       (a.adnr?'<div class=""muted"" style=""font-size:12px"">'+esc(a.adnr)+'</div>':'')+
-      '<div class=""nft-actions"" style=""margin-top:8px""><button class=""act-btn prim"" onclick=""openSendBTC(\''+esc(a.address)+'\')"">&rarr; Send BTC</button></div>'+
+      baseHtml+
+      '<div class=""nft-actions"" style=""margin-top:8px;display:flex;flex-wrap:wrap;gap:6px"">'+
+      '<button class=""act-btn prim"" onclick=""openSendBTC(\''+esc(a.address)+'\')"">&rarr; Send BTC</button>'+
+      '<button class=""act-btn sec"" onclick=""linkBtcEvm(\''+esc(a.address)+'\')"">Link Base EVM</button>'+
+      '</div>'+
       '</div>';
   }).join('');
   el('btc-content').innerHTML='<div class=""btc-grid"">'+cards+'</div>';

@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Bitcoin.Models;
+using VbtcBaseBridge = ReserveBlockCore.Bitcoin.Services.BaseBridgeService;
+using VbtcBaseBridgeExit = ReserveBlockCore.Bitcoin.Services.BaseBridgeExitWatchService;
 using ReserveBlockCore.Controllers;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
@@ -2811,6 +2813,330 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
         #endregion
 
+        #region Base Bridge Operations
+
+        /// <summary>
+        /// Lock vBTC for bridging to Base. Creates a bridge lock record and optionally
+        /// triggers immediate relay to mint vBTC.b on Base Sepolia.
+        /// </summary>
+        /// <param name="payload">Bridge lock request</param>
+        /// <returns>Lock ID and status</returns>
+        [HttpPost("BridgeToBase")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> BridgeToBase([FromBody] VBTCBridgeLockPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID is required" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress is required" });
+
+                if (string.IsNullOrEmpty(payload.EvmDestination))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "EvmDestination is required" });
+
+                // Validate EVM address format
+                if (!payload.EvmDestination.StartsWith("0x") || payload.EvmDestination.Length != 42)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "EvmDestination must be a valid EVM address (0x + 40 hex chars)" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                // Check available balance using existing service
+                var balResult = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(
+                    payload.SmartContractUID, payload.OwnerAddress);
+
+                if (!balResult.success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Failed to check balance" });
+
+                // Deduct already-locked bridge amounts
+                var alreadyLocked = BridgeLockRecord.GetLockedAmount(payload.OwnerAddress, payload.SmartContractUID);
+                var availableBalance = balResult.availableBalance - alreadyLocked;
+
+                if (payload.Amount > availableBalance)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Insufficient available balance. Available: {availableBalance} BTC, Requested: {payload.Amount} BTC, Already bridge-locked: {alreadyLocked} BTC"
+                    });
+                }
+
+                // Create bridge lock record
+                var lockId = Guid.NewGuid().ToString("N");
+                var amountSats = (long)(payload.Amount * 100_000_000M);
+                var lockRecord = new BridgeLockRecord
+                {
+                    LockId = lockId,
+                    SmartContractUID = payload.SmartContractUID,
+                    OwnerAddress = payload.OwnerAddress,
+                    Amount = payload.Amount,
+                    AmountSats = amountSats,
+                    EvmDestination = payload.EvmDestination,
+                    Status = BridgeLockStatus.Locked,
+                    CreatedAtUtc = TimeUtil.GetTime()
+                };
+
+                if (!BridgeLockRecord.Save(lockRecord))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to save bridge lock record" });
+
+                LogUtility.Log($"[BaseBridge] Bridge lock created. LockId: {lockId}, Amount: {payload.Amount} BTC, To: {payload.EvmDestination}",
+                    "VBTCController.BridgeToBase");
+
+                // Auto-relay if bridge service is configured and autoRelay is true
+                string? baseTxHash = null;
+                string relayStatus = "Locked (pending relay)";
+
+                if (payload.AutoRelay && VbtcBaseBridge.IsEnabled)
+                {
+                    var mintResult = await VbtcBaseBridge.MintVBTCbOnBase(lockRecord);
+                    if (mintResult.Success)
+                    {
+                        baseTxHash = mintResult.Result;
+                        relayStatus = "Minted on Base";
+                    }
+                    else
+                    {
+                        relayStatus = $"Relay failed: {mintResult.Result}";
+                    }
+                }
+                else if (!VbtcBaseBridge.IsEnabled)
+                {
+                    relayStatus = "Bridge not configured - lock recorded but relay pending manual configuration";
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "vBTC bridge lock created successfully",
+                    LockId = lockId,
+                    SmartContractUID = payload.SmartContractUID,
+                    Amount = payload.Amount,
+                    AmountSats = amountSats,
+                    EvmDestination = payload.EvmDestination,
+                    BaseTxHash = baseTxHash,
+                    Status = relayStatus,
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get bridge lock status by lock ID
+        /// </summary>
+        [HttpGet("GetBridgeLockStatus/{lockId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLockStatus(string lockId)
+        {
+            try
+            {
+                var record = BridgeLockRecord.GetByLockId(lockId);
+                if (record == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Bridge lock not found" });
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Bridge lock found",
+                    Lock = record
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// List all bridge locks for a contract
+        /// </summary>
+        [HttpGet("GetBridgeLocks/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLocks(string scUID)
+        {
+            try
+            {
+                var records = BridgeLockRecord.GetBySmartContract(scUID);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = $"Found {records.Count} bridge locks",
+                    Locks = records
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Manually trigger relay of pending bridge locks to Base.
+        /// Processes all locks with status = Locked.
+        /// </summary>
+        [HttpPost("RelayPendingBridgeLocks")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> RelayPendingBridgeLocks()
+        {
+            try
+            {
+                if (!VbtcBaseBridge.IsEnabled)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Base bridge is not configured. Set BASE_BRIDGE_CONTRACT and BASE_BRIDGE_RELAY_KEY environment variables." });
+
+                var results = await VbtcBaseBridge.ProcessPendingLocks();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = $"Processed {results.Count} pending bridge locks",
+                    Results = results.Select(r => new { r.LockId, r.Success, r.Result })
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get vBTC.b balance on Base for a given EVM address
+        /// </summary>
+        [HttpGet("GetBaseBalance/{evmAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBaseBalance(string evmAddress)
+        {
+            try
+            {
+                var result = await VbtcBaseBridge.GetBaseBalance(evmAddress);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = result.Success,
+                    Message = result.Message,
+                    EvmAddress = evmAddress,
+                    VBTCbBalance = result.Balance,
+                    ContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    Network = VbtcBaseBridge.BaseNetworkDisplayName,
+                    ChainId = VbtcBaseBridge.BaseChainId
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get bridge configuration status
+        /// </summary>
+        [HttpGet("GetBridgeStatus")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeStatus()
+        {
+            try
+            {
+                var pendingCount = BridgeLockRecord.GetPendingRelays().Count;
+                var totalSupply = VbtcBaseBridge.CanReadVbtcToken
+                    ? await VbtcBaseBridge.GetBaseTotalSupply()
+                    : (false, 0M, "Not configured");
+
+                var sync = BridgeExitSyncState.GetOrCreate();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
+                    ExitWatchConfigured = VbtcBaseBridgeExit.IsConfigured,
+                    BaseRpcUrl = VbtcBaseBridge.BaseRpcUrl,
+                    VBTCbContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    BaseChainId = VbtcBaseBridge.BaseChainId,
+                    PendingRelays = pendingCount,
+                    BaseTotalSupply = totalSupply.Item2,
+                    ExitPollLastScannedBlock = sync.LastScannedBlock,
+                    Network = VbtcBaseBridge.BaseNetworkDisplayName
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Configure the Base bridge at runtime (alternative to environment variables).
+        /// WARNING: Only use in development/demo. In production, use environment variables.
+        /// </summary>
+        [HttpPost("ConfigureBridge")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ConfigureBridge([FromBody] VBTCBridgeConfigPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (!string.IsNullOrEmpty(payload.BaseRpcUrl))
+                    VbtcBaseBridge.BaseRpcUrl = payload.BaseRpcUrl;
+
+                if (!string.IsNullOrEmpty(payload.VBTCbContractAddress))
+                    VbtcBaseBridge.VBTCbContractAddress = payload.VBTCbContractAddress;
+
+                if (!string.IsNullOrEmpty(payload.RelayPrivateKey))
+                    VbtcBaseBridge.RelayPrivateKey = payload.RelayPrivateKey;
+
+                if (payload.BaseChainId > 0)
+                    VbtcBaseBridge.BaseChainId = payload.BaseChainId;
+
+                LogUtility.Log($"[BaseBridge] Configuration updated via API. Enabled: {VbtcBaseBridge.IsEnabled}",
+                    "VBTCController.ConfigureBridge");
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Bridge configuration updated",
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
+                    BaseRpcUrl = VbtcBaseBridge.BaseRpcUrl,
+                    VBTCbContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    BaseChainId = VbtcBaseBridge.BaseChainId
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Manually poll Base for <c>burnForExit</c> / <c>ExitBurned</c> and unlock matching VFX locks (same as background worker).
+        /// </summary>
+        [HttpPost("PollBaseExitBurns")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> PollBaseExitBurns()
+        {
+            try
+            {
+                var result = await VbtcBaseBridgeExit.PollOnce();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Processed = result.Processed,
+                    ScannedToBlock = result.ScannedToBlock,
+                    Message = result.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
         #endregion
     }
 
@@ -2937,6 +3263,29 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public long Timestamp { get; set; }
         public string UniqueId { get; set; }
         public string OwnerSignature { get; set; }       // VFX signature
+    }
+
+    // Base Bridge Payload Models
+
+    public class VBTCBridgeLockPayload
+    {
+        public string SmartContractUID { get; set; } = string.Empty;
+        public string OwnerAddress { get; set; } = string.Empty;
+        public decimal Amount { get; set; }
+        public string EvmDestination { get; set; } = string.Empty;
+        /// <summary>
+        /// If true and bridge is configured, immediately relay to Base after locking.
+        /// If false, lock only — relay later via RelayPendingBridgeLocks.
+        /// </summary>
+        public bool AutoRelay { get; set; } = true;
+    }
+
+    public class VBTCBridgeConfigPayload
+    {
+        public string? BaseRpcUrl { get; set; }
+        public string? VBTCbContractAddress { get; set; }
+        public string? RelayPrivateKey { get; set; }
+        public int BaseChainId { get; set; } = 0;
     }
 
     #endregion

@@ -21,7 +21,8 @@ namespace ReserveBlockCore.BrowserWalletServices
                 address = a.Address,
                 adnr = a.ADNR,
                 balance = a.Balance,
-                isValidating = a.IsValidating
+                isValidating = a.IsValidating,
+                linkedEvmAddress = a.LinkedEvmAddress
             }).ToList();
         }
 
