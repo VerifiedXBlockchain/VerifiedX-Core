@@ -566,6 +566,9 @@ namespace ReserveBlockCore
             // Base bridge-back: poll ExitBurned logs (burnForExit) and unlock VFX bridge locks
             _ = Task.Run(Bitcoin.Services.BaseBridgeExitWatchService.BridgeExitScanLoop);
 
+            // Base bridge: retry pending mint operations (handles failed AutoRelay retries)
+            _ = Task.Run(Bitcoin.Services.BaseBridgeService.BridgeMintRetryLoop);
+
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL

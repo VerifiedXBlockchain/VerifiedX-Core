@@ -305,6 +305,38 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
         }
 
+        /// <summary>
+        /// Background loop that retries pending bridge locks (status = Locked) every 30 seconds.
+        /// Handles cases where AutoRelay failed due to gas issues, RPC errors, etc.
+        /// </summary>
+        public static async Task BridgeMintRetryLoop()
+        {
+            // Wait for startup to complete
+            await Task.Delay(30_000);
+
+            while (!ReserveBlockCore.Globals.StopAllTimers)
+            {
+                try
+                {
+                    if (IsEnabled)
+                    {
+                        var pending = BridgeLockRecord.GetPendingRelays();
+                        if (pending.Any())
+                        {
+                            LogUtility.Log($"[BaseBridge] Retry loop: {pending.Count} pending lock(s) to mint.", "BaseBridgeService.BridgeMintRetryLoop");
+                            await ProcessPendingLocks();
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogUtility.Log($"[BaseBridge] Retry loop error: {ex.Message}", "BaseBridgeService.BridgeMintRetryLoop");
+                }
+
+                await Task.Delay(30_000);
+            }
+        }
+
         #region Helpers
 
         private static async Task<Nethereum.RPC.Eth.DTOs.TransactionReceipt?> WaitForReceipt(Web3 web3, string txHash, int timeoutSeconds)

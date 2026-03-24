@@ -2979,6 +2979,29 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// List all bridge locks for an owner address (across all contracts)
+        /// </summary>
+        [HttpGet("GetBridgeLocksByOwner/{ownerAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLocksByOwner(string ownerAddress)
+        {
+            try
+            {
+                var records = BridgeLockRecord.GetByOwner(ownerAddress);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = $"Found {records.Count} bridge locks for owner",
+                    Locks = records
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
         /// Manually trigger relay of pending bridge locks to Base.
         /// Processes all locks with status = Locked.
         /// </summary>
