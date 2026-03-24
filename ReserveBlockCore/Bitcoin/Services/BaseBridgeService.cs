@@ -17,7 +17,7 @@ namespace ReserveBlockCore.Bitcoin.Services
     /// </summary>
     public static class BaseBridgeService
     {
-        // ── Configuration (set via Globals.IsTestNet + environment) ──
+        // ── Configuration (set from config.txt via ProcessConfig) ──
         public static string BaseRpcUrl { get; set; } = "https://sepolia.base.org";
         public static string VBTCbContractAddress { get; set; } = "";
         public static string RelayPrivateKey { get; set; } = "";
@@ -254,37 +254,13 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Load configuration from environment variables. Defaults follow <see cref="ReserveBlockCore.Globals.IsTestNet"/>
-        /// (Base Sepolia vs Base mainnet), like BTC Electrum/network selection.
+        /// Log current bridge configuration status. All values are set from config.txt via ProcessConfig().
         /// </summary>
         public static void LoadConfig()
         {
-            if (ReserveBlockCore.Globals.IsTestNet)
-            {
-                BaseRpcUrl = "https://sepolia.base.org";
-                BaseChainId = 84532;
-            }
-            else
-            {
-                BaseRpcUrl = "https://mainnet.base.org";
-                BaseChainId = 8453;
-            }
-
-            var rpc = Environment.GetEnvironmentVariable("BASE_BRIDGE_RPC_URL");
-            if (!string.IsNullOrEmpty(rpc)) BaseRpcUrl = rpc;
-
-            var contract = Environment.GetEnvironmentVariable("BASE_BRIDGE_CONTRACT");
-            if (!string.IsNullOrEmpty(contract)) VBTCbContractAddress = contract;
-
-            var key = Environment.GetEnvironmentVariable("BASE_BRIDGE_RELAY_KEY");
-            if (!string.IsNullOrEmpty(key)) RelayPrivateKey = key;
-
-            var chainIdStr = Environment.GetEnvironmentVariable("BASE_BRIDGE_CHAIN_ID");
-            if (!string.IsNullOrEmpty(chainIdStr) && int.TryParse(chainIdStr, out var chainId))
-                BaseChainId = chainId;
-
             if (IsEnabled)
             {
+                ReserveBlockCore.Globals.IsBaseBridgeRelayer = true;
                 LogUtility.Log($"[BaseBridge] Mint enabled. RPC: {BaseRpcUrl}, Contract: {VBTCbContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
                     "BaseBridgeService.LoadConfig");
             }
@@ -300,7 +276,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
             else
             {
-                LogUtility.Log("[BaseBridge] Not configured. Set BASE_BRIDGE_RPC_URL (and optionally BASE_BRIDGE_CONTRACT / BASE_BRIDGE_RELAY_KEY).",
+                LogUtility.Log("[BaseBridge] Not configured. Set BaseBridgeRpcUrl, BaseBridgeContract, and BaseBridgeRelayKey in config.txt.",
                     "BaseBridgeService.LoadConfig");
             }
         }

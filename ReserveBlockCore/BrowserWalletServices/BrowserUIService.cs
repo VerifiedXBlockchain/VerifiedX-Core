@@ -252,9 +252,8 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
       <div style='font-size:13px;color:var(--muted);line-height:1.6'>
         To convert vBTC.b back to vBTC on VerifiedX, burn the tokens on Base using an EVM wallet (MetaMask, etc.):<br><br>
         <strong>1.</strong> Open MetaMask connected to Base Sepolia (or Base Mainnet).<br>
-        <strong>2.</strong> Call <code>burn(amount)</code> on the vBTC.b contract via Basescan Write Contract tab.<br>
-        <strong>3.</strong> The relay node detects the burn event and unlocks your vBTC on VerifiedX.<br><br>
-        <em style='color:var(--orange)'>Note: Burn-to-unlock (Flow B) is not yet implemented in this demo. Only Bridge-to-Base (Flow A) is active.</em>
+        <strong>2.</strong> Call <code>burnForExit(amount)</code> on the vBTC.b contract via Basescan Write Contract tab.<br>
+        <strong>3.</strong> The relay node detects the burn event and unlocks your vBTC on VerifiedX.
       </div>
     </div>
   </div>";

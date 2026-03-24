@@ -262,6 +262,7 @@ namespace ReserveBlockCore
         public static bool IsValidatorPortOpen = false;
         public static bool IsValidatorAPIPortOpen = false;
         public static bool IsFROSTAPIPortOpen = false;
+        public static bool IsBaseBridgeRelayer = false;
 
         // HAL-17 Fix: Configurable timeout values
         public static int SignalRShortTimeoutMs = 2000;

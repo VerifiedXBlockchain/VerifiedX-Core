@@ -169,7 +169,8 @@ namespace ReserveBlockCore.Config
                 // Base Bridge config (optional — env vars and LoadConfig() also apply)
                 config.BaseBridgeRpcUrl = dict.ContainsKey("BaseBridgeRpcUrl") ? dict["BaseBridgeRpcUrl"] : null;
                 config.BaseBridgeContract = dict.ContainsKey("BaseBridgeContract") ? dict["BaseBridgeContract"] : null;
-                config.BaseBridgeRelayKey = dict.ContainsKey("BaseBridgeRelayKey") ? dict["BaseBridgeRelayKey"] : null;
+                var rawRelayKey = dict.ContainsKey("BaseBridgeRelayKey") ? dict["BaseBridgeRelayKey"] : null;
+                config.BaseBridgeRelayKey = (rawRelayKey != null && rawRelayKey.ToLower() != "na") ? rawRelayKey : null;
                 config.BaseBridgeChainId = dict.ContainsKey("BaseBridgeChainId") ? Convert.ToInt32(dict["BaseBridgeChainId"]) : 0;
 
                 config.MotherAddress = dict.ContainsKey("MotherAddress") ? dict["MotherAddress"] : null;
@@ -552,6 +553,8 @@ namespace ReserveBlockCore.Config
 		Bitcoin.Services.BaseBridgeService.RelayPrivateKey = config.BaseBridgeRelayKey;
 	if (config.BaseBridgeChainId > 0)
 		Bitcoin.Services.BaseBridgeService.BaseChainId = config.BaseBridgeChainId;
+	if (Bitcoin.Services.BaseBridgeService.IsEnabled)
+		Globals.IsBaseBridgeRelayer = true;
 	
         }
         public static void ProcessABL()
@@ -614,6 +617,7 @@ namespace ReserveBlockCore.Config
                     // Base Bridge defaults (mainnet — update contract + relay key before use)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://mainnet.base.org");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRelayKey=na");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=8453");
                 }
                 else if(Globals.IsCustomTestNet) //devnet
@@ -627,7 +631,8 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge defaults (devnet — Base Sepolia)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0xd2bB4BdA89A23c63eaaD464F15658845a2114Ffa");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRelayKey=na");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
                 else //testnet
@@ -640,7 +645,8 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge defaults (testnet — Base Sepolia)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0xd2bB4BdA89A23c63eaaD464F15658845a2114Ffa");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRelayKey=na");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
 				

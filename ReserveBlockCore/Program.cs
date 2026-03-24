@@ -567,7 +567,8 @@ namespace ReserveBlockCore
             _ = Task.Run(Bitcoin.Services.BaseBridgeExitWatchService.BridgeExitScanLoop);
 
             // Base bridge: retry pending mint operations (handles failed AutoRelay retries)
-            _ = Task.Run(Bitcoin.Services.BaseBridgeService.BridgeMintRetryLoop);
+            if (Globals.IsBaseBridgeRelayer)
+                _ = Task.Run(Bitcoin.Services.BaseBridgeService.BridgeMintRetryLoop);
 
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
