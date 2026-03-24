@@ -2846,6 +2846,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (payload.Amount <= 0)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
 
+                if (AccountData.GetSingleAccount(payload.OwnerAddress) == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress must be a wallet account on this node (required to sign VBTC_V2_BRIDGE_LOCK)." });
+
                 // Check available balance using existing service
                 var balResult = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(
                     payload.SmartContractUID, payload.OwnerAddress);
@@ -2853,7 +2856,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (!balResult.success)
                     return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Failed to check balance" });
 
-                // Deduct already-locked bridge amounts
+                // Deduct local bridge reservations not yet reflected in state trei (see BridgeLockRecord.GetLockedAmount)
                 var alreadyLocked = BridgeLockRecord.GetLockedAmount(payload.OwnerAddress, payload.SmartContractUID);
                 var availableBalance = balResult.availableBalance - alreadyLocked;
 
@@ -2862,13 +2865,25 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new
                     {
                         Success = false,
-                        Message = $"Insufficient available balance. Available: {availableBalance} BTC, Requested: {payload.Amount} BTC, Already bridge-locked: {alreadyLocked} BTC"
+                        Message = $"Insufficient available balance. Available: {availableBalance} BTC, Requested: {payload.Amount} BTC, Reserved (pending VFX confirmation): {alreadyLocked} BTC"
                     });
                 }
 
-                // Create bridge lock record
                 var lockId = Guid.NewGuid().ToString("N");
                 var amountSats = (long)(payload.Amount * 100_000_000M);
+
+                var txResult = await Services.VBTCService.CreateBridgeLockTx(
+                    payload.SmartContractUID,
+                    payload.OwnerAddress,
+                    payload.Amount,
+                    payload.EvmDestination,
+                    lockId);
+
+                if (!txResult.Success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = txResult.TxHashOrError, LockId = lockId });
+
+                var vfxTxHash = txResult.TxHashOrError;
+
                 var lockRecord = new BridgeLockRecord
                 {
                     LockId = lockId,
@@ -2878,49 +2893,73 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     AmountSats = amountSats,
                     EvmDestination = payload.EvmDestination,
                     Status = BridgeLockStatus.Locked,
-                    CreatedAtUtc = TimeUtil.GetTime()
+                    CreatedAtUtc = TimeUtil.GetTime(),
+                    VfxLockTxHash = vfxTxHash,
+                    VfxLockConfirmedOnChain = false
                 };
 
                 if (!BridgeLockRecord.Save(lockRecord))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to save bridge lock record" });
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "VFX lock transaction was broadcast but saving the local bridge record failed. Check wallet transactions.",
+                        LockId = lockId,
+                        VfxLockTxHash = vfxTxHash
+                    });
+                }
 
-                LogUtility.Log($"[BaseBridge] Bridge lock created. LockId: {lockId}, Amount: {payload.Amount} BTC, To: {payload.EvmDestination}",
+                LogUtility.Log($"[BaseBridge] VFX bridge lock broadcast. LockId: {lockId}, Tx: {vfxTxHash}, Amount: {payload.Amount} BTC, To: {payload.EvmDestination}",
                     "VBTCController.BridgeToBase");
 
-                // Auto-relay if bridge service is configured and autoRelay is true
                 string? baseTxHash = null;
-                string relayStatus = "Locked (pending relay)";
+                string relayStatus;
 
                 if (payload.AutoRelay && VbtcBaseBridge.IsEnabled)
                 {
-                    var mintResult = await VbtcBaseBridge.MintVBTCbOnBase(lockRecord);
-                    if (mintResult.Success)
+                    var confirmed = await Services.VBTCService.WaitForBridgeLockInStateAsync(lockId, 120_000);
+                    if (!confirmed)
                     {
-                        baseTxHash = mintResult.Result;
-                        relayStatus = "Minted on Base";
+                        relayStatus = "VFX lock pending block confirmation; mint not sent. Retry RelayPendingBridgeLocks after the lock is included.";
                     }
                     else
                     {
-                        relayStatus = $"Relay failed: {mintResult.Result}";
+                        var recordForMint = BridgeLockRecord.GetByLockId(lockId) ?? lockRecord;
+                        var mintResult = await VbtcBaseBridge.MintVBTCbOnBase(recordForMint);
+                        if (mintResult.Success)
+                        {
+                            baseTxHash = mintResult.Result;
+                            relayStatus = "Minted on Base";
+                        }
+                        else
+                        {
+                            relayStatus = $"Relay failed: {mintResult.Result}";
+                        }
                     }
                 }
                 else if (!VbtcBaseBridge.IsEnabled)
                 {
-                    relayStatus = "Bridge not configured - lock recorded but relay pending manual configuration";
+                    relayStatus = "VFX lock tx broadcast; configure Base relay (BASE_BRIDGE_*) then RelayPendingBridgeLocks after the lock confirms in a block";
+                }
+                else
+                {
+                    relayStatus = "VFX lock tx broadcast; mint later via RelayPendingBridgeLocks (after block confirms)";
                 }
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "vBTC bridge lock created successfully",
+                    Message = "vBTC bridge lock transaction broadcast",
                     LockId = lockId,
+                    VfxLockTxHash = vfxTxHash,
                     SmartContractUID = payload.SmartContractUID,
                     Amount = payload.Amount,
                     AmountSats = amountSats,
                     EvmDestination = payload.EvmDestination,
                     BaseTxHash = baseTxHash,
                     Status = relayStatus,
-                    BridgeEnabled = VbtcBaseBridge.IsEnabled
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
+                    AutoRelay = payload.AutoRelay
                 });
             }
             catch (Exception ex)
@@ -3297,8 +3336,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public decimal Amount { get; set; }
         public string EvmDestination { get; set; } = string.Empty;
         /// <summary>
-        /// If true and bridge is configured, immediately relay to Base after locking.
-        /// If false, lock only — relay later via RelayPendingBridgeLocks.
+        /// If true and relay is configured, wait for the VFX lock to be included in a block then mint on Base.
+        /// If false, broadcast the VFX lock only — use RelayPendingBridgeLocks after confirmation.
         /// </summary>
         public bool AutoRelay { get; set; } = true;
     }

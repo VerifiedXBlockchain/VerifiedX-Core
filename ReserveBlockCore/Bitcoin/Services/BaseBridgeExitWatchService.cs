@@ -4,13 +4,15 @@ using Nethereum.Hex.HexTypes;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
 using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Data;
 using ReserveBlockCore.Utilities;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
     /// <summary>
-    /// Polls Base for <c>ExitBurned</c> from <see cref="VBTCb"/> <c>burnForExit</c> and unlocks matching
-    /// <see cref="BridgeLockRecord"/> entries on VerifiedX (demo Flow C).
+    /// Polls Base for <c>ExitBurned</c> from <see cref="VBTCb"/> <c>burnForExit</c> and broadcasts
+    /// <see cref="TransactionType.VBTC_V2_BRIDGE_UNLOCK"/> on VerifiedX for this node's local locks
+    /// (after <see cref="VBTCBridgeLockState"/> exists on-chain from <see cref="VBTCService.CreateBridgeLockTx"/>).
     /// </summary>
     public static class BaseBridgeExitWatchService
     {
@@ -124,10 +126,43 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var txHash = log.TransactionHash;
                 if (string.IsNullOrEmpty(txHash)) continue;
 
-                if (BridgeLockRecord.TryUnlockFromBaseExit(lockId, burner, (long)amount, txHash))
+                var chainLock = VBTCBridgeLockState.GetByLockId(lockId);
+                if (chainLock == null || chainLock.IsUnlocked)
+                    continue;
+
+                var localRecord = BridgeLockRecord.GetByLockId(lockId);
+                var walletForOwner = AccountData.GetSingleAccount(chainLock.OwnerAddress) != null;
+                if (localRecord == null && !walletForOwner)
+                    continue;
+
+                if (localRecord != null && !BridgeLockRecord.ValidateExitBurnMatchesMinted(lockId, burner, (long)amount))
+                    continue;
+
+                if (localRecord == null)
+                {
+                    if (!string.Equals(chainLock.EvmDestination.Trim(), burner.Trim(), StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (chainLock.AmountSats != (long)amount) continue;
+                }
+
+                var unlockResult = await VBTCService.CreateBridgeUnlockTx(
+                    chainLock.SmartContractUID,
+                    chainLock.OwnerAddress,
+                    lockId,
+                    chainLock.Amount,
+                    txHash);
+
+                if (unlockResult.Success)
                 {
                     processed++;
-                    LogUtility.Log($"[BaseBridgeExit] Unlocked VFX lock {lockId} after burn tx {txHash}",
+                    if (localRecord != null)
+                        BridgeLockRecord.TryMarkRedeemingForExit(lockId, txHash);
+                    LogUtility.Log($"[BaseBridgeExit] Broadcast VBTC_V2_BRIDGE_UNLOCK for lock {lockId} (burn tx {txHash}) → VFX tx {unlockResult.TxHashOrError}",
+                        "BaseBridgeExitWatchService.PollOnceInternal");
+                }
+                else
+                {
+                    LogUtility.Log($"[BaseBridgeExit] CreateBridgeUnlockTx failed for lock {lockId}: {unlockResult.TxHashOrError}",
                         "BaseBridgeExitWatchService.PollOnceInternal");
                 }
             }

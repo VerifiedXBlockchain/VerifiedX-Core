@@ -1,5 +1,7 @@
+using System;
 using LiteDB;
 using ReserveBlockCore.Data;
+using ReserveBlockCore.Models;
 using ReserveBlockCore.Utilities;
 
 namespace ReserveBlockCore.Bitcoin.Models
@@ -18,6 +20,10 @@ namespace ReserveBlockCore.Bitcoin.Models
         public decimal Amount { get; set; }
         public long AmountSats { get; set; }
         public string EvmDestination { get; set; } = string.Empty;
+        /// <summary>VerifiedX VBTC_V2_BRIDGE_LOCK transaction hash (after broadcast).</summary>
+        public string? VfxLockTxHash { get; set; }
+        /// <summary>True after the lock is applied in the state trei (included in a block).</summary>
+        public bool VfxLockConfirmedOnChain { get; set; }
         public string? BaseTxHash { get; set; }
         /// <summary>Set when burnForExit on Base is observed and the lock is released on VFX (demo bridge-back).</summary>
         public string? ExitBurnTxHash { get; set; }
@@ -62,15 +68,22 @@ namespace ReserveBlockCore.Bitcoin.Models
             return col.Find(x => x.Status == status).ToList();
         }
 
+        /// <summary>
+        /// Locks ready for Base mint: VFX lock tx confirmed on-chain (state trei), relay not yet started.
+        /// </summary>
         public static List<BridgeLockRecord> GetPendingRelays()
         {
             var col = GetCollection();
-            return col.Find(x => x.Status == BridgeLockStatus.Locked).ToList();
+            return col.Find(x =>
+                x.Status == BridgeLockStatus.Locked &&
+                x.VfxLockConfirmedOnChain &&
+                !string.IsNullOrEmpty(x.VfxLockTxHash)).ToList();
         }
 
         /// <summary>
-        /// Get total bridge-locked amount for a given address and contract (in BTC decimal).
-        /// Used to deduct from available balance.
+        /// Local DB amounts still reserved in the UI before the VFX state trei reflects the lock
+        /// (<see cref="VfxLockConfirmedOnChain"/> false). Once confirmed, transparent balance already
+        /// includes the on-chain lock debit — do not double-subtract.
         /// </summary>
         public static decimal GetLockedAmount(string ownerAddress, string scUID)
         {
@@ -78,10 +91,31 @@ namespace ReserveBlockCore.Bitcoin.Models
             var active = col.Find(x =>
                 x.OwnerAddress == ownerAddress &&
                 x.SmartContractUID == scUID &&
-                (x.Status == BridgeLockStatus.Locked ||
-                 x.Status == BridgeLockStatus.ProofSubmitted ||
-                 x.Status == BridgeLockStatus.Minted));
+                !x.VfxLockConfirmedOnChain &&
+                (x.Status == BridgeLockStatus.Locked || x.Status == BridgeLockStatus.ProofSubmitted));
             return active.Sum(x => x.Amount);
+        }
+
+        /// <summary>Called when a VBTC_V2_BRIDGE_LOCK is applied chain-wide (state trei update).</summary>
+        public static bool TryMarkVfxLockConfirmed(string lockId, string vfxTxHash)
+        {
+            try
+            {
+                var col = GetCollection();
+                var r = col.FindOne(x => x.LockId == lockId.Trim());
+                if (r == null) return false;
+                if (!string.IsNullOrEmpty(r.VfxLockTxHash) && !string.Equals(r.VfxLockTxHash, vfxTxHash, StringComparison.OrdinalIgnoreCase))
+                    return false;
+                r.VfxLockConfirmedOnChain = true;
+                if (string.IsNullOrEmpty(r.VfxLockTxHash))
+                    r.VfxLockTxHash = vfxTxHash;
+                col.Update(r);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         public static bool Save(BridgeLockRecord record)
@@ -125,31 +159,67 @@ namespace ReserveBlockCore.Bitcoin.Models
         }
 
         /// <summary>
-        /// After Base <c>burnForExit</c> is indexed: verify lock, full amount, burner == Evm destination, then unlock on VFX.
+        /// Validates a local <see cref="BridgeLockStatus.Minted"/> row against an <c>ExitBurned</c> event (before broadcasting VFX unlock).
         /// </summary>
-        public static bool TryUnlockFromBaseExit(string lockId, string burnerAddress, long amountSats, string burnTxHash)
+        public static bool ValidateExitBurnMatchesMinted(string lockId, string burnerAddress, long amountSats)
         {
             try
             {
-                var col = GetCollection();
-                var record = col.FindOne(x => x.LockId == lockId.Trim());
-                if (record == null) return false;
-                if (record.Status != BridgeLockStatus.Minted) return false;
+                var record = GetByLockId(lockId);
+                if (record == null || record.Status != BridgeLockStatus.Minted) return false;
                 if (record.AmountSats != amountSats) return false;
                 if (string.IsNullOrEmpty(burnerAddress) ||
                     !string.Equals(record.EvmDestination.Trim(), burnerAddress.Trim(), StringComparison.OrdinalIgnoreCase))
                     return false;
                 if (!string.IsNullOrEmpty(record.ExitBurnTxHash)) return false;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
-                record.Status = BridgeLockStatus.Unlocked;
+        /// <summary>
+        /// After a matching burn is seen and before/after <see cref="VBTCService.CreateBridgeUnlockTx"/>: mark local DB as redeeming.
+        /// </summary>
+        public static bool TryMarkRedeemingForExit(string lockId, string burnTxHash)
+        {
+            try
+            {
+                var col = GetCollection();
+                var record = col.FindOne(x => x.LockId == lockId.Trim());
+                if (record == null || record.Status != BridgeLockStatus.Minted) return false;
+                if (!string.IsNullOrEmpty(record.ExitBurnTxHash)) return false;
+
+                record.Status = BridgeLockStatus.Redeeming;
                 record.ExitBurnTxHash = burnTxHash;
-                record.FinalizedAtUtc = TimeUtil.GetTime();
                 col.Update(record);
                 return true;
             }
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Called from <see cref="StateData"/> when <see cref="TransactionType.VBTC_V2_BRIDGE_UNLOCK"/> is applied on-chain.
+        /// </summary>
+        public static void FinalizeFromChainUnlockIfPending(string lockId)
+        {
+            try
+            {
+                var col = GetCollection();
+                var record = col.FindOne(x => x.LockId == lockId.Trim());
+                if (record == null || record.Status != BridgeLockStatus.Redeeming) return;
+
+                record.Status = BridgeLockStatus.Unlocked;
+                record.FinalizedAtUtc = TimeUtil.GetTime();
+                col.Update(record);
+            }
+            catch
+            {
             }
         }
 

@@ -12,6 +12,7 @@ using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using Spectre.Console;
 using System;
+using System.Linq;
 using System.Net;
 using System.Security.Principal;
 using System.Xml.Linq;
@@ -2903,6 +2904,117 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+            // vBTC V2 Base bridge lock — same balance rules as transparent transfer; LockId must be unique on-chain.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for vBTC V2 bridge lock.");
+
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    var fn = jobj["Function"]?.ToObject<string>();
+                    if (fn != "VBTCBridgeLock()")
+                        return (txResult, "Invalid Function for vBTC V2 bridge lock.");
+
+                    var scUID = jobj["ContractUID"]?.ToObject<string>();
+                    var lockId = jobj["LockId"]?.ToObject<string>();
+                    var amount = jobj["Amount"]?.ToObject<decimal?>();
+                    var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                    var evmDestination = jobj["EvmDestination"]?.ToObject<string>();
+
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId))
+                        return (txResult, "ContractUID and LockId are required for bridge lock.");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Bridge lock must be a self-transaction (from == to).");
+
+                    if (!amount.HasValue || amount.Value <= 0)
+                        return (txResult, "Amount must be greater than zero for bridge lock.");
+
+                    if (!amountSats.HasValue)
+                        return (txResult, "AmountSats is required for bridge lock.");
+
+                    var expectedSats = (long)(amount.Value * 100_000_000M);
+                    if (expectedSats != amountSats.Value)
+                        return (txResult, "AmountSats does not match Amount for bridge lock.");
+
+                    if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
+                        return (txResult, "Invalid EvmDestination for bridge lock.");
+
+                    if (VBTCBridgeLockState.GetByLockId(lockId) != null)
+                        return (txResult, "Bridge LockId already exists on-chain.");
+
+                    var spendCheck = await ValidateVbtcTransparentSpendForBridgeLock(scUID, txRequest.FromAddress, amount.Value, blockVerify, blockDownloads);
+                    if (!spendCheck.Ok)
+                        return (txResult, spendCheck.Message);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_LOCK transaction: {ex}",
+                        "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate vBTC V2 bridge lock transaction.");
+                }
+            }
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for vBTC V2 bridge unlock.");
+
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    var fn = jobj["Function"]?.ToObject<string>();
+                    if (fn != "VBTCBridgeUnlock()")
+                        return (txResult, "Invalid Function for vBTC V2 bridge unlock.");
+
+                    var scUID = jobj["ContractUID"]?.ToObject<string>();
+                    var lockId = jobj["LockId"]?.ToObject<string>();
+                    var amount = jobj["Amount"]?.ToObject<decimal?>();
+                    var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                    var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string>();
+
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId))
+                        return (txResult, "ContractUID and LockId are required for bridge unlock.");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Bridge unlock must be a self-transaction (from == to).");
+
+                    if (!amount.HasValue || amount.Value <= 0 || !amountSats.HasValue)
+                        return (txResult, "Amount and AmountSats are required for bridge unlock.");
+
+                    var expectedSats = (long)(amount.Value * 100_000_000M);
+                    if (expectedSats != amountSats.Value)
+                        return (txResult, "AmountSats does not match Amount for bridge unlock.");
+
+                    if (!IsValidEvmTxHash32(exitBurnTxHash))
+                        return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
+
+                    var rec = VBTCBridgeLockState.GetByLockId(lockId);
+                    if (rec == null)
+                        return (txResult, "Unknown bridge LockId (no prior lock on-chain).");
+
+                    if (rec.IsUnlocked)
+                        return (txResult, "Bridge lock already unlocked.");
+
+                    if (rec.OwnerAddress != txRequest.FromAddress)
+                        return (txResult, "Bridge unlock signer must match original lock owner.");
+
+                    if (rec.SmartContractUID != scUID)
+                        return (txResult, "ContractUID does not match the locked bridge record.");
+
+                    if (rec.AmountSats != amountSats.Value)
+                        return (txResult, "AmountSats does not match the locked bridge record.");
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_UNLOCK transaction: {ex}",
+                        "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate vBTC V2 bridge unlock transaction.");
+                }
+            }
+
             if (txRequest.FromAddress.StartsWith("xRBX") && runReserveCheck)
             {
                 if (txRequest.TransactionType != TransactionType.TX && 
@@ -2977,6 +3089,94 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+        }
+
+        private static bool IsValidEvmTxHash32(string? h)
+        {
+            if (string.IsNullOrEmpty(h)) return false;
+            var hex = h.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? h.Substring(2) : h;
+            if (hex.Length != 64) return false;
+            foreach (var c in hex)
+            {
+                if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F'))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>Same transparent balance rules as <see cref="TransactionType.VBTC_V2_TRANSFER"/> for a bridge lock debit.</summary>
+        private static async Task<(bool Ok, string Message)> ValidateVbtcTransparentSpendForBridgeLock(
+            string scUID,
+            string fromAddress,
+            decimal amount,
+            bool blockVerify,
+            bool blockDownloads)
+        {
+            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+            if (scStateTreiRec == null)
+                return (false, $"vBTC V2 contract not found in state trei: {scUID}");
+
+            bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
+
+            decimal ledgerBalance = 0M;
+            if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+            {
+                var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
+                    .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                    .ToList();
+
+                if (transactions.Any())
+                    ledgerBalance = transactions.Sum(x => x.Amount);
+            }
+
+            if (isOwner)
+            {
+                decimal depositBalance = 0M;
+                string? depositAddr2 = null;
+                var scMainDecompile2 = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                if (scMainDecompile2?.Features != null)
+                {
+                    var tknzV2 = scMainDecompile2.Features
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures).FirstOrDefault();
+                    if (tknzV2 != null)
+                        depositAddr2 = ((TokenizationV2Feature)tknzV2).DepositAddress;
+                }
+
+                if (!string.IsNullOrEmpty(depositAddr2))
+                {
+                    if (!blockDownloads && !blockVerify)
+                    {
+                        try
+                        {
+                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                            if (elxClient != null)
+                            {
+                                var balance = await elxClient.GetBalance(depositAddr2, false);
+                                depositBalance = balance.Confirmed / 100_000_000M;
+                            }
+                        }
+                        catch { /* ElectrumX unavailable */ }
+                    }
+                }
+
+                decimal ownerBalance = depositBalance + ledgerBalance;
+                if (ownerBalance < amount)
+                {
+                    if (!blockVerify)
+                        return (false, $"Insufficient vBTC balance (owner) for bridge lock. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount}");
+                }
+            }
+            else
+            {
+                if (ledgerBalance < amount)
+                    return (false, $"Insufficient vBTC balance for bridge lock. Available: {ledgerBalance}, Requested: {amount}");
+
+                if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                    return (false, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+            }
+
+            return (true, "");
         }
 
         public static async Task<bool> VerifyTXSize(Transaction txRequest)

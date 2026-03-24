@@ -120,7 +120,9 @@ namespace ReserveBlockCore.Models
         VFX_PRIVATE_TRANSFER,
         VBTC_V2_SHIELD,
         VBTC_V2_UNSHIELD,
-        VBTC_V2_PRIVATE_TRANSFER
+        VBTC_V2_PRIVATE_TRANSFER,
+        VBTC_V2_BRIDGE_LOCK,              // Lock vBTC for bridging to Base (user broadcasts)
+        VBTC_V2_BRIDGE_UNLOCK             // Unlock vBTC after burn on Base (user broadcasts)
     }
 
     public enum ReserveTransactionType

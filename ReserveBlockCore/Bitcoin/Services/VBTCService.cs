@@ -942,5 +942,242 @@ namespace ReserveBlockCore.Bitcoin.Services
                 return (false, string.Empty, string.Empty, $"Error: {ex.Message}");
             }
         }
+
+        #region Bridge Lock / Unlock Transactions
+
+        /// <summary>
+        /// Create and broadcast a VBTC_V2_BRIDGE_LOCK transaction on the VFX chain.
+        /// This deducts the vBTC balance in the State Trei so all nodes see the lock.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID of the vBTC contract</param>
+        /// <param name="ownerAddress">VFX address that owns the vBTC being locked</param>
+        /// <param name="amount">Amount of vBTC to lock (in BTC, e.g. 0.001)</param>
+        /// <param name="evmDestination">EVM address on Base to receive vBTC.b</param>
+        /// <param name="lockIdOverride">Optional; default is a new GUID (format N). Must be unique on-chain.</param>
+        /// <returns>(Success, TxHashOrError, LockId)</returns>
+        public static async Task<(bool Success, string TxHashOrError, string LockId)> CreateBridgeLockTx(
+            string scUID, string ownerAddress, decimal amount, string evmDestination, string? lockIdOverride = null)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {ownerAddress}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"Account not found: {ownerAddress}", string.Empty);
+                }
+
+                // Validate balance (subtract local bridge reservations not yet reflected in state trei)
+                var balResult = await TryGetAvailableTransparentVbtcBalance(scUID, ownerAddress);
+                if (!balResult.success)
+                {
+                    SCLogUtility.Log(balResult.error ?? "Balance lookup failed", "VBTCService.CreateBridgeLockTx()");
+                    return (false, balResult.error ?? "Could not resolve vBTC transparent balance.", string.Empty);
+                }
+
+                var reservedLocal = BridgeLockRecord.GetLockedAmount(ownerAddress, scUID);
+                var spendable = balResult.availableBalance - reservedLocal;
+                if (spendable < amount)
+                {
+                    SCLogUtility.Log($"Insufficient balance. Available: {spendable} (raw: {balResult.availableBalance}, local bridge reserve: {reservedLocal}), Requested: {amount}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"Insufficient balance. Available: {spendable} BTC, Requested: {amount}", string.Empty);
+                }
+
+                // Validate EVM destination
+                if (string.IsNullOrWhiteSpace(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
+                {
+                    return (false, "Invalid EVM destination address. Must be 0x-prefixed, 42 characters.", string.Empty);
+                }
+
+                var lockId = string.IsNullOrWhiteSpace(lockIdOverride) ? Guid.NewGuid().ToString("N") : lockIdOverride.Trim();
+                long amountSats = (long)(amount * 100_000_000M);
+
+                // Create transaction data
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeLock()",
+                    ContractUID = scUID,
+                    LockId = lockId,
+                    Amount = amount,
+                    AmountSats = amountSats,
+                    EvmDestination = evmDestination
+                });
+
+                // Build transaction (self-TX: from=to=owner, amount=0 VFX)
+                var lockTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = ownerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_LOCK,
+                    Data = txData
+                };
+
+                lockTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(lockTx);
+
+                // Build and sign
+                lockTx.Build();
+                var txHash = lockTx.Hash;
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {ownerAddress}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"Private key was null for account {ownerAddress}", string.Empty);
+                }
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}", string.Empty);
+                }
+
+                lockTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(lockTx);
+                if (result.Item1)
+                {
+                    await TransactionData.AddTxToWallet(lockTx, true);
+                    await AccountData.UpdateLocalBalance(ownerAddress, lockTx.Fee + lockTx.Amount);
+                    await TransactionData.AddToPool(lockTx);
+                    await P2PClient.SendTXMempool(lockTx);
+                    SCLogUtility.Log($"vBTC V2 Bridge Lock TX Success. SCUID: {scUID}, TxHash: {lockTx.Hash}, LockId: {lockId}", "VBTCService.CreateBridgeLockTx()");
+                    return (true, lockTx.Hash, lockId);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Bridge Lock TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"TX Verify Failed: {result.Item2}", string.Empty);
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Bridge Lock Error: {ex.Message}", "VBTCService.CreateBridgeLockTx()");
+                return (false, $"Error: {ex.Message}", string.Empty);
+            }
+        }
+
+        /// <summary>
+        /// Polls until <see cref="VBTCBridgeLockState"/> exists (lock included in a block) or the timeout elapses.
+        /// Used before relay mint on Base so the VFX lock is consensus-valid.
+        /// </summary>
+        public static async Task<bool> WaitForBridgeLockInStateAsync(string lockId, int timeoutMs = 120_000)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (VBTCBridgeLockState.GetByLockId(lockId) != null)
+                    return true;
+                var rec = BridgeLockRecord.GetByLockId(lockId);
+                if (rec?.VfxLockConfirmedOnChain == true)
+                    return true;
+                await Task.Delay(400);
+            }
+            return VBTCBridgeLockState.GetByLockId(lockId) != null;
+        }
+
+        /// <summary>
+        /// Create and broadcast a VBTC_V2_BRIDGE_UNLOCK transaction on the VFX chain.
+        /// This restores the vBTC balance after a burn on Base has been detected.
+        /// Called by the user's node when it detects its own ExitBurned event on Base.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID of the vBTC contract</param>
+        /// <param name="ownerAddress">VFX address that originally locked the vBTC</param>
+        /// <param name="lockId">The lock ID being unlocked</param>
+        /// <param name="amount">Amount being unlocked</param>
+        /// <param name="exitBurnTxHash">The Base transaction hash of the burnForExit call</param>
+        /// <returns>(Success, TxHashOrError)</returns>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeUnlockTx(
+            string scUID, string ownerAddress, string lockId, decimal amount, string exitBurnTxHash)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {ownerAddress}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (false, $"Account not found: {ownerAddress}");
+                }
+
+                long amountSats = (long)(amount * 100_000_000M);
+
+                // Create transaction data
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeUnlock()",
+                    ContractUID = scUID,
+                    LockId = lockId,
+                    Amount = amount,
+                    AmountSats = amountSats,
+                    ExitBurnTxHash = exitBurnTxHash
+                });
+
+                // Build transaction (self-TX: from=to=owner, amount=0 VFX)
+                var unlockTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = ownerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_UNLOCK,
+                    Data = txData
+                };
+
+                unlockTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(unlockTx);
+
+                // Build and sign
+                unlockTx.Build();
+                var txHash = unlockTx.Hash;
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {ownerAddress}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (false, $"Private key was null for account {ownerAddress}");
+                }
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                }
+
+                unlockTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(unlockTx);
+                if (result.Item1)
+                {
+                    await TransactionData.AddTxToWallet(unlockTx, true);
+                    await AccountData.UpdateLocalBalance(ownerAddress, unlockTx.Fee + unlockTx.Amount);
+                    await TransactionData.AddToPool(unlockTx);
+                    await P2PClient.SendTXMempool(unlockTx);
+                    SCLogUtility.Log($"vBTC V2 Bridge Unlock TX Success. SCUID: {scUID}, TxHash: {unlockTx.Hash}, LockId: {lockId}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (true, unlockTx.Hash);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Bridge Unlock TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Bridge Unlock Error: {ex.Message}", "VBTCService.CreateBridgeUnlockTx()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        #endregion
     }
 }

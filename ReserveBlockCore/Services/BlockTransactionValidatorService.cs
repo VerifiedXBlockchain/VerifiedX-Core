@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Linq;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
@@ -1003,6 +1003,27 @@ namespace ReserveBlockCore.Services
                     catch (Exception ex)
                     {
                         SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation error: {ex.Message}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                }
+
+                if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
+                {
+                    try
+                    {
+                        var txdataSuccess = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Success;
+                        txdataSuccess.InsertSafe(tx);
+                        SCLogUtility.Log($"VBTC_V2 bridge tx in block: {tx.Hash}, Type: {tx.TransactionType}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2 bridge tx error: {ex.Message}",
                             "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         var txdata = TransactionData.GetAll();
                         tx.TransactionStatus = TransactionStatus.Invalid;

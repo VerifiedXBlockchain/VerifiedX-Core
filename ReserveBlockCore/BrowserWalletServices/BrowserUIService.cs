@@ -999,6 +999,7 @@ function renderVBTC(contracts){
   }).join('');
   el('vbtc-content').innerHTML='<div class=""vbtc-grid"">'+cards+'</div>';
   loadBridgeHistory();
+  startBridgePoll();
   el('burn-instructions').style.display='block';
 }
 
@@ -1042,6 +1043,9 @@ function loadBridgeHistory(){
     el('bridge-hist-content').innerHTML='<div class=""tbl-wrap""><table class=""dtbl""><thead><tr><th>Lock ID</th><th>Amount</th><th>EVM Dest</th><th>Status</th><th>Base TX</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   }).catch(function(){el('bridge-history-section').style.display='none';});
 }
+var _bridgePollTimer=null;
+function startBridgePoll(){if(_bridgePollTimer)clearInterval(_bridgePollTimer);_bridgePollTimer=setInterval(function(){loadBridgeHistory();},15000);}
+function stopBridgePoll(){if(_bridgePollTimer){clearInterval(_bridgePollTimer);_bridgePollTimer=null;}}
 
 /* ---- Bitcoin ---- */
 function loadBTC(){

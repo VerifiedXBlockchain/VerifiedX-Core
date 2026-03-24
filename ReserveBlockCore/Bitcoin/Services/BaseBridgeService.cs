@@ -306,8 +306,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Background loop that retries pending bridge locks (status = Locked) every 30 seconds.
-        /// Handles cases where AutoRelay failed due to gas issues, RPC errors, etc.
+        /// Background loop that mints pending bridge locks every 30 seconds (see <see cref="BridgeLockRecord.GetPendingRelays"/>:
+        /// VFX lock confirmed on-chain, status Locked, relay not yet completed).
         /// </summary>
         public static async Task BridgeMintRetryLoop()
         {

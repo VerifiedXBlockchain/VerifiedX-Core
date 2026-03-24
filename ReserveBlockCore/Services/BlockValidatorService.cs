@@ -548,6 +548,8 @@ namespace ReserveBlockCore.Services
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
                                     blkTransaction.TransactionType != TransactionType.VFX_SHIELD &&
                                     blkTransaction.TransactionType != TransactionType.VFX_UNSHIELD &&
                                     blkTransaction.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&

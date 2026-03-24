@@ -500,6 +500,16 @@ namespace ReserveBlockCore.Data
                             VoteOnVBTCV2Cancellation(tx);
                         }
 
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
+                        {
+                            ApplyVBTCBridgeLock(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
+                        {
+                            ApplyVBTCBridgeUnlock(tx);
+                        }
+
                         if(tx.TransactionType == TransactionType.RESERVE)
                         {
                             var txData = tx.Data;
@@ -2698,6 +2708,164 @@ namespace ReserveBlockCore.Data
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"TransferVBTCV2 error: {ex.Message}", "StateData.TransferVBTCV2()");
+            }
+        }
+
+        /// <summary>
+        /// vBTC Base bridge lock: deduct transparent balance chain-wide (same ledger pattern as withdrawal burn).
+        /// </summary>
+        private static void ApplyVBTCBridgeLock(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeLock: expected self-transaction (from == to)", "StateData.ApplyVBTCBridgeLock()");
+                    return;
+                }
+
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var lockId = jobj["LockId"]?.ToObject<string?>();
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                var evmDestination = jobj["EvmDestination"]?.ToObject<string?>();
+
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId) || !amount.HasValue || !amountSats.HasValue || string.IsNullOrEmpty(evmDestination))
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeLock: missing required fields", "StateData.ApplyVBTCBridgeLock()");
+                    return;
+                }
+
+                var expectedSats = (long)(amount.Value * 100_000_000M);
+                if (expectedSats != amountSats.Value)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: AmountSats mismatch for lock {lockId}", "StateData.ApplyVBTCBridgeLock()");
+                    return;
+                }
+
+                if (VBTCBridgeLockState.GetByLockId(lockId) != null)
+                    return;
+
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTreiRec == null)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: contract not found {scUID}", "StateData.ApplyVBTCBridgeLock()");
+                    return;
+                }
+
+                var tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                {
+                    new SmartContractStateTreiTokenizationTX
+                    {
+                        Amount = amount.Value * -1.0M,
+                        FromAddress = tx.FromAddress,
+                        ToAddress = "-"
+                    }
+                };
+
+                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                else
+                    scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+
+                SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                if (!VBTCBridgeLockState.TryInsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination))
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: failed to persist VBTCBridgeLockState for {lockId}", "StateData.ApplyVBTCBridgeLock()");
+                }
+                else
+                {
+                    BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash);
+                }
+
+                SCLogUtility.Log($"ApplyVBTCBridgeLock: lockId={lockId}, amount={amount.Value} BTC, owner={tx.FromAddress}, scUID={scUID}",
+                    "StateData.ApplyVBTCBridgeLock()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeLock error: {ex.Message}", "StateData.ApplyVBTCBridgeLock()");
+            }
+        }
+
+        /// <summary>
+        /// vBTC Base bridge unlock: restore transparent balance after burn on Base (proof hash carried in TX data).
+        /// </summary>
+        private static void ApplyVBTCBridgeUnlock(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeUnlock: expected self-transaction (from == to)", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var lockId = jobj["LockId"]?.ToObject<string?>();
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string?>();
+
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId) || !amount.HasValue || !amountSats.HasValue || string.IsNullOrEmpty(exitBurnTxHash))
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeUnlock: missing required fields", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                var rec = VBTCBridgeLockState.GetByLockId(lockId);
+                if (rec == null || rec.IsUnlocked)
+                    return;
+
+                if (rec.OwnerAddress != tx.FromAddress || rec.SmartContractUID != scUID)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock: signer/contract mismatch for lock {lockId}", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                if (rec.AmountSats != amountSats.Value)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock: AmountSats mismatch for lock {lockId}", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTreiRec == null)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock: contract not found {scUID}", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                var tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                {
+                    new SmartContractStateTreiTokenizationTX
+                    {
+                        Amount = amount.Value,
+                        FromAddress = "+",
+                        ToAddress = tx.FromAddress
+                    }
+                };
+
+                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                else
+                    scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+
+                SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                if (!VBTCBridgeLockState.TryFinalizeUnlock(tx, rec, exitBurnTxHash))
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock: failed to finalize VBTCBridgeLockState for {lockId}", "StateData.ApplyVBTCBridgeUnlock()");
+
+                BridgeLockRecord.FinalizeFromChainUnlockIfPending(lockId);
+
+                SCLogUtility.Log($"ApplyVBTCBridgeUnlock: lockId={lockId}, amount={amount.Value} BTC, owner={tx.FromAddress}, exitBurn={exitBurnTxHash}",
+                    "StateData.ApplyVBTCBridgeUnlock()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock error: {ex.Message}", "StateData.ApplyVBTCBridgeUnlock()");
             }
         }
 
