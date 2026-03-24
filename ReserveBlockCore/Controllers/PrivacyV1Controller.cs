@@ -364,6 +364,40 @@ namespace ReserveBlockCore.Controllers
             }
         }
 
+        /// <summary>Create a <c>zfx_</c> shielded address from a single transparent account's private key (no HD wallet required).</summary>
+        [HttpPost("CreateShieldedAddressFromAccount")]
+        public Task<string> CreateShieldedAddressFromAccount([FromBody] CreateShieldedAddressFromAccountRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.TransparentAddress))
+                    return Task.FromResult(Fail("TransparentAddress is required."));
+                if (!AddressValidateUtility.ValidateAddress(req.TransparentAddress))
+                    return Task.FromResult(Fail("Invalid TransparentAddress."));
+                var account = AccountData.GetSingleAccount(req.TransparentAddress);
+                if (account == null)
+                    return Task.FromResult(Fail("TransparentAddress not found in local wallet."));
+
+                var accountKey = account.GetKey;
+                if (string.IsNullOrWhiteSpace(accountKey))
+                    return Task.FromResult(Fail("Cannot access account private key. Is the wallet locked?"));
+
+                var keyMat = ShieldedHdDerivation.DeriveFromPrivateKey(accountKey);
+                var wallet = ShieldedWalletService.CreateFromKeyMaterial(keyMat, req.TransparentAddress, req.WalletPassword);
+                ShieldedWalletService.Upsert(wallet);
+
+                return Task.FromResult(Ok(new
+                {
+                    keyMat.ZfxAddress,
+                    TransparentSourceAddress = req.TransparentAddress
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ex.Message));
+            }
+        }
+
         /// <summary>Derive a <c>zfx_</c> address from HD seed (local HD wallet or explicit hex).</summary>
         [HttpPost("GenerateShieldedAddress")]
         public Task<string> GenerateShieldedAddress([FromBody] GenerateShieldedAddressRequest req)

@@ -32,6 +32,13 @@ namespace ReserveBlockCore.Models.Privacy
         public string? WalletPassword { get; set; }
     }
 
+    /// <summary>Create a shielded address from a single transparent account (no HD wallet required).</summary>
+    public class CreateShieldedAddressFromAccountRequest
+    {
+        public string TransparentAddress { get; set; } = "";
+        public string? WalletPassword { get; set; }
+    }
+
     public class GenerateShieldedAddressRequest
     {
         /// <summary>When true, uses <see cref="HDWallet"/> seed from local DB (must exist).</summary>
