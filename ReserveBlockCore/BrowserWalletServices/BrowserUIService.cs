@@ -24,6 +24,7 @@ namespace ReserveBlockCore.BrowserWalletServices
             BuildVbtcWithdrawModal() +
             BuildVbtcCompleteModal() +
             BuildVbtcSendModal() +
+            BuildBridgeToBaseModal() +
             BuildCreateZfxModal() +
             BuildShieldModal() +
             BuildUnshieldModal() +
@@ -242,6 +243,20 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
   <div id='p-vbtc' class='panel'>
     <div class='sec-hdr'><span class='sec-ttl'>vBTC Contracts</span></div>
     <div id='vbtc-content'><div class='ld'><span class='spin'></span>Loading vBTC...</div></div>
+    <div id='bridge-history-section' style='display:none'>
+      <div class='sec-hdr' style='margin-top:24px'><span class='sec-ttl'>&#127881; Bridge History</span></div>
+      <div id='bridge-hist-content'></div>
+    </div>
+    <div id='burn-instructions' style='display:none;margin-top:24px;padding:20px;background:var(--surface);border:1px solid var(--border);border-radius:12px'>
+      <div style='font-size:15px;font-weight:700;margin-bottom:10px'>&#128293; How to Burn vBTC.b (Exit from Base)</div>
+      <div style='font-size:13px;color:var(--muted);line-height:1.6'>
+        To convert vBTC.b back to vBTC on VerifiedX, burn the tokens on Base using an EVM wallet (MetaMask, etc.):<br><br>
+        <strong>1.</strong> Open MetaMask connected to Base Sepolia (or Base Mainnet).<br>
+        <strong>2.</strong> Call <code>burn(amount)</code> on the vBTC.b contract via Basescan Write Contract tab.<br>
+        <strong>3.</strong> The relay node detects the burn event and unlocks your vBTC on VerifiedX.<br><br>
+        <em style='color:var(--orange)'>Note: Burn-to-unlock (Flow B) is not yet implemented in this demo. Only Bridge-to-Base (Flow A) is active.</em>
+      </div>
+    </div>
   </div>";
 
         // ── Bitcoin Panel ────────────────────────────────────────────────────
@@ -505,6 +520,44 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
     <div class='modal-foot'>
       <button class='btn-sec' onclick='closeVBTCTx()'>Cancel</button>
       <button class='btn-prim' id='vbtc-tx-btn' onclick='doVBTCTransfer()'>Send vBTC</button>
+    </div>
+  </div>
+</div>";
+
+        // ── Bridge to Base Modal ────────────────────────────────────────────
+        private static string BuildBridgeToBaseModal() => @"
+<!-- Bridge to Base Modal -->
+<div class='overlay' id='bridge-overlay'>
+  <div class='modal'>
+    <div class='modal-hdr'>
+      <div class='modal-ttl'>&#127881; Bridge vBTC to Base</div>
+      <button class='modal-close' onclick='closeBridge()'>&#215;</button>
+    </div>
+    <input type='hidden' id='br-scuid'>
+    <input type='hidden' id='br-owner'>
+    <div class='form-grp'>
+      <label>vBTC Contract</label>
+      <input class='form-inp' id='br-contract-disp' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>Available Balance</label>
+      <input class='form-inp' id='br-bal-disp' type='text' readonly>
+    </div>
+    <div class='form-grp'>
+      <label>Amount (vBTC)</label>
+      <input class='form-inp' id='br-amount' type='text' placeholder='0.00000000'>
+    </div>
+    <div class='form-grp'>
+      <label>Base EVM Destination (0x...)</label>
+      <input class='form-inp' id='br-evm' type='text' placeholder='0x...'>
+    </div>
+    <div style='padding:12px;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);border-radius:8px;font-size:13px;color:var(--accent);margin-bottom:12px'>
+      This locks your vBTC on VerifiedX and mints vBTC.b (ERC-20) on Base at the destination address. The relay node will process the mint automatically.
+    </div>
+    <div class='msg' id='br-msg'></div>
+    <div class='modal-foot'>
+      <button class='btn-sec' onclick='closeBridge()'>Cancel</button>
+      <button class='btn-prim' id='br-btn' onclick='doBridgeToBase()'>Bridge to Base</button>
     </div>
   </div>
 </div>";
@@ -929,6 +982,7 @@ function renderVBTC(contracts){
     var canComplete=c.withdrawalStatus==='Requested';
     var btns='<div class=""nft-actions"" style=""margin-top:6px"">';
     if(c.balance>0)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx(\''+esc(c.scUID)+'\','+c.balance+')"">&rarr; Send vBTC</button>';
+    if(c.balance>0)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge(\''+esc(c.scUID)+'\',\''+esc(c.ownerAddress)+'\','+c.balance+')"">&#127881; Bridge to Base</button>';
     if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD(\''+esc(c.scUID)+'\',\''+esc(c.ownerAddress)+'\','+c.balance+')"">&darr; Withdraw</button>';
     if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC(\''+esc(c.scUID)+'\','+c.activeWithdrawalAmount+',\''+esc(c.activeWithdrawalDest||'')+'\')"">&check; Complete Withdrawal</button>';
     btns+='</div>';
@@ -944,6 +998,49 @@ function renderVBTC(contracts){
       '</div>';
   }).join('');
   el('vbtc-content').innerHTML='<div class=""vbtc-grid"">'+cards+'</div>';
+  loadBridgeHistory();
+  el('burn-instructions').style.display='block';
+}
+
+/* ---- Bridge to Base ---- */
+window.openBridge=function(scUID,owner,bal){
+  el('br-scuid').value=scUID;el('br-owner').value=owner;
+  el('br-contract-disp').value=scUID;el('br-bal-disp').value=fmtBal(bal)+' vBTC';
+  el('br-amount').value='';el('br-evm').value='';hideMsg('br-msg');
+  el('bridge-overlay').classList.add('on');
+};
+window.closeBridge=function(){el('bridge-overlay').classList.remove('on');};
+window.doBridgeToBase=function(){
+  var scUID=el('br-scuid').value,owner=el('br-owner').value,amt=el('br-amount').value.trim(),evm=el('br-evm').value.trim();
+  if(!amt||!evm){showMsg('br-msg','Fill amount and EVM destination.','err');return;}
+  if(!evm.startsWith('0x')||evm.length!==42){showMsg('br-msg','Invalid EVM address.','err');return;}
+  var btn=el('br-btn');btn.disabled=true;btn.textContent='Bridging...';
+  fetch('/vbtcapi/VBTC/BridgeToBase',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({SmartContractUID:scUID,OwnerAddress:owner,Amount:parseFloat(amt),EvmDestination:evm})
+  }).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false;btn.textContent='Bridge to Base';
+    if(d.Success||d.success){showMsg('br-msg','Bridge lock created! Lock ID: '+(d.LockId||d.lockId||'')+'. Relay will mint vBTC.b on Base shortly.','ok');
+      setTimeout(function(){closeBridge();tabLoaded.vbtc=false;loadVBTC();},3000);
+    }else{showMsg('br-msg',d.Message||d.message||'Bridge failed.','err');}
+  }).catch(function(e){btn.disabled=false;btn.textContent='Bridge to Base';showMsg('br-msg',e.message||'Failed.','err');});
+};
+function loadBridgeHistory(){
+  if(!selAddr)return;
+  fetch('/vbtcapi/VBTC/BridgeLocks/'+encodeURIComponent(selAddr)).then(function(r){return r.json();}).then(function(data){
+    var locks=data.Locks||data.locks||data;
+    if(!locks||!locks.length){el('bridge-history-section').style.display='none';return;}
+    el('bridge-history-section').style.display='block';
+    var rows=locks.map(function(lk){
+      var st=lk.Status||lk.status||'Unknown';
+      var sCls=st==='Minted'?'badge-ok':st==='Failed'?'badge-fail':'badge-pend';
+      return '<tr><td><code class=""muted"">'+shn(lk.LockId||lk.lockId||'',12)+'</code></td>'+
+        '<td>'+fmtBal(lk.Amount||lk.amount||0)+' vBTC</td>'+
+        '<td><code class=""muted"" title=""'+esc(lk.EvmDestination||lk.evmDestination||'')+'"">'+ shn(lk.EvmDestination||lk.evmDestination||'',14)+'</code></td>'+
+        '<td><span class=""badge '+sCls+'"">'+esc(st)+'</span></td>'+
+        '<td>'+(lk.BaseTxHash||lk.baseTxHash?'<code class=""muted"">'+shn(lk.BaseTxHash||lk.baseTxHash,12)+'</code>':'--')+'</td></tr>';
+    }).join('');
+    el('bridge-hist-content').innerHTML='<div class=""tbl-wrap""><table class=""dtbl""><thead><tr><th>Lock ID</th><th>Amount</th><th>EVM Dest</th><th>Status</th><th>Base TX</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  }).catch(function(){el('bridge-history-section').style.display='none';});
 }
 
 /* ---- Bitcoin ---- */

@@ -65,6 +65,12 @@ namespace ReserveBlockCore.Config
         public int MaxBlockSizeBytes { get; set; }
         public int BlockValidationTimeoutMs { get; set; }
 
+        // Base Bridge configuration (config.txt keys: BaseBridgeRpcUrl, BaseBridgeContract, BaseBridgeRelayKey, BaseBridgeChainId)
+        public string? BaseBridgeRpcUrl { get; set; }
+        public string? BaseBridgeContract { get; set; }
+        public string? BaseBridgeRelayKey { get; set; }
+        public int BaseBridgeChainId { get; set; }
+
         public static Config ReadConfigFile()
         {
             var path = GetPathUtility.GetConfigPath();
@@ -159,6 +165,12 @@ namespace ReserveBlockCore.Config
 					".nls", ".ctbl", ".crypt1", ".hsq", ".iws", ".vzr", ".lkh", ".ezt", ".rna", ".aepl", ".hts", ".atm", ".fuj", ".aut", 
 					".fjl", ".delf", ".buk", ".bmw", ".capxml", ".bps", ".cyw", ".iva", ".pid", ".lpaq5", ".dx", ".bqf", ".qit", ".pr", ".lok", 
 					".xnt"};
+
+                // Base Bridge config (optional — env vars and LoadConfig() also apply)
+                config.BaseBridgeRpcUrl = dict.ContainsKey("BaseBridgeRpcUrl") ? dict["BaseBridgeRpcUrl"] : null;
+                config.BaseBridgeContract = dict.ContainsKey("BaseBridgeContract") ? dict["BaseBridgeContract"] : null;
+                config.BaseBridgeRelayKey = dict.ContainsKey("BaseBridgeRelayKey") ? dict["BaseBridgeRelayKey"] : null;
+                config.BaseBridgeChainId = dict.ContainsKey("BaseBridgeChainId") ? Convert.ToInt32(dict["BaseBridgeChainId"]) : 0;
 
                 config.MotherAddress = dict.ContainsKey("MotherAddress") ? dict["MotherAddress"] : null;
                 config.MotherPassword = dict.ContainsKey("MotherPassword") ? dict["MotherPassword"] : null;
@@ -529,8 +541,18 @@ namespace ReserveBlockCore.Config
 		
 		// HAL-19 Fix: Process DoS protection configuration
 		Globals.MaxBlockSizeBytes = config.MaxBlockSizeBytes;
-		Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
-		
+	Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
+
+	// Base Bridge: Apply config values (env vars still override in LoadConfig)
+	if (!string.IsNullOrEmpty(config.BaseBridgeRpcUrl))
+		Bitcoin.Services.BaseBridgeService.BaseRpcUrl = config.BaseBridgeRpcUrl;
+	if (!string.IsNullOrEmpty(config.BaseBridgeContract))
+		Bitcoin.Services.BaseBridgeService.VBTCbContractAddress = config.BaseBridgeContract;
+	if (!string.IsNullOrEmpty(config.BaseBridgeRelayKey))
+		Bitcoin.Services.BaseBridgeService.RelayPrivateKey = config.BaseBridgeRelayKey;
+	if (config.BaseBridgeChainId > 0)
+		Bitcoin.Services.BaseBridgeService.BaseChainId = config.BaseBridgeChainId;
+	
         }
         public static void ProcessABL()
         {
@@ -583,12 +605,16 @@ namespace ReserveBlockCore.Config
             {
 				if (Globals.IsTestNet == false) //mainnet
 				{
-					File.AppendAllText(path + "config.txt", "Port=3338");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=7292");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=false");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
+				File.AppendAllText(path + "config.txt", "Port=3338");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=7292");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=false");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge defaults (mainnet — update contract + relay key before use)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://mainnet.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=8453");
                 }
                 else if(Globals.IsCustomTestNet) //devnet
                 {
@@ -599,6 +625,10 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge defaults (devnet — Base Sepolia)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
                 else //testnet
                 {
@@ -608,6 +638,10 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge defaults (testnet — Base Sepolia)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
 				
 			}
