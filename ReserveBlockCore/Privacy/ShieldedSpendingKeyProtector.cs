@@ -26,8 +26,7 @@ namespace ReserveBlockCore.Privacy
             RandomNumberGenerator.Fill(nonce);
             var tag = new byte[16];
             var cipher = new byte[plaintext32OrMore.Length];
-            using (var gcm = new AesGcm(key))
-                gcm.Encrypt(nonce, plaintext32OrMore, cipher, tag);
+            CrossPlatformAesGcm.Encrypt(key, nonce, plaintext32OrMore, cipher, tag, associatedData: null);
 
             var outBuf = new byte[1 + SaltSize + 12 + 16 + cipher.Length];
             outBuf[0] = FormatV1;
@@ -61,8 +60,7 @@ namespace ReserveBlockCore.Privacy
                 var cipher = blob.Slice(1 + SaltSize + 12 + 16).ToArray();
                 var key = Pbkdf2Key(password, salt);
                 var plain = new byte[cipher.Length];
-                using (var gcm = new AesGcm(key))
-                    gcm.Decrypt(nonce, cipher, tag, plain);
+                CrossPlatformAesGcm.Decrypt(key, nonce, cipher, tag, plain, associatedData: null);
                 plaintext = plain;
                 return true;
             }

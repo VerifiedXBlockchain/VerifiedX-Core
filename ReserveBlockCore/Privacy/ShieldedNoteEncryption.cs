@@ -51,8 +51,7 @@ namespace ReserveBlockCore.Privacy
             var tag = new byte[16];
             var cipher = new byte[plaintext.Length];
             var aad = BuildAad(ephPub, recipientEncryptionPubKey33);
-            using (var gcm = new AesGcm(aesKey))
-                gcm.Encrypt(nonce, plaintext, cipher, tag, aad);
+            CrossPlatformAesGcm.Encrypt(aesKey, nonce, plaintext, cipher, tag, aad);
 
             var outBuf = new byte[1 + 33 + 12 + 16 + cipher.Length];
             outBuf[0] = WireVersion1;
@@ -102,8 +101,7 @@ namespace ReserveBlockCore.Privacy
                 var aad = BuildAad(ephPub.ToArray(), recipientPub);
 
                 var plain = new byte[cipher.Length];
-                using (var gcm = new AesGcm(aesKey))
-                    gcm.Decrypt(nonce.ToArray(), cipher, tag.ToArray(), plain, aad);
+                CrossPlatformAesGcm.Decrypt(aesKey, nonce.ToArray(), cipher, tag.ToArray(), plain, aad);
 
                 plaintext = plain;
                 return true;

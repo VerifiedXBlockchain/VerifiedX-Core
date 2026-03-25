@@ -1026,14 +1026,14 @@ window.doBridgeToBase=function(){
 };
 function loadBridgeHistory(){
   if(!selAddr)return;
-  fetch('/vbtcapi/VBTC/BridgeLocks/'+encodeURIComponent(selAddr)).then(function(r){return r.json();}).then(function(data){
+  fetch('/vbtcapi/VBTC/GetBridgeLocksByOwner/'+encodeURIComponent(selAddr)).then(function(r){return r.json();}).then(function(data){
     var locks=data.Locks||data.locks||data;
     if(!locks||!locks.length){el('bridge-history-section').style.display='none';return;}
     el('bridge-history-section').style.display='block';
     var rows=locks.map(function(lk){
       var st=lk.Status||lk.status||'Unknown';
       var sCls=st==='Minted'?'badge-ok':st==='Failed'?'badge-fail':'badge-pend';
-      return '<tr><td><code class=""muted"">'+shn(lk.LockId||lk.lockId||'',12)+'</code></td>'+
+      return '<tr><td><code class=""muted"" style=""cursor:pointer;word-break:break-all"" title=""Click to copy"" onclick=""navigator.clipboard.writeText(this.textContent)"">'+(lk.LockId||lk.lockId||'')+'</code></td>'+
         '<td>'+fmtBal(lk.Amount||lk.amount||0)+' vBTC</td>'+
         '<td><code class=""muted"" title=""'+esc(lk.EvmDestination||lk.evmDestination||'')+'"">'+ shn(lk.EvmDestination||lk.evmDestination||'',14)+'</code></td>'+
         '<td><span class=""badge '+sCls+'"">'+esc(st)+'</span></td>'+
