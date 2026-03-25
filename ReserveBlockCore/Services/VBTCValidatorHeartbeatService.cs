@@ -102,9 +102,6 @@ namespace ReserveBlockCore.Services
                         continue;
                     }
 
-                    LogUtility.Log($"Checking heartbeat for {validators.Count} validators",
-                        "VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop()");
-
                     var currentBlock = Globals.LastBlock.Height;
 
                     foreach (var validator in validators)
@@ -150,8 +147,6 @@ namespace ReserveBlockCore.Services
                                 VBTCValidator.SaveValidator(validator);
                                 _failureCounts.Remove(validator.ValidatorAddress);
 
-                                LogUtility.Log($"HTTP heartbeat success: {validator.ValidatorAddress} ({validator.IPAddress})",
-                                    "VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop()");
                             }
                             else
                             {
@@ -173,8 +168,6 @@ namespace ReserveBlockCore.Services
                         }
                     }
 
-                    LogUtility.Log("Heartbeat check complete",
-                        "VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop()");
                 }
                 catch (Exception ex)
                 {
