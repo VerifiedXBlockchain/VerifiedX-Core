@@ -16,7 +16,29 @@ namespace ReserveBlockCore.Privacy
             col.EnsureIndex(x => x.ShieldedAddress, true);
             var existing = col.FindOne(x => x.ShieldedAddress == wallet.ShieldedAddress);
             if (existing != null)
+            {
                 wallet.Id = existing.Id;
+
+                // Preserve existing scan state so a repeat create call doesn't wipe scanned data
+                if (wallet.LastScannedBlock == 0 && existing.LastScannedBlock > 0)
+                    wallet.LastScannedBlock = existing.LastScannedBlock;
+
+                if ((wallet.UnspentCommitments == null || wallet.UnspentCommitments.Count == 0)
+                    && existing.UnspentCommitments != null && existing.UnspentCommitments.Count > 0)
+                    wallet.UnspentCommitments = existing.UnspentCommitments;
+
+                if ((wallet.ShieldedBalances == null || wallet.ShieldedBalances.Count == 0)
+                    && existing.ShieldedBalances != null && existing.ShieldedBalances.Count > 0)
+                    wallet.ShieldedBalances = existing.ShieldedBalances;
+
+                // If existing wallet has spending key and incoming one doesn't, preserve it
+                if ((wallet.SpendingKey == null || wallet.SpendingKey.Length == 0)
+                    && existing.SpendingKey != null && existing.SpendingKey.Length > 0)
+                {
+                    wallet.SpendingKey = existing.SpendingKey;
+                    wallet.IsViewOnly = existing.IsViewOnly;
+                }
+            }
             col.Upsert(wallet);
         }
 
