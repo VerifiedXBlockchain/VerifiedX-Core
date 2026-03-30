@@ -1,0 +1,107 @@
+# Manual workflow: builds VerifiedX-Core for Windows, Linux, and macOS as self-contained single-file executables.
+
+name: Build .NET 6 Native Binaries
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-win-x64:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Publish win-x64
+        run: dotnet publish ReserveBlockCore/ReserveBlockCore.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verifiedx-core-win-x64
+          path: ReserveBlockCore/bin/Release/net6.0/win-x64/publish/
+
+  build-linux-x64:
+    name: Build Linux x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Publish linux-x64
+        run: dotnet publish ReserveBlockCore/ReserveBlockCore.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verifiedx-core-linux-x64
+          path: ReserveBlockCore/bin/Release/net6.0/linux-x64/publish/
+
+  build-linux-arm64:
+    name: Build Linux ARM64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Publish linux-arm64
+        run: dotnet publish ReserveBlockCore/ReserveBlockCore.csproj -c Release -r linux-arm64 --self-contained true -p:PublishSingleFile=true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verifiedx-core-linux-arm64
+          path: ReserveBlockCore/bin/Release/net6.0/linux-arm64/publish/
+
+  build-macos-x64:
+    name: Build macOS x64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Publish osx-x64
+        run: dotnet publish ReserveBlockCore/ReserveBlockCore.csproj -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verifiedx-core-osx-x64
+          path: ReserveBlockCore/bin/Release/net6.0/osx-x64/publish/
+
+  build-macos-arm64:
+    name: Build macOS ARM64 (Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Publish osx-arm64
+        run: dotnet publish ReserveBlockCore/ReserveBlockCore.csproj -c Release -r osx-arm64 --self-contained true -p:PublishSingleFile=true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verifiedx-core-osx-arm64
+          path: ReserveBlockCore/bin/Release/net6.0/osx-arm64/publish/
