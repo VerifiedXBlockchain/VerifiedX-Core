@@ -881,8 +881,7 @@ namespace ReserveBlockCore.Services
                                         
                                         Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
                                         
-                                        LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", 
-                                            "BlockValidatorService");
+                                        //LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
@@ -902,8 +901,7 @@ namespace ReserveBlockCore.Services
                                         
                                         Bitcoin.Models.VBTCValidator.SetInactive(validatorAddress, tx.Hash, exitBlockHeight ?? block.Height);
                                         
-                                        LogUtility.Log($"Processed VBTC V2 validator exit for {validatorAddress} at block {block.Height}", 
-                                            "BlockValidatorService");
+                                        //LogUtility.Log($"Processed VBTC V2 validator exit for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
@@ -961,8 +959,7 @@ namespace ReserveBlockCore.Services
                                             Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
                                         }
 
-                                        LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}",
-                                            "BlockValidatorService");
+                                        //LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
