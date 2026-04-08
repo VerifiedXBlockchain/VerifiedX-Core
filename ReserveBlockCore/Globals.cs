@@ -13,6 +13,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Security;
+using System.Collections.Generic;
 
 namespace ReserveBlockCore
 {
@@ -23,6 +24,11 @@ namespace ReserveBlockCore
             var Source = new CancellationTokenSource();
             Source.Cancel();
             CancelledToken = Source.Token;
+
+            if (MaxBlockCasters < 3)
+                MaxBlockCasters = 3;
+            else if (MaxBlockCasters > 5)
+                MaxBlockCasters = 5;
         }
 
         public class MethodCallCount
@@ -320,6 +326,44 @@ namespace ReserveBlockCore
         public const int MaxValPeers = 20;
         public const int MaxBlockCasterPeers = 4;
         public static int MaxBlockCasters = 5;
+
+        /// <summary>How old the tip must be (seconds) before seed casters treat the chain as stopped and use bootstrap-only paths.</summary>
+        public const int BootstrapChainStallThresholdSeconds = 120;
+
+        /// <summary>Hardcoded seed caster addresses (mainnet + testnet). Only these nodes may enter <see cref="IsBootstrapMode"/> when the tip is stale.</summary>
+        public static readonly HashSet<string> BootstrapCasterAddresses = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "RK28ywrBfEXV5EuARn3etyVXMtcmywNxnM",
+            "RFoKrASMr19mg8S71Lf1F2suzxahG5Yj4N",
+            "RH9XAP3omXvk7P6Xe9fQ1C6nZQ1adJw2ZG",
+            "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
+            "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+            "xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi",
+        };
+
+        /// <summary>True if this node’s validating address is one of the seed casters.</summary>
+        public static bool IsLocalBootstrapCaster =>
+            !string.IsNullOrEmpty(ValidatorAddress) && BootstrapCasterAddresses.Contains(ValidatorAddress);
+
+        /// <summary>No tip yet → treat as stopped (cold start). After <see cref="IsChainSynced"/>, tip older than <see cref="BootstrapChainStallThresholdSeconds"/> vs wall clock → network likely stopped (~10+ missed slots at 12s target).</summary>
+        public static bool IsChainStalledForBootstrap
+        {
+            get
+            {
+                if (LastBlock == null || LastBlock.Height < 0)
+                    return true;
+                if (!IsChainSynced)
+                    return false;
+                var now = TimeUtil.GetTime();
+                return now - LastBlock.Timestamp > BootstrapChainStallThresholdSeconds;
+            }
+        }
+
+        /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.</summary>
+        public static bool IsBootstrapMode => IsLocalBootstrapCaster && IsChainStalledForBootstrap;
+
+        /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/> (when not bootstrap). Edit the initializer here only — not loaded from config.txt.</summary>
+        public static long CertEnforceHeight = 1337;
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;
@@ -346,6 +390,28 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<long, CasterRoundAudit> CasterRoundAuditDict = new ConcurrentDictionary<long, CasterRoundAudit>();
         public static ConcurrentDictionary<string, Proof> CasterProofDict = new ConcurrentDictionary<string, Proof>();
 
+        /// <summary>Discovered / agreed caster set (synced from <see cref="BlockCasters"/> and discovery). Used with <see cref="BlockCasters"/> for certificate verification (plan §Appendix C).</summary>
+        public static object KnownCastersLock = new object();
+        public static List<CasterInfo> KnownCasters { get; } = new List<CasterInfo>();
+
+        public static void SyncKnownCastersFromBlockCasters()
+        {
+            lock (KnownCastersLock)
+            {
+                KnownCasters.Clear();
+                foreach (var p in BlockCasters)
+                {
+                    if (string.IsNullOrEmpty(p.ValidatorAddress))
+                        continue;
+                    KnownCasters.Add(new CasterInfo
+                    {
+                        Address = p.ValidatorAddress,
+                        PeerIP = (p.PeerIP ?? "").Replace("::ffff:", ""),
+                        PublicKey = p.ValidatorPublicKey ?? ""
+                    });
+                }
+            }
+        }
 
         #endregion
 

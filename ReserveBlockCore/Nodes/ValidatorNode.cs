@@ -285,6 +285,28 @@ namespace ReserveBlockCore.Nodes
                         Globals.BlockCasters.Add(caster);
                 }
             }
+
+            Globals.SyncKnownCastersFromBlockCasters();
+        }
+
+        /// <summary>Phase 2: request the same height from two casters; require matching hash when both respond.</summary>
+        public static async Task<Block?> FetchBlockWithRedundantCasterAgreementAsync(long height, string winnerAddress)
+        {
+            var peers = Globals.BlockCasters.Where(x => !string.IsNullOrEmpty(x.PeerIP)).Take(2).ToList();
+            if (peers.Count == 0)
+                return null;
+
+            var a = await CasterBlockFetch.TryFetchBlockAsync(peers[0], height, winnerAddress);
+            if (a == null || a.Validator != winnerAddress)
+                return null;
+            if (peers.Count < 2)
+                return a;
+
+            var b = await CasterBlockFetch.TryFetchBlockAsync(peers[1], height, winnerAddress);
+            if (b == null || b.Validator != winnerAddress)
+                return a;
+
+            return a.Hash == b.Hash ? a : null;
         }
 
         #endregion

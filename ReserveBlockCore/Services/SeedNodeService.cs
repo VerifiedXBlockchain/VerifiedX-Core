@@ -93,6 +93,9 @@ namespace ReserveBlockCore.Services
         }
         public static async Task GetSeedNodePeers()
         {
+            if (!Globals.IsBootstrapMode)
+                return;
+
             List<Peers> peerList = new List<Peers>();
 
             Peers n1Peer = new Peers
@@ -227,6 +230,9 @@ namespace ReserveBlockCore.Services
 
         public static async Task GetSeedNodePeersTestnet()
         {
+            if (!Globals.IsBootstrapMode)
+                return;
+
             if (Globals.IsTestNet)
             {
                 if (Globals.IsCustomTestNet)

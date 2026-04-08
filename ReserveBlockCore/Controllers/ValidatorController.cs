@@ -6,6 +6,7 @@ using ReserveBlockCore.Models;
 using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
+using System.Linq;
 using System.Net;
 
 namespace ReserveBlockCore.Controllers
@@ -178,10 +179,200 @@ namespace ReserveBlockCore.Controllers
                 if(round.Block == null)
                     return Ok("0");
 
+                var blk = round.Block;
+                if (blk != null)
+                    _ = ConsensusAttestationPublisher.PublishLocalAsync(blk);
+
                 return Ok(JsonConvert.SerializeObject(round.Block));
             }
                 
             return Ok("0");
+        }
+
+        static bool IsCasterParticipantAddress(string? address)
+        {
+            if (string.IsNullOrEmpty(address))
+                return false;
+            if (Globals.BlockCasters.Any(x => x.ValidatorAddress == address))
+                return true;
+            lock (Globals.KnownCastersLock)
+                return Globals.KnownCasters.Any(x => x.Address == address);
+        }
+
+        [HttpPost]
+        [Route("SubmitAttestation")]
+        public ActionResult<string> SubmitAttestation([FromBody] SubmitAttestationRequest? body)
+        {
+            try
+            {
+                var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+                if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                    return Unauthorized();
+
+                if (body == null
+                    || string.IsNullOrWhiteSpace(body.BlockHash)
+                    || string.IsNullOrWhiteSpace(body.WinnerAddress)
+                    || string.IsNullOrWhiteSpace(body.PrevHash)
+                    || string.IsNullOrWhiteSpace(body.CasterAddress)
+                    || string.IsNullOrWhiteSpace(body.Signature))
+                    return BadRequest("invalid body");
+
+                if (!IsCasterParticipantAddress(body.CasterAddress))
+                    return Unauthorized();
+
+                var msg = ConsensusMessageFormatter.FormatAttestationV1(body.BlockHeight, body.BlockHash, body.WinnerAddress, body.PrevHash);
+                if (!SignatureService.VerifySignature(body.CasterAddress, msg, body.Signature))
+                    return Unauthorized();
+
+                var att = new CasterAttestation
+                {
+                    CasterAddress = body.CasterAddress,
+                    Signature = body.Signature,
+                    Timestamp = TimeUtil.GetTime()
+                };
+
+                if (!ConsensusAttestationStore.TryAdd(body.BlockHeight, body.CasterAddress, att, out var err))
+                    return Conflict(err);
+
+                return Ok();
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        [HttpGet]
+        [Route("GetAttestations/{blockHeight}")]
+        public ActionResult<string> GetAttestations(long blockHeight)
+        {
+            var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+            if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                return Unauthorized();
+            var list = ConsensusAttestationStore.GetForHeight(blockHeight);
+            return Ok(JsonConvert.SerializeObject(list));
+        }
+
+        [HttpPost]
+        [Route("RequestBlock")]
+        public async Task<ActionResult<string>> RequestBlock([FromBody] RequestBlockRequest? req)
+        {
+            try
+            {
+                var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+                if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                    return Unauthorized();
+
+                if (req == null || string.IsNullOrWhiteSpace(req.CasterAddress) || string.IsNullOrWhiteSpace(req.WinnerAddress) || string.IsNullOrWhiteSpace(req.Signature))
+                    return BadRequest();
+
+                var now = TimeUtil.GetTime();
+                if (Math.Abs(now - req.Timestamp) > 90)
+                    return Unauthorized("timestamp");
+
+                var msg = ConsensusMessageFormatter.FormatRequestBlockV1(req.BlockHeight, req.CasterAddress, req.WinnerAddress, req.Timestamp);
+                if (!SignatureService.VerifySignature(req.CasterAddress, msg, req.Signature))
+                    return Unauthorized();
+
+                if (!IsCasterParticipantAddress(req.CasterAddress))
+                    return Unauthorized();
+
+                if (RequestBlockCache.TryGet(req.BlockHeight, req.CasterAddress, req.WinnerAddress, out var cached) && cached != null)
+                    return Ok(JsonConvert.SerializeObject(cached));
+
+                if (req.BlockHeight != Globals.LastBlock.Height + 1)
+                    return BadRequest("height");
+
+                if (Globals.CasterRoundDict.TryGetValue(req.BlockHeight, out var cr))
+                {
+                    if (!string.IsNullOrEmpty(cr.Validator) && cr.Validator != req.WinnerAddress)
+                        return BadRequest("winner mismatch");
+                    if (cr.Block != null && cr.Block.Validator == req.WinnerAddress)
+                    {
+                        RequestBlockCache.Add(req.BlockHeight, req.CasterAddress, req.WinnerAddress, cr.Block);
+                        return Ok(JsonConvert.SerializeObject(cr.Block));
+                    }
+                }
+
+                if (req.WinnerAddress != Globals.ValidatorAddress)
+                    return BadRequest("not producer");
+
+                var account = AccountData.GetLocalValidator();
+                if (account == null || account.GetPrivKey == null)
+                    return BadRequest("no local validator");
+
+                var validators = Validators.Validator.GetAll();
+                var validator = validators.FindOne(x => x.Address == account.Address);
+                if (validator == null)
+                    return BadRequest();
+
+                var prevHash = Globals.LastBlock.Hash;
+                var proof = await ProofUtility.CreateProof(validator.Address, account.PublicKey, req.BlockHeight, prevHash);
+
+                int totalVals = !Globals.IsBootstrapMode && ValidatorSnapshotService.CurrentSnapshot.Count > 0
+                    ? ValidatorSnapshotService.CurrentSnapshot.Count
+                    : Globals.NetworkValidators.Count;
+
+                var block = await BlockchainData.CraftBlock_V5(req.WinnerAddress, totalVals, proof.Item2, req.BlockHeight, false, true);
+                if (block == null)
+                    return BadRequest("craft failed");
+
+                RequestBlockCache.Add(req.BlockHeight, req.CasterAddress, req.WinnerAddress, block);
+                return Ok(JsonConvert.SerializeObject(block));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        [HttpGet]
+        [Route("GetCasterList")]
+        public ActionResult<string> GetCasterList()
+        {
+            try
+            {
+                var acc = AccountData.GetLocalValidator();
+                if (acc == null || acc.GetPrivKey == null)
+                    return BadRequest();
+
+                var list = Globals.BlockCasters
+                    .Where(x => !string.IsNullOrEmpty(x.ValidatorAddress))
+                    .Select(x => new CasterInfo
+                    {
+                        Address = x.ValidatorAddress!,
+                        PeerIP = (x.PeerIP ?? "").Replace("::ffff:", ""),
+                        PublicKey = x.ValidatorPublicKey ?? ""
+                    })
+                    .OrderBy(x => x.Address, StringComparer.Ordinal)
+                    .ToList();
+
+                var h = (int)Math.Min(int.MaxValue, Math.Max(0, Globals.LastBlock.Height));
+                var canonical = ConsensusMessageFormatter.FormatSignedCasterListV1(h, list.Select(c => (c.Address, c.PeerIP, c.PublicKey)));
+                var sig = SignatureService.CreateSignature(canonical, acc.GetPrivKey, acc.PublicKey);
+                if (sig == "ERROR")
+                    return BadRequest("sign failed");
+
+                var resp = new SignedCasterListResponse
+                {
+                    AsOfBlockHeight = h,
+                    Casters = list,
+                    SignerAddress = acc.Address,
+                    Signature = sig
+                };
+                return Ok(JsonConvert.SerializeObject(resp));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        [HttpPost]
+        [Route("CasterInvitation")]
+        public ActionResult<string> CasterInvitation([FromBody] CasterRotationBroadcast? _)
+        {
+            return Accepted("CasterInvitation reserved for signed rotation flow (plan §7.4).");
         }
 
         [HttpGet]

@@ -58,7 +58,7 @@ namespace ReserveBlockCore.Nodes
         {
             _ = StartCastingRounds();
 
-            //_ = MonitorCasters();
+            _ = MonitorCasters();
         }
 
         #endregion
@@ -84,22 +84,27 @@ namespace ReserveBlockCore.Nodes
                     continue;
                 }
 
-                //Add back once network is stable after mainnet release.
-                //Opens casters up to general public. For now casters will always be online.
-                //await PingCasters();
+                if (!Globals.IsBootstrapMode)
+                    await PingCasters();
 
                 var casterList = Globals.BlockCasters.ToList();
 
-                if (casterList.Count() < Globals.MaxBlockCasters)
-                {
-                    //Add back once network is stable after mainnet release.
-                    //Opens casters up to general public.
-                    //await InitiateReplacement(Globals.LastBlock.Height);
-                }
+                if (!Globals.IsBootstrapMode && casterList.Count < Globals.MaxBlockCasters)
+                    await InitiateReplacement(Globals.LastBlock.Height);
+
+                await CasterDiscoveryService.RefreshIfDueAsync();
 
                 await Task.Delay(10000);
 
             }
+        }
+
+        private static async Task BroadcastConsensusBlockAsync(Block block, string winnerAddress)
+        {
+            if (block == null)
+                return;
+            await ConsensusCertificateHelper.TryAttachCertificateAsync(block, winnerAddress);
+            _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
         }
 
         #endregion
@@ -500,6 +505,8 @@ namespace ReserveBlockCore.Nodes
 
                     _ = CleanupApprovedCasterBlocks();
 
+                    await ValidatorSnapshotService.RefreshSnapshotIfNeededAsync(Height);
+
                     ValidatorApprovalBag.Clear();
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
                     //Generate Proofs for ALL vals
@@ -819,27 +826,47 @@ namespace ReserveBlockCore.Nodes
                                         }
                                         else
                                         {
-                                            terminalWinner = "RH9XAP3omXvk7P6Xe9fQ1C6nZQ1adJw2ZG"; //Mainnet
-                                            if(Globals.IsTestNet)
-                                                terminalWinner = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj";
+                                            var tie = proofSnapshot
+                                                .Where(x => x.BlockHeight == Height)
+                                                .OrderBy(x => x.VRFNumber)
+                                                .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
+                                                .ThenBy(x => x.Address, StringComparer.Ordinal)
+                                                .FirstOrDefault();
+                                            if (tie != null)
+                                            {
+                                                terminalWinner = tie.Address;
+                                                CasterRoundAudit.AddStep($"Bag had no majority vote; tiebreak winner: {terminalWinner}", true);
+                                                approved = true;
+                                                break;
+                                            }
                                             ConsoleWriterService.OutputVal($"\r\n Bag failed. No Result was found.");
-                                            CasterRoundAudit.AddStep($"Bag was approved. Moving to next block.", true);
-                                            //ConsoleWriterService.OutputVal($"\r\nBag was approved. Moving to next block.");
-
-                                            approved = true;
-                                            break;
+                                            CasterRoundAudit.AddStep($"Bag failed — no tiebreak candidate; continuing approval window.", true);
+                                            await Task.Delay(200);
                                         }
                                     }
                                 }
 
-                                terminalWinner = Height % 2 == 0 ? "RFoKrASMr19mg8S71Lf1F2suzxahG5Yj4N" : "RH9XAP3omXvk7P6Xe9fQ1C6nZQ1adJw2ZG";
+                                if (!approved)
+                                {
+                                    var tieAfter = proofSnapshot
+                                        .Where(x => x.BlockHeight == Height)
+                                        .OrderBy(x => x.VRFNumber)
+                                        .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
+                                        .ThenBy(x => x.Address, StringComparer.Ordinal)
+                                        .FirstOrDefault();
+                                    if (tieAfter != null)
+                                    {
+                                        terminalWinner = tieAfter.Address;
+                                        approved = true;
+                                        CasterRoundAudit.AddStep($"Approval window ended; tiebreak winner: {terminalWinner}", true);
+                                    }
+                                    else
+                                    {
+                                        CasterRoundAudit.AddStep("No terminal winner after approval window; restarting round.", true);
+                                        continue;
+                                    }
+                                }
 
-                                if (Globals.IsTestNet)
-                                    terminalWinner = Height % 2 == 0 ? "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj" : "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC";
-
-                                CasterRoundAudit.AddStep($"Stabilization Code. Moving on.", true);
-                                approved = true;
-                                
                                 //ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight && approved)
                                 {
@@ -952,7 +979,7 @@ namespace ReserveBlockCore.Nodes
                                                         CasterRoundAudit.AddStep($"Block found. Broadcasting.", true);
                                                         //ConsoleWriterService.OutputVal($"Inside block service B");
                                                         //ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
-                                                        _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                        await BroadcastConsensusBlockAsync(block, terminalWinner);
                                                         //_ = P2PValidatorClient.BroadcastBlock(block);
                                                     }
 
@@ -975,33 +1002,15 @@ namespace ReserveBlockCore.Nodes
                                                 {
                                                     attempts++;
                                                     CasterRoundAudit.AddStep($"Requesting block from Casters.", true);
-                                                    using (var client = Globals.HttpClientFactory.CreateClient())
+                                                    block = await ValidatorNode.FetchBlockWithRedundantCasterAgreementAsync(finalizedWinner.BlockHeight, terminalWinner);
+                                                    if (block == null)
                                                     {
-                                                        var casters = Globals.BlockCasters.Where(x => x.ValidatorAddress == terminalWinner).FirstOrDefault();
-                                                        if (casters == null)
-                                                            break;
-                                                        //ConsoleWriterService.OutputVal($"Requesting block from Caster: {casters.ValidatorAddress}");
-                                                        var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
-                                                        var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 5));
-                                                        if (response != null)
-                                                        {
-                                                            if (response.IsSuccessStatusCode)
-                                                            {
-                                                                var responseBody = await response.Content.ReadAsStringAsync();
-                                                                if (responseBody != null)
-                                                                {
-                                                                    if (responseBody == "0")
-                                                                    {
-                                                                        //ConsoleWriterService.OutputVal($"Response was 0 (zero)");
-                                                                        failedToReachConsensus = true;
-                                                                        await Task.Delay(75);
-                                                                        continue;
-                                                                    }
+                                                        failedToReachConsensus = true;
+                                                        await Task.Delay(75);
+                                                        continue;
+                                                    }
 
-                                                                    //ConsoleWriterService.OutputVal($"Response had non-zero data");
-                                                                    block = JsonConvert.DeserializeObject<Block>(responseBody);
-                                                                    if (block != null)
-                                                                    {
+                                                    {
                                                                         failedToReachConsensus = false;
                                                                         blockFound = true;
 
@@ -1048,7 +1057,7 @@ namespace ReserveBlockCore.Nodes
                                                                             if (nextHeight == currentHeight)
                                                                             {
                                                                                 //ConsoleWriterService.OutputVal($"Inside block service B");
-                                                                                _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                                                await BroadcastConsensusBlockAsync(block, terminalWinner);
                                                                                 //_ = P2PValidatorClient.BroadcastBlock(block);
                                                                             }
 
@@ -1088,7 +1097,7 @@ namespace ReserveBlockCore.Nodes
                                                                                 if (nextHeight == currentHeight)
                                                                                 {
                                                                                     //ConsoleWriterService.OutputVal($"Inside block service E");
-                                                                                    _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                                                    await BroadcastConsensusBlockAsync(block, terminalWinner);
                                                                                     //_ = P2PValidatorClient.BroadcastBlock(block);
                                                                                 }
 
@@ -1098,14 +1107,9 @@ namespace ReserveBlockCore.Nodes
                                                                                 break;
                                                                             }
                                                                         }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-
-                                                        await Task.Delay(75);
-
                                                     }
+
+                                                    await Task.Delay(75);
                                                 }
                                                 catch { }
                                             }
@@ -1225,6 +1229,8 @@ namespace ReserveBlockCore.Nodes
                     }
 
                     _ = CleanupApprovedCasterBlocks();
+
+                    await ValidatorSnapshotService.RefreshSnapshotIfNeededAsync(Height);
 
                     ValidatorApprovalBag.Clear();
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
@@ -1566,9 +1572,30 @@ namespace ReserveBlockCore.Nodes
                                         }
                                         else
                                         {
+                                            var tieSc = proofSnapshot
+                                                .Where(x => x.BlockHeight == Height)
+                                                .OrderBy(x => x.VRFNumber)
+                                                .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
+                                                .ThenBy(x => x.Address, StringComparer.Ordinal)
+                                                .FirstOrDefault();
+                                            if (tieSc != null)
+                                            {
+                                                terminalWinner = tieSc.Address;
+                                                CasterRoundAudit.AddStep($"Bag had no majority vote; tiebreak winner: {terminalWinner}", true);
+                                                approved = true;
+                                                break;
+                                            }
                                             ConsoleWriterService.OutputVal($"\r\n Bag failed. No Result was found.");
+                                            await Task.Delay(200);
                                         }
                                     }
+                                }
+
+                                if (!approved)
+                                {
+                                    terminalWinner = finalizedWinner.Address;
+                                    approved = true;
+                                    CasterRoundAudit.AddStep($"Approval inconclusive; using finalized proof winner: {terminalWinner}", true);
                                 }
 
                                 CasterRoundAudit.AddStep($"You did not win. Looking for block.", true);
@@ -1620,7 +1647,7 @@ namespace ReserveBlockCore.Nodes
                                                     CasterRoundAudit.AddStep($"Block found. Broadcasting.", true);
                                                     //ConsoleWriterService.OutputVal($"Inside block service B");
                                                     //ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
-                                                    _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                                                await BroadcastConsensusBlockAsync(block, terminalWinner);
                                                     //_ = P2PValidatorClient.BroadcastBlock(block);
                                                 }
 
@@ -1644,34 +1671,17 @@ namespace ReserveBlockCore.Nodes
                                         try
                                         {
                                             CasterRoundAudit.AddStep($"Requesting block from Casters.", true);
-                                            using (var client = Globals.HttpClientFactory.CreateClient())
+                                            foreach (var casters in Globals.BlockCasters)
                                             {
-                                                foreach (var casters in Globals.BlockCasters)
+                                                block = await CasterBlockFetch.TryFetchBlockAsync(casters, finalizedWinner.BlockHeight, terminalWinner);
+                                                if (block == null)
                                                 {
-                                                    //ConsoleWriterService.OutputVal($"Requesting block from Caster: {casters.ValidatorAddress}");
-                                                    var uri = $"http://{casters.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getblock/{finalizedWinner.BlockHeight}";
-                                                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 0, 0, BLOCK_REQUEST_WINDOW));
-                                                    if (response != null)
-                                                    {
-                                                        if (response.IsSuccessStatusCode)
-                                                        {
-                                                            var responseBody = await response.Content.ReadAsStringAsync();
-                                                            if (responseBody != null)
-                                                            {
-                                                                if (responseBody == "0")
-                                                                {
-                                                                    //ConsoleWriterService.OutputVal($"Response was 0 (zero)");
-                                                                    failedToReachConsensus = true;
-                                                                    await Task.Delay(75);
-                                                                    continue;
-                                                                }
+                                                    failedToReachConsensus = true;
+                                                    await Task.Delay(75);
+                                                    continue;
+                                                }
 
-                                                                //ConsoleWriterService.OutputVal($"Response had non-zero data");
-                                                                block = JsonConvert.DeserializeObject<Block>(responseBody);
-                                                                if (block != null)
-                                                                {
-
-                                                                    if(block.Validator != terminalWinner)
+                                                                if(block.Validator != terminalWinner)
                                                                     {
                                                                         failedToReachConsensus = true;
                                                                         await Task.Delay(75);
@@ -1728,7 +1738,7 @@ namespace ReserveBlockCore.Nodes
                                                                         if (nextHeight == currentHeight)
                                                                         {
                                                                             //ConsoleWriterService.OutputVal($"Inside block service B");
-                                                                            _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                                            await BroadcastConsensusBlockAsync(block, terminalWinner);
                                                                             //_ = P2PValidatorClient.BroadcastBlock(block);
                                                                         }
 
@@ -1768,7 +1778,7 @@ namespace ReserveBlockCore.Nodes
                                                                             if (nextHeight == currentHeight)
                                                                             {
                                                                                 //ConsoleWriterService.OutputVal($"Inside block service E");
-                                                                                _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+                                                                                await BroadcastConsensusBlockAsync(block, terminalWinner);
                                                                                 //_ = P2PValidatorClient.BroadcastBlock(block);
                                                                             }
 
@@ -1778,13 +1788,8 @@ namespace ReserveBlockCore.Nodes
                                                                             break;
                                                                         }
                                                                     }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
 
-                                                    await Task.Delay(75);
-                                                }
+                                                await Task.Delay(75);
                                             }
                                         }
                                         catch (Exception ex) { }

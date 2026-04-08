@@ -13,23 +13,54 @@ namespace ReserveBlockCore.Utilities
     public class ProofUtility
     {
         private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+        private static long _proofCacheHeight = long.MinValue;
+        private static List<Proof>? _allProofsCache;
+
+        public static void ClearProofGenerationCache()
+        {
+            _proofCacheHeight = long.MinValue;
+            _allProofsCache = null;
+        }
 
         public static async Task<List<Proof>> GenerateProofs()
+        {
+            return await GetOrCreateAllProofsAsync();
+        }
+
+        private static async Task<List<Proof>> GetOrCreateAllProofsAsync()
+        {
+            var blockHeight = Globals.LastBlock.Height + 1;
+            if (_proofCacheHeight == blockHeight && _allProofsCache != null)
+                return _allProofsCache;
+
+            await BanService.RunUnban();
+
+            List<Proof> proofs;
+            if (Globals.IsBootstrapMode)
+                proofs = await GenerateProofsFromNetworkValidatorsLegacy();
+            else
+            {
+                proofs = await GenerateProofsFromSnapshotAsync();
+                if (proofs.Count == 0)
+                    proofs = await GenerateProofsFromNetworkValidatorsLegacy();
+            }
+
+            _allProofsCache = proofs;
+            _proofCacheHeight = blockHeight;
+            Globals.LastProofBlockheight = blockHeight;
+            return proofs;
+        }
+
+        /// <summary>Legacy path: in-memory NetworkValidators (bootstrap only).</summary>
+        private static async Task<List<Proof>> GenerateProofsFromNetworkValidatorsLegacy()
         {
             List<Proof> proofs = new List<Proof>();
 
             var blockHeight = Globals.LastBlock.Height + 1;
             var prevHash = Globals.LastBlock.Hash;
 
-            var peerDB = Peers.GetAll();
-            //Force unban quicker
-            await BanService.RunUnban();
+            var newPeers = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount <= 3).ToList();
 
-            var badList = Globals.FailedProducers.ToList();
-
-            var newPeers = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount <= 3 && !badList.Contains(x.Address)).ToList();
-
-            List<NetworkValidator> peersMissingDataList = new List<NetworkValidator>();
             List<string> CompletedIPs = new List<string>();
             List<string> CompletedAddresses = new List<string>();
 
@@ -39,8 +70,7 @@ namespace ReserveBlockCore.Utilities
                 {
                     if (CompletedIPs.Contains(val.IPAddress) ||
                         CompletedAddresses.Contains(val.Address) ||
-                        IsProducerExcluded(val.Address) ||
-                        badList.Contains(val.Address))
+                        IsProducerExcluded(val.Address))
                         continue;
 
                     CompletedIPs.Add(val.IPAddress);
@@ -48,19 +78,15 @@ namespace ReserveBlockCore.Utilities
 
                     var stateAddress = StateData.GetSpecificAccountStateTrei(val.Address);
                     if (stateAddress == null)
-                    {
                         continue;
-                    }
 
                     if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
-                    {
                         continue;
-                    }
 
                     var proof = await CreateProof(val.Address, val.PublicKey, blockHeight, prevHash);
                     if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
                     {
-                        Proof _proof = new Proof
+                        proofs.Add(new Proof
                         {
                             Address = val.Address,
                             BlockHeight = blockHeight,
@@ -69,84 +95,53 @@ namespace ReserveBlockCore.Utilities
                             PublicKey = val.PublicKey,
                             VRFNumber = proof.Item1,
                             IPAddress = val.IPAddress.Replace("::ffff:", "")
-                        };
-
-                        proofs.Add(_proof);
+                        });
                     }
                 }
-                else
-                {
-                    //TODO: Try to get info or remove them.
-                    peersMissingDataList.Add(val);
-                }
             }
-
-            CompletedIPs.Clear();
-            CompletedAddresses.Clear();
-
-            CompletedIPs = new List<string>();
-            CompletedAddresses = new List<string>();
-
-            Globals.LastProofBlockheight = blockHeight;
 
             return proofs;
         }
-        public static async Task<List<Proof>> GenerateCasterProofs()
+
+        /// <summary>Deterministic path: validator snapshot (post-bootstrap).</summary>
+        private static async Task<List<Proof>> GenerateProofsFromSnapshotAsync()
         {
             List<Proof> proofs = new List<Proof>();
-
             var blockHeight = Globals.LastBlock.Height + 1;
             var prevHash = Globals.LastBlock.Hash;
+            var snapshot = ValidatorSnapshotService.GetSnapshotForHeight(blockHeight);
 
-            var peerDB = Peers.GetAll();
-            //Force unban quicker
-            await BanService.RunUnban();
-
-            var badList = Globals.FailedProducers.ToList();
-
-            var newPeers = Globals.BlockCasters.Where(x => !badList.Contains(x.PeerIP)).ToList();
-
-            List<NetworkValidator> peersMissingDataList = new List<NetworkValidator>();
-            List<string> CompletedIPs = new List<string>();
-            List<string> CompletedAddresses = new List<string>();
-
-            foreach (var val in newPeers)
+            foreach (var entry in snapshot)
             {
-                if (val.ValidatorAddress != null && val.ValidatorPublicKey != null)
-                {
-                    var proof = await CreateProof(val.ValidatorAddress, val.ValidatorPublicKey, blockHeight, prevHash);
-                    if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
-                    {
-                        Proof _proof = new Proof
-                        {
-                            Address = val.ValidatorAddress,
-                            BlockHeight = blockHeight,
-                            PreviousBlockHash = prevHash,
-                            ProofHash = proof.Item2,
-                            PublicKey = val.ValidatorPublicKey,
-                            VRFNumber = proof.Item1,
-                            IPAddress = val.PeerIP.Replace("::ffff:", "")
-                        };
+                if (string.IsNullOrEmpty(entry.PublicKey))
+                    continue;
 
-                        proofs.Add(_proof);
-                    }
-                }
-                else
+                var proof = await CreateProof(entry.Address, entry.PublicKey, blockHeight, prevHash);
+                if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
                 {
-                    //TODO: Try to get info or remove them.
-                    //peersMissingDataList.Add(val);
+                    proofs.Add(new Proof
+                    {
+                        Address = entry.Address,
+                        BlockHeight = blockHeight,
+                        PreviousBlockHash = prevHash,
+                        ProofHash = proof.Item2,
+                        PublicKey = entry.PublicKey,
+                        VRFNumber = proof.Item1,
+                        IPAddress = (entry.IPAddress ?? "").Replace("::ffff:", "")
+                    });
                 }
             }
 
-            CompletedIPs.Clear();
-            CompletedAddresses.Clear();
-
-            CompletedIPs = new List<string>();
-            CompletedAddresses = new List<string>();
-
-            Globals.LastProofBlockheight = blockHeight;
-
             return proofs;
+        }
+
+        public static async Task<List<Proof>> GenerateCasterProofs()
+        {
+            var all = await GetOrCreateAllProofsAsync();
+            var casterAddrs = new HashSet<string>(
+                Globals.BlockCasters.Where(c => !string.IsNullOrEmpty(c.ValidatorAddress)).Select(c => c.ValidatorAddress!),
+                StringComparer.Ordinal);
+            return all.Where(p => casterAddrs.Contains(p.Address)).ToList();
         }
         public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight, string prevBlockHash)
         {

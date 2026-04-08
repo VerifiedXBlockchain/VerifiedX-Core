@@ -385,6 +385,12 @@ namespace ReserveBlockCore.Services
                     //no rules
                 }
 
+                if (!ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                {
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
+                    return result;
+                }
+
                 //ensures the timestamps being produced are correct
                 if (block.Height != 0)
                 {
@@ -1104,6 +1110,9 @@ namespace ReserveBlockCore.Services
 
                     //DbContext.Commit();
 
+                    if (!validateOnly && !blockDownloads && block.Version == 4 && !Globals.IsBootstrapMode)
+                        _ = ConsensusAttestationPublisher.PublishLocalAsync(block);
+
                     return result;//block accepted
                 }
                 else
@@ -1254,7 +1263,9 @@ namespace ReserveBlockCore.Services
                     ValidatorLogUtility.Log("Block validated failed due to transactions not validating", "BlockValidatorService.ValidateBlockForTask()");
                     return result;//block rejected due to bad transaction(s)
                 }
-                    
+
+                if (!ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                    return result;
 
                 result = true;
             }
