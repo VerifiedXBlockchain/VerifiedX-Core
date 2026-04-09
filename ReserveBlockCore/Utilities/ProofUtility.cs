@@ -3,7 +3,6 @@ using ReserveBlockCore.Data;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Services;
-using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -12,14 +11,17 @@ namespace ReserveBlockCore.Utilities
 {
     public class ProofUtility
     {
-        private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+        private static readonly object ProofCacheLock = new object();
         private static long _proofCacheHeight = long.MinValue;
         private static List<Proof>? _allProofsCache;
 
         public static void ClearProofGenerationCache()
         {
-            _proofCacheHeight = long.MinValue;
-            _allProofsCache = null;
+            lock (ProofCacheLock)
+            {
+                _proofCacheHeight = long.MinValue;
+                _allProofsCache = null;
+            }
         }
 
         public static async Task<List<Proof>> GenerateProofs()
@@ -30,10 +32,20 @@ namespace ReserveBlockCore.Utilities
         private static async Task<List<Proof>> GetOrCreateAllProofsAsync()
         {
             var blockHeight = Globals.LastBlock.Height + 1;
-            if (_proofCacheHeight == blockHeight && _allProofsCache != null)
-                return _allProofsCache;
+
+            lock (ProofCacheLock)
+            {
+                if (_proofCacheHeight == blockHeight && _allProofsCache != null)
+                    return _allProofsCache;
+            }
 
             await BanService.RunUnban();
+
+            lock (ProofCacheLock)
+            {
+                if (_proofCacheHeight == blockHeight && _allProofsCache != null)
+                    return _allProofsCache;
+            }
 
             List<Proof> proofs;
             if (Globals.IsBootstrapMode)
@@ -45,9 +57,15 @@ namespace ReserveBlockCore.Utilities
                     proofs = await GenerateProofsFromNetworkValidatorsLegacy();
             }
 
-            _allProofsCache = proofs;
-            _proofCacheHeight = blockHeight;
-            Globals.LastProofBlockheight = blockHeight;
+            lock (ProofCacheLock)
+            {
+                if (_proofCacheHeight == blockHeight && _allProofsCache != null)
+                    return _allProofsCache;
+                _allProofsCache = proofs;
+                _proofCacheHeight = blockHeight;
+                Globals.LastProofBlockheight = blockHeight;
+            }
+
             return proofs;
         }
 
