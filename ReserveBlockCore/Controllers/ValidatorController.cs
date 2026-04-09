@@ -29,13 +29,12 @@ namespace ReserveBlockCore.Controllers
             {
                 var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
 
-                // Convert it to a string if it's not null
-                string peerIP = remoteIpAddress?.ToString().Replace("::ffff:", "");
+                var peerIP = remoteIpAddress?.ToString()?.Replace("::ffff:", "") ?? "";
 
                 if (networkVal == null)
                     return BadRequest("Could not deserialize network val request");
 
-                if (Globals.BannedIPs.ContainsKey(peerIP))
+                if (!string.IsNullOrEmpty(peerIP) && Globals.BannedIPs.ContainsKey(peerIP))
                 {
                     return Unauthorized();
                 }
@@ -86,7 +85,7 @@ namespace ReserveBlockCore.Controllers
                 if (proof == null)
                     return BadRequest("Could not deserialize network val request");
 
-                if (Globals.BannedIPs.ContainsKey(peerIP))
+                if (peerIP != null && Globals.BannedIPs.ContainsKey(peerIP))
                 {
                     return Unauthorized();
                 }
@@ -120,10 +119,11 @@ namespace ReserveBlockCore.Controllers
             {
                 var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
 
-                // Convert it to a string if it's not null
                 string? peerIP = remoteIpAddress?.ToString();
+                if (peerIP != null)
+                    peerIP = peerIP.Replace("::ffff:", "");
 
-                if (Globals.BannedIPs.ContainsKey(peerIP))
+                if (!string.IsNullOrEmpty(peerIP) && Globals.BannedIPs.ContainsKey(peerIP))
                 {
                     return Unauthorized();
                 }
@@ -270,11 +270,11 @@ namespace ReserveBlockCore.Controllers
                 if (Math.Abs(now - req.Timestamp) > 90)
                     return Unauthorized("timestamp");
 
-                var msg = ConsensusMessageFormatter.FormatRequestBlockV1(req.BlockHeight, req.CasterAddress, req.WinnerAddress, req.Timestamp);
-                if (!SignatureService.VerifySignature(req.CasterAddress, msg, req.Signature))
+                if (!IsCasterParticipantAddress(req.CasterAddress))
                     return Unauthorized();
 
-                if (!IsCasterParticipantAddress(req.CasterAddress))
+                var msg = ConsensusMessageFormatter.FormatRequestBlockV1(req.BlockHeight, req.CasterAddress, req.WinnerAddress, req.Timestamp);
+                if (!SignatureService.VerifySignature(req.CasterAddress, msg, req.Signature))
                     return Unauthorized();
 
                 if (RequestBlockCache.TryGet(req.BlockHeight, req.CasterAddress, req.WinnerAddress, out var cached) && cached != null)

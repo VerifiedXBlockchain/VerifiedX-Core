@@ -13,8 +13,19 @@ namespace ReserveBlockCore.Services
         public const long SnapshotPeriodBlocks = 500;
         public const long StaleThresholdBlocks = 1500;
 
-        public static List<ValidatorSnapshotEntry> CurrentSnapshot { get; private set; } = new List<ValidatorSnapshotEntry>();
-        public static long SnapshotHeight { get; private set; } = -1;
+        private static readonly object SnapshotLock = new object();
+        private static List<ValidatorSnapshotEntry> _snapshotEntries = new List<ValidatorSnapshotEntry>();
+        private static long _snapshotHeight = -1;
+
+        public static List<ValidatorSnapshotEntry> CurrentSnapshot
+        {
+            get { lock (SnapshotLock) { return _snapshotEntries; } }
+        }
+
+        public static long SnapshotHeight
+        {
+            get { lock (SnapshotLock) { return _snapshotHeight; } }
+        }
 
         /// <summary>
         /// Anchor height S for the snapshot used when producing block at height <paramref name="nextBlockHeight"/>.
@@ -64,8 +75,12 @@ namespace ReserveBlockCore.Services
                 });
             }
 
-            CurrentSnapshot = list;
-            SnapshotHeight = anchor;
+            lock (SnapshotLock)
+            {
+                _snapshotEntries = list;
+                _snapshotHeight = anchor;
+            }
+
             ProofUtility.ClearProofGenerationCache();
             return Task.CompletedTask;
         }
@@ -76,9 +91,12 @@ namespace ReserveBlockCore.Services
         public static List<ValidatorSnapshotEntry> GetSnapshotForHeight(long nextBlockHeight)
         {
             var anchor = SnapshotAnchor(nextBlockHeight);
-            if (CurrentSnapshot != null && SnapshotHeight == anchor)
-                return CurrentSnapshot;
-            return CurrentSnapshot ?? new List<ValidatorSnapshotEntry>();
+            lock (SnapshotLock)
+            {
+                if (_snapshotEntries != null && _snapshotHeight == anchor)
+                    return _snapshotEntries;
+                return _snapshotEntries ?? new List<ValidatorSnapshotEntry>();
+            }
         }
 
         public static Task RefreshSnapshotIfNeededAsync(long nextBlockHeight)

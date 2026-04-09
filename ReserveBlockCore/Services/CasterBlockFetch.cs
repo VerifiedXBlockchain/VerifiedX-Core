@@ -22,13 +22,13 @@ namespace ReserveBlockCore.Services
 
             var acc = AccountData.GetLocalValidator();
             if (acc == null || acc.GetPrivKey == null)
-                return await GetBlockLegacyAsync(baseUri, blockHeight).ConfigureAwait(false);
+                return null;
 
             var ts = TimeUtil.GetTime();
             var msg = ConsensusMessageFormatter.FormatRequestBlockV1(blockHeight, acc.Address, winnerAddress, ts);
             var sig = SignatureService.CreateSignature(msg, acc.GetPrivKey, acc.PublicKey);
             if (sig == "ERROR")
-                return await GetBlockLegacyAsync(baseUri, blockHeight).ConfigureAwait(false);
+                return null;
 
             var req = new RequestBlockRequest
             {
@@ -45,7 +45,7 @@ namespace ReserveBlockCore.Services
                 using var content = new StringContent(JsonConvert.SerializeObject(req), Encoding.UTF8, "application/json");
                 using var resp = await client.PostAsync(baseUri + "RequestBlock", content).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
-                    return await GetBlockLegacyAsync(baseUri, blockHeight).ConfigureAwait(false);
+                    return null;
 
                 var responseBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
                 if (string.IsNullOrEmpty(responseBody) || responseBody == "0")
@@ -54,7 +54,7 @@ namespace ReserveBlockCore.Services
             }
             catch
             {
-                return await GetBlockLegacyAsync(baseUri, blockHeight).ConfigureAwait(false);
+                return null;
             }
         }
 

@@ -14,7 +14,7 @@ namespace ReserveBlockCore.Services
         {
             try
             {
-                if (Globals.IsBootstrapMode || block.Version != 4)
+                if (Globals.IsBootstrapMode || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
                     return;
                 if (!Globals.IsBlockCaster)
                     return;

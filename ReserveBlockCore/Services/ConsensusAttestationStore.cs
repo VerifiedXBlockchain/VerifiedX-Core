@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using ReserveBlockCore.Models;
 
@@ -6,46 +6,62 @@ namespace ReserveBlockCore.Services
 {
     public static class ConsensusAttestationStore
     {
-        private static readonly ConcurrentDictionary<long, ConcurrentDictionary<string, CasterAttestation>> ByHeight = new();
+        private static readonly object Mut = new object();
+        private static readonly Dictionary<long, Dictionary<string, CasterAttestation>> Store = new();
         public const int MaxPerHeight = 12;
         private const int RetainHeightsBehindTip = 64;
 
-        public static void Prune(long lastCommittedHeight)
+        private static void PruneUnsafe(long lastCommittedHeight)
         {
             var floor = lastCommittedHeight - RetainHeightsBehindTip;
-            foreach (var key in ByHeight.Keys)
-            {
-                if (key < floor)
-                    ByHeight.TryRemove(key, out _);
-            }
+            foreach (var key in Store.Keys.Where(k => k < floor).ToList())
+                Store.Remove(key);
+        }
+
+        public static void Prune(long lastCommittedHeight)
+        {
+            lock (Mut)
+                PruneUnsafe(lastCommittedHeight);
         }
 
         public static bool TryAdd(long height, string casterAddress, CasterAttestation attestation, out string? error)
         {
             error = null;
-            Prune(Globals.LastBlock.Height);
-
-            var inner = ByHeight.GetOrAdd(height, _ => new ConcurrentDictionary<string, CasterAttestation>(StringComparer.Ordinal));
-            if (inner.Count >= MaxPerHeight)
+            lock (Mut)
             {
-                error = "Attestation cap for height";
-                return false;
-            }
+                PruneUnsafe(Globals.LastBlock.Height);
 
-            if (!inner.TryAdd(casterAddress, attestation))
-            {
-                error = "Duplicate attestation for caster";
-                return false;
-            }
+                if (!Store.TryGetValue(height, out var inner))
+                {
+                    inner = new Dictionary<string, CasterAttestation>(StringComparer.Ordinal);
+                    Store[height] = inner;
+                }
 
-            return true;
+                if (inner.Count >= MaxPerHeight)
+                {
+                    error = "Attestation cap for height";
+                    return false;
+                }
+
+                if (inner.ContainsKey(casterAddress))
+                {
+                    error = "Duplicate attestation for caster";
+                    return false;
+                }
+
+                inner[casterAddress] = attestation;
+                return true;
+            }
         }
 
         public static IReadOnlyList<CasterAttestation> GetForHeight(long height)
         {
-            if (!ByHeight.TryGetValue(height, out var inner))
-                return Array.Empty<CasterAttestation>();
-            return inner.Values.ToList();
+            lock (Mut)
+            {
+                if (!Store.TryGetValue(height, out var inner))
+                    return Array.Empty<CasterAttestation>();
+                return inner.Values.ToList();
+            }
         }
     }
 }

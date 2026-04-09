@@ -12,7 +12,7 @@ namespace ReserveBlockCore.Services
         /// <summary>Collect M-of-N attestations (eager polling) and set <see cref="Block.ConsensusCertificate"/> before P2P broadcast.</summary>
         public static async Task TryAttachCertificateAsync(Block block, string? winnerAddress = null)
         {
-            if (block == null || Globals.IsBootstrapMode || block.Version != 4)
+            if (block == null || Globals.IsBootstrapMode || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
                 return;
 
             var winner = string.IsNullOrEmpty(winnerAddress) ? block.Validator : winnerAddress;

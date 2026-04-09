@@ -1110,7 +1110,7 @@ namespace ReserveBlockCore.Services
 
                     //DbContext.Commit();
 
-                    if (!validateOnly && !blockDownloads && block.Version == 4 && !Globals.IsBootstrapMode)
+                    if (!validateOnly && !blockDownloads && ConsensusCertificateRules.SupportsConsensusCertificate(block.Version) && !Globals.IsBootstrapMode)
                         _ = ConsensusAttestationPublisher.PublishLocalAsync(block);
 
                     return result;//block accepted

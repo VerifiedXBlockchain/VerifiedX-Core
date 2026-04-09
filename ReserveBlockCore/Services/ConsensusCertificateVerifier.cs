@@ -10,7 +10,7 @@ namespace ReserveBlockCore.Services
         /// <summary>True if certificate is not required, or present and valid (M-of-N caster ECDSA on §12.1 payload).</summary>
         public static bool VerifyOrNotRequired(Block block)
         {
-            if (Globals.IsBootstrapMode || block.Height < Globals.CertEnforceHeight || block.Version != 4)
+            if (Globals.IsBootstrapMode || block.Height < Globals.CertEnforceHeight || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
                 return true;
 
             var cert = block.ConsensusCertificate;

@@ -34,8 +34,9 @@ namespace ReserveBlockCore.Nodes
         const int APPROVAL_WINDOW = 12000;      // 12 seconds
         const int CASTER_VOTE_WINDOW = 6000;    // 6 seconds
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
-        public static ReplacementRound _currentRound;
-        public static List<string> _allCasterAddresses;
+        /// <summary>Replacement-round state; <see langword="volatile"/> so readers see latest reference without torn reads of the field itself.</summary>
+        public static volatile ReplacementRound? _currentRound;
+        public static volatile List<string>? _allCasterAddresses;
         public static CasterRoundAudit? CasterRoundAudit = null;
         
         // Dynamic reference points for block delay calculation
