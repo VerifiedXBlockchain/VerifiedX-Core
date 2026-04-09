@@ -30,9 +30,9 @@ namespace ReserveBlockCore.Nodes
         private readonly IHubContext<P2PBlockcasterServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
-        const int PROOF_COLLECTION_TIME = 3000; // 3 seconds
-        const int APPROVAL_WINDOW = 6000;       // 6 seconds
-        const int CASTER_VOTE_WINDOW = 3000;    // 3 seconds (legacy; see GET_APPROVAL_HTTP_TIMEOUT_MS)
+        const int PROOF_COLLECTION_TIME = 4000; // 4 seconds — sync barrier for caster proof exchange
+        const int APPROVAL_WINDOW = 8000;       // 8 seconds
+        const int CASTER_VOTE_WINDOW = 4000;    // 4 seconds per-caster HTTP timeout
         const int GET_APPROVAL_HTTP_TIMEOUT_MS = 2500; // per-caster HTTP; parallelized so total ≈ this, not N×6s
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         /// <summary>Replacement-round state; <see langword="volatile"/> so readers see latest reference without torn reads of the field itself.</summary>
@@ -664,23 +664,26 @@ namespace ReserveBlockCore.Nodes
                         Globals.CasterProofDict = new ConcurrentDictionary<string, Proof>();
                         Globals.Proofs = new ConcurrentBag<Proof>();
 
-                        // Parallel proof exchange: fetch + send simultaneously, then retry if needed
-                        await Task.WhenAll(GetWinningProof(winningCasterProof), SendWinningProof(winningCasterProof));
-                        
-                        var requiredProofs = Math.Max(2, (casterList.Count / 2) + 1);
-                        
-                        // If not enough proofs, do one more round
-                        if (Globals.CasterProofDict.Count() < requiredProofs)
+                        // Timed proof exchange loop: parallel HTTP inside, early exit when all proofs collected
+                        var requiredProofs = casterList.Count;
+                        var swProofCollectionTime = Stopwatch.StartNew();
+                        while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                         {
-                            await Task.Delay(1000);
                             await Task.WhenAll(GetWinningProof(winningCasterProof), SendWinningProof(winningCasterProof));
+                            
+                            // Early exit if we have all proofs
+                            if (Globals.CasterProofDict.Count() >= requiredProofs)
+                                break;
+                            
+                            await Task.Delay(500);
                         }
+                        swProofCollectionTime.Stop();
 
                         if (Globals.CasterProofDict.Count() < requiredProofs)
                         {
                             if (CasterRoundAudit != null)
                                 CasterRoundAudit.AddStep($"Caster P2P proofs {Globals.CasterProofDict.Count()}/{requiredProofs}; retrying…", false);
-                            await Task.Delay(1000);
+                            await Task.Delay(2000);
                             continue;
                         }
 
