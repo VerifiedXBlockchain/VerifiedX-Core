@@ -1,3 +1,4 @@
+using System.Linq;
 using ReserveBlockCore.Models;
 
 namespace ReserveBlockCore.Services
@@ -6,6 +7,14 @@ namespace ReserveBlockCore.Services
     {
         public static int RequiredAttestations(int activeCasterCount) =>
             activeCasterCount <= 0 ? int.MaxValue : Math.Max(1, activeCasterCount / 2 + 1);
+
+        /// <summary>Distinct validator addresses in <see cref="Globals.BlockCasters"/>; matches <see cref="ConsensusCertificateHelper"/> quorum basis.</summary>
+        public static int OperationalBlockCasterCount() =>
+            Globals.BlockCasters
+                .Where(p => !string.IsNullOrEmpty(p.ValidatorAddress))
+                .Select(p => p.ValidatorAddress!)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
 
         /// <summary>True if certificate is not required, or present and valid (M-of-N caster ECDSA on §12.1 payload).</summary>
         public static bool VerifyOrNotRequired(Block block)
@@ -27,7 +36,10 @@ namespace ReserveBlockCore.Services
             if (casterSet.Count == 0)
                 return false;
 
-            var need = RequiredAttestations(casterSet.Count);
+            // Must match TryAttachCertificateAsync: quorum is majority of the operational caster committee (BlockCasters),
+            // not BlockCasters ∪ KnownCasters (discovery can inflate N and make collected attestations never enough).
+            var operational = OperationalBlockCasterCount();
+            var need = RequiredAttestations(operational > 0 ? operational : casterSet.Count);
             var validSigners = new HashSet<string>(StringComparer.Ordinal);
 
             if (cert.Attestations == null)

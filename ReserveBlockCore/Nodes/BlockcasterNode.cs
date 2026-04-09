@@ -32,7 +32,8 @@ namespace ReserveBlockCore.Nodes
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
         const int PROOF_COLLECTION_TIME = 6000; // 6 seconds
         const int APPROVAL_WINDOW = 12000;      // 12 seconds
-        const int CASTER_VOTE_WINDOW = 6000;    // 6 seconds
+        const int CASTER_VOTE_WINDOW = 6000;    // 6 seconds (legacy; see GET_APPROVAL_HTTP_TIMEOUT_MS)
+        const int GET_APPROVAL_HTTP_TIMEOUT_MS = 2500; // per-caster HTTP; parallelized so total ≈ this, not N×6s
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         /// <summary>Replacement-round state; <see langword="volatile"/> so readers see latest reference without torn reads of the field itself.</summary>
         public static volatile ReplacementRound? _currentRound;
@@ -106,6 +107,49 @@ namespace ReserveBlockCore.Nodes
                 return;
             await ConsensusCertificateHelper.TryAttachCertificateAsync(block, winnerAddress);
             _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
+        }
+
+        /// <summary>One caster HTTP poll; used in parallel so N casters finish in ~one timeout instead of N×6s.</summary>
+        private static async Task PollCasterGetApprovalAsync(Peers caster, Proof finalizedWinner)
+        {
+            if (string.IsNullOrEmpty(caster.PeerIP))
+                return;
+            using var client = Globals.HttpClientFactory.CreateClient();
+            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(GET_APPROVAL_HTTP_TIMEOUT_MS));
+            try
+            {
+                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
+                var response = await client.GetAsync(uri, cts.Token);
+                if (!response.IsSuccessStatusCode)
+                    return;
+                var responseJson = await response.Content.ReadAsStringAsync();
+                if (responseJson == null)
+                    return;
+                if (responseJson == "1")
+                {
+                    await Task.Delay(200);
+                    for (var count = 0; count < 3; count++)
+                    {
+                        response = await client.GetAsync(uri, cts.Token);
+                        responseJson = await response.Content.ReadAsStringAsync();
+                        if (responseJson == "0" || responseJson != "1")
+                            await Task.Delay(200);
+                        else
+                            break;
+                    }
+                }
+                if (responseJson != "0" && responseJson != "1")
+                {
+                    var remoteCasterRound = JsonConvert.DeserializeObject<CasterRound>(responseJson);
+                    if (remoteCasterRound != null)
+                        await GetApproval(caster.PeerIP, finalizedWinner.BlockHeight, remoteCasterRound.Validator);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (Globals.OptionalLogging)
+                    ErrorLogUtility.LogError($"PollCasterGetApproval {caster.PeerIP}: {ex.Message}", "BlockcasterNode");
+            }
         }
 
         #endregion
@@ -717,74 +761,14 @@ namespace ReserveBlockCore.Nodes
                                         }
                                     }
                                     //Caster dict null value here potentially due to it being to fast.
-                                    foreach (var caster in Globals.BlockCasters)
-                                    {
-                                        using (var client = Globals.HttpClientFactory.CreateClient())
-                                        {
-                                            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
-                                            try
-                                            {
-                                                var valAddr = finalizedWinner.Address;
-                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
-                                                var response = await client.GetAsync(uri, cts.Token);
-                                                if (response.IsSuccessStatusCode)
-                                                {
-                                                    var responseJson = await response.Content.ReadAsStringAsync();
-                                                    if (responseJson != null)
-                                                    {
-                                                        if (responseJson == "1")
-                                                        {
-                                                            await Task.Delay(500);
-                                                            int count = 0;
-                                                            while (count < 3)
-                                                            {
-                                                                response = await client.GetAsync(uri, cts.Token);
-                                                                responseJson = await response.Content.ReadAsStringAsync();
-                                                                if (responseJson == "0" || responseJson != "1")
-                                                                {
-                                                                    await Task.Delay(500);
-                                                                    count++;
-                                                                    continue;
-                                                                }
-                                                                else
-                                                                {
-                                                                    break;
-                                                                }
-                                                            }
-                                                        }
-                                                        if (responseJson != "0" && responseJson != "1")
-                                                        {
-                                                            var remoteCasterRound = JsonConvert.DeserializeObject<CasterRound>(responseJson);
-                                                            if (remoteCasterRound != null)
-                                                            {
-                                                                await GetApproval(caster.PeerIP, finalizedWinner.BlockHeight, remoteCasterRound.Validator);
-                                                                CasterApprovalList.Add(caster.PeerIP);
-                                                                //ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {caster.ValidatorAddress}.");
-                                                                //ConsoleWriterService.OutputVal($"IP Address: {caster.PeerIP}.");
-                                                                await Task.Delay(200);
-                                                                continue;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                else
-                                                {
-                                                    await Task.Delay(200);
-                                                }
-                                            }
-                                            catch (Exception ex)
-                                            {
-                                                ConsoleWriterService.OutputVal($"\r\nError sending approval to address: {finalizedWinner.Address}.");
-                                                ConsoleWriterService.OutputVal($"ERROR: {ex}.");
-                                            }
-                                        }
-                                    }
+                                    var castersSnap = Globals.BlockCasters.ToList();
+                                    await Task.WhenAll(castersSnap.Select(c => PollCasterGetApprovalAsync(c, finalizedWinner)));
 
-                                    await Task.Delay(200);
+                                    await Task.Delay(100);
 
                                     var vBag = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).ToList();
 
-                                    CasterRoundAudit.AddStep($"Validator Bag Count: {vBag.Count()}.", true);
+                                    CasterRoundAudit.AddStep($"Validator Bag Count: {vBag.Count()}.", false);
                                     //ConsoleWriterService.OutputVal($"\r\nValidator Bag Count: {vBag.Count()}.");
 
                                     var approvalCount = casterList.Count() <= 5 ? 3 : 4;
@@ -834,8 +818,9 @@ namespace ReserveBlockCore.Nodes
                                                 approved = true;
                                                 break;
                                             }
-                                            ConsoleWriterService.OutputVal($"\r\n Bag failed. No Result was found.");
-                                            CasterRoundAudit.AddStep($"Bag failed — no tiebreak candidate; continuing approval window.", true);
+                                            if (Globals.OptionalLogging)
+                                                ConsoleWriterService.OutputVal("\r\n Bag failed. No Result was found.");
+                                            CasterRoundAudit.AddStep("Bag failed — no tiebreak candidate; continuing approval window.", false);
                                             await Task.Delay(200);
                                         }
                                     }
@@ -1443,74 +1428,14 @@ namespace ReserveBlockCore.Nodes
                                         }
                                     }
                                     //Caster dict null value here potentially due to it being to fast.
-                                    foreach (var caster in Globals.BlockCasters)
-                                    {
-                                        using (var client = Globals.HttpClientFactory.CreateClient())
-                                        {
-                                            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
-                                            try
-                                            {
-                                                var valAddr = finalizedWinner.Address;
-                                                var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/getapproval/{finalizedWinner.BlockHeight}";
-                                                var response = await client.GetAsync(uri, cts.Token);
-                                                if (response.IsSuccessStatusCode)
-                                                {
-                                                    var responseJson = await response.Content.ReadAsStringAsync();
-                                                    if (responseJson != null)
-                                                    {
-                                                        if(responseJson == "1")
-                                                        {
-                                                            await Task.Delay(500);
-                                                            int count = 0;
-                                                            while(count < 3)
-                                                            {
-                                                                response = await client.GetAsync(uri, cts.Token);
-                                                                responseJson = await response.Content.ReadAsStringAsync();
-                                                                if (responseJson == "0" || responseJson != "1")
-                                                                {
-                                                                    await Task.Delay(500);
-                                                                    count++;
-                                                                    continue;
-                                                                }
-                                                                else
-                                                                {
-                                                                    break;
-                                                                }
-                                                            }
-                                                        }
-                                                        if(responseJson != "0" && responseJson != "1")
-                                                        {
-                                                            var remoteCasterRound = JsonConvert.DeserializeObject<CasterRound>(responseJson);
-                                                            if(remoteCasterRound != null)
-                                                            {
-                                                                await GetApproval(caster.PeerIP, finalizedWinner.BlockHeight, remoteCasterRound.Validator);
-                                                                CasterApprovalList.Add(caster.PeerIP);
-                                                                //ConsoleWriterService.OutputVal($"\r\nApproval sent to address: {caster.ValidatorAddress}.");
-                                                                //ConsoleWriterService.OutputVal($"IP Address: {caster.PeerIP}.");
-                                                                await Task.Delay(200);
-                                                                continue;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                else
-                                                {
-                                                    await Task.Delay(200);
-                                                }
-                                            }
-                                            catch (Exception ex)
-                                            {
-                                                ConsoleWriterService.OutputVal($"\r\nError sending approval to address: {finalizedWinner.Address}.");
-                                                ConsoleWriterService.OutputVal($"ERROR: {ex}.");
-                                            }
-                                        }
-                                    }
+                                    var castersSnapB = Globals.BlockCasters.ToList();
+                                    await Task.WhenAll(castersSnapB.Select(c => PollCasterGetApprovalAsync(c, finalizedWinner)));
 
-                                    await Task.Delay(200);
+                                    await Task.Delay(100);
 
                                     var vBag = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).ToList();
 
-                                    CasterRoundAudit.AddStep($"Validator Bag Count: {vBag.Count()}.", true);
+                                    CasterRoundAudit.AddStep($"Validator Bag Count: {vBag.Count()}.", false);
                                     //ConsoleWriterService.OutputVal($"\r\nValidator Bag Count: {vBag.Count()}.");
 
                                     var approvalCount = casterList.Count() <= 5 ? 3 : 4;
@@ -1579,7 +1504,8 @@ namespace ReserveBlockCore.Nodes
                                                 approved = true;
                                                 break;
                                             }
-                                            ConsoleWriterService.OutputVal($"\r\n Bag failed. No Result was found.");
+                                            if (Globals.OptionalLogging)
+                                                ConsoleWriterService.OutputVal("\r\n Bag failed. No Result was found.");
                                             await Task.Delay(200);
                                         }
                                     }

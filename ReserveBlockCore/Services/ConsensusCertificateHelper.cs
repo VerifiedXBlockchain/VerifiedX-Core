@@ -21,8 +21,7 @@ namespace ReserveBlockCore.Services
 
             if (block.ConsensusCertificate != null && block.ConsensusCertificate.Attestations?.Count > 0)
             {
-                var need = ConsensusCertificateVerifier.RequiredAttestations(
-                    Globals.BlockCasters.Where(x => !string.IsNullOrEmpty(x.ValidatorAddress)).Select(x => x.ValidatorAddress!).Distinct().Count());
+                var need = ConsensusCertificateVerifier.RequiredAttestations(ConsensusCertificateVerifier.OperationalBlockCasterCount());
                 if (block.ConsensusCertificate.Attestations.Count >= need)
                     return;
             }
@@ -68,12 +67,7 @@ namespace ReserveBlockCore.Services
                 catch { }
             }
 
-            var casterAddrs = Globals.BlockCasters
-                .Where(x => !string.IsNullOrEmpty(x.ValidatorAddress))
-                .Select(x => x.ValidatorAddress!)
-                .Distinct()
-                .ToList();
-            var needCount = ConsensusCertificateVerifier.RequiredAttestations(casterAddrs.Count);
+            var needCount = ConsensusCertificateVerifier.RequiredAttestations(ConsensusCertificateVerifier.OperationalBlockCasterCount());
             var merged = new Dictionary<string, CasterAttestation>(StringComparer.Ordinal);
 
             for (var i = 0; i < 15 && merged.Count < needCount; i++)
