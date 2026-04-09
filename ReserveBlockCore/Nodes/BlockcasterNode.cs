@@ -70,18 +70,17 @@ namespace ReserveBlockCore.Nodes
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
-                
-                if (!Globals.IsBlockCaster)
-                {
-                    await Task.Delay(new TimeSpan(0, 0, 30));
-                    continue;
-                }
 
                 if (!Globals.BlockCasters.Any())
                 {
-                    //Get blockcasters if empty.
                     await ValidatorNode.GetBlockcasters();
                     await delay;
+                    continue;
+                }
+
+                if (!Globals.IsBlockCaster)
+                {
+                    await Task.Delay(new TimeSpan(0, 0, 30));
                     continue;
                 }
 
@@ -427,14 +426,19 @@ namespace ReserveBlockCore.Nodes
 
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
-                var casterList = Globals.BlockCasters.ToList();
-                if (casterList.Any())
+                if (!Globals.BlockCasters.Any())
                 {
-                    if (casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress))
-                        Globals.IsBlockCaster = true;
-                    else
-                        Globals.IsBlockCaster = false;
+                    await ValidatorNode.GetBlockcasters();
+                    await delay;
+                    continue;
                 }
+
+                var casterList = Globals.BlockCasters.ToList();
+                if (casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress))
+                    Globals.IsBlockCaster = true;
+                else
+                    Globals.IsBlockCaster = false;
+
                 if (!Globals.IsBlockCaster)
                 {
                     await Task.Delay(new TimeSpan(0, 0, 30));
@@ -444,14 +448,6 @@ namespace ReserveBlockCore.Nodes
                 ConsoleWriterService.OutputVal("Top of consensus loop");
 
                 Block? block = null;
-
-                if (!Globals.BlockCasters.Any())
-                {
-                    //Get blockcasters if empty.
-                    await ValidatorNode.GetBlockcasters();
-                    await delay;
-                    continue;
-                }
 
                 try
                 {
@@ -1152,14 +1148,19 @@ namespace ReserveBlockCore.Nodes
 
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
-                var casterList = Globals.BlockCasters.ToList();
-                if (casterList.Any())
+                if (!Globals.BlockCasters.Any())
                 {
-                    if (casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress))
-                        Globals.IsBlockCaster = true;
-                    else
-                        Globals.IsBlockCaster = false;
+                    await ValidatorNode.GetBlockcasters();
+                    await delay;
+                    continue;
                 }
+
+                var casterList = Globals.BlockCasters.ToList();
+                if (casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress))
+                    Globals.IsBlockCaster = true;
+                else
+                    Globals.IsBlockCaster = false;
+
                 if (!Globals.IsBlockCaster)
                 {
                     await Task.Delay(new TimeSpan(0, 0, 30));
@@ -1169,14 +1170,6 @@ namespace ReserveBlockCore.Nodes
                 ConsoleWriterService.OutputVal("Top of consensus loop");
 
                 Block? block = null;
-
-                if (!Globals.BlockCasters.Any())
-                {
-                    //Get blockcasters if empty.
-                    await ValidatorNode.GetBlockcasters();
-                    await delay;
-                    continue;
-                }
 
                 try
                 {

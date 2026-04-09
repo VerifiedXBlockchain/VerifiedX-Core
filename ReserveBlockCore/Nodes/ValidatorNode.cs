@@ -162,10 +162,11 @@ namespace ReserveBlockCore.Nodes
 
         public static async Task GetBlockcasters()
         {
-            if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
-            {
+            if (Globals.StopAllTimers && !Globals.IsChainSynced)
                 return;
-            }
+            // Hardcoded bootstrap caster list does not require P2P; allow injection while Nodes is still empty.
+            if (Globals.Nodes.Count == 0 && !SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
+                return;
 
             if (!SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
             {

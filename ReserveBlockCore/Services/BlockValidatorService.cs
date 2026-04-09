@@ -385,7 +385,9 @@ namespace ReserveBlockCore.Services
                     //no rules
                 }
 
-                if (!ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                // Certificates are attached after local craft (TryAttachCertificateAsync) and before broadcast.
+                // validateOnly preflight must not require a cert yet; full acceptance paths use validateOnly=false.
+                if (!validateOnly && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
                     return result;
