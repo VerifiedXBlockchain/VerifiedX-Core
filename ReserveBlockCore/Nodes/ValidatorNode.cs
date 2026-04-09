@@ -117,9 +117,12 @@ namespace ReserveBlockCore.Nodes
                             continue;
                         }
                     }
+                    var totalVals = !Globals.IsBootstrapMode && ValidatorSnapshotService.CurrentSnapshot.Count > 0
+                        ? ValidatorSnapshotService.CurrentSnapshot.Count
+                        : Globals.NetworkValidators.Count;
                     var block = await BlockchainData.CraftBlock_V5(
                                                     Globals.ValidatorAddress,
-                                                    Globals.NetworkValidators.Count(),
+                                                    totalVals,
                                                     proof.Item2, nextHeight, false, true);
 
                     if (block != null)

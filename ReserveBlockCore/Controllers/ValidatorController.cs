@@ -90,6 +90,9 @@ namespace ReserveBlockCore.Controllers
                     return Unauthorized();
                 }
 
+                if (string.IsNullOrEmpty(peerIP))
+                    return BadRequest("Could not determine caller IP");
+
                 // Verify the proof and add it if valid
                 if (proof.VerifyProof())
                 {
