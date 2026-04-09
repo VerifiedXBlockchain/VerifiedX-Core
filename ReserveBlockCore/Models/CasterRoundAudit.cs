@@ -71,9 +71,8 @@ namespace ReserveBlockCore.Models
         }
         private DateTime lastUpdate = DateTime.MinValue;
 
-        private void ThrottledOutput(int milliseconds = 500)
+        private void ThrottledOutput(int milliseconds = 2000)
         {
-            // Only update if the last update was more than the specified time ago
             if ((DateTime.Now - lastUpdate).TotalMilliseconds >= milliseconds)
             {
                 Output();

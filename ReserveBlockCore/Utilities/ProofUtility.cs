@@ -162,7 +162,39 @@ namespace ReserveBlockCore.Utilities
             var casterAddrs = new HashSet<string>(
                 Globals.BlockCasters.Where(c => !string.IsNullOrEmpty(c.ValidatorAddress)).Select(c => c.ValidatorAddress!),
                 StringComparer.Ordinal);
-            return all.Where(p => casterAddrs.Contains(p.Address)).ToList();
+            var list = all.Where(p => casterAddrs.Contains(p.Address)).ToList();
+
+            // Snapshot / NetworkValidators often omit seed casters; build missing proofs from agreed BlockCasters (pubkey on peer).
+            var blockHeight = Globals.LastBlock.Height + 1;
+            var prevHash = Globals.LastBlock.Hash;
+            foreach (var peer in Globals.BlockCasters.ToList())
+            {
+                if (string.IsNullOrEmpty(peer.ValidatorAddress) || string.IsNullOrEmpty(peer.ValidatorPublicKey))
+                    continue;
+                if (list.Exists(p => p.Address == peer.ValidatorAddress))
+                    continue;
+
+                var stateAddress = StateData.GetSpecificAccountStateTrei(peer.ValidatorAddress);
+                if (stateAddress == null || stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
+                    continue;
+
+                var proofTuple = await CreateProof(peer.ValidatorAddress, peer.ValidatorPublicKey, blockHeight, prevHash);
+                if (proofTuple.Item1 != 0 && !string.IsNullOrEmpty(proofTuple.Item2))
+                {
+                    list.Add(new Proof
+                    {
+                        Address = peer.ValidatorAddress,
+                        BlockHeight = blockHeight,
+                        PreviousBlockHash = prevHash,
+                        ProofHash = proofTuple.Item2,
+                        PublicKey = peer.ValidatorPublicKey,
+                        VRFNumber = proofTuple.Item1,
+                        IPAddress = (peer.PeerIP ?? "").Replace("::ffff:", "")
+                    });
+                }
+            }
+
+            return list;
         }
         public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight, string prevBlockHash)
         {

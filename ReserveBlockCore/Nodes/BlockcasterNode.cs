@@ -38,7 +38,8 @@ namespace ReserveBlockCore.Nodes
         public static volatile ReplacementRound? _currentRound;
         public static volatile List<string>? _allCasterAddresses;
         public static CasterRoundAudit? CasterRoundAudit = null;
-        
+        static long _lastStartingOverLogTicks;
+
         // Dynamic reference points for block delay calculation
         private static long ReferenceHeight = -1;
         private static long ReferenceTime = -1;
@@ -461,22 +462,14 @@ namespace ReserveBlockCore.Nodes
                         await WaitForNextConsensusRound();
                     }
 
-                    if (CasterRoundAudit == null)
+                    if (CasterRoundAudit == null || CasterRoundAudit.BlockHeight < Height)
                     {
                         CasterRoundAudit = new CasterRoundAudit(Height);
                         Console.Clear();
                     }
-                    else
+                    else if (CasterRoundAudit.BlockHeight == Height)
                     {
-                        Console.Clear();
-                        if (CasterRoundAudit.BlockHeight < Height)
-                        {
-                            CasterRoundAudit = new CasterRoundAudit(Height);
-                        }
-                        else
-                        {
-                            CasterRoundAudit.AddCycle();//bad we don't want this.
-                        }
+                        CasterRoundAudit.AddStep($"Retry at height {Height}…", false);
                     }
 
                     if (PreviousHeight != Height)
@@ -603,7 +596,9 @@ namespace ReserveBlockCore.Nodes
 
                         if (winningCasterProof == null)
                         {
-                            ConsoleWriterService.OutputVal($"\r\nCould not connect to any nodes for winning proof. Starting over.");
+                            if (CasterRoundAudit != null)
+                                CasterRoundAudit.AddStep("Could not verify winning caster; retrying…", false);
+                            await Task.Delay(2000);
                             continue;
                         }
 
@@ -641,6 +636,9 @@ namespace ReserveBlockCore.Nodes
 
                         if (Globals.CasterProofDict.Count() < 3)
                         {
+                            if (CasterRoundAudit != null)
+                                CasterRoundAudit.AddStep($"Caster P2P proofs {Globals.CasterProofDict.Count()}/3; retrying…", false);
+                            await Task.Delay(2000);
                             continue;
                         }
 
@@ -1123,10 +1121,18 @@ namespace ReserveBlockCore.Nodes
                     }
                     else
                     {
-                        CasterRoundAudit = null;//round was starting. 
+                        var cc = casterProofs?.Count() ?? 0;
+                        if (CasterRoundAudit != null)
+                            CasterRoundAudit.AddStep($"Need ≥3 caster proofs (have {cc}). Augmented from BlockCasters + chain; check balances / val API / firewall.", false);
+                        await Task.Delay(Math.Max(3000, Globals.BlockTime / 4));
+                        continue;
                     }
 
-                    ConsoleWriterService.OutputVal($"\r\nStarting over.");
+                    if (Environment.TickCount64 - _lastStartingOverLogTicks >= 15_000)
+                    {
+                        ConsoleWriterService.OutputVal("\r\nStarting over.");
+                        _lastStartingOverLogTicks = Environment.TickCount64;
+                    }
                     Globals.Proofs.Clear();
                     Globals.Proofs = new ConcurrentBag<Proof>();
                     await Task.Delay(50);
@@ -1183,22 +1189,14 @@ namespace ReserveBlockCore.Nodes
                         await WaitForNextConsensusRound();
                     }
 
-                    if(CasterRoundAudit == null)
+                    if (CasterRoundAudit == null || CasterRoundAudit.BlockHeight < Height)
                     {
                         CasterRoundAudit = new CasterRoundAudit(Height);
                         Console.Clear();
                     }
-                    else
+                    else if (CasterRoundAudit.BlockHeight == Height)
                     {
-                        Console.Clear();
-                        if (CasterRoundAudit.BlockHeight < Height)
-                        {
-                            CasterRoundAudit = new CasterRoundAudit(Height);
-                        }
-                        else
-                        {
-                            CasterRoundAudit.AddCycle();//bad we don't want this.
-                        }
+                        CasterRoundAudit.AddStep($"Retry at height {Height}…", false);
                     }
 
                     if (PreviousHeight != Height)
@@ -1323,7 +1321,9 @@ namespace ReserveBlockCore.Nodes
 
                         if (winningCasterProof == null)
                         {
-                            ConsoleWriterService.OutputVal($"\r\nCould not connect to any nodes for winning proof. Starting over.");
+                            if (CasterRoundAudit != null)
+                                CasterRoundAudit.AddStep("Could not verify winning caster; retrying…", false);
+                            await Task.Delay(2000);
                             continue;
                         }
 
@@ -1917,10 +1917,18 @@ namespace ReserveBlockCore.Nodes
                     }
                     else
                     {
-                        CasterRoundAudit = null;//round was starting. 
+                        var cc = casterProofs?.Count() ?? 0;
+                        if (CasterRoundAudit != null)
+                            CasterRoundAudit.AddStep($"Need ≥3 caster proofs (have {cc}). Augmented from BlockCasters + chain; check balances / val API / firewall.", false);
+                        await Task.Delay(Math.Max(3000, Globals.BlockTime / 4));
+                        continue;
                     }
-                    
-                    ConsoleWriterService.OutputVal($"\r\nStarting over.");
+
+                    if (Environment.TickCount64 - _lastStartingOverLogTicks >= 15_000)
+                    {
+                        ConsoleWriterService.OutputVal("\r\nStarting over.");
+                        _lastStartingOverLogTicks = Environment.TickCount64;
+                    }
                     Globals.Proofs.Clear();
                     Globals.Proofs = new ConcurrentBag<Proof>();
                     await Task.Delay(50);
