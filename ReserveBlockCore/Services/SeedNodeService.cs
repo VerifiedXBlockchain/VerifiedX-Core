@@ -6,12 +6,28 @@ using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Utilities;
 using Spectre.Console;
 using System;
+using System.Linq;
 using System.Net;
 
 namespace ReserveBlockCore.Services
 {
     public class SeedNodeService
     {
+        /// <summary>
+        /// Inject hardcoded bootstrap caster IPs only in bootstrap mode, before chain sync, or when the caster bag is empty (cold start / recovery).
+        /// Once synced with a non-empty caster set, skip so the network does not depend on seeds staying online.
+        /// </summary>
+        public static bool ShouldInjectHardcodedBootstrapPeers()
+        {
+            if (Globals.IsBootstrapMode)
+                return true;
+            if (!Globals.IsChainSynced)
+                return true;
+            if (!Globals.BlockCasters.Any(p => !string.IsNullOrEmpty(p.ValidatorAddress)))
+                return true;
+            return false;
+        }
+
         public static List<SeedNode> SeedNodeList = new List<SeedNode>();
         static SemaphoreSlim SeedNodeServiceLock = new SemaphoreSlim(1, 1);
         public static async Task Start()
@@ -93,7 +109,7 @@ namespace ReserveBlockCore.Services
         }
         public static async Task GetSeedNodePeers()
         {
-            if (!Globals.IsBootstrapMode)
+            if (!ShouldInjectHardcodedBootstrapPeers())
                 return;
 
             List<Peers> peerList = new List<Peers>();
@@ -230,7 +246,7 @@ namespace ReserveBlockCore.Services
 
         public static async Task GetSeedNodePeersTestnet()
         {
-            if (!Globals.IsBootstrapMode)
+            if (!ShouldInjectHardcodedBootstrapPeers())
                 return;
 
             if (Globals.IsTestNet)

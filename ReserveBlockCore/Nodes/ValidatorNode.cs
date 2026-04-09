@@ -164,6 +164,12 @@ namespace ReserveBlockCore.Nodes
                 return;
             }
 
+            if (!SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
+            {
+                Globals.SyncKnownCastersFromBlockCasters();
+                return;
+            }
+
             List<Peers> peerList = new List<Peers>()
             {
 

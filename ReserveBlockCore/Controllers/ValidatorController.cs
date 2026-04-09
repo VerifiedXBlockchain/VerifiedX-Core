@@ -297,28 +297,54 @@ namespace ReserveBlockCore.Controllers
                 if (req.WinnerAddress != Globals.ValidatorAddress)
                     return BadRequest("not producer");
 
-                var account = AccountData.GetLocalValidator();
-                if (account == null || account.GetPrivKey == null)
-                    return BadRequest("no local validator");
+                var craftLock = RequestBlockCache.GetCraftLock(req.BlockHeight, req.WinnerAddress);
+                await craftLock.WaitAsync();
+                try
+                {
+                    if (RequestBlockCache.TryGet(req.BlockHeight, req.WinnerAddress, out var cachedAfterWait) && cachedAfterWait != null)
+                        return Ok(JsonConvert.SerializeObject(cachedAfterWait));
 
-                var validators = Validators.Validator.GetAll();
-                var validator = validators.FindOne(x => x.Address == account.Address);
-                if (validator == null)
-                    return BadRequest();
+                    if (Globals.CasterRoundDict.TryGetValue(req.BlockHeight, out var crAfterWait))
+                    {
+                        if (!string.IsNullOrEmpty(crAfterWait.Validator) && crAfterWait.Validator != req.WinnerAddress)
+                            return BadRequest("winner mismatch");
+                        if (crAfterWait.Block != null && crAfterWait.Block.Validator == req.WinnerAddress)
+                        {
+                            RequestBlockCache.Add(req.BlockHeight, req.WinnerAddress, crAfterWait.Block);
+                            return Ok(JsonConvert.SerializeObject(crAfterWait.Block));
+                        }
+                    }
 
-                var prevHash = Globals.LastBlock.Hash;
-                var proof = await ProofUtility.CreateProof(validator.Address, account.PublicKey, req.BlockHeight, prevHash);
+                    if (req.WinnerAddress != Globals.ValidatorAddress)
+                        return BadRequest("not producer");
 
-                int totalVals = !Globals.IsBootstrapMode && ValidatorSnapshotService.CurrentSnapshot.Count > 0
-                    ? ValidatorSnapshotService.CurrentSnapshot.Count
-                    : Globals.NetworkValidators.Count;
+                    var account = AccountData.GetLocalValidator();
+                    if (account == null || account.GetPrivKey == null)
+                        return BadRequest("no local validator");
 
-                var block = await BlockchainData.CraftBlock_V5(req.WinnerAddress, totalVals, proof.Item2, req.BlockHeight, false, true);
-                if (block == null)
-                    return BadRequest("craft failed");
+                    var validators = Validators.Validator.GetAll();
+                    var validator = validators.FindOne(x => x.Address == account.Address);
+                    if (validator == null)
+                        return BadRequest();
 
-                RequestBlockCache.Add(req.BlockHeight, req.WinnerAddress, block);
-                return Ok(JsonConvert.SerializeObject(block));
+                    var prevHash = Globals.LastBlock.Hash;
+                    var proof = await ProofUtility.CreateProof(validator.Address, account.PublicKey, req.BlockHeight, prevHash);
+
+                    int totalVals = !Globals.IsBootstrapMode && ValidatorSnapshotService.CurrentSnapshot.Count > 0
+                        ? ValidatorSnapshotService.CurrentSnapshot.Count
+                        : Globals.NetworkValidators.Count;
+
+                    var block = await BlockchainData.CraftBlock_V5(req.WinnerAddress, totalVals, proof.Item2, req.BlockHeight, false, true);
+                    if (block == null)
+                        return BadRequest("craft failed");
+
+                    RequestBlockCache.Add(req.BlockHeight, req.WinnerAddress, block);
+                    return Ok(JsonConvert.SerializeObject(block));
+                }
+                finally
+                {
+                    craftLock.Release();
+                }
             }
             catch (Exception ex)
             {
