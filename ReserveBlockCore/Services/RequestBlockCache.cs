@@ -4,18 +4,18 @@ using ReserveBlockCore.Utilities;
 
 namespace ReserveBlockCore.Services
 {
-    /// <summary>§12.2 — same tuple within 60s returns cached block.</summary>
+    /// <summary>§12.2 — canonical crafted block for (height, winner) within TTL; shared across casters so M-of-N attest one hash.</summary>
     public static class RequestBlockCache
     {
         private static readonly ConcurrentDictionary<string, (Block Block, long ExpiryUnix)> Entries = new();
 
-        private static string Key(long height, string caster, string winner) =>
-            $"{caster}|{height}|{winner}";
+        private static string Key(long height, string winner) =>
+            $"{height}|{winner}";
 
-        public static bool TryGet(long height, string casterAddress, string winnerAddress, out Block? block)
+        public static bool TryGet(long height, string winnerAddress, out Block? block)
         {
             block = null;
-            var k = Key(height, casterAddress, winnerAddress);
+            var k = Key(height, winnerAddress);
             if (!Entries.TryGetValue(k, out var e))
                 return false;
             if (TimeUtil.GetTime() > e.ExpiryUnix)
@@ -28,9 +28,9 @@ namespace ReserveBlockCore.Services
             return true;
         }
 
-        public static void Add(long height, string casterAddress, string winnerAddress, Block block, int ttlSeconds = 60)
+        public static void Add(long height, string winnerAddress, Block block, int ttlSeconds = 60)
         {
-            var k = Key(height, casterAddress, winnerAddress);
+            var k = Key(height, winnerAddress);
             Entries[k] = (block, TimeUtil.GetTime() + ttlSeconds);
         }
     }

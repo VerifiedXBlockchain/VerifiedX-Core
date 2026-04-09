@@ -277,7 +277,7 @@ namespace ReserveBlockCore.Controllers
                 if (!SignatureService.VerifySignature(req.CasterAddress, msg, req.Signature))
                     return Unauthorized();
 
-                if (RequestBlockCache.TryGet(req.BlockHeight, req.CasterAddress, req.WinnerAddress, out var cached) && cached != null)
+                if (RequestBlockCache.TryGet(req.BlockHeight, req.WinnerAddress, out var cached) && cached != null)
                     return Ok(JsonConvert.SerializeObject(cached));
 
                 if (req.BlockHeight != Globals.LastBlock.Height + 1)
@@ -289,7 +289,7 @@ namespace ReserveBlockCore.Controllers
                         return BadRequest("winner mismatch");
                     if (cr.Block != null && cr.Block.Validator == req.WinnerAddress)
                     {
-                        RequestBlockCache.Add(req.BlockHeight, req.CasterAddress, req.WinnerAddress, cr.Block);
+                        RequestBlockCache.Add(req.BlockHeight, req.WinnerAddress, cr.Block);
                         return Ok(JsonConvert.SerializeObject(cr.Block));
                     }
                 }
@@ -317,7 +317,7 @@ namespace ReserveBlockCore.Controllers
                 if (block == null)
                     return BadRequest("craft failed");
 
-                RequestBlockCache.Add(req.BlockHeight, req.CasterAddress, req.WinnerAddress, block);
+                RequestBlockCache.Add(req.BlockHeight, req.WinnerAddress, block);
                 return Ok(JsonConvert.SerializeObject(block));
             }
             catch (Exception ex)
