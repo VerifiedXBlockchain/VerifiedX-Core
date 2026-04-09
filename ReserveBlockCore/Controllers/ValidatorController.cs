@@ -179,10 +179,7 @@ namespace ReserveBlockCore.Controllers
                 if(round.Block == null)
                     return Ok("0");
 
-                var blk = round.Block;
-                if (blk != null)
-                    _ = ConsensusAttestationPublisher.PublishLocalAsync(blk);
-
+                // Do not publish attestations from this unauthenticated GET (DoS amplifier). Use authenticated RequestBlock / post-accept paths.
                 return Ok(JsonConvert.SerializeObject(round.Block));
             }
                 
@@ -301,6 +298,10 @@ namespace ReserveBlockCore.Controllers
                 await craftLock.WaitAsync();
                 try
                 {
+                    // Tip can advance while waiting; crafting for a stale height breaks prev-hash / consensus.
+                    if (req.BlockHeight != Globals.LastBlock.Height + 1)
+                        return BadRequest("height");
+
                     if (RequestBlockCache.TryGet(req.BlockHeight, req.WinnerAddress, out var cachedAfterWait) && cachedAfterWait != null)
                         return Ok(JsonConvert.SerializeObject(cachedAfterWait));
 
