@@ -61,9 +61,12 @@ namespace ReserveBlockCore.Utilities
             {
                 if (_proofCacheHeight == blockHeight && _allProofsCache != null)
                     return _allProofsCache;
-                _allProofsCache = proofs;
-                _proofCacheHeight = blockHeight;
-                Globals.LastProofBlockheight = blockHeight;
+                if (blockHeight >= _proofCacheHeight)
+                {
+                    _allProofsCache = proofs;
+                    _proofCacheHeight = blockHeight;
+                    Globals.LastProofBlockheight = blockHeight;
+                }
             }
 
             return proofs;
