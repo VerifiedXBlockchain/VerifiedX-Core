@@ -30,9 +30,9 @@ namespace ReserveBlockCore.Nodes
         private readonly IHubContext<P2PBlockcasterServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
-        const int PROOF_COLLECTION_TIME = 6000; // 6 seconds
-        const int APPROVAL_WINDOW = 12000;      // 12 seconds
-        const int CASTER_VOTE_WINDOW = 6000;    // 6 seconds (legacy; see GET_APPROVAL_HTTP_TIMEOUT_MS)
+        const int PROOF_COLLECTION_TIME = 3000; // 3 seconds
+        const int APPROVAL_WINDOW = 6000;       // 6 seconds
+        const int CASTER_VOTE_WINDOW = 3000;    // 3 seconds (legacy; see GET_APPROVAL_HTTP_TIMEOUT_MS)
         const int GET_APPROVAL_HTTP_TIMEOUT_MS = 2500; // per-caster HTTP; parallelized so total ≈ this, not N×6s
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
         /// <summary>Replacement-round state; <see langword="volatile"/> so readers see latest reference without torn reads of the field itself.</summary>
@@ -664,25 +664,23 @@ namespace ReserveBlockCore.Nodes
                         Globals.CasterProofDict = new ConcurrentDictionary<string, Proof>();
                         Globals.Proofs = new ConcurrentBag<Proof>();
 
-                        var swProofCollectionTime = Stopwatch.StartNew();
-                        while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
+                        // Parallel proof exchange: fetch + send simultaneously, then retry if needed
+                        await Task.WhenAll(GetWinningProof(winningCasterProof), SendWinningProof(winningCasterProof));
+                        
+                        var requiredProofs = Math.Max(2, (casterList.Count / 2) + 1);
+                        
+                        // If not enough proofs, do one more round
+                        if (Globals.CasterProofDict.Count() < requiredProofs)
                         {
-                            _ = GetWinningProof(winningCasterProof);
                             await Task.Delay(1000);
-                            _ = SendWinningProof(winningCasterProof);
-                            await Task.Delay(500);
-
-
+                            await Task.WhenAll(GetWinningProof(winningCasterProof), SendWinningProof(winningCasterProof));
                         }
 
-                        swProofCollectionTime.Stop();
-                        //await Task.Delay(PROOF_COLLECTION_TIME);
-
-                        if (Globals.CasterProofDict.Count() < 3)
+                        if (Globals.CasterProofDict.Count() < requiredProofs)
                         {
                             if (CasterRoundAudit != null)
-                                CasterRoundAudit.AddStep($"Caster P2P proofs {Globals.CasterProofDict.Count()}/3; retrying…", false);
-                            await Task.Delay(2000);
+                                CasterRoundAudit.AddStep($"Caster P2P proofs {Globals.CasterProofDict.Count()}/{requiredProofs}; retrying…", false);
+                            await Task.Delay(1000);
                             continue;
                         }
 
@@ -2141,81 +2139,47 @@ namespace ReserveBlockCore.Nodes
         #region Get Winning Proof Backup Method
         public static async Task GetWinningProof(Proof proof)
         {
-            // Create a CancellationTokenSource with a timeout of 5 seconds
             var validators = Globals.BlockCasters.ToList();
+
+            if (!validators.Any())
+                return;
 
             try
             {
-                var rnd = new Random();
-                var randomizedValidators = validators
-                    .OrderBy(x => rnd.Next())
-                    .ToList();
-
-                if (!randomizedValidators.Any())
-                    return;
-
-                var sw = Stopwatch.StartNew();
-                while (sw.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
+                // Parallel fetch from all casters simultaneously
+                var tasks = validators.Select(async validator =>
                 {
                     try
                     {
-                        foreach(var validator in randomizedValidators)
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
+                        var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/SendWinningProof/{proof.BlockHeight}";
+                        var response = await client.GetAsync(uri, cts.Token);
+                        if (response.IsSuccessStatusCode)
                         {
-                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            var responseJson = await response.Content.ReadAsStringAsync();
+                            if (responseJson != null && responseJson != "0")
                             {
-                                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
-                                try
+                                var remoteCasterProof = JsonConvert.DeserializeObject<Proof>(responseJson);
+                                if (remoteCasterProof != null && remoteCasterProof.VerifyProof())
                                 {
-                                    var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/SendWinningProof/{proof.BlockHeight}";
-                                    var response = await client.GetAsync(uri, cts.Token);
-                                    await Task.Delay(200);
-                                    if (response.IsSuccessStatusCode)
-                                    {
-                                        var responseJson = await response.Content.ReadAsStringAsync();
-                                        if (responseJson != null)
-                                        {
-                                            if (responseJson != "0")
-                                            {
-                                                var remoteCasterProof = JsonConvert.DeserializeObject<Proof>(responseJson);
-                                                if (remoteCasterProof != null)
-                                                {
-                                                    if (remoteCasterProof.VerifyProof())
-                                                    {
-                                                        if (!Globals.CasterProofDict.ContainsKey(validator.PeerIP))
-                                                        {
-                                                            while (!Globals.CasterProofDict.TryAdd(validator.PeerIP, remoteCasterProof))
-                                                            {
-                                                                await Task.Delay(75);
-                                                            }
-                                                        }
-
-                                                    }
-                                                    await Task.Delay(200);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        await Task.Delay(200);
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    //ConsoleWriterService.OutputVal($"\r\nError getting proof from address: {validator.PeerIP}.");
-                                    //ConsoleWriterService.OutputVal($"ERROR: {ex}.");
+                                    Globals.CasterProofDict.TryAdd(validator.PeerIP, remoteCasterProof);
                                 }
                             }
                         }
                     }
-                    catch (Exception ex) { }
-                }
+                    catch (Exception ex)
+                    {
+                        if (Globals.OptionalLogging)
+                            ErrorLogUtility.LogError($"Error getting proof from {validator.PeerIP}: {ex.Message}", "BlockcasterNode.GetWinningProof()");
+                    }
+                });
 
-                sw.Stop();
+                await Task.WhenAll(tasks);
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Error in proof distribution: {ex.Message}", "ValidatorNode.SendWinningProof()");
+                ErrorLogUtility.LogError($"Error in proof collection: {ex.Message}", "BlockcasterNode.GetWinningProof()");
             }
         }
         #endregion

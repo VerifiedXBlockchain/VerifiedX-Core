@@ -169,8 +169,18 @@ namespace ReserveBlockCore.Utilities
             var prevHash = Globals.LastBlock.Hash;
             foreach (var peer in Globals.BlockCasters.ToList())
             {
-                if (string.IsNullOrEmpty(peer.ValidatorAddress) || string.IsNullOrEmpty(peer.ValidatorPublicKey))
+                if (string.IsNullOrEmpty(peer.ValidatorAddress))
                     continue;
+                
+                // Try to populate missing public key from NetworkValidators
+                if (string.IsNullOrEmpty(peer.ValidatorPublicKey))
+                {
+                    if (Globals.NetworkValidators.TryGetValue(peer.ValidatorAddress, out var nv) && !string.IsNullOrEmpty(nv.PublicKey))
+                        peer.ValidatorPublicKey = nv.PublicKey;
+                    else
+                        continue;
+                }
+                
                 if (list.Exists(p => p.Address == peer.ValidatorAddress))
                     continue;
 
@@ -311,7 +321,7 @@ namespace ReserveBlockCore.Utilities
                     {
                         return (true, null);
                     }
-                    var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
+                    var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 7));
 
                     if (response != null)
