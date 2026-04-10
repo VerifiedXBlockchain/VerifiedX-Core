@@ -172,13 +172,50 @@ namespace ReserveBlockCore.Utilities
                 if (string.IsNullOrEmpty(peer.ValidatorAddress))
                     continue;
                 
-                // Try to populate missing public key from NetworkValidators
+                // Try to populate missing public key from NetworkValidators or via HTTP
                 if (string.IsNullOrEmpty(peer.ValidatorPublicKey))
                 {
                     if (Globals.NetworkValidators.TryGetValue(peer.ValidatorAddress, out var nv) && !string.IsNullOrEmpty(nv.PublicKey))
+                    {
                         peer.ValidatorPublicKey = nv.PublicKey;
+                    }
                     else
-                        continue;
+                    {
+                        // Fetch public key from the remote caster's ValidatorInfo endpoint
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(peer.PeerIP))
+                            {
+                                using var client = Globals.HttpClientFactory.CreateClient();
+                                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                                var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/ValidatorInfo";
+                                var response = await client.GetAsync(uri, cts.Token);
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    var infoStr = await response.Content.ReadAsStringAsync();
+                                    if (!string.IsNullOrEmpty(infoStr) && infoStr.Contains(","))
+                                    {
+                                        var parts = infoStr.Split(',');
+                                        if (parts.Length >= 2)
+                                        {
+                                            var remoteAddress = parts[0].Trim();
+                                            var remotePubKey = parts[1].Trim();
+                                            if (!string.IsNullOrEmpty(remotePubKey))
+                                            {
+                                                peer.ValidatorPublicKey = remotePubKey;
+                                                if (string.IsNullOrEmpty(peer.ValidatorAddress))
+                                                    peer.ValidatorAddress = remoteAddress;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch { /* best-effort */ }
+                        
+                        if (string.IsNullOrEmpty(peer.ValidatorPublicKey))
+                            continue;
+                    }
                 }
                 
                 if (list.Exists(p => p.Address == peer.ValidatorAddress))

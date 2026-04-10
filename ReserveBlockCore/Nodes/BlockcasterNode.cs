@@ -565,9 +565,22 @@ namespace ReserveBlockCore.Nodes
                         Globals.CasterRoundDict[Height] = casterRound;
                     }
 
-                    if (winningCasterProof != null && casterProofs.Count() > 2)
+                    // Always store our winning caster proof in CasterRoundDict so other casters can fetch it via HTTP
+                    // (SendWinningProof endpoint reads from CasterRoundDict)
+                    if (winningCasterProof != null)
                     {
-                        CasterRoundAudit.AddStep($"Attempting Proof on Address: {winningCasterProof.Address}", true);
+                        var earlyRound = Globals.CasterRoundDict[Height];
+                        if (earlyRound != null)
+                        {
+                            var compareEarlyRound = earlyRound;
+                            earlyRound.Proof = winningCasterProof;
+                            while (!Globals.CasterRoundDict.TryUpdate(Height, earlyRound, compareEarlyRound)) ;
+                        }
+                    }
+
+                    if (winningCasterProof != null && casterProofs.Count() > 0)
+                    {
+                        CasterRoundAudit.AddStep($"Attempting Proof on Address: {winningCasterProof.Address} (casterProofs: {casterProofs.Count()})", true);
                         //ConsoleWriterService.OutputVal($"\r\nAttempting Proof on Address: {winningProof.Address}");
                         var verificationResult = false;
                         List<string> ExcludeValList = new List<string>();
@@ -1109,7 +1122,7 @@ namespace ReserveBlockCore.Nodes
                     {
                         var cc = casterProofs?.Count() ?? 0;
                         if (CasterRoundAudit != null)
-                            CasterRoundAudit.AddStep($"Need ≥3 caster proofs (have {cc}). Augmented from BlockCasters + chain; check balances / val API / firewall.", false);
+                            CasterRoundAudit.AddStep($"No caster proofs generated (have {cc}). Check peer public keys / balances / val API / firewall.", false);
                         await Task.Delay(Math.Max(3000, Globals.BlockTime / 4));
                         continue;
                     }
