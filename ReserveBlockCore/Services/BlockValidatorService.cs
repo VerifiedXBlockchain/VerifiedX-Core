@@ -10,6 +10,7 @@ using ReserveBlockCore.P2P;
 using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
 using System.Security.Principal;
