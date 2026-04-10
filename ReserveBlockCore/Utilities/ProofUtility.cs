@@ -359,7 +359,7 @@ namespace ReserveBlockCore.Utilities
                         return (true, null);
                     }
                     var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
-                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 7));
+                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
 
                     if (response != null)
                     {

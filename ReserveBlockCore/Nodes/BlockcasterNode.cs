@@ -35,6 +35,9 @@ namespace ReserveBlockCore.Nodes
         const int CASTER_VOTE_WINDOW = 4000;    // 4 seconds per-caster HTTP timeout
         const int GET_APPROVAL_HTTP_TIMEOUT_MS = 2500; // per-caster HTTP; parallelized so total ≈ this, not N×6s
         const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
+        const int MAX_ROUND_DURATION_MS = 25000; // 25 seconds — hard cap for entire consensus round
+        const int WINNER_VERIFY_TIMEOUT_MS = 5000; // 5 seconds — total time for parallel winner verification
+        const int RETRY_DELAY_MS = 500;          // 500ms — delay between round retries (was 2000ms)
         /// <summary>Replacement-round state; <see langword="volatile"/> so readers see latest reference without torn reads of the field itself.</summary>
         public static volatile ReplacementRound? _currentRound;
         public static volatile List<string>? _allCasterAddresses;
@@ -525,12 +528,19 @@ namespace ReserveBlockCore.Nodes
                         PreviousHeight = Height;
                         await Task.WhenAll(BlockDelay, Task.Delay(1500));
                         
-                        // Simple concurrent delay: runs in parallel with consensus work.
-                        // If consensus finishes in <12s, we wait the remainder. If >12s, next round starts after the 1.5s minimum above.
-                        BlockDelay = Task.Delay(Globals.BlockTime);
+                        // Adaptive timing: correct for drift so blocks stay near target interval
+                        if (ReferenceHeight == -1)
+                        {
+                            ReferenceHeight = Globals.LastBlock.Height;
+                            ReferenceTime = TimeUtil.GetMillisecondTime();
+                        }
+                        
+                        var CurrentTime = TimeUtil.GetMillisecondTime();
+                        var DelayTimeCorrection = Globals.BlockTime * (Height - ReferenceHeight) - (CurrentTime - ReferenceTime);
+                        var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
+                        BlockDelay = Task.Delay((int)DelayTime);
 
-                        CasterRoundAudit.AddStep("Next Consensus Delay: " + Globals.BlockTime, true);
-                        //ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
+                        CasterRoundAudit.AddStep("Next Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")", true);
                     }
 
                     _ = CleanupApprovedCasterBlocks();
@@ -651,7 +661,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             if (CasterRoundAudit != null)
                                 CasterRoundAudit.AddStep("Could not verify winning caster; retrying…", false);
-                            await Task.Delay(2000);
+                            await Task.Delay(RETRY_DELAY_MS);
                             continue;
                         }
 
@@ -697,7 +707,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             if (CasterRoundAudit != null)
                                 CasterRoundAudit.AddStep($"Caster P2P proofs {Globals.CasterProofDict.Count()}/{requiredProofs}; retrying…", false);
-                            await Task.Delay(2000);
+                            await Task.Delay(RETRY_DELAY_MS);
                             continue;
                         }
 
@@ -901,7 +911,7 @@ namespace ReserveBlockCore.Nodes
                                                 var validators = Globals.NetworkValidators.Values.ToList();
                                                 var excludeVals = new List<string>();
                                                 
-                                                while (!blockFound)
+                                                while (!blockFound && swb.ElapsedMilliseconds < BLOCK_REQUEST_WINDOW)
                                                 {
                                                     var rnd = new Random();
                                                     var randomizedValidator = validators
