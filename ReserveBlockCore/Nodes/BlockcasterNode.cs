@@ -677,8 +677,13 @@ namespace ReserveBlockCore.Nodes
                         Globals.CasterProofDict = new ConcurrentDictionary<string, Proof>();
                         Globals.Proofs = new ConcurrentBag<Proof>();
 
-                        // Timed proof exchange loop: parallel HTTP inside, early exit when all proofs collected
-                        var requiredProofs = casterList.Count;
+                        // Inject our own proof directly (avoids self-HTTP which can fail behind NAT)
+                        var selfIP = Globals.BlockCasters.FirstOrDefault(c => c.ValidatorAddress == Globals.ValidatorAddress)?.PeerIP;
+                        if (selfIP != null && winningCasterProof != null)
+                            Globals.CasterProofDict.TryAdd(selfIP, winningCasterProof);
+
+                        // Timed proof exchange loop: parallel HTTP inside, early exit when majority collected
+                        var requiredProofs = Math.Max(1, casterList.Count / 2 + 1); // majority quorum: 2/3, 3/5, 4/7…
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                         {
@@ -785,7 +790,7 @@ namespace ReserveBlockCore.Nodes
                                     CasterRoundAudit.AddStep($"Validator Bag Count: {vBag.Count()}.", false);
                                     //ConsoleWriterService.OutputVal($"\r\nValidator Bag Count: {vBag.Count()}.");
 
-                                    var approvalCount = casterList.Count() <= 5 ? 3 : 4;
+                                    var approvalCount = Math.Max(2, casterList.Count / 2 + 1); // majority quorum: 2/3, 3/5, 4/7…
 
                                     if (vBag.Any() && !approved)
                                     {
