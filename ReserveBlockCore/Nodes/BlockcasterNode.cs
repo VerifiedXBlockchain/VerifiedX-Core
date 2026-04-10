@@ -521,16 +521,11 @@ namespace ReserveBlockCore.Nodes
                         PreviousHeight = Height;
                         await Task.WhenAll(BlockDelay, Task.Delay(1500));
                         
-                        // Reset reference point each block so delay correction is based on last block only, not cumulative drift
-                        ReferenceHeight = Globals.LastBlock.Height;
-                        ReferenceTime = TimeUtil.GetMillisecondTime();
-                        
-                        var CurrentTime = TimeUtil.GetMillisecondTime();
-                        var DelayTimeCorrection = Globals.BlockTime * (Height - ReferenceHeight) - (CurrentTime - ReferenceTime);
-                        var DelayTime = Math.Min(Math.Max(Globals.BlockTime + DelayTimeCorrection, Globals.BlockTimeMin), Globals.BlockTimeMax);
-                        BlockDelay = Task.Delay((int)DelayTime);
+                        // Simple concurrent delay: runs in parallel with consensus work.
+                        // If consensus finishes in <12s, we wait the remainder. If >12s, next round starts after the 1.5s minimum above.
+                        BlockDelay = Task.Delay(Globals.BlockTime);
 
-                        CasterRoundAudit.AddStep("Next Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")", true);
+                        CasterRoundAudit.AddStep("Next Consensus Delay: " + Globals.BlockTime, true);
                         //ConsoleWriterService.OutputVal("\r\nNext Consensus Delay: " + DelayTime + " (" + DelayTimeCorrection + ")");
                     }
 
