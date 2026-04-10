@@ -188,16 +188,6 @@ namespace ReserveBlockCore
                         Globals.StopConsoleOutput = true;
                         Globals.StopValConsoleOutput = true;
                     }
-
-                    if(argC.Contains("cFork"))
-                    {
-                        Globals.IsFork = true;
-                        var forkSplit = argC.Split(new char[] { '=' });
-                        if (string.IsNullOrEmpty(forkSplit[1]))
-                            await ForkConfiguration.RunForkedConfiguration();
-                        else
-                            await ForkConfiguration.RunForkedConfiguration(forkSplit[1]);
-                    }
                     if(argC == "version")
                     {
                         Console.WriteLine(Globals.CLIVersion);
