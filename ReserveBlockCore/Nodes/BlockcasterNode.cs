@@ -40,6 +40,10 @@ namespace ReserveBlockCore.Nodes
         public static volatile List<string>? _allCasterAddresses;
         public static CasterRoundAudit? CasterRoundAudit = null;
         static long _lastStartingOverLogTicks;
+        /// <summary>Height-based deduplication: tracks the highest block height currently being processed or already accepted via ReceiveConfirmedBlock.</summary>
+        private static long _acceptedHeight = -1;
+        /// <summary>Throttle for "block rejected" log messages — tracks last logged height per validator to prevent spam.</summary>
+        private static readonly ConcurrentDictionary<string, long> _rejectionLogTracker = new();
 
     // Dynamic reference points for block delay calculation — reset after each block
     private static long ReferenceHeight = -1;
@@ -2108,6 +2112,37 @@ namespace ReserveBlockCore.Nodes
             var lastBlockHeight = Globals.LastBlock.Height;
             if (lastBlockHeight < nextBlock.Height)
             {
+                // Height-based deduplication: prevent processing competing blocks at the same height.
+                // Uses Interlocked.CompareExchange so only the first block at a given height proceeds.
+                var currentAccepted = Interlocked.Read(ref _acceptedHeight);
+                if (nextBlock.Height <= currentAccepted)
+                    return; // Another block at this height is already being processed or was accepted
+
+                // Try to claim this height — only one thread wins
+                var prev = Interlocked.CompareExchange(ref _acceptedHeight, nextBlock.Height, currentAccepted);
+                if (prev != currentAccepted)
+                    return; // Lost the race — another thread claimed it
+
+                // Consensus gate: verify this block's validator matches what consensus determined.
+                // If CasterRoundDict has a consensus entry for this height, the block's validator must match.
+                if (Globals.CasterRoundDict.TryGetValue(nextBlock.Height, out var consensusRound))
+                {
+                    if (!string.IsNullOrEmpty(consensusRound?.Validator) && nextBlock.Validator != consensusRound.Validator)
+                    {
+                        // Throttled rejection log — only log once per validator per height
+                        var logKey = $"{nextBlock.Validator}";
+                        _rejectionLogTracker.TryGetValue(logKey, out var lastLoggedHeight);
+                        if (lastLoggedHeight < nextBlock.Height)
+                        {
+                            _rejectionLogTracker[logKey] = nextBlock.Height;
+                            ConsoleWriterService.OutputVal($"[Consensus Gate] Block at height {nextBlock.Height} from {nextBlock.Validator} rejected — consensus chose {consensusRound.Validator}");
+                        }
+                        // Reset _acceptedHeight so the correct block can be processed
+                        Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
+                        return;
+                    }
+                }
+
                 var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
                 if (result)
                 {
@@ -2115,7 +2150,11 @@ namespace ReserveBlockCore.Nodes
                     {
                         _ = P2PValidatorClient.BroadcastBlock(nextBlock, false);
                     }
-
+                }
+                else
+                {
+                    // Validation failed — reset _acceptedHeight so the correct block can try
+                    Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
                 }
             }
         }

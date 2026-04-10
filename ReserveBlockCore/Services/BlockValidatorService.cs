@@ -19,6 +19,8 @@ namespace ReserveBlockCore.Services
 {
     public class BlockValidatorService
     {
+        /// <summary>Rate-limits "block rejected" log messages — one log per validator:height combo.</summary>
+        private static readonly ConcurrentDictionary<string, bool> _blockRejectionLog = new();
         public static SemaphoreSlim ValidateBlocksSemaphore = new SemaphoreSlim(1, 1);
         public static SemaphoreSlim ValidateBlockSemaphore = new SemaphoreSlim(1, 1);
 
