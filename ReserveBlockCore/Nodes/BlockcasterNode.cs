@@ -872,67 +872,75 @@ namespace ReserveBlockCore.Nodes
                                     {
                                         if (terminalWinner == Globals.ValidatorAddress)
                                         {
-                                            //request block from random network val.
-                                            var validators = Globals.NetworkValidators.Values.ToList();
-                                            var excludeVals = new List<string>();
-
-                                            while(!blockFound)
+                                            // FIX: Craft the block exactly ONCE when we are the winning validator.
+                                            // Previously this looped through random validators, each independently crafting
+                                            // a different block (different timestamp/txs = different hash).
+                                            // Now we use Globals.NextValidatorBlock (pre-crafted) or request from ONE source only.
+                                            
+                                            // First check CasterRoundDict — another caster may have already stored the block
+                                            if (Globals.CasterRoundDict.TryGetValue(Height, out var existingRound) && existingRound?.Block != null)
                                             {
-                                                var rnd = new Random();
-                                                var randomizedValidator = validators
-                                                    .Where(x => !excludeVals.Contains(x.IPAddress))
-                                                    .OrderBy(x => rnd.Next())
-                                                    .ToList()
-                                                    .FirstOrDefault();
-
-                                                if(randomizedValidator == null)
+                                                block = existingRound.Block;
+                                                blockFound = true;
+                                            }
+                                            
+                                            // Try Globals.NextValidatorBlock (pre-crafted by this validator)
+                                            if (!blockFound)
+                                            {
+                                                var preBlock = Globals.NextValidatorBlock;
+                                                if (preBlock != null && preBlock.Height == Height)
                                                 {
-                                                    block = Globals.NextValidatorBlock;
+                                                    block = preBlock;
                                                     blockFound = true;
-                                                    round = Globals.CasterRoundDict[block.Height];
-                                                    if (round != null)
-                                                    {
-                                                        var compareRound = round;
-                                                        round.Block = block;
-                                                        round.Validator = Globals.ValidatorAddress;
-                                                        while (!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound))
-                                                        {
-                                                            await Task.Delay(75);
-                                                        }
-                                                    }
-                                                    break;
                                                 }
-                                                else
+                                            }
+                                            
+                                            // If still no block, request from exactly ONE network validator to craft it
+                                            if (!blockFound)
+                                            {
+                                                var validators = Globals.NetworkValidators.Values.ToList();
+                                                var excludeVals = new List<string>();
+                                                
+                                                while (!blockFound)
                                                 {
+                                                    var rnd = new Random();
+                                                    var randomizedValidator = validators
+                                                        .Where(x => !excludeVals.Contains(x.IPAddress))
+                                                        .OrderBy(x => rnd.Next())
+                                                        .ToList()
+                                                        .FirstOrDefault();
+                                                    
+                                                    if (randomizedValidator == null)
+                                                    {
+                                                        // No validators available — use pre-crafted block as last resort
+                                                        block = Globals.NextValidatorBlock;
+                                                        if (block != null)
+                                                            blockFound = true;
+                                                        break;
+                                                    }
+                                                    
                                                     var verificationResultTuple = await ProofUtility.VerifyValAvailability(randomizedValidator.IPAddress, randomizedValidator.Address, Height);
                                                     verificationResult = verificationResultTuple.Item1;
-                                                    if(!verificationResult)
+                                                    if (!verificationResult || verificationResultTuple.Item2 == null)
                                                     {
                                                         excludeVals.Add(randomizedValidator.IPAddress);
                                                         continue;
                                                     }
-
-                                                    if(verificationResultTuple.Item2 == null)
-                                                    {
-                                                        excludeVals.Add(randomizedValidator.IPAddress);
-                                                        continue;
-                                                    }
-
+                                                    
                                                     block = verificationResultTuple.Item2;
                                                     blockFound = true;
-                                                    round = Globals.CasterRoundDict[block.Height];
-                                                    if (round != null)
-                                                    {
-                                                        var compareRound = round;
-                                                        round.Block = block;
-                                                        round.Validator = randomizedValidator.Address;
-                                                        while (!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound))
-                                                        {
-                                                            await Task.Delay(75);
-                                                        }
-                                                    }
-                                                    break;
+                                                    break; // Use THIS block — don't try other validators
                                                 }
+                                            }
+                                            
+                                            // Store the single crafted block in CasterRoundDict so all casters share the same version
+                                            if (blockFound && block != null)
+                                            {
+                                                round = Globals.CasterRoundDict.GetOrAdd(block.Height, new CasterRound { BlockHeight = block.Height });
+                                                var compareRound = round;
+                                                round.Block = block;
+                                                round.Validator = Globals.ValidatorAddress;
+                                                Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound);
                                             }
 
                                             if(blockFound)
