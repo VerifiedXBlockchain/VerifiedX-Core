@@ -1142,6 +1142,103 @@ namespace ReserveBlockCore.Nodes
             }
         }
 
+        #region Height Sync
+
+        /// <summary>
+        /// Queries peer casters' block heights and fetches/applies any missing blocks
+        /// so this caster is at the same height before starting consensus.
+        /// </summary>
+        private static async Task SyncHeightWithPeersAsync()
+        {
+            try
+            {
+                var myHeight = Globals.LastBlock.Height;
+                var casters = Globals.BlockCasters.ToList();
+                if (casters.Count == 0) return;
+
+                long maxPeerHeight = myHeight;
+                string? bestPeerIP = null;
+
+                // Query all peer casters for their height in parallel
+                var tasks = casters
+                    .Where(c => !string.IsNullOrEmpty(c.PeerIP))
+                    .Select(async caster =>
+                    {
+                        try
+                        {
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                            var uri = $"http://{caster.PeerIP!.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetBlockHeight";
+                            var resp = await client.GetAsync(uri, cts.Token);
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                var body = await resp.Content.ReadAsStringAsync();
+                                if (long.TryParse(body, out var peerHeight))
+                                    return (ip: caster.PeerIP!, height: peerHeight);
+                            }
+                        }
+                        catch { }
+                        return (ip: "", height: 0L);
+                    })
+                    .ToList();
+
+                var results = await Task.WhenAll(tasks);
+                foreach (var r in results)
+                {
+                    if (r.height > maxPeerHeight)
+                    {
+                        maxPeerHeight = r.height;
+                        bestPeerIP = r.ip;
+                    }
+                }
+
+                // If we're behind, fetch and apply missing blocks
+                if (maxPeerHeight > myHeight && bestPeerIP != null)
+                {
+                    ConsoleWriterService.OutputVal($"\r\n[HeightSync] Behind by {maxPeerHeight - myHeight} block(s). Catching up from {bestPeerIP}...");
+                    for (long h = myHeight + 1; h <= maxPeerHeight; h++)
+                    {
+                        try
+                        {
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                            var uri = $"http://{bestPeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetBlock/{h}";
+                            var resp = await client.GetAsync(uri, cts.Token);
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                var json = await resp.Content.ReadAsStringAsync();
+                                if (!string.IsNullOrEmpty(json) && json != "0")
+                                {
+                                    var block = Newtonsoft.Json.JsonConvert.DeserializeObject<Block>(json);
+                                    if (block != null)
+                                    {
+                                        var result = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
+                                        if (result)
+                                        {
+                                            ConsoleWriterService.OutputVal($"[HeightSync] Applied block {h}.");
+                                        }
+                                        else
+                                        {
+                                            ConsoleWriterService.OutputVal($"[HeightSync] Block {h} validation failed. Stopping catch-up.");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            ConsoleWriterService.OutputVal($"[HeightSync] Error fetching block {h}: {ex.Message}");
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { /* best-effort sync */ }
+        }
+
+        #endregion
+
         #region Start Consensus
         private static async Task StartConsensus()
         {
