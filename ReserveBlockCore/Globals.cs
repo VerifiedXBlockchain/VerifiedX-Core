@@ -363,7 +363,7 @@ namespace ReserveBlockCore
         public static bool IsBootstrapMode => IsLocalBootstrapCaster && IsChainStalledForBootstrap;
 
         /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/> (when not bootstrap). Edit the initializer here only — not loaded from config.txt.</summary>
-        public static long CertEnforceHeight = 1337;
+        public static long CertEnforceHeight = long.MaxValue;
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;

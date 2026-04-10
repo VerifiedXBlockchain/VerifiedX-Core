@@ -41,9 +41,9 @@ namespace ReserveBlockCore.Nodes
         public static CasterRoundAudit? CasterRoundAudit = null;
         static long _lastStartingOverLogTicks;
 
-        // Dynamic reference points for block delay calculation
-        private static long ReferenceHeight = -1;
-        private static long ReferenceTime = -1;
+    // Dynamic reference points for block delay calculation — reset after each block
+    private static long ReferenceHeight = -1;
+    private static long ReferenceTime = -1;
 
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
@@ -521,12 +521,9 @@ namespace ReserveBlockCore.Nodes
                         PreviousHeight = Height;
                         await Task.WhenAll(BlockDelay, Task.Delay(1500));
                         
-                        // Initialize reference point on first run
-                        if (ReferenceHeight == -1)
-                        {
-                            ReferenceHeight = Globals.LastBlock.Height;
-                            ReferenceTime = TimeUtil.GetMillisecondTime();
-                        }
+                        // Reset reference point each block so delay correction is based on last block only, not cumulative drift
+                        ReferenceHeight = Globals.LastBlock.Height;
+                        ReferenceTime = TimeUtil.GetMillisecondTime();
                         
                         var CurrentTime = TimeUtil.GetMillisecondTime();
                         var DelayTimeCorrection = Globals.BlockTime * (Height - ReferenceHeight) - (CurrentTime - ReferenceTime);
