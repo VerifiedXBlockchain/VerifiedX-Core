@@ -405,6 +405,44 @@ namespace ReserveBlockCore.Controllers
             return Accepted("CasterInvitation reserved for signed rotation flow (plan §7.4).");
         }
 
+        /// <summary>
+        /// Caster readiness check — returns this caster's current height and ready status.
+        /// Used by the startup readiness barrier so all casters sync before beginning consensus.
+        /// </summary>
+        [HttpGet]
+        [Route("CasterReadyCheck/{height}")]
+        public ActionResult<string> CasterReadyCheck(long height)
+        {
+            try
+            {
+                var myHeight = Globals.LastBlock.Height;
+                var ready = Globals.IsBlockCaster && !string.IsNullOrEmpty(Globals.ValidatorAddress);
+                var result = new { Height = myHeight, Ready = ready, Address = Globals.ValidatorAddress ?? "" };
+                return Ok(JsonConvert.SerializeObject(result));
+            }
+            catch { return BadRequest(); }
+        }
+
+        /// <summary>
+        /// Returns the block hash this caster has for the given height.
+        /// Used in the block-hash agreement phase to ensure all casters commit the same block.
+        /// </summary>
+        [HttpGet]
+        [Route("GetBlockHash/{blockHeight}")]
+        public ActionResult<string> GetBlockHash(long blockHeight)
+        {
+            try
+            {
+                if (Globals.CasterRoundDict.TryGetValue(blockHeight, out var round) && round?.Block != null)
+                {
+                    var result = new { Hash = round.Block.Hash, Validator = round.Block.Validator, Height = blockHeight };
+                    return Ok(JsonConvert.SerializeObject(result));
+                }
+                return Ok("0");
+            }
+            catch { return Ok("0"); }
+        }
+
         [HttpGet]
         [Route("GetApproval/{blockHeight}")]
         public ActionResult<string?> GetApproval(long blockHeight)

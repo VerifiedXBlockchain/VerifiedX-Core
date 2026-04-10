@@ -52,6 +52,11 @@ namespace ReserveBlockCore.Nodes
     private static long ReferenceHeight = -1;
     private static long ReferenceTime = -1;
 
+    // Readiness barrier constants
+    const int READINESS_CHECK_INTERVAL_MS = 2000;
+    const int READINESS_MAX_WAIT_MS = 60000; // 60 seconds max wait for peers
+    const int BLOCK_HASH_AGREEMENT_TIMEOUT_MS = 5000; // 5 seconds for block hash agreement phase
+
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -545,7 +550,17 @@ namespace ReserveBlockCore.Nodes
 
                     _ = CleanupApprovedCasterBlocks();
 
+                    // CASTER-SYNC-FIX: Per-round height sync — ensure we're at the same height as peers before generating proofs
+                    await SyncHeightWithPeersAsync();
+
                     await ValidatorSnapshotService.RefreshSnapshotIfNeededAsync(Height);
+
+                    // Re-check height after sync — it may have advanced
+                    if (Height != Globals.LastBlock.Height + 1)
+                    {
+                        CasterRoundAudit?.AddStep($"Height changed after sync (was {Height}, now need {Globals.LastBlock.Height + 1}); restarting round.", false);
+                        continue;
+                    }
 
                     ValidatorApprovalBag.Clear();
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
@@ -688,8 +703,9 @@ namespace ReserveBlockCore.Nodes
                         if (selfIP != null && winningCasterProof != null)
                             Globals.CasterProofDict.TryAdd(selfIP, winningCasterProof);
 
-                        // Timed proof exchange loop: parallel HTTP inside, early exit when majority collected
-                        var requiredProofs = Math.Max(1, casterList.Count / 2 + 1); // majority quorum: 2/3, 3/5, 4/7…
+                        // CASTER-SYNC-FIX: Strict proof quorum — never proceed with just 1 proof
+                        // With 3 casters: need 2. With 5: need 3. Never allow a single self-proof to pass.
+                        var requiredProofs = Math.Max(2, casterList.Count / 2 + 1); // strict majority quorum: 2/3, 3/5, 4/7…
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                         {
@@ -1132,6 +1148,24 @@ namespace ReserveBlockCore.Nodes
                                         //This is done if non-caster wins the block
 
                                         await Task.Delay(200);
+                                    }
+
+                                    // CASTER-SYNC-FIX: Block hash agreement phase — verify all casters have the same block
+                                    if (blockFound && block != null)
+                                    {
+                                        CasterRoundAudit.AddStep($"[BlockHashAgreement] Verifying block hash agreement with peer casters…", true);
+                                        var agreedBlock = await VerifyBlockHashAgreementAsync(block, Height, terminalWinner);
+                                        if (agreedBlock != null)
+                                        {
+                                            block = agreedBlock;
+                                            // Update CasterRoundDict with the agreed block
+                                            if (Globals.CasterRoundDict.TryGetValue(Height, out var agreedRound))
+                                            {
+                                                var compareAgreedRound = agreedRound;
+                                                agreedRound.Block = block;
+                                                Globals.CasterRoundDict.TryUpdate(Height, agreedRound, compareAgreedRound);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2299,6 +2333,196 @@ namespace ReserveBlockCore.Nodes
                 var waitTime = Globals.BlockTime - TimeSinceLastBlock + 1000; // Add 1 second buffer
                 await Task.Delay((int)waitTime);
             }
+
+            // CASTER-SYNC-FIX: Startup readiness barrier — ensure all casters are at same height before first round
+            await WaitForCasterReadiness();
+        }
+
+        /// <summary>
+        /// Startup readiness barrier: queries peer casters to ensure a supermajority are online
+        /// and at the same block height before allowing consensus to begin.
+        /// This prevents a slow-booting caster from generating proofs independently and picking
+        /// a different winner than its peers.
+        /// </summary>
+        private static async Task WaitForCasterReadiness()
+        {
+            ConsoleWriterService.OutputVal("[ReadinessBarrier] Waiting for peer casters to be ready...");
+            var sw = Stopwatch.StartNew();
+
+            while (sw.ElapsedMilliseconds < READINESS_MAX_WAIT_MS)
+            {
+                // First, sync our height with peers in case we're behind
+                await SyncHeightWithPeersAsync();
+
+                var myHeight = Globals.LastBlock.Height;
+                var casters = Globals.BlockCasters.ToList();
+                if (casters.Count <= 1)
+                {
+                    ConsoleWriterService.OutputVal("[ReadinessBarrier] Only 1 caster (self); proceeding.");
+                    break;
+                }
+
+                var requiredReady = Math.Max(2, casters.Count / 2 + 1); // supermajority
+                int readyCount = 1; // count ourselves
+                int matchingHeightCount = 1; // count ourselves
+
+                var peerTasks = casters
+                    .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
+                    .Select(async caster =>
+                    {
+                        try
+                        {
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                            var uri = $"http://{caster.PeerIP!.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/CasterReadyCheck/{myHeight}";
+                            var resp = await client.GetAsync(uri, cts.Token);
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                var body = await resp.Content.ReadAsStringAsync();
+                                if (!string.IsNullOrEmpty(body) && body != "0")
+                                {
+                                    var peerStatus = JsonConvert.DeserializeAnonymousType(body, new { Height = 0L, Ready = false, Address = "" });
+                                    if (peerStatus != null)
+                                        return (ready: peerStatus.Ready, height: peerStatus.Height);
+                                }
+                            }
+                        }
+                        catch { }
+                        return (ready: false, height: -1L);
+                    })
+                    .ToList();
+
+                var results = await Task.WhenAll(peerTasks);
+                foreach (var r in results)
+                {
+                    if (r.ready) readyCount++;
+                    if (r.height == myHeight) matchingHeightCount++;
+                }
+
+                ConsoleWriterService.OutputVal($"[ReadinessBarrier] Ready: {readyCount}/{casters.Count}, Height-matched: {matchingHeightCount}/{casters.Count} (need {requiredReady})");
+
+                if (readyCount >= requiredReady && matchingHeightCount >= requiredReady)
+                {
+                    ConsoleWriterService.OutputVal("[ReadinessBarrier] Supermajority of casters ready and height-synced. Starting consensus.");
+                    break;
+                }
+
+                await Task.Delay(READINESS_CHECK_INTERVAL_MS);
+            }
+
+            if (sw.ElapsedMilliseconds >= READINESS_MAX_WAIT_MS)
+            {
+                ConsoleWriterService.OutputVal("[ReadinessBarrier] WARNING: Timed out waiting for peer readiness. Proceeding anyway — peers may be unavailable.");
+            }
+        }
+
+        /// <summary>
+        /// Block hash agreement phase: after fetching/crafting a block, exchange hashes with peer casters
+        /// to ensure all casters have the SAME block before committing.
+        /// Returns the agreed-upon block, or null if agreement could not be reached.
+        /// </summary>
+        private static async Task<Block?> VerifyBlockHashAgreementAsync(Block block, long height, string terminalWinner)
+        {
+            var casters = Globals.BlockCasters.ToList();
+            if (casters.Count <= 1)
+                return block; // Only one caster, no agreement needed
+
+            var requiredAgreement = Math.Max(2, casters.Count / 2 + 1);
+            var myHash = block.Hash;
+            int agreementCount = 1; // count ourselves
+            string? majorityHash = null;
+            var hashVotes = new Dictionary<string, int> { { myHash, 1 } };
+            var hashToSource = new Dictionary<string, string>(); // hash -> peer IP for fetching
+
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < BLOCK_HASH_AGREEMENT_TIMEOUT_MS)
+            {
+                var peerTasks = casters
+                    .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
+                    .Select(async caster =>
+                    {
+                        try
+                        {
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                            var uri = $"http://{caster.PeerIP!.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetBlockHash/{height}";
+                            var resp = await client.GetAsync(uri, cts.Token);
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                var body = await resp.Content.ReadAsStringAsync();
+                                if (!string.IsNullOrEmpty(body) && body != "0")
+                                {
+                                    var peerResult = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L });
+                                    if (peerResult != null && !string.IsNullOrEmpty(peerResult.Hash))
+                                        return (hash: peerResult.Hash, ip: caster.PeerIP!);
+                                }
+                            }
+                        }
+                        catch { }
+                        return (hash: (string?)null, ip: "");
+                    })
+                    .ToList();
+
+                var results = await Task.WhenAll(peerTasks);
+                hashVotes.Clear();
+                hashVotes[myHash] = 1;
+                hashToSource.Clear();
+
+                foreach (var r in results)
+                {
+                    if (r.hash != null)
+                    {
+                        if (!hashVotes.ContainsKey(r.hash))
+                            hashVotes[r.hash] = 0;
+                        hashVotes[r.hash]++;
+                        if (!hashToSource.ContainsKey(r.hash))
+                            hashToSource[r.hash] = r.ip;
+                    }
+                }
+
+                // Check for agreement
+                var best = hashVotes.OrderByDescending(kv => kv.Value).First();
+                if (best.Value >= requiredAgreement)
+                {
+                    majorityHash = best.Key;
+                    agreementCount = best.Value;
+                    break;
+                }
+
+                await Task.Delay(500);
+            }
+
+            if (majorityHash == null)
+            {
+                CasterRoundAudit?.AddStep($"[BlockHashAgreement] No supermajority hash agreement reached for height {height}.", false);
+                ConsoleWriterService.OutputVal($"[BlockHashAgreement] WARNING: No hash agreement at height {height}. Hash votes: {string.Join(", ", hashVotes.Select(kv => $"{kv.Key[..Math.Min(8, kv.Key.Length)]}={kv.Value}"))}");
+                // Fall back to our block — it's better than nothing, and the existing consensus gate will protect
+                return block;
+            }
+
+            CasterRoundAudit?.AddStep($"[BlockHashAgreement] Agreement: {agreementCount}/{casters.Count} on hash {majorityHash[..Math.Min(8, majorityHash.Length)]}…", true);
+
+            // If our hash matches, we're good
+            if (myHash == majorityHash)
+                return block;
+
+            // Our hash differs from majority — fetch the correct block from a peer that has it
+            ConsoleWriterService.OutputVal($"[BlockHashAgreement] Our block hash differs from majority. Fetching correct block from peer.");
+            if (hashToSource.TryGetValue(majorityHash, out var sourceIP))
+            {
+                var peerBlock = await CasterBlockFetch.TryFetchBlockAsync(
+                    new Peers { PeerIP = sourceIP },
+                    height,
+                    terminalWinner);
+                if (peerBlock != null && peerBlock.Hash == majorityHash)
+                {
+                    CasterRoundAudit?.AddStep($"[BlockHashAgreement] Replaced local block with majority block from {sourceIP}.", true);
+                    return peerBlock;
+                }
+            }
+
+            // Couldn't fetch the majority block — return our block as fallback
+            return block;
         }
 
         #endregion

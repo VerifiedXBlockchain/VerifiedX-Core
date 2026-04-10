@@ -300,23 +300,57 @@ namespace ReserveBlockCore.Nodes
         }
 
         /// <summary>Phase 2: request the same height from two casters; require matching hash when both respond.</summary>
+        /// <summary>
+        /// CASTER-SYNC-FIX: Enhanced block fetch — queries ALL reachable casters in parallel
+        /// and requires a supermajority to agree on the same block hash.
+        /// Previously only checked 2 casters, allowing split-brain when they disagreed.
+        /// </summary>
         public static async Task<Block?> FetchBlockWithRedundantCasterAgreementAsync(long height, string winnerAddress)
         {
-            var peers = Globals.BlockCasters.Where(x => !string.IsNullOrEmpty(x.PeerIP)).Take(2).ToList();
+            var peers = Globals.BlockCasters.Where(x => !string.IsNullOrEmpty(x.PeerIP)).ToList();
             if (peers.Count == 0)
                 return null;
 
-            var a = await CasterBlockFetch.TryFetchBlockAsync(peers[0], height, winnerAddress);
-            if (a == null || a.Validator != winnerAddress)
+            // Fetch from ALL casters in parallel
+            var fetchTasks = peers.Select(async peer =>
+            {
+                try
+                {
+                    var block = await CasterBlockFetch.TryFetchBlockAsync(peer, height, winnerAddress);
+                    if (block != null && block.Validator == winnerAddress)
+                        return (block, peer.PeerIP);
+                }
+                catch { }
+                return ((Block?)null, peer.PeerIP);
+            }).ToList();
+
+            var results = await Task.WhenAll(fetchTasks);
+            var validResults = results.Where(r => r.Item1 != null).ToList();
+
+            if (validResults.Count == 0)
                 return null;
-            if (peers.Count < 2)
-                return a;
 
-            var b = await CasterBlockFetch.TryFetchBlockAsync(peers[1], height, winnerAddress);
-            if (b == null || b.Validator != winnerAddress)
-                return a;
+            // Group by hash and find the supermajority
+            var requiredAgreement = Math.Max(2, peers.Count / 2 + 1);
+            var hashGroups = validResults
+                .GroupBy(r => r.Item1!.Hash)
+                .OrderByDescending(g => g.Count())
+                .ToList();
 
-            return a.Hash == b.Hash ? a : null;
+            var bestGroup = hashGroups.First();
+            if (bestGroup.Count() >= requiredAgreement)
+            {
+                // Supermajority agrees on this hash
+                return bestGroup.First().Item1;
+            }
+
+            // If only one caster responded, accept it (better than nothing)
+            if (validResults.Count == 1)
+                return validResults[0].Item1;
+
+            // No supermajority — return null to signal disagreement
+            ConsoleWriterService.OutputVal($"[FetchBlock] No hash agreement at height {height}: {string.Join(", ", hashGroups.Select(g => $"{g.Key?[..Math.Min(8, g.Key?.Length ?? 0)]}={g.Count()}"))}");
+            return null;
         }
 
         #endregion
