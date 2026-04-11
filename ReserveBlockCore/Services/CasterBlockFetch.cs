@@ -10,14 +10,21 @@ namespace ReserveBlockCore.Services
     public static class CasterBlockFetch
     {
         /// <summary>
-        /// Fetches a block from a peer caster. Retries up to 5 times with 2-second delays
+        /// Fetches a block from a peer caster. Retries up to 3 times with 1-second delays
         /// to allow the winning caster's consensus loop time to craft and store the block.
         /// The RequestBlock endpoint only returns cached blocks (never crafts independently)
         /// to prevent fork-causing hash divergence.
+        /// 
+        /// FIX: Reduced from 5×2s to 3×1s because blocks typically arrive via broadcast
+        /// within seconds. Also short-circuits if block arrives via broadcast during retries.
         /// </summary>
         public static async Task<Block?> TryFetchBlockAsync(Peers caster, long blockHeight, string winnerAddress)
         {
             if (caster == null || string.IsNullOrEmpty(caster.PeerIP))
+                return null;
+
+            // FIX: Short-circuit if block already arrived via broadcast
+            if (Globals.LastBlock.Height >= blockHeight)
                 return null;
 
             var ip = caster.PeerIP.Replace("::ffff:", "");
@@ -32,11 +39,15 @@ namespace ReserveBlockCore.Services
 
             // Retry loop: the winning caster may not have stored the block yet.
             // RequestBlock returns "0" until the block is ready (it no longer crafts independently).
-            const int maxRetries = 5;
-            const int retryDelayMs = 2000;
+            const int maxRetries = 3;
+            const int retryDelayMs = 1000;
 
             for (int attempt = 0; attempt < maxRetries; attempt++)
             {
+                // FIX: Check if block arrived via broadcast before each retry
+                if (Globals.LastBlock.Height >= blockHeight)
+                    return null;
+
                 if (attempt > 0)
                     await Task.Delay(retryDelayMs).ConfigureAwait(false);
 

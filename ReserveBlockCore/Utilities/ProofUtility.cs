@@ -156,18 +156,45 @@ namespace ReserveBlockCore.Utilities
             return proofs;
         }
 
+        /// <summary>
+        /// Checks if a wallet version string has a major version matching Globals.MajorVer.
+        /// Returns false for null/empty/malformed versions.
+        /// </summary>
+        private static bool IsMajorVersionCurrent(string? walletVersion)
+        {
+            if (string.IsNullOrEmpty(walletVersion))
+                return false;
+            try
+            {
+                var parts = walletVersion!.Split('.');
+                if (parts.Length < 1) return false;
+                var major = Convert.ToInt32(parts[0]);
+                return major >= Globals.MajorVer;
+            }
+            catch { return false; }
+        }
+
         public static async Task<List<Proof>> GenerateCasterProofs()
         {
             var all = await GetOrCreateAllProofsAsync();
+            
+            // FIX: Filter BlockCasters to only include peers with current major wallet version.
+            // This prevents phantom casters on outdated versions from inflating the proof count
+            // and potentially winning VRF elections they can't fulfil.
+            var validCasters = Globals.BlockCasters
+                .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                .Where(c => IsMajorVersionCurrent(c.WalletVersion))
+                .ToList();
+            
             var casterAddrs = new HashSet<string>(
-                Globals.BlockCasters.Where(c => !string.IsNullOrEmpty(c.ValidatorAddress)).Select(c => c.ValidatorAddress!),
+                validCasters.Select(c => c.ValidatorAddress!),
                 StringComparer.Ordinal);
             var list = all.Where(p => casterAddrs.Contains(p.Address)).ToList();
 
             // Snapshot / NetworkValidators often omit seed casters; build missing proofs from agreed BlockCasters (pubkey on peer).
             var blockHeight = Globals.LastBlock.Height + 1;
             var prevHash = Globals.LastBlock.Hash;
-            foreach (var peer in Globals.BlockCasters.ToList())
+            foreach (var peer in validCasters)
             {
                 if (string.IsNullOrEmpty(peer.ValidatorAddress))
                     continue;
