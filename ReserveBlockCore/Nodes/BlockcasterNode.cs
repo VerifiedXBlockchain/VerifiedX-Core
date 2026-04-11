@@ -19,6 +19,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks.Dataflow;
 using System.Xml.Schema;
+using static ReserveBlockCore.Utilities.CasterLogUtility;
 
 
 namespace ReserveBlockCore.Nodes
@@ -30,14 +31,14 @@ namespace ReserveBlockCore.Nodes
         private readonly IHubContext<P2PBlockcasterServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
-        const int PROOF_COLLECTION_TIME = 4000; // 4 seconds — sync barrier for caster proof exchange
-        const int APPROVAL_WINDOW = 8000;       // 8 seconds
-        const int CASTER_VOTE_WINDOW = 4000;    // 4 seconds per-caster HTTP timeout
-        const int GET_APPROVAL_HTTP_TIMEOUT_MS = 2500; // per-caster HTTP; parallelized so total ≈ this, not N×6s
-        const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
-        const int MAX_ROUND_DURATION_MS = 25000; // 25 seconds — hard cap for entire consensus round
-        const int WINNER_VERIFY_TIMEOUT_MS = 5000; // 5 seconds — total time for parallel winner verification
-        const int RETRY_DELAY_MS = 500;          // 500ms — delay between round retries (was 2000ms)
+        const int PROOF_COLLECTION_TIME = 3000; // 3 seconds — sync barrier for caster proof exchange (was 4s)
+        const int APPROVAL_WINDOW = 4000;       // 4 seconds (was 8s) — reduced because VRF is deterministic
+        const int CASTER_VOTE_WINDOW = 3000;    // 3 seconds per-caster HTTP timeout (was 4s)
+        const int GET_APPROVAL_HTTP_TIMEOUT_MS = 2000; // per-caster HTTP; parallelized
+        const int BLOCK_REQUEST_WINDOW = 8000;  // 8 seconds (was 12s)
+        const int MAX_ROUND_DURATION_MS = 20000; // 20 seconds — hard cap for entire consensus round
+        const int WINNER_VERIFY_TIMEOUT_MS = 5000; // 5 seconds — total time for winner verification
+        const int RETRY_DELAY_MS = 300;          // 300ms — delay between round retries
         /// <summary>Replacement-round state; <see langword="volatile"/> so readers see latest reference without torn reads of the field itself.</summary>
         public static volatile ReplacementRound? _currentRound;
         public static volatile List<string>? _allCasterAddresses;
@@ -483,6 +484,8 @@ namespace ReserveBlockCore.Nodes
             var PreviousHeight = -1L;
             var BlockDelay = Task.CompletedTask;
             ConsoleWriterService.OutputVal("Booting up consensus loop");
+            CasterLogUtility.Clear();
+            CasterLogUtility.Log($"=== Consensus loop starting. Validator={Globals.ValidatorAddress} ===", "BOOT");
 
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
@@ -531,6 +534,9 @@ namespace ReserveBlockCore.Nodes
                         CasterRoundAudit.AddStep($"Retry at height {Height}…", false);
                     }
 
+                    var roundSw = Stopwatch.StartNew(); // Track total round time
+                    CasterLogUtility.Log($"--- ROUND START height={Height} lastBlock={Globals.LastBlock.Height} ---", "ROUND");
+
                     if (PreviousHeight != Height)
                     {
                         PreviousHeight = Height;
@@ -560,8 +566,11 @@ namespace ReserveBlockCore.Nodes
                     //Generate Proofs for ALL vals
                     CasterRoundAudit.AddStep($"Generating Proofs for height: {Height}.", true);
                     //ConsoleWriterService.OutputVal($"\r\nGenerating Proofs for height: {Height}.");
+                    var proofGenSw = Stopwatch.StartNew();
                     var casterProofs = await ProofUtility.GenerateCasterProofs();
                     var proofs = await ProofUtility.GenerateProofs();
+                    proofGenSw.Stop();
+                    CasterLogUtility.Log($"ProofGen: {proofGenSw.ElapsedMilliseconds}ms, casterProofs={casterProofs.Count}, allProofs={proofs.Count}", "PROOFS");
                     CasterRoundAudit.AddStep($"{proofs.Count()} Proofs Generated", true);
                     //ConsoleWriterService.OutputVal($"\r\n{proofs.Count()} Proofs Generated");
                     var winningCasterProof = await ProofUtility.SortProofs(casterProofs);
@@ -594,11 +603,13 @@ namespace ReserveBlockCore.Nodes
 
                     if (winningCasterProof != null && casterProofs.Count() > 0)
                     {
+                        CasterLogUtility.Log($"Winner candidate: {winningCasterProof.Address} VRF={winningCasterProof.VRFNumber}", "VERIFY");
                         CasterRoundAudit.AddStep($"Attempting Proof on Address: {winningCasterProof.Address} (casterProofs: {casterProofs.Count()})", true);
-                        //ConsoleWriterService.OutputVal($"\r\nAttempting Proof on Address: {winningProof.Address}");
                         var verificationResult = false;
                         List<string> ExcludeValList = new List<string>();
-                        while (!verificationResult)
+                        var verifySw = Stopwatch.StartNew();
+                        int verifyAttempts = 0;
+                        while (!verificationResult && verifySw.ElapsedMilliseconds < WINNER_VERIFY_TIMEOUT_MS)
                         {
                             if (winningCasterProof != null)
                             {
@@ -665,10 +676,15 @@ namespace ReserveBlockCore.Nodes
                             }
                         }
 
+                        verifySw.Stop();
+                        CasterLogUtility.Log($"Verify done: {verifySw.ElapsedMilliseconds}ms, attempts={verifyAttempts}, winner={winningCasterProof?.Address ?? "NULL"}", "VERIFY");
+
                         if (winningCasterProof == null)
                         {
                             if (CasterRoundAudit != null)
                                 CasterRoundAudit.AddStep("Could not verify winning caster; retrying…", false);
+                            CasterLogUtility.Log($"ROUND FAILED: no verified winner after {roundSw.ElapsedMilliseconds}ms", "ROUND");
+                            CasterLogUtility.Flush();
                             await Task.Delay(RETRY_DELAY_MS);
                             continue;
                         }
@@ -699,12 +715,15 @@ namespace ReserveBlockCore.Nodes
                         // VRF is deterministic (seed = publicKey + height + prevHash, no caster address).
                         // All casters compute identical VRF numbers, so 2/3 proofs always pick the same winner.
                         var requiredProofs = Math.Max(2, casterList.Count / 2 + 1); // majority quorum
+                        CasterLogUtility.Log($"ProofExchange: need {requiredProofs}/{casterList.Count} proofs, have {Globals.CasterProofDict.Count()} (self-injected)", "EXCHANGE");
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                         {
-                            await Task.WhenAll(GetWinningProof(winningCasterProof), SendWinningProof(winningCasterProof));
+                            // FIX 3: Only pull proofs via HTTP (GetWinningProof).
+                            // SendWinningProof uses BlockCasterNodes (SignalR) which is always empty — removed.
+                            await GetWinningProof(winningCasterProof);
                             
-                            // Early exit if we have all proofs
+                            // Early exit if we have enough proofs
                             if (Globals.CasterProofDict.Count() >= requiredProofs)
                                 break;
                             
@@ -712,10 +731,14 @@ namespace ReserveBlockCore.Nodes
                         }
                         swProofCollectionTime.Stop();
 
+                        CasterLogUtility.Log($"ProofExchange done: {swProofCollectionTime.ElapsedMilliseconds}ms, collected={Globals.CasterProofDict.Count()}/{requiredProofs}", "EXCHANGE");
+
                         if (Globals.CasterProofDict.Count() < requiredProofs)
                         {
                             if (CasterRoundAudit != null)
                                 CasterRoundAudit.AddStep($"Caster P2P proofs {Globals.CasterProofDict.Count()}/{requiredProofs}; retrying…", false);
+                            CasterLogUtility.Log($"ROUND FAILED: insufficient proofs after {roundSw.ElapsedMilliseconds}ms", "ROUND");
+                            CasterLogUtility.Flush();
                             await Task.Delay(RETRY_DELAY_MS);
                             continue;
                         }
@@ -741,150 +764,31 @@ namespace ReserveBlockCore.Nodes
                             var finalizedWinner = finalizedWinnerGroup.FirstOrDefault();
                             if (finalizedWinner != null)
                             {
+                                CasterLogUtility.Log($"Finalized winner: {finalizedWinner.Address} VRF={finalizedWinner.VRFNumber} proofCount={proofSnapshot.Count}", "WINNER");
                                 CasterRoundAudit.AddStep($"Finalized winner : {finalizedWinner.Address}", true);
-                                //ConsoleWriterService.OutputVal($"\r\nFinalized winner : {finalizedWinner.Address}");
 
-                                var approved = false;
+                                // FIX 2: SKIP APPROVAL PHASE ENTIRELY.
+                                // VRF is deterministic (seed = publicKey + height + prevHash).
+                                // All casters independently compute the same VRF numbers and pick the same winner.
+                                // The approval loop was 4-8 seconds of HTTP polling that added latency and caused
+                                // timing drift between casters. Instead, use the proof snapshot directly.
+                                var terminalWinner = finalizedWinner.Address;
+                                var approved = true;
 
-                                var sw = Stopwatch.StartNew();
-                                List<string> CasterApprovalList = new List<string>();
-                                Dictionary<string, string> CasterVoteList = new Dictionary<string, string>();
-
-                                string? terminalWinner = null;
-
-                                while (!approved && sw.ElapsedMilliseconds < APPROVAL_WINDOW)
+                                // Still update CasterRoundDict so the GetApproval endpoint works for any peer that checks
                                 {
-
-                                    if (Globals.LastBlock.Height >= finalizedWinner.BlockHeight)
-                                        break;
-
-                                    if (!Globals.CasterRoundDict.ContainsKey(finalizedWinner.BlockHeight))
-                                    {
-                                        var casterRound = new CasterRound
-                                        {
-                                            BlockHeight = finalizedWinner.BlockHeight,
-                                            Validator = finalizedWinner.Address
-                                        };
-
-                                        casterRound.ProgressRound();
-
-                                        Globals.CasterRoundDict[finalizedWinner.BlockHeight] = casterRound;
-                                    }
-                                    else
-                                    {
-                                        round = Globals.CasterRoundDict[finalizedWinner.BlockHeight];
-                                        round.ProgressRound();
-                                        if (round.RoundStale())
-                                        {
-                                            var casterRound = new CasterRound
-                                            {
-                                                BlockHeight = finalizedWinner.BlockHeight,
-                                                Validator = finalizedWinner.Address
-                                            };
-                                            Globals.CasterRoundDict[finalizedWinner.BlockHeight] = casterRound;
-                                        }
-                                        else
-                                        {
-                                            var compareRound = round;
-                                            round.Validator = finalizedWinner.Address;
-                                            round.BlockHeight = finalizedWinner.BlockHeight;
-                                            while (!Globals.CasterRoundDict.TryUpdate(round.BlockHeight, round, compareRound))
-                                            {
-                                                await Task.Delay(75);
-                                            }
-                                        }
-                                    }
-                                    //Caster dict null value here potentially due to it being to fast.
-                                    var castersSnap = Globals.BlockCasters.ToList();
-                                    await Task.WhenAll(castersSnap.Select(c => PollCasterGetApprovalAsync(c, finalizedWinner)));
-
-                                    await Task.Delay(100);
-
-                                    var vBag = ValidatorApprovalBag.Where(x => x.Item2 == finalizedWinner.BlockHeight).ToList();
-
-                                    CasterRoundAudit.AddStep($"Validator Bag Count: {vBag.Count()}.", false);
-                                    //ConsoleWriterService.OutputVal($"\r\nValidator Bag Count: {vBag.Count()}.");
-
-                                    var approvalCount = Math.Max(2, casterList.Count / 2 + 1); // majority quorum: 2/3, 3/5, 4/7…
-
-                                    if (vBag.Any() && !approved)
-                                    {
-                                        foreach (var vote in vBag)
-                                        {
-                                            if (!CasterVoteList.ContainsKey(vote.Item1))
-                                                CasterVoteList[vote.Item1] = vote.Item3;
-                                        }
-
-                                        //Issue is here one of them is still null... Figure out WHY!
-                                        //Look above. Could be its asking the first one and it hasn't populated its dictionary yet. 
-                                        var result = CasterVoteList.GroupBy(x => x.Value)
-                                            .Where(x => x.Count() >= approvalCount)
-                                            .Select(g => new { Value = g.Key, Count = g.Count() })
-                                            .OrderByDescending(g => g.Count)
-                                            .FirstOrDefault();
-
-                                        if (result != null)
-                                        {
-                                            if (result.Count >= approvalCount)
-                                            {
-                                                terminalWinner = result.Value;
-                                                //If our winner does not match the consensus get the one that does.
-
-                                                CasterRoundAudit.AddStep($"Bag was approved. Moving to next block.", true);
-                                                //ConsoleWriterService.OutputVal($"\r\nBag was approved. Moving to next block.");
-
-                                                approved = true;
-                                                break;
-                                            }
-                                        }
-                                        else
-                                        {
-                                            // VRF is deterministic — tiebreak from any proof subset picks the same winner.
-                                            var tie = proofSnapshot
-                                                .Where(x => x.BlockHeight == Height)
-                                                .OrderBy(x => x.VRFNumber)
-                                                .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
-                                                .ThenBy(x => x.Address, StringComparer.Ordinal)
-                                                .FirstOrDefault();
-                                            if (tie != null)
-                                            {
-                                                terminalWinner = tie.Address;
-                                                CasterRoundAudit.AddStep($"Deterministic tiebreak winner: {terminalWinner}", true);
-                                                approved = true;
-                                                break;
-                                            }
-                                            if (Globals.OptionalLogging)
-                                                ConsoleWriterService.OutputVal("\r\n Bag failed. No Result was found.");
-                                            CasterRoundAudit.AddStep("Bag failed — no tiebreak candidate; continuing approval window.", false);
-                                            await Task.Delay(200);
-                                        }
-                                    }
+                                    var casterRound = Globals.CasterRoundDict.GetOrAdd(finalizedWinner.BlockHeight, new CasterRound { BlockHeight = finalizedWinner.BlockHeight });
+                                    var compareRound = casterRound;
+                                    casterRound.Validator = terminalWinner;
+                                    casterRound.BlockHeight = finalizedWinner.BlockHeight;
+                                    casterRound.ProgressRound();
+                                    Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, casterRound, compareRound);
                                 }
 
-                                if (!approved)
-                                {
-                                    // VRF is deterministic — all casters compute the same VRF numbers,
-                                    // so tiebreak from any proof subset picks the same winner.
-                                    var tieAfter = proofSnapshot
-                                        .Where(x => x.BlockHeight == Height)
-                                        .OrderBy(x => x.VRFNumber)
-                                        .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
-                                        .ThenBy(x => x.Address, StringComparer.Ordinal)
-                                        .FirstOrDefault();
-                                    if (tieAfter != null)
-                                    {
-                                        terminalWinner = tieAfter.Address;
-                                        approved = true;
-                                        CasterRoundAudit.AddStep($"Approval window ended; deterministic tiebreak winner: {terminalWinner}", true);
-                                    }
-                                    else
-                                    {
-                                        CasterRoundAudit.AddStep("No terminal winner after approval window; restarting round.", true);
-                                        continue;
-                                    }
-                                }
+                                CasterLogUtility.Log($"Approval SKIPPED (VRF deterministic). terminalWinner={terminalWinner}", "APPROVAL");
+                                CasterRoundAudit.AddStep($"Approval skipped — VRF deterministic winner: {terminalWinner}", true);
 
-                                //ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
+                                CasterLogUtility.Log($"Block fetch phase: iAmWinner={terminalWinner == Globals.ValidatorAddress}, winner={terminalWinner}", "BLOCKFETCH");
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight && approved)
                                 {
                                     bool blockFound = false;
@@ -1019,132 +923,70 @@ namespace ReserveBlockCore.Nodes
                                         }
                                         else
                                         {
-                                            //wait and request block or wait for it to show up. 
-                                            int attempts = 0;
-                                            while (attempts < 3)
+                                            // FIX 4: Fetch block directly from each caster via RequestBlock endpoint.
+                                            // FetchBlockWithRedundantCasterAgreementAsync required supermajority agreement
+                                            // but non-winning casters don't have the block yet, causing it to always fail.
+                                            CasterRoundAudit.AddStep($"Requesting block from peer casters directly.", true);
+                                            foreach (var caster in Globals.BlockCasters.ToList())
                                             {
                                                 try
                                                 {
-                                                    attempts++;
-                                                    CasterRoundAudit.AddStep($"Requesting block from Casters.", true);
-                                                    block = await ValidatorNode.FetchBlockWithRedundantCasterAgreementAsync(finalizedWinner.BlockHeight, terminalWinner);
-                                                    if (block == null)
+                                                    block = await CasterBlockFetch.TryFetchBlockAsync(caster, finalizedWinner.BlockHeight, terminalWinner);
+                                                    if (block != null && block.Validator == terminalWinner)
+                                                    {
+                                                        failedToReachConsensus = false;
+                                                        blockFound = true;
+
+                                                        round = Globals.CasterRoundDict.GetOrAdd(block.Height, new CasterRound { BlockHeight = block.Height });
+                                                        var compareRound = round;
+                                                        round.Block = block;
+                                                        round.Validator = block.Validator;
+                                                        Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound);
+
+                                                        CasterRoundAudit.AddStep($"Block fetched from {caster.PeerIP}. Height: {block.Height}", true);
+                                                        var IP = finalizedWinner.IPAddress;
+                                                        var nextHeight = Globals.LastBlock.Height + 1;
+                                                        var currentHeight = block.Height;
+
+                                                        if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+                                                        {
+                                                            BlockDownloadService.BlockDict.AddOrUpdate(
+                                                                currentHeight,
+                                                                new List<(Block, string)> { (block, IP) },
+                                                                (key, existingList) =>
+                                                                {
+                                                                    existingList.Add((block, IP));
+                                                                    return existingList;
+                                                                });
+                                                            if (nextHeight == currentHeight)
+                                                                await BlockValidatorService.ValidateBlocks();
+                                                            if (nextHeight < currentHeight)
+                                                                await BlockDownloadService.GetAllBlocks();
+                                                        }
+
+                                                        if (nextHeight == currentHeight)
+                                                        {
+                                                            await BroadcastConsensusBlockAsync(block, terminalWinner);
+                                                        }
+
+                                                        break;
+                                                    }
+                                                    else
                                                     {
                                                         failedToReachConsensus = true;
-                                                        await Task.Delay(75);
-                                                        continue;
                                                     }
-
-                                                    {
-                                                                        failedToReachConsensus = false;
-                                                                        blockFound = true;
-
-                                                                        round = Globals.CasterRoundDict[block.Height];
-                                                                        if (round != null)
-                                                                        {
-                                                                            var compareRound = round;
-                                                                            round.Block = block;
-                                                                            round.Validator = block.Validator;
-                                                                            while (!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound)) ;
-                                                                        }
-
-                                                                        CasterRoundAudit.AddStep($"Block deserialized. Height: {block.Height}", true);
-                                                                        //ConsoleWriterService.OutputVal($"Block deserialized. Height: {block.Height}");
-                                                                        var IP = finalizedWinner.IPAddress;
-                                                                        var nextHeight = Globals.LastBlock.Height + 1;
-                                                                        var currentHeight = block.Height;
-
-                                                if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                                {
-                                                    //ConsoleWriterService.OutputVal($"Processing Block");
-                                                    // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                                                    BlockDownloadService.BlockDict.AddOrUpdate(
-                                                        currentHeight,
-                                                        new List<(Block, string)> { (block, IP) },
-                                                        (key, existingList) =>
-                                                        {
-                                                            existingList.Add((block, IP));
-                                                            return existingList;
-                                                        });
-                                                    if (nextHeight == currentHeight)
-                                                        await BlockValidatorService.ValidateBlocks();
-                                                    if (nextHeight < currentHeight)
-                                                        await BlockDownloadService.GetAllBlocks();
                                                 }
-
-                                                                        if (currentHeight < nextHeight)
-                                                                        {
-                                                                            blockFound = true;
-                                                                            //_ = AddConsensusHeaderQueue(consensusHeader);
-                                                                            if (Globals.LastBlock.Height < block.Height)
-                                                                                await BlockValidatorService.ValidateBlocks();
-
-                                                                            if (nextHeight == currentHeight)
-                                                                            {
-                                                                                //ConsoleWriterService.OutputVal($"Inside block service B");
-                                                                                await BroadcastConsensusBlockAsync(block, terminalWinner);
-                                                                                //_ = P2PValidatorClient.BroadcastBlock(block);
-                                                                            }
-
-                                                                            if (nextHeight < currentHeight)
-                                                                                await BlockDownloadService.GetAllBlocks();
-
-                                                                            break;
-                                                                        }
-                                                                        else
-                                                                        {
-                                                                            //ConsoleWriterService.OutputVal($"Inside block service C");
-                                                                            if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                                                            {
-                                                                                // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                                                                                BlockDownloadService.BlockDict.AddOrUpdate(
-                                                                                    currentHeight,
-                                                                                    new List<(Block, string)> { (block, IP) },
-                                                                                    (key, existingList) =>
-                                                                                    {
-                                                                                        existingList.Add((block, IP));
-                                                                                        return existingList;
-                                                                                    });
-                                                                                if (nextHeight == currentHeight)
-                                                                                    await BlockValidatorService.ValidateBlocks();
-                                                                                if (nextHeight < currentHeight)
-                                                                                    await BlockDownloadService.GetAllBlocks();
-                                                                            }
-
-                                                                            if (currentHeight < nextHeight)
-                                                                            {
-                                                                                //ConsoleWriterService.OutputVal($"Inside block service D");
-                                                                                blockFound = true;
-                                                                                //_ = AddConsensusHeaderQueue(consensusHeader);
-                                                                                if (Globals.LastBlock.Height < block.Height)
-                                                                                    await BlockValidatorService.ValidateBlocks();
-
-                                                                                if (nextHeight == currentHeight)
-                                                                                {
-                                                                                    //ConsoleWriterService.OutputVal($"Inside block service E");
-                                                                                    await BroadcastConsensusBlockAsync(block, terminalWinner);
-                                                                                    //_ = P2PValidatorClient.BroadcastBlock(block);
-                                                                                }
-
-                                                                                if (nextHeight < currentHeight)
-                                                                                    await BlockDownloadService.GetAllBlocks();
-
-                                                                                break;
-                                                                            }
-                                                                        }
-                                                    }
-
-                                                    await Task.Delay(75);
-                                                }
-                                                catch { }
+                                                catch { failedToReachConsensus = true; }
+                                                await Task.Delay(75);
                                             }
-                                            
                                         }
                                         /////////////////////////////////////
                                         //This is done if non-caster wins the block
 
                                         await Task.Delay(200);
                                     }
+
+                                    CasterLogUtility.Log($"BlockFetch done: {swb.ElapsedMilliseconds}ms, found={blockFound}, failed={failedToReachConsensus}", "BLOCKFETCH");
 
                                     // CASTER-SYNC-FIX: Block hash agreement phase — verify all casters have the same block
                                     if (blockFound && block != null)
@@ -1175,6 +1017,9 @@ namespace ReserveBlockCore.Nodes
                         await Task.Delay(Math.Max(3000, Globals.BlockTime / 4));
                         continue;
                     }
+
+                    CasterLogUtility.Log($"--- ROUND END height={Height} totalTime={roundSw.ElapsedMilliseconds}ms lastBlock={Globals.LastBlock.Height} ---", "ROUND");
+                    CasterLogUtility.Flush();
 
                     if (Environment.TickCount64 - _lastStartingOverLogTicks >= 15_000)
                     {
