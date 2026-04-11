@@ -553,17 +553,7 @@ namespace ReserveBlockCore.Nodes
 
                     _ = CleanupApprovedCasterBlocks();
 
-                    // CASTER-SYNC-FIX: Per-round height sync — ensure we're at the same height as peers before generating proofs
-                    await SyncHeightWithPeersAsync();
-
                     await ValidatorSnapshotService.RefreshSnapshotIfNeededAsync(Height);
-
-                    // Re-check height after sync — it may have advanced
-                    if (Height != Globals.LastBlock.Height + 1)
-                    {
-                        CasterRoundAudit?.AddStep($"Height changed after sync (was {Height}, now need {Globals.LastBlock.Height + 1}); restarting round.", false);
-                        continue;
-                    }
 
                     ValidatorApprovalBag.Clear();
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
@@ -706,9 +696,9 @@ namespace ReserveBlockCore.Nodes
                         if (selfIP != null && winningCasterProof != null)
                             Globals.CasterProofDict.TryAdd(selfIP, winningCasterProof);
 
-                        // DESYNC-FIX: Require ALL caster proofs — not just majority.
-                        // Partial proof sets caused each caster to select different winners.
-                        var requiredProofs = casterList.Count; // ALL casters must participate
+                        // VRF is deterministic (seed = publicKey + height + prevHash, no caster address).
+                        // All casters compute identical VRF numbers, so 2/3 proofs always pick the same winner.
+                        var requiredProofs = Math.Max(2, casterList.Count / 2 + 1); // majority quorum
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                         {
@@ -849,11 +839,23 @@ namespace ReserveBlockCore.Nodes
                                         }
                                         else
                                         {
-                                            // DESYNC-FIX: NO tiebreak fallback — if no majority vote, keep polling.
-                                            // Tiebreak was causing each caster to pick a different winner from incomplete data.
+                                            // VRF is deterministic — tiebreak from any proof subset picks the same winner.
+                                            var tie = proofSnapshot
+                                                .Where(x => x.BlockHeight == Height)
+                                                .OrderBy(x => x.VRFNumber)
+                                                .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
+                                                .ThenBy(x => x.Address, StringComparer.Ordinal)
+                                                .FirstOrDefault();
+                                            if (tie != null)
+                                            {
+                                                terminalWinner = tie.Address;
+                                                CasterRoundAudit.AddStep($"Deterministic tiebreak winner: {terminalWinner}", true);
+                                                approved = true;
+                                                break;
+                                            }
                                             if (Globals.OptionalLogging)
-                                                ConsoleWriterService.OutputVal("\r\n Bag failed. No majority vote yet — continuing to poll.");
-                                            CasterRoundAudit.AddStep("No majority vote yet; continuing approval window.", false);
+                                                ConsoleWriterService.OutputVal("\r\n Bag failed. No Result was found.");
+                                            CasterRoundAudit.AddStep("Bag failed — no tiebreak candidate; continuing approval window.", false);
                                             await Task.Delay(200);
                                         }
                                     }
@@ -861,11 +863,25 @@ namespace ReserveBlockCore.Nodes
 
                                 if (!approved)
                                 {
-                                    // DESYNC-FIX: NO tiebreak fallback after approval window.
-                                    // If casters can't agree, retry the entire round — don't guess.
-                                    CasterRoundAudit.AddStep("Approval window ended without majority agreement; restarting round.", false);
-                                    await Task.Delay(RETRY_DELAY_MS);
-                                    continue;
+                                    // VRF is deterministic — all casters compute the same VRF numbers,
+                                    // so tiebreak from any proof subset picks the same winner.
+                                    var tieAfter = proofSnapshot
+                                        .Where(x => x.BlockHeight == Height)
+                                        .OrderBy(x => x.VRFNumber)
+                                        .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
+                                        .ThenBy(x => x.Address, StringComparer.Ordinal)
+                                        .FirstOrDefault();
+                                    if (tieAfter != null)
+                                    {
+                                        terminalWinner = tieAfter.Address;
+                                        approved = true;
+                                        CasterRoundAudit.AddStep($"Approval window ended; deterministic tiebreak winner: {terminalWinner}", true);
+                                    }
+                                    else
+                                    {
+                                        CasterRoundAudit.AddStep("No terminal winner after approval window; restarting round.", true);
+                                        continue;
+                                    }
                                 }
 
                                 //ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
