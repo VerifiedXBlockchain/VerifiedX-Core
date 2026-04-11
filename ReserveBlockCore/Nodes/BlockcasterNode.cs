@@ -43,8 +43,11 @@ namespace ReserveBlockCore.Nodes
         public static volatile List<string>? _allCasterAddresses;
         public static CasterRoundAudit? CasterRoundAudit = null;
         static long _lastStartingOverLogTicks;
-        /// <summary>Height-based deduplication: tracks the highest block height currently being processed or already accepted via ReceiveConfirmedBlock.</summary>
-        private static long _acceptedHeight = -1;
+    /// <summary>Height-based deduplication: tracks the highest block height currently being processed or already accepted via ReceiveConfirmedBlock.</summary>
+    private static long _acceptedHeight = -1;
+    /// <summary>Timestamp (Environment.TickCount64) of the last successful block acceptance. Used for desync recovery.</summary>
+    private static long _lastBlockAcceptedTick = Environment.TickCount64;
+    const int DESYNC_RECOVERY_TIMEOUT_MS = 45000; // 45 seconds without a new block → bypass consensus gate
         /// <summary>Throttle for "block rejected" log messages — tracks last logged height per validator to prevent spam.</summary>
         private static readonly ConcurrentDictionary<string, long> _rejectionLogTracker = new();
 
@@ -703,9 +706,9 @@ namespace ReserveBlockCore.Nodes
                         if (selfIP != null && winningCasterProof != null)
                             Globals.CasterProofDict.TryAdd(selfIP, winningCasterProof);
 
-                        // CASTER-SYNC-FIX: Strict proof quorum — never proceed with just 1 proof
-                        // With 3 casters: need 2. With 5: need 3. Never allow a single self-proof to pass.
-                        var requiredProofs = Math.Max(2, casterList.Count / 2 + 1); // strict majority quorum: 2/3, 3/5, 4/7…
+                        // DESYNC-FIX: Require ALL caster proofs — not just majority.
+                        // Partial proof sets caused each caster to select different winners.
+                        var requiredProofs = casterList.Count; // ALL casters must participate
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                         {
@@ -846,22 +849,11 @@ namespace ReserveBlockCore.Nodes
                                         }
                                         else
                                         {
-                                            var tie = proofSnapshot
-                                                .Where(x => x.BlockHeight == Height)
-                                                .OrderBy(x => x.VRFNumber)
-                                                .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
-                                                .ThenBy(x => x.Address, StringComparer.Ordinal)
-                                                .FirstOrDefault();
-                                            if (tie != null)
-                                            {
-                                                terminalWinner = tie.Address;
-                                                CasterRoundAudit.AddStep($"Bag had no majority vote; tiebreak winner: {terminalWinner}", true);
-                                                approved = true;
-                                                break;
-                                            }
+                                            // DESYNC-FIX: NO tiebreak fallback — if no majority vote, keep polling.
+                                            // Tiebreak was causing each caster to pick a different winner from incomplete data.
                                             if (Globals.OptionalLogging)
-                                                ConsoleWriterService.OutputVal("\r\n Bag failed. No Result was found.");
-                                            CasterRoundAudit.AddStep("Bag failed — no tiebreak candidate; continuing approval window.", false);
+                                                ConsoleWriterService.OutputVal("\r\n Bag failed. No majority vote yet — continuing to poll.");
+                                            CasterRoundAudit.AddStep("No majority vote yet; continuing approval window.", false);
                                             await Task.Delay(200);
                                         }
                                     }
@@ -869,23 +861,11 @@ namespace ReserveBlockCore.Nodes
 
                                 if (!approved)
                                 {
-                                    var tieAfter = proofSnapshot
-                                        .Where(x => x.BlockHeight == Height)
-                                        .OrderBy(x => x.VRFNumber)
-                                        .ThenBy(x => x.ProofHash, StringComparer.Ordinal)
-                                        .ThenBy(x => x.Address, StringComparer.Ordinal)
-                                        .FirstOrDefault();
-                                    if (tieAfter != null)
-                                    {
-                                        terminalWinner = tieAfter.Address;
-                                        approved = true;
-                                        CasterRoundAudit.AddStep($"Approval window ended; tiebreak winner: {terminalWinner}", true);
-                                    }
-                                    else
-                                    {
-                                        CasterRoundAudit.AddStep("No terminal winner after approval window; restarting round.", true);
-                                        continue;
-                                    }
+                                    // DESYNC-FIX: NO tiebreak fallback after approval window.
+                                    // If casters can't agree, retry the entire round — don't guess.
+                                    CasterRoundAudit.AddStep("Approval window ended without majority agreement; restarting round.", false);
+                                    await Task.Delay(RETRY_DELAY_MS);
+                                    continue;
                                 }
 
                                 //ConsoleWriterService.OutputVal($"\r\nYou did not win. Looking for block.");
@@ -2177,7 +2157,11 @@ namespace ReserveBlockCore.Nodes
 
                 // Consensus gate: verify this block's validator matches what consensus determined.
                 // If CasterRoundDict has a consensus entry for this height, the block's validator must match.
-                if (Globals.CasterRoundDict.TryGetValue(nextBlock.Height, out var consensusRound))
+                // DESYNC-FIX: Bypass the consensus gate if we've been stuck for too long (desync recovery).
+                var timeSinceLastBlock = Environment.TickCount64 - Interlocked.Read(ref _lastBlockAcceptedTick);
+                bool desyncRecoveryMode = timeSinceLastBlock > DESYNC_RECOVERY_TIMEOUT_MS;
+
+                if (!desyncRecoveryMode && Globals.CasterRoundDict.TryGetValue(nextBlock.Height, out var consensusRound))
                 {
                     if (!string.IsNullOrEmpty(consensusRound?.Validator) && nextBlock.Validator != consensusRound.Validator)
                     {
@@ -2194,10 +2178,17 @@ namespace ReserveBlockCore.Nodes
                         return;
                     }
                 }
+                else if (desyncRecoveryMode)
+                {
+                    ConsoleWriterService.OutputVal($"[Desync Recovery] Stuck for {timeSinceLastBlock}ms — bypassing consensus gate for block {nextBlock.Height} from {nextBlock.Validator}");
+                }
 
                 var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
                 if (result)
                 {
+                    // DESYNC-FIX: Update last block accepted timestamp for desync recovery tracking
+                    Interlocked.Exchange(ref _lastBlockAcceptedTick, Environment.TickCount64);
+
                     if (nextBlock.Height > lastBlockHeight)
                     {
                         _ = P2PValidatorClient.BroadcastBlock(nextBlock, false);

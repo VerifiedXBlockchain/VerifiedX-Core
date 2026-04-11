@@ -406,6 +406,17 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// Returns this node's current block height as a plain number.
+        /// Used by SyncHeightWithPeersAsync to check if peers are ahead.
+        /// </summary>
+        [HttpGet]
+        [Route("GetBlockHeight")]
+        public ActionResult<string> GetBlockHeight()
+        {
+            return Ok(Globals.LastBlock.Height.ToString());
+        }
+
+        /// <summary>
         /// Caster readiness check — returns this caster's current height and ready status.
         /// Used by the startup readiness barrier so all casters sync before beginning consensus.
         /// </summary>
