@@ -9,6 +9,12 @@ namespace ReserveBlockCore.Services
 {
     public static class CasterBlockFetch
     {
+        /// <summary>
+        /// Fetches a block from a peer caster. Retries up to 5 times with 2-second delays
+        /// to allow the winning caster's consensus loop time to craft and store the block.
+        /// The RequestBlock endpoint only returns cached blocks (never crafts independently)
+        /// to prevent fork-causing hash divergence.
+        /// </summary>
         public static async Task<Block?> TryFetchBlockAsync(Peers caster, long blockHeight, string winnerAddress)
         {
             if (caster == null || string.IsNullOrEmpty(caster.PeerIP))
@@ -24,38 +30,55 @@ namespace ReserveBlockCore.Services
             if (acc == null || acc.GetPrivKey == null)
                 return null;
 
-            var ts = TimeUtil.GetTime();
-            var msg = ConsensusMessageFormatter.FormatRequestBlockV1(blockHeight, acc.Address, winnerAddress, ts);
-            var sig = SignatureService.CreateSignature(msg, acc.GetPrivKey, acc.PublicKey);
-            if (sig == "ERROR")
-                return null;
+            // Retry loop: the winning caster may not have stored the block yet.
+            // RequestBlock returns "0" until the block is ready (it no longer crafts independently).
+            const int maxRetries = 5;
+            const int retryDelayMs = 2000;
 
-            var req = new RequestBlockRequest
+            for (int attempt = 0; attempt < maxRetries; attempt++)
             {
-                BlockHeight = blockHeight,
-                CasterAddress = acc.Address,
-                WinnerAddress = winnerAddress,
-                Timestamp = ts,
-                Signature = sig
-            };
+                if (attempt > 0)
+                    await Task.Delay(retryDelayMs).ConfigureAwait(false);
 
-            try
-            {
-                using var client = Globals.HttpClientFactory.CreateClient();
-                using var content = new StringContent(JsonConvert.SerializeObject(req), Encoding.UTF8, "application/json");
-                using var resp = await client.PostAsync(baseUri + "RequestBlock", content).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode)
+                // Re-sign each attempt with fresh timestamp to pass the 90-second window check
+                var ts = TimeUtil.GetTime();
+                var msg = ConsensusMessageFormatter.FormatRequestBlockV1(blockHeight, acc.Address, winnerAddress, ts);
+                var sig = SignatureService.CreateSignature(msg, acc.GetPrivKey, acc.PublicKey);
+                if (sig == "ERROR")
                     return null;
 
-                var responseBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                if (string.IsNullOrEmpty(responseBody) || responseBody == "0")
-                    return null;
-                return JsonConvert.DeserializeObject<Block>(responseBody);
+                var req = new RequestBlockRequest
+                {
+                    BlockHeight = blockHeight,
+                    CasterAddress = acc.Address,
+                    WinnerAddress = winnerAddress,
+                    Timestamp = ts,
+                    Signature = sig
+                };
+
+                try
+                {
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    using var content = new StringContent(JsonConvert.SerializeObject(req), Encoding.UTF8, "application/json");
+                    using var resp = await client.PostAsync(baseUri + "RequestBlock", content).ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode)
+                        continue; // retry — peer may not be ready yet
+
+                    var responseBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (string.IsNullOrEmpty(responseBody) || responseBody == "0")
+                        continue; // block not ready yet — retry
+
+                    var block = JsonConvert.DeserializeObject<Block>(responseBody);
+                    if (block != null)
+                        return block;
+                }
+                catch
+                {
+                    // Network error — retry
+                }
             }
-            catch
-            {
-                return null;
-            }
+
+            return null;
         }
 
         private static async Task<Block?> GetBlockLegacyAsync(string baseUri, long blockHeight)

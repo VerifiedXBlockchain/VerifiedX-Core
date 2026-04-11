@@ -7,7 +7,6 @@ using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System.Linq;
-using System.Net;
 
 namespace ReserveBlockCore.Controllers
 {
@@ -294,61 +293,13 @@ namespace ReserveBlockCore.Controllers
                     }
                 }
 
-                if (req.WinnerAddress != Globals.ValidatorAddress)
-                    return BadRequest("not producer");
-
-                var craftLock = RequestBlockCache.GetCraftLock(req.BlockHeight, req.WinnerAddress);
-                await craftLock.WaitAsync();
-                try
-                {
-                    // Tip can advance while waiting; crafting for a stale height breaks prev-hash / consensus.
-                    if (req.BlockHeight != Globals.LastBlock.Height + 1)
-                        return BadRequest("height");
-
-                    if (RequestBlockCache.TryGet(req.BlockHeight, req.WinnerAddress, out var cachedAfterWait) && cachedAfterWait != null)
-                        return Ok(JsonConvert.SerializeObject(cachedAfterWait));
-
-                    if (Globals.CasterRoundDict.TryGetValue(req.BlockHeight, out var crAfterWait))
-                    {
-                        if (!string.IsNullOrEmpty(crAfterWait.Validator) && crAfterWait.Validator != req.WinnerAddress)
-                            return BadRequest("winner mismatch");
-                        if (crAfterWait.Block != null && crAfterWait.Block.Validator == req.WinnerAddress)
-                        {
-                            RequestBlockCache.Add(req.BlockHeight, req.WinnerAddress, crAfterWait.Block);
-                            return Ok(JsonConvert.SerializeObject(crAfterWait.Block));
-                        }
-                    }
-
-                    if (req.WinnerAddress != Globals.ValidatorAddress)
-                        return BadRequest("not producer");
-
-                    var account = AccountData.GetLocalValidator();
-                    if (account == null || account.GetPrivKey == null)
-                        return BadRequest("no local validator");
-
-                    var validators = Validators.Validator.GetAll();
-                    var validator = validators.FindOne(x => x.Address == account.Address);
-                    if (validator == null)
-                        return BadRequest();
-
-                    var prevHash = Globals.LastBlock.Hash;
-                    var proof = await ProofUtility.CreateProof(validator.Address, account.PublicKey, req.BlockHeight, prevHash);
-
-                    int totalVals = !Globals.IsBootstrapMode && ValidatorSnapshotService.CurrentSnapshot.Count > 0
-                        ? ValidatorSnapshotService.CurrentSnapshot.Count
-                        : Globals.NetworkValidators.Count;
-
-                    var block = await BlockchainData.CraftBlock_V5(req.WinnerAddress, totalVals, proof.Item2, req.BlockHeight, false, true);
-                    if (block == null)
-                        return BadRequest("craft failed");
-
-                    RequestBlockCache.Add(req.BlockHeight, req.WinnerAddress, block);
-                    return Ok(JsonConvert.SerializeObject(block));
-                }
-                finally
-                {
-                    craftLock.Release();
-                }
+                // FIX (CRITICAL): Do NOT craft a new block here.
+                // The winning caster's consensus loop (iAmWinner path) is solely responsible for crafting
+                // the block and storing it in CasterRoundDict. If RequestBlock independently crafts a block,
+                // it races with the consensus loop and produces a DIFFERENT block (different timestamp/txs = 
+                // different hash), causing non-winners to end up with a different block than the winner → FORK.
+                // Return "0" (not found) so the requesting caster retries until the consensus loop stores the block.
+                return Ok("0");
             }
             catch (Exception ex)
             {
