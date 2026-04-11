@@ -535,7 +535,12 @@ namespace ReserveBlockCore.Nodes
                     }
 
                     var roundSw = Stopwatch.StartNew(); // Track total round time
-                    CasterLogUtility.Log($"--- ROUND START height={Height} lastBlock={Globals.LastBlock.Height} ---", "ROUND");
+                    CasterLogUtility.Log($"--- ROUND START height={Height} lastBlock={Globals.LastBlock.Height} lastHash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]} ---", "ROUND");
+
+                    // FIX 1 (CRITICAL): Block hash sync before VRF computation.
+                    // If our LastBlock.Hash differs from peer casters, VRF seeds diverge and
+                    // casters pick different winners → fork. Sync BEFORE generating proofs.
+                    await SyncBlockHashWithPeersAsync();
 
                     if (PreviousHeight != Height)
                     {
@@ -712,9 +717,15 @@ namespace ReserveBlockCore.Nodes
                         if (selfIP != null && winningCasterProof != null)
                             Globals.CasterProofDict.TryAdd(selfIP, winningCasterProof);
 
-                        // VRF is deterministic (seed = publicKey + height + prevHash, no caster address).
-                        // All casters compute identical VRF numbers, so 2/3 proofs always pick the same winner.
-                        var requiredProofs = Math.Max(2, casterList.Count / 2 + 1); // majority quorum
+                        // FIX 4: Clamp requiredProofs to actual unique caster ADDRESSES (not casterList.Count
+                        // which can include phantom entries from replacement logic).
+                        var uniqueCasterAddresses = casterList
+                            .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                            .Select(c => c.ValidatorAddress)
+                            .Distinct()
+                            .Count();
+                        var effectiveCasterCount = Math.Max(uniqueCasterAddresses, 1);
+                        var requiredProofs = Math.Max(2, effectiveCasterCount / 2 + 1); // majority quorum
                         CasterLogUtility.Log($"ProofExchange: need {requiredProofs}/{casterList.Count} proofs, have {Globals.CasterProofDict.Count()} (self-injected)", "EXCHANGE");
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
@@ -1035,6 +1046,118 @@ namespace ReserveBlockCore.Nodes
                 }
             }
         }
+
+        #region Block Hash Sync
+
+        /// <summary>
+        /// FIX 1 (CRITICAL): Before each round, verify our LastBlock.Hash matches peer casters.
+        /// If hashes diverge, VRF seeds diverge → different winners → fork.
+        /// Fetches the correct block from the majority if we're the outlier.
+        /// </summary>
+        private static async Task SyncBlockHashWithPeersAsync()
+        {
+            try
+            {
+                var myHeight = Globals.LastBlock.Height;
+                var myHash = Globals.LastBlock.Hash;
+                var casters = Globals.BlockCasters.ToList()
+                    .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
+                    .ToList();
+                
+                if (casters.Count == 0) return;
+
+                var peerTasks = casters.Select(async caster =>
+                {
+                    try
+                    {
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                        var uri = $"http://{caster.PeerIP!.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetBlockHash/{myHeight}";
+                        var resp = await client.GetAsync(uri, cts.Token);
+                        if (resp.IsSuccessStatusCode)
+                        {
+                            var body = await resp.Content.ReadAsStringAsync();
+                            if (!string.IsNullOrEmpty(body) && body != "0")
+                            {
+                                var peerResult = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L });
+                                if (peerResult != null && peerResult.Height == myHeight && !string.IsNullOrEmpty(peerResult.Hash))
+                                    return (hash: peerResult.Hash, ip: caster.PeerIP!);
+                            }
+                        }
+                    }
+                    catch { }
+                    return (hash: (string?)null, ip: "");
+                }).ToList();
+
+                var results = await Task.WhenAll(peerTasks);
+                
+                var hashVotes = new Dictionary<string, int>();
+                if (!string.IsNullOrEmpty(myHash))
+                    hashVotes[myHash] = 1;
+                
+                var hashToIP = new Dictionary<string, string>();
+                foreach (var r in results)
+                {
+                    if (r.hash != null)
+                    {
+                        if (!hashVotes.ContainsKey(r.hash))
+                            hashVotes[r.hash] = 0;
+                        hashVotes[r.hash]++;
+                        if (!hashToIP.ContainsKey(r.hash))
+                            hashToIP[r.hash] = r.ip;
+                    }
+                }
+
+                if (hashVotes.Count <= 1) return; // All agree or no responses
+
+                var majority = hashVotes.OrderByDescending(kv => kv.Value).First();
+                
+                if (majority.Key == myHash)
+                {
+                    CasterLogUtility.Log($"BlockHashSync: OK — all agree on {myHash?[..Math.Min(16, myHash?.Length ?? 0)]}", "HASHSYNC");
+                    return;
+                }
+
+                CasterLogUtility.Log($"BlockHashSync: MISMATCH! ours={myHash?[..Math.Min(16, myHash?.Length ?? 0)]} majority={majority.Key[..Math.Min(16, majority.Key.Length)]} votes={majority.Value}", "HASHSYNC");
+
+                if (hashToIP.TryGetValue(majority.Key, out var sourceIP))
+                {
+                    try
+                    {
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                        var uri = $"http://{sourceIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetBlock/{myHeight}";
+                        var resp = await client.GetAsync(uri, cts.Token);
+                        if (resp.IsSuccessStatusCode)
+                        {
+                            var json = await resp.Content.ReadAsStringAsync();
+                            if (!string.IsNullOrEmpty(json) && json != "0")
+                            {
+                                var correctBlock = JsonConvert.DeserializeObject<Block>(json);
+                                if (correctBlock != null && correctBlock.Hash == majority.Key)
+                                {
+                                    var result = await BlockValidatorService.ValidateBlock(correctBlock, true, false, false, true);
+                                    if (result)
+                                        CasterLogUtility.Log($"BlockHashSync: Applied majority block. New hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}", "HASHSYNC");
+                                    else
+                                        CasterLogUtility.Log($"BlockHashSync: Majority block validation FAILED.", "HASHSYNC");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        CasterLogUtility.Log($"BlockHashSync: Error fetching majority block: {ex.Message}", "HASHSYNC");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"BlockHashSync: Exception: {ex.Message}", "HASHSYNC");
+            }
+        }
+
+        #endregion
 
         #region Height Sync
 
