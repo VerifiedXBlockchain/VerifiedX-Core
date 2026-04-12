@@ -126,6 +126,14 @@ namespace ReserveBlockCore.Services
         {
             if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
+                if (!Globals.PortsOpened)
+                {
+                    LogUtility.Log("Validator startup blocked: required ports are not open or no IP address provided. Check rbxlog for port check details.", 
+                        "ValidatorService.StartupValidatorProcess()");
+                    Console.WriteLine("Validator startup blocked: required ports are not open or no IP address was provided. Check rbxlog for details.");
+                    return;
+                }
+
                 while (!Globals.IsChainSynced)
                 {
                     await Task.Delay(1000);
@@ -638,6 +646,11 @@ namespace ReserveBlockCore.Services
         {
             string output = "";
             Validators validator = new Validators();
+
+            if (!Globals.PortsOpened)
+            {
+                return "Cannot register as validator: required ports are not open or no IP address was provided. Check rbxlog for port check details.";
+            }
 
             if(Globals.V4Height == Globals.LastBlock.Height + 1)
             {
@@ -1328,6 +1341,11 @@ namespace ReserveBlockCore.Services
         {
             string output = "";
             Validators validator = new Validators();
+
+            if (!Globals.PortsOpened)
+            {
+                return "Cannot register as validator: required ports are not open or no IP address was provided. Check rbxlog for port check details.";
+            }
 
             if (account == null)
             {
