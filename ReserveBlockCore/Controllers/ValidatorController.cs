@@ -386,6 +386,45 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// CASTER-CONSENSUS-FIX: Winner vote exchange endpoint for mandatory agreement phase.
+        /// Receives a peer caster's winner vote, stores it in CasterWinnerVoteDict,
+        /// and returns all known votes for that height so peers can converge.
+        /// </summary>
+        [HttpPost]
+        [Route("ExchangeWinnerVote")]
+        public ActionResult<string> ExchangeWinnerVote([FromBody] WinnerVoteRequest? req)
+        {
+            try
+            {
+                if (req == null || req.BlockHeight <= 0 || string.IsNullOrEmpty(req.VoterAddress) || string.IsNullOrEmpty(req.WinnerAddress))
+                    return BadRequest("0");
+
+                // Only accept votes from known casters
+                var casterList = Globals.BlockCasters.ToList();
+                if (!casterList.Any(c => c.ValidatorAddress == req.VoterAddress))
+                    return BadRequest("0");
+
+                // Store the incoming vote
+                var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(req.BlockHeight, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, string>());
+                votesForHeight[req.VoterAddress] = req.WinnerAddress;
+
+                // Also ensure our own vote is present (if we have one from CasterRoundDict)
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress) && !votesForHeight.ContainsKey(Globals.ValidatorAddress))
+                {
+                    if (Globals.CasterRoundDict.TryGetValue(req.BlockHeight, out var round) && round?.Proof != null)
+                    {
+                        votesForHeight[Globals.ValidatorAddress] = round.Proof.Address;
+                    }
+                }
+
+                // Return all votes for this height
+                var result = new { BlockHeight = req.BlockHeight, Votes = votesForHeight.ToDictionary(kv => kv.Key, kv => kv.Value) };
+                return Ok(JsonConvert.SerializeObject(result));
+            }
+            catch { return BadRequest("0"); }
+        }
+
+        /// <summary>
         /// Returns the block hash this caster has for the given height.
         /// Used in the block-hash agreement phase to ensure all casters commit the same block.
         /// </summary>

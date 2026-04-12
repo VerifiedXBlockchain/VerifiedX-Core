@@ -390,6 +390,8 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<long, CasterRound> CasterRoundDict = new ConcurrentDictionary<long, CasterRound>();
         public static ConcurrentDictionary<long, CasterRoundAudit> CasterRoundAuditDict = new ConcurrentDictionary<long, CasterRoundAudit>();
         public static ConcurrentDictionary<string, Proof> CasterProofDict = new ConcurrentDictionary<string, Proof>();
+        /// <summary>Winner vote exchange: key = height, value = dict of (casterIP -> chosen winner address). Used for mandatory winner agreement phase.</summary>
+        public static ConcurrentDictionary<long, ConcurrentDictionary<string, string>> CasterWinnerVoteDict = new ConcurrentDictionary<long, ConcurrentDictionary<string, string>>();
 
         /// <summary>Discovered / agreed caster set (synced from <see cref="BlockCasters"/> and discovery). Used with <see cref="BlockCasters"/> for certificate verification (plan §Appendix C).</summary>
         public static object KnownCastersLock = new object();

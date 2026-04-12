@@ -60,6 +60,7 @@ namespace ReserveBlockCore.Nodes
     const int READINESS_CHECK_INTERVAL_MS = 2000;
     const int READINESS_MAX_WAIT_MS = 60000; // 60 seconds max wait for peers
     const int BLOCK_HASH_AGREEMENT_TIMEOUT_MS = 5000; // 5 seconds for block hash agreement phase
+    const int WINNER_AGREEMENT_TIMEOUT_MS = 4000; // 4 seconds for mandatory winner agreement phase
 
     /// <summary>Tracks consecutive hash sync failures at the same height to break infinite loops.</summary>
     private static long _hashSyncFailHeight = -1;
@@ -783,15 +784,24 @@ namespace ReserveBlockCore.Nodes
                                 CasterLogUtility.Log($"Finalized winner: {finalizedWinner.Address} VRF={finalizedWinner.VRFNumber} proofCount={proofSnapshot.Count}", "WINNER");
                                 CasterRoundAudit.AddStep($"Finalized winner : {finalizedWinner.Address}", true);
 
-                                // FIX 2: SKIP APPROVAL PHASE ENTIRELY.
-                                // VRF is deterministic (seed = publicKey + height + prevHash).
-                                // All casters independently compute the same VRF numbers and pick the same winner.
-                                // The approval loop was 4-8 seconds of HTTP polling that added latency and caused
-                                // timing drift between casters. Instead, use the proof snapshot directly.
-                                var terminalWinner = finalizedWinner.Address;
+                                // CASTER-CONSENSUS-FIX: Mandatory winner agreement phase.
+                                // Instead of skipping approval entirely (which caused desync when VRF inputs differed),
+                                // exchange winner votes with all peer casters and require supermajority agreement.
+                                // This guarantees all casters craft/fetch a block for the SAME validator.
+                                var agreedWinner = await ReachWinnerAgreementAsync(Height, finalizedWinner.Address);
+                                if (agreedWinner == null)
+                                {
+                                    CasterRoundAudit?.AddStep($"Winner agreement FAILED — no supermajority. Retrying round.", false);
+                                    CasterLogUtility.Log($"ROUND FAILED: winner agreement failed after {roundSw.ElapsedMilliseconds}ms", "ROUND");
+                                    CasterLogUtility.Flush();
+                                    await Task.Delay(RETRY_DELAY_MS);
+                                    continue;
+                                }
+
+                                var terminalWinner = agreedWinner;
                                 var approved = true;
 
-                                // Still update CasterRoundDict so the GetApproval endpoint works for any peer that checks
+                                // Update CasterRoundDict with the agreed winner
                                 {
                                     var casterRound = Globals.CasterRoundDict.GetOrAdd(finalizedWinner.BlockHeight, new CasterRound { BlockHeight = finalizedWinner.BlockHeight });
                                     var compareRound = casterRound;
@@ -801,8 +811,8 @@ namespace ReserveBlockCore.Nodes
                                     Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, casterRound, compareRound);
                                 }
 
-                                CasterLogUtility.Log($"Approval SKIPPED (VRF deterministic). terminalWinner={terminalWinner}", "APPROVAL");
-                                CasterRoundAudit.AddStep($"Approval skipped — VRF deterministic winner: {terminalWinner}", true);
+                                CasterLogUtility.Log($"Winner AGREED: {terminalWinner} (local candidate was {finalizedWinner.Address})", "AGREEMENT");
+                                CasterRoundAudit.AddStep($"Winner agreed: {terminalWinner}", true);
 
                                 CasterLogUtility.Log($"Block fetch phase: iAmWinner={terminalWinner == Globals.ValidatorAddress}, winner={terminalWinner}", "BLOCKFETCH");
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight && approved)
@@ -2453,6 +2463,118 @@ namespace ReserveBlockCore.Nodes
         }
 
         /// <summary>
+        /// CASTER-CONSENSUS-FIX: Mandatory winner agreement phase.
+        /// After each caster independently picks a winner from its proof snapshot,
+        /// exchange winner votes with all peer casters. Only proceed if a supermajority
+        /// agrees on the same winner. This prevents the boot desync scenario where a slow
+        /// caster picks a different winner than its peers.
+        /// Returns the agreed winner address, or null if no agreement was reached.
+        /// </summary>
+        private static async Task<string?> ReachWinnerAgreementAsync(long height, string myChosenWinner)
+        {
+            var casters = Globals.BlockCasters.ToList();
+            if (casters.Count <= 1)
+                return myChosenWinner; // Only one caster, no agreement needed
+
+            var requiredAgreement = Math.Max(2, casters.Count / 2 + 1);
+
+            // Store our own vote
+            var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(height, _ => new ConcurrentDictionary<string, string>());
+            votesForHeight[Globals.ValidatorAddress] = myChosenWinner;
+
+            // Also store in CasterRoundDict so the endpoint can read it
+            if (Globals.CasterRoundDict.TryGetValue(height, out var currentRound) && currentRound != null)
+            {
+                currentRound.Validator = myChosenWinner;
+            }
+
+            var sw = Stopwatch.StartNew();
+            string? agreedWinner = null;
+
+            while (sw.ElapsedMilliseconds < WINNER_AGREEMENT_TIMEOUT_MS)
+            {
+                // Exchange votes with all peer casters in parallel
+                var peerTasks = casters
+                    .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
+                    .Select(async caster =>
+                    {
+                        try
+                        {
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                            var uri = $"http://{caster.PeerIP!.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/ExchangeWinnerVote";
+                            var voteReq = new WinnerVoteRequest
+                            {
+                                BlockHeight = height,
+                                VoterAddress = Globals.ValidatorAddress,
+                                WinnerAddress = myChosenWinner
+                            };
+                            using var content = new StringContent(
+                                JsonConvert.SerializeObject(voteReq),
+                                Encoding.UTF8,
+                                "application/json");
+                            var resp = await client.PostAsync(uri, content, cts.Token);
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                var body = await resp.Content.ReadAsStringAsync();
+                                if (!string.IsNullOrEmpty(body) && body != "0")
+                                {
+                                    var voteResp = JsonConvert.DeserializeAnonymousType(body, new { BlockHeight = 0L, Votes = new Dictionary<string, string>() });
+                                    if (voteResp?.Votes != null)
+                                    {
+                                        // Merge remote votes into our local dict
+                                        foreach (var kv in voteResp.Votes)
+                                        {
+                                            votesForHeight.TryAdd(kv.Key, kv.Value);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                    })
+                    .ToList();
+
+                await Task.WhenAll(peerTasks);
+
+                // Check for supermajority agreement
+                var voteGroups = votesForHeight.Values
+                    .GroupBy(v => v)
+                    .OrderByDescending(g => g.Count())
+                    .ToList();
+
+                if (voteGroups.Any())
+                {
+                    var best = voteGroups.First();
+                    CasterLogUtility.Log($"WinnerAgreement: votes={votesForHeight.Count}/{casters.Count}, best={best.Key} count={best.Count()}, need={requiredAgreement}", "AGREEMENT");
+
+                    if (best.Count() >= requiredAgreement)
+                    {
+                        agreedWinner = best.Key;
+                        CasterLogUtility.Log($"WinnerAgreement: AGREED on {agreedWinner} ({best.Count()}/{casters.Count})", "AGREEMENT");
+                        break;
+                    }
+                }
+
+                await Task.Delay(500);
+            }
+
+            sw.Stop();
+
+            if (agreedWinner == null)
+            {
+                CasterLogUtility.Log($"WinnerAgreement: FAILED after {sw.ElapsedMilliseconds}ms. Votes: {string.Join(", ", votesForHeight.Select(kv => $"{kv.Key[..Math.Min(8, kv.Key.Length)]}→{kv.Value[..Math.Min(8, kv.Value.Length)]}"))}", "AGREEMENT");
+            }
+
+            // Cleanup old vote entries
+            var oldKeys = Globals.CasterWinnerVoteDict.Keys.Where(k => k < height - 10).ToList();
+            foreach (var k in oldKeys)
+                Globals.CasterWinnerVoteDict.TryRemove(k, out _);
+
+            return agreedWinner;
+        }
+
+        /// <summary>
         /// Block hash agreement phase: after fetching/crafting a block, exchange hashes with peer casters
         /// to ensure all casters have the SAME block before committing.
         /// Returns the agreed-upon block, or null if agreement could not be reached.
@@ -2530,10 +2652,10 @@ namespace ReserveBlockCore.Nodes
 
             if (majorityHash == null)
             {
-                CasterRoundAudit?.AddStep($"[BlockHashAgreement] No supermajority hash agreement reached for height {height}.", false);
-                ConsoleWriterService.OutputVal($"[BlockHashAgreement] WARNING: No hash agreement at height {height}. Hash votes: {string.Join(", ", hashVotes.Select(kv => $"{kv.Key[..Math.Min(8, kv.Key.Length)]}={kv.Value}"))}");
-                // Fall back to our block — it's better than nothing, and the existing consensus gate will protect
-                return block;
+                CasterRoundAudit?.AddStep($"[BlockHashAgreement] No supermajority hash agreement reached for height {height}. REJECTING round.", false);
+                CasterLogUtility.Log($"BlockHashAgreement: FAILED — no supermajority. Votes: {string.Join(", ", hashVotes.Select(kv => $"{kv.Key[..Math.Min(8, kv.Key.Length)]}={kv.Value}"))}", "AGREEMENT");
+                // CASTER-CONSENSUS-FIX: Return null to force a round retry instead of committing a potentially divergent block
+                return null;
             }
 
             CasterRoundAudit?.AddStep($"[BlockHashAgreement] Agreement: {agreementCount}/{casters.Count} on hash {majorityHash[..Math.Min(8, majorityHash.Length)]}…", true);

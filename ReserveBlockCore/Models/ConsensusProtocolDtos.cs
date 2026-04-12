@@ -19,6 +19,14 @@ namespace ReserveBlockCore.Models
         public string Signature { get; set; } = "";
     }
 
+    /// <summary>CASTER-CONSENSUS-FIX: Winner vote exchange request for mandatory agreement phase.</summary>
+    public class WinnerVoteRequest
+    {
+        public long BlockHeight { get; set; }
+        public string VoterAddress { get; set; } = "";
+        public string WinnerAddress { get; set; } = "";
+    }
+
     public class CasterInfo
     {
         public string Address { get; set; } = "";
