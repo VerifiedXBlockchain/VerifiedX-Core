@@ -346,29 +346,28 @@ namespace ReserveBlockCore.Services
                     }
                 }
 
-                if (Globals.AdjudicateAccount == null)
-                {
-                    var now = DateTime.Now;
-                    var lastShutDown = settings.LastShutdown;
+                
+                var now = DateTime.Now;
+                var lastShutDown = settings.LastShutdown;
 
-                    if (lastShutDown != null && settings.CorrectShutdown && Globals.LastBlock.Height > 0)
+                if (lastShutDown != null && settings.CorrectShutdown && Globals.LastBlock.Height > 0)
+                {
+                    if (!Debugger.IsAttached && lastShutDown.Value.AddSeconds(20) > now)
                     {
-                        if (!Debugger.IsAttached && lastShutDown.Value.AddSeconds(20) > now)
-                        {
-                            var diff = Convert.ToInt32((lastShutDown.Value.AddSeconds(20) - now).TotalMilliseconds);
-                            Console.WriteLine("Wallet was restarted too fast. Startup will continue in a moment. Do not close wallet.");
-                            await Task.Delay(diff);//make the wallet wait if restart is too fast
-                        }
-                    }
-                    else
-                    {
-                        if (!Debugger.IsAttached && Globals.LastBlock.Height > 0)
-                        {
-                            Console.WriteLine("Wallet was restarted too fast or improperly closed. Startup will continue in a moment. Do not close wallet.");
-                            await Task.Delay(15000);
-                        }
+                        var diff = Convert.ToInt32((lastShutDown.Value.AddSeconds(20) - now).TotalMilliseconds);
+                        Console.WriteLine("Wallet was restarted too fast. Startup will continue in a moment. Do not close wallet.");
+                        await Task.Delay(diff);//make the wallet wait if restart is too fast
                     }
                 }
+                else
+                {
+                    if (!Debugger.IsAttached && Globals.LastBlock.Height > 0 && !skipStateSync)
+                    {
+                        Console.WriteLine("Wallet was restarted too fast or improperly closed. Startup will continue in a moment. Do not close wallet.");
+                        await Task.Delay(15000);
+                    }
+                }
+                
 
                 _ = Settings.InitiateStartupUpdate();
             }
