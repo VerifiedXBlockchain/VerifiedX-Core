@@ -395,11 +395,37 @@ namespace ReserveBlockCore.Controllers
         {
             try
             {
-                if (Globals.CasterRoundDict.TryGetValue(blockHeight, out var round) && round?.Block != null)
+                // FIX: Return the COMMITTED block hash from the actual blockchain,
+                // not stale CasterRoundDict data. CasterRoundDict may hold an outdated
+                // block version from before hash-agreement or validation replaced it,
+                // causing phantom mismatches and infinite HASHSYNC loops.
+                
+                // 1. If this is the current committed block, return Globals.LastBlock directly
+                if (blockHeight == Globals.LastBlock.Height && !string.IsNullOrEmpty(Globals.LastBlock.Hash))
+                {
+                    var result = new { Hash = Globals.LastBlock.Hash, Validator = Globals.LastBlock.Validator, Height = blockHeight };
+                    return Ok(JsonConvert.SerializeObject(result));
+                }
+                
+                // 2. If this is a past block, look it up from the actual blockchain database
+                if (blockHeight < Globals.LastBlock.Height)
+                {
+                    var block = BlockchainData.GetBlockByHeight(blockHeight);
+                    if (block != null && !string.IsNullOrEmpty(block.Hash))
+                    {
+                        var result = new { Hash = block.Hash, Validator = block.Validator, Height = blockHeight };
+                        return Ok(JsonConvert.SerializeObject(result));
+                    }
+                }
+                
+                // 3. Only for FUTURE blocks (being crafted), use CasterRoundDict
+                if (blockHeight > Globals.LastBlock.Height && 
+                    Globals.CasterRoundDict.TryGetValue(blockHeight, out var round) && round?.Block != null)
                 {
                     var result = new { Hash = round.Block.Hash, Validator = round.Block.Validator, Height = blockHeight };
                     return Ok(JsonConvert.SerializeObject(result));
                 }
+                
                 return Ok("0");
             }
             catch { return Ok("0"); }

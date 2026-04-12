@@ -61,6 +61,11 @@ namespace ReserveBlockCore.Nodes
     const int READINESS_MAX_WAIT_MS = 60000; // 60 seconds max wait for peers
     const int BLOCK_HASH_AGREEMENT_TIMEOUT_MS = 5000; // 5 seconds for block hash agreement phase
 
+    /// <summary>Tracks consecutive hash sync failures at the same height to break infinite loops.</summary>
+    private static long _hashSyncFailHeight = -1;
+    private static int _hashSyncFailCount = 0;
+    const int HASH_SYNC_MAX_RETRIES = 3; // After this many consecutive failures at same height, skip sync and proceed
+
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -1066,6 +1071,15 @@ namespace ReserveBlockCore.Nodes
                 
                 if (casters.Count == 0) return;
 
+                // FIX 2: Escape hatch — if we've failed to sync at the same height too many times,
+                // skip and proceed. This breaks the infinite HASHSYNC MISMATCH loop caused by
+                // stale CasterRoundDict data (now fixed in GetBlockHash endpoint).
+                if (_hashSyncFailHeight == myHeight && _hashSyncFailCount >= HASH_SYNC_MAX_RETRIES)
+                {
+                    CasterLogUtility.Log($"BlockHashSync: SKIP — {_hashSyncFailCount} consecutive failures at height {myHeight}. Proceeding with consensus.", "HASHSYNC");
+                    return;
+                }
+
                 var peerTasks = casters.Select(async caster =>
                 {
                     try
@@ -1108,18 +1122,28 @@ namespace ReserveBlockCore.Nodes
                     }
                 }
 
-                if (hashVotes.Count <= 1) return; // All agree or no responses
+                if (hashVotes.Count <= 1)
+                {
+                    // All agree or no responses — reset failure counter
+                    _hashSyncFailHeight = -1;
+                    _hashSyncFailCount = 0;
+                    return;
+                }
 
                 var majority = hashVotes.OrderByDescending(kv => kv.Value).First();
                 
                 if (majority.Key == myHash)
                 {
                     CasterLogUtility.Log($"BlockHashSync: OK — all agree on {myHash?[..Math.Min(16, myHash?.Length ?? 0)]}", "HASHSYNC");
+                    // Reset failure counter on success
+                    _hashSyncFailHeight = -1;
+                    _hashSyncFailCount = 0;
                     return;
                 }
 
                 CasterLogUtility.Log($"BlockHashSync: MISMATCH! ours={myHash?[..Math.Min(16, myHash?.Length ?? 0)]} majority={majority.Key[..Math.Min(16, majority.Key.Length)]} votes={majority.Value}", "HASHSYNC");
 
+                bool syncSucceeded = false;
                 if (hashToIP.TryGetValue(majority.Key, out var sourceIP))
                 {
                     try
@@ -1138,7 +1162,10 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     var result = await BlockValidatorService.ValidateBlock(correctBlock, true, false, false, true);
                                     if (result)
+                                    {
                                         CasterLogUtility.Log($"BlockHashSync: Applied majority block. New hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}", "HASHSYNC");
+                                        syncSucceeded = true;
+                                    }
                                     else
                                         CasterLogUtility.Log($"BlockHashSync: Majority block validation FAILED.", "HASHSYNC");
                                 }
@@ -1149,6 +1176,26 @@ namespace ReserveBlockCore.Nodes
                     {
                         CasterLogUtility.Log($"BlockHashSync: Error fetching majority block: {ex.Message}", "HASHSYNC");
                     }
+                }
+
+                // FIX 2: Track consecutive failures to enable escape hatch
+                if (!syncSucceeded)
+                {
+                    if (_hashSyncFailHeight == myHeight)
+                    {
+                        _hashSyncFailCount++;
+                        CasterLogUtility.Log($"BlockHashSync: Sync failed {_hashSyncFailCount}/{HASH_SYNC_MAX_RETRIES} at height {myHeight}", "HASHSYNC");
+                    }
+                    else
+                    {
+                        _hashSyncFailHeight = myHeight;
+                        _hashSyncFailCount = 1;
+                    }
+                }
+                else
+                {
+                    _hashSyncFailHeight = -1;
+                    _hashSyncFailCount = 0;
                 }
             }
             catch (Exception ex)
@@ -2172,6 +2219,20 @@ namespace ReserveBlockCore.Nodes
                 {
                     // DESYNC-FIX: Update last block accepted timestamp for desync recovery tracking
                     Interlocked.Exchange(ref _lastBlockAcceptedTick, Environment.TickCount64);
+
+                    // FIX 3: Update CasterRoundDict with the COMMITTED block so GetBlockHash
+                    // returns the correct hash instead of stale pre-agreement data.
+                    if (Globals.CasterRoundDict.TryGetValue(nextBlock.Height, out var committedRound))
+                    {
+                        var compareRound = committedRound;
+                        committedRound.Block = nextBlock;
+                        committedRound.Validator = nextBlock.Validator;
+                        Globals.CasterRoundDict.TryUpdate(nextBlock.Height, committedRound, compareRound);
+                    }
+
+                    // FIX 3b: Reset hash sync failure counter since we successfully committed a block
+                    _hashSyncFailHeight = -1;
+                    _hashSyncFailCount = 0;
 
                     if (nextBlock.Height > lastBlockHeight)
                     {
