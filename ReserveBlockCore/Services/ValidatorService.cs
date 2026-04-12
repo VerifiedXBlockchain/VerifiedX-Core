@@ -24,6 +24,7 @@ namespace ReserveBlockCore.Services
     {
         static SemaphoreSlim ValidatorMonitorServiceLock = new SemaphoreSlim(1, 1);
         static SemaphoreSlim ValidatorCountServiceLock = new SemaphoreSlim(1, 1);
+        static bool _processExitCasterDepartureRegistered;
 
         public static async Task StartValidatorServer()
         {
@@ -143,8 +144,25 @@ namespace ReserveBlockCore.Services
                 Globals.IsFrostValidator = true; // Enable FROST server for validator nodes
                 _ = FrostServer.Start();
 
+                if (!_processExitCasterDepartureRegistered)
+                {
+                    _processExitCasterDepartureRegistered = true;
+                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                    {
+                        if (!Globals.IsBlockCaster)
+                            return;
+                        try
+                        {
+                            CasterDiscoveryService.BroadcastDeparture().GetAwaiter().GetResult();
+                        }
+                        catch { /* best-effort */ }
+                    };
+                }
+
                 // Give servers a moment to bind their ports before checking reachability
                 await Task.Delay(5000);
+
+                Globals.LastBlockProducedTick = Environment.TickCount64;
 
                 // Run port reachability check now that servers are listening
                 ValidatorPortCheckService.RunValidatorPortCheck();

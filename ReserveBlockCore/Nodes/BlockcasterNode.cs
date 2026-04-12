@@ -111,6 +111,16 @@ namespace ReserveBlockCore.Nodes
                 if (!Globals.IsBootstrapMode)
                     await PingCasters();
 
+                if (Globals.BlockCasters.Any())
+                {
+                    await CasterDiscoveryService.EvaluateCasterPool();
+                    await CasterDiscoveryService.CheckForStall();
+                }
+                else if (Globals.IsBlockCaster)
+                {
+                    await CasterDiscoveryService.EvaluateCasterPool();
+                }
+
                 var casterList = Globals.BlockCasters.ToList();
 
                 if (!Globals.IsBootstrapMode && casterList.Count < Globals.MaxBlockCasters)
@@ -186,9 +196,9 @@ namespace ReserveBlockCore.Nodes
 
             HashSet<string> removeList = new HashSet<string>();
 
-            int retryCount = 0;
             foreach (var caster in casterList)
             {
+                int retryCount = 0;
                 do
                 {
                     try
@@ -232,8 +242,16 @@ namespace ReserveBlockCore.Nodes
                 var nCasterList = casterList.Where(x => !removeList.Contains(x.PeerIP)).ToList();
                 ConcurrentBag<Peers> nBag = new ConcurrentBag<Peers>();
                 nCasterList.ForEach(x => { nBag.Add(x); });
-                Globals.BlockCasters.Clear();
                 Globals.BlockCasters = nBag;
+                Globals.SyncKnownCastersFromBlockCasters();
+
+                foreach (var removedIP in removeList)
+                {
+                    var removedCaster = casterList.FirstOrDefault(c => c.PeerIP == removedIP);
+                    var removedAddr = removedCaster?.ValidatorAddress ?? "unknown";
+                    ConsoleWriterService.OutputVal($"[PingCasters] Removed offline caster {removedAddr} ({removedIP})");
+                    _ = CasterDiscoveryService.OnCasterRemoved(removedAddr);
+                }
             }
         }
 

@@ -263,6 +263,8 @@ namespace ReserveBlockCore
         public static bool UseV2BlockDownload = false;
         public static bool IsArbiter = false;
         public static bool IsBlockCaster = false;
+        /// <summary>Environment.TickCount64 when a block was last committed (see BlockchainData.AddBlock). Used for caster stall detection.</summary>
+        public static long LastBlockProducedTick { get; set; } = 0;
         public static bool IsWardenMonitoring = false;
         public static bool IsFrostValidator = false;
         public static bool IsValidatorPortOpen = false;

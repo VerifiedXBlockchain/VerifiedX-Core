@@ -328,6 +328,8 @@ namespace ReserveBlockCore
             Config.Config.ProcessConfig(config);
             Config.Config.ProcessABL();
 
+            _ = Task.Run(LogUtility.LogLoop);
+
             // Run startup IP check (validates IP is configured; port checks happen later after servers start)
             ValidatorPortCheckService.RunStartupIPCheck();
 
@@ -517,8 +519,6 @@ namespace ReserveBlockCore
 
 
             await StartupService.SetSelfBeacon();
-
-            _ = Task.Run(LogUtility.LogLoop);
 
             //deprecate in v5.0.1 or greater
             _ = Task.Run(P2PClient.UpdateMethodCodes);

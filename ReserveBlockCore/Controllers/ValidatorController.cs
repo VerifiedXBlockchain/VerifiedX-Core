@@ -424,6 +424,86 @@ namespace ReserveBlockCore.Controllers
             catch { return BadRequest("0"); }
         }
 
+        /// <summary>Receives a signed promotion to join the caster pool (dynamic discovery).</summary>
+        [HttpPost]
+        [Route("PromoteToCaster")]
+        public async Task<ActionResult<string>> PromoteToCaster([FromBody] CasterPromotionRequest? req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrEmpty(req.PromotedAddress))
+                    return BadRequest("invalid");
+                if (req.PromotedAddress != Globals.ValidatorAddress)
+                    return BadRequest("not for us");
+                await CasterDiscoveryService.HandlePromotion(req);
+                return Ok("promoted");
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        /// <summary>Graceful caster departure notice (signed by departing caster).</summary>
+        [HttpPost]
+        [Route("AnnounceCasterDeparture")]
+        public async Task<ActionResult<string>> AnnounceCasterDeparture([FromBody] CasterDepartureNotice? notice)
+        {
+            try
+            {
+                if (notice == null || string.IsNullOrEmpty(notice.DepartingAddress))
+                    return BadRequest("invalid");
+                if (!Globals.BlockCasters.Any(c => c.ValidatorAddress == notice.DepartingAddress))
+                    return BadRequest("not a known caster");
+                await CasterDiscoveryService.HandleDeparture(notice);
+                return Ok();
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        /// <summary>Diagnostics: top caster candidates by balance.</summary>
+        [HttpGet]
+        [Route("GetCasterCandidates")]
+        public ActionResult<string> GetCasterCandidates()
+        {
+            try
+            {
+                var currentCasterAddresses = Globals.BlockCasters.ToList()
+                    .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                    .Select(c => c.ValidatorAddress!)
+                    .ToHashSet();
+
+                var candidates = Globals.NetworkValidators.Values
+                    .Where(v => !string.IsNullOrEmpty(v.Address)
+                             && !currentCasterAddresses.Contains(v.Address)
+                             && v.IsFullyTrusted)
+                    .Select(v => new
+                    {
+                        Address = v.Address,
+                        IP = v.IPAddress,
+                        Balance = AccountStateTrei.GetAccountBalance(v.Address),
+                        LastSeen = v.LastSeen,
+                        FailCount = v.CheckFailCount
+                    })
+                    .OrderByDescending(x => x.Balance)
+                    .Take(10)
+                    .ToList();
+
+                return Ok(JsonConvert.SerializeObject(new
+                {
+                    CurrentCasters = Globals.BlockCasters.Count,
+                    MaxCasters = CasterDiscoveryService.MaxCasters,
+                    MinBalance = CasterDiscoveryService.MinCasterBalance,
+                    SlotsAvailable = Math.Max(0, CasterDiscoveryService.MaxCasters - Globals.BlockCasters.Count),
+                    Candidates = candidates
+                }));
+            }
+            catch { return Ok("0"); }
+        }
+
         /// <summary>
         /// Returns the block hash this caster has for the given height.
         /// Used in the block-hash agreement phase to ensure all casters commit the same block.

@@ -49,4 +49,27 @@ namespace ReserveBlockCore.Models
         public List<CasterInfo> ProposedCasters { get; set; } = new();
         public List<string> CasterSignatures { get; set; } = new();
     }
+
+    /// <summary>
+    /// Sent to a validator when it has been promoted to caster status.
+    /// MUST be signed by the promoter — verified on receipt. See CasterDiscoveryService.GetCanonicalCasterListJson for hash input.
+    /// </summary>
+    public class CasterPromotionRequest
+    {
+        public string PromotedAddress { get; set; } = "";
+        public long BlockHeight { get; set; }
+        public List<CasterInfo> CasterList { get; set; } = new();
+        public string PromoterAddress { get; set; } = "";
+        /// <summary>Signature of PROMOTE|{PromotedAddress}|{BlockHeight}|{PromoterAddress}|{CasterListHashHex}.</summary>
+        public string PromoterSignature { get; set; } = "";
+    }
+
+    /// <summary>Graceful caster departure; MUST be signed by the departing caster.</summary>
+    public class CasterDepartureNotice
+    {
+        public string DepartingAddress { get; set; } = "";
+        public long BlockHeight { get; set; }
+        /// <summary>Signature of DEPART|{DepartingAddress}|{BlockHeight}.</summary>
+        public string DepartureSignature { get; set; } = "";
+    }
 }
