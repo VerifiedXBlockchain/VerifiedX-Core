@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -13,6 +14,13 @@ namespace ReserveBlockCore.Utilities
         public static void LogQueue(string message, string location, string fileName, bool log)
         {
             if(!log)
+                return; // this disables the log queue
+            FileQueue.Enqueue((message, location, fileName, DateTime.Now));
+        }
+
+        private static async Task LogEnqueue(string message, string location, string fileName, bool log)
+        {
+            if (!log)
                 return; // this disables the log queue
             FileQueue.Enqueue((message, location, fileName, DateTime.Now));
         }
@@ -105,13 +113,13 @@ namespace ReserveBlockCore.Utilities
                     await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + " ");
                 }
 
-
-                await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + text);
+                await LogEnqueue(text, "", "rbxlog.txt", true);
+                //await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + text);
                 VFXLogging.LogInfo(message, location);
             }
             catch (Exception ex)
             {
-
+                await LogEnqueue($"Error Logging: {ex}", "", "rbxlog.txt", true);
             }
         }
 
