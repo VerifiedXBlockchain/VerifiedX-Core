@@ -385,22 +385,40 @@ namespace ReserveBlockCore.Utilities
                     {
                         return (true, null);
                     }
-                    var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
+
+                    var cleanIP = winningProof.IPAddress.Replace("::ffff:", "");
+
+                    // FIX B: Version gate — reject validators on outdated versions.
+                    // Old nodes won't have the GetWalletVersion endpoint → 404 → rejected.
+                    try
+                    {
+                        var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                        var versionResp = await client.GetAsync(versionUri).WaitAsync(new TimeSpan(0, 0, 3));
+                        if (versionResp == null || !versionResp.IsSuccessStatusCode)
+                        {
+                            CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — GetWalletVersion returned {versionResp?.StatusCode}. Rejecting.", "VERSIONGATE");
+                            return (false, null);
+                        }
+                        var peerVersion = await versionResp.Content.ReadAsStringAsync();
+                        if (string.IsNullOrEmpty(peerVersion) || !IsMajorVersionCurrent(peerVersion))
+                        {
+                            CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Rejecting.", "VERSIONGATE");
+                            return (false, null);
+                        }
+                    }
+                    catch (Exception vex)
+                    {
+                        CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — version check failed: {vex.Message}. Rejecting.", "VERSIONGATE");
+                        return (false, null);
+                    }
+
+                    var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
 
                     if (response != null)
                     {
                         if (response.IsSuccessStatusCode)
                         {
-                            //var blockJson = await response.Content.ReadAsStringAsync();
-                            //if (blockJson == null)
-                            //    return (false, null);
-
-                            //var block = JsonConvert.DeserializeObject<Block>(blockJson);
-
-                            //if (block == null)
-                            //    return (false, null);
-
                             return (true, null);
                         }
                     }
@@ -424,7 +442,23 @@ namespace ReserveBlockCore.Utilities
                     {
                         return (true, Globals.NextValidatorBlock);
                     }
-                    var uri = $"http://{ip.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
+
+                    var cleanIP = ip.Replace("::ffff:", "");
+
+                    // FIX C: Version gate for block-crafting validators too.
+                    try
+                    {
+                        var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                        var versionResp = await client.GetAsync(versionUri).WaitAsync(new TimeSpan(0, 0, 3));
+                        if (versionResp == null || !versionResp.IsSuccessStatusCode)
+                            return (false, null);
+                        var peerVersion = await versionResp.Content.ReadAsStringAsync();
+                        if (string.IsNullOrEmpty(peerVersion) || !IsMajorVersionCurrent(peerVersion))
+                            return (false, null);
+                    }
+                    catch { return (false, null); }
+
+                    var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                     if (response != null)

@@ -491,6 +491,19 @@ namespace ReserveBlockCore.Controllers
             return Ok();
         }
 
+        /// <summary>
+        /// Returns this node's wallet/CLI version string.
+        /// Used by casters during VerifyWinnerAvailability to reject validators
+        /// running outdated versions that can't participate in consensus properly.
+        /// Old nodes won't have this endpoint → 404 → rejected as winner.
+        /// </summary>
+        [HttpGet]
+        [Route("GetWalletVersion")]
+        public ActionResult<string> GetWalletVersion()
+        {
+            return Ok(Globals.CLIVersion);
+        }
+
         [HttpGet]
         [Route("SendSeedPart")]
         public ActionResult<string> SendSeedPart()
