@@ -3,43 +3,58 @@ using ReserveBlockCore.Utilities;
 namespace ReserveBlockCore.Services
 {
     /// <summary>
-    /// Runs a startup port check against the node's own ReportedIP to verify
-    /// that all required validator ports are reachable from the outside.
-    /// Sets Globals.PortsOpened accordingly.
+    /// Provides startup IP validation and post-server-start port reachability checks.
     /// </summary>
     public static class ValidatorPortCheckService
     {
         /// <summary>
-        /// Checks all required validator ports against Globals.ReportedIP.
-        /// If no IP is set, logs a warning and sets PortsOpened = false.
-        /// Called from Program.cs on every node startup.
+        /// Called early in Program.cs after config/args are processed.
+        /// Only checks that an IP address has been provided (from config or --ipaddress arg).
+        /// Does NOT check ports — nothing is listening yet at this point.
         /// </summary>
-        public static void RunStartupPortCheck()
+        public static void RunStartupIPCheck()
         {
-            LogUtility.Log("Port Check: Starting startup port verification...", "ValidatorPortCheckService.RunStartupPortCheck()");
-
-            // First check: is an IP address available?
             if (string.IsNullOrEmpty(Globals.ReportedIP))
             {
                 LogUtility.Log(
-                    "Port Check: No IP address provided. Set IPAddress in config.txt or use --ipaddress=x.x.x.x argument. " +
-                    "Ports cannot be verified. PortsOpened set to false.",
-                    "ValidatorPortCheckService.RunStartupPortCheck()");
+                    "IP Check: No IP address provided. Set IPAddress in config.txt or use --ipaddress=x.x.x.x argument. " +
+                    "Validator port verification will not be possible until an IP is known.",
+                    "ValidatorPortCheckService.RunStartupIPCheck()");
+                Console.WriteLine("Warning: No IP address configured. Validator port checks require an IP. Set IPAddress in config.txt or use --ipaddress=x.x.x.x");
+            }
+            else
+            {
+                LogUtility.Log($"IP Check: IP address {Globals.ReportedIP} is configured (from config or CLI arg).",
+                    "ValidatorPortCheckService.RunStartupIPCheck()");
+            }
+        }
+
+        /// <summary>
+        /// Called from StartupValidatorProcess() AFTER validator servers have been started.
+        /// Checks all required validator ports against Globals.ReportedIP to verify
+        /// they are reachable from the outside (firewall/NAT).
+        /// Sets Globals.PortsOpened accordingly.
+        /// </summary>
+        public static void RunValidatorPortCheck()
+        {
+            if (string.IsNullOrEmpty(Globals.ReportedIP))
+            {
+                LogUtility.Log(
+                    "Port Check: No IP address available. Cannot verify validator ports. PortsOpened set to false.",
+                    "ValidatorPortCheckService.RunValidatorPortCheck()");
                 Globals.PortsOpened = false;
                 return;
             }
 
             var ip = Globals.ReportedIP;
-            LogUtility.Log($"Port Check: Using IP address {ip} for port verification.", "ValidatorPortCheckService.RunStartupPortCheck()");
+            LogUtility.Log($"Port Check: Checking validator ports against {ip}...", "ValidatorPortCheckService.RunValidatorPortCheck()");
 
-            // Define all ports to check with friendly names
+            // These are the ports that should be listening after validator server startup
             var portsToCheck = new (int Port, string Name)[]
             {
-                (Globals.Port, "P2P"),
                 (Globals.ValPort, "Validator"),
                 (Globals.ValAPIPort, "Validator API"),
                 (Globals.FrostValidatorPort, "FROST Validator"),
-                (Globals.ArbiterPort, "Arbiter"),
             };
 
             bool allOpen = true;
@@ -53,32 +68,37 @@ namespace ReserveBlockCore.Services
                 }
                 catch (Exception ex)
                 {
-                    LogUtility.Log($"Port Check: Error checking port {port} ({name}): {ex.Message}", "ValidatorPortCheckService.RunStartupPortCheck()");
+                    LogUtility.Log($"Port Check: Error checking port {port} ({name}): {ex.Message}", "ValidatorPortCheckService.RunValidatorPortCheck()");
                 }
 
                 if (isOpen)
                 {
-                    LogUtility.Log($"Port Check: Port {port} ({name}) - OPEN", "ValidatorPortCheckService.RunStartupPortCheck()");
+                    LogUtility.Log($"Port Check: Port {port} ({name}) - OPEN", "ValidatorPortCheckService.RunValidatorPortCheck()");
                 }
                 else
                 {
-                    LogUtility.Log($"Port Check: Port {port} ({name}) - CLOSED", "ValidatorPortCheckService.RunStartupPortCheck()");
+                    LogUtility.Log($"Port Check: Port {port} ({name}) - CLOSED", "ValidatorPortCheckService.RunValidatorPortCheck()");
                     allOpen = false;
                 }
             }
+
+            // Also update the individual globals for backward compatibility
+            Globals.IsValidatorPortOpen = PortUtility.IsPortOpen(ip, Globals.ValPort);
+            Globals.IsValidatorAPIPortOpen = PortUtility.IsPortOpen(ip, Globals.ValAPIPort);
+            Globals.IsFROSTAPIPortOpen = PortUtility.IsPortOpen(ip, Globals.FrostValidatorPort);
 
             Globals.PortsOpened = allOpen;
 
             if (allOpen)
             {
-                LogUtility.Log("Port Check: All required ports are OPEN. PortsOpened set to true.", "ValidatorPortCheckService.RunStartupPortCheck()");
+                LogUtility.Log("Port Check: All required validator ports are OPEN. PortsOpened set to true.", "ValidatorPortCheckService.RunValidatorPortCheck()");
             }
             else
             {
                 LogUtility.Log(
-                    "Port Check: One or more required ports are CLOSED. PortsOpened set to false. " +
-                    "Validator registration and startup will be blocked until all ports are open.",
-                    "ValidatorPortCheckService.RunStartupPortCheck()");
+                    "Port Check: One or more required validator ports are CLOSED. PortsOpened set to false. " +
+                    "The StartupValidators loop will continue retrying every 30 seconds.",
+                    "ValidatorPortCheckService.RunValidatorPortCheck()");
             }
         }
     }

@@ -126,14 +126,6 @@ namespace ReserveBlockCore.Services
         {
             if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
-                if (!Globals.PortsOpened)
-                {
-                    LogUtility.Log("Validator startup blocked: required ports are not open or no IP address provided. Check rbxlog for port check details.", 
-                        "ValidatorService.StartupValidatorProcess()");
-                    Console.WriteLine("Validator startup blocked: required ports are not open or no IP address was provided. Check rbxlog for details.");
-                    return;
-                }
-
                 while (!Globals.IsChainSynced)
                 {
                     await Task.Delay(1000);
@@ -150,6 +142,13 @@ namespace ReserveBlockCore.Services
                 _ = StartValidatorServer();
                 Globals.IsFrostValidator = true; // Enable FROST server for validator nodes
                 _ = FrostServer.Start();
+
+                // Give servers a moment to bind their ports before checking reachability
+                await Task.Delay(5000);
+
+                // Run port reachability check now that servers are listening
+                ValidatorPortCheckService.RunValidatorPortCheck();
+
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
                 _ = VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop();  // Start vBTC V2 validator heartbeat loop
@@ -205,6 +204,20 @@ namespace ReserveBlockCore.Services
         {
             try
             {
+                // Wait for ports to be verified open before sending any registration/heartbeat TXs
+                var portWaitAttempts = 0;
+                while (!Globals.PortsOpened && portWaitAttempts < 30)
+                {
+                    portWaitAttempts++;
+                    await Task.Delay(5000);
+                }
+                if (!Globals.PortsOpened)
+                {
+                    LogUtility.Log("Cannot send vBTC V2 registration - ports not verified open. Validator may have been stopped.",
+                        "ValidatorService.SendVBTCV2RegistrationTx()");
+                    return;
+                }
+
                 var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(Globals.ValidatorAddress);
                 if (existingValidator != null)
                 {
@@ -377,6 +390,14 @@ namespace ReserveBlockCore.Services
         {
             try
             {
+                // Don't send reactivation TX if ports aren't verified open
+                if (!Globals.PortsOpened)
+                {
+                    LogUtility.Log("Cannot send vBTC V2 reactivation - ports not verified open.",
+                        "ValidatorService.SendVBTCV2ReactivationTx()");
+                    return;
+                }
+
                 var validator = AccountData.GetSingleAccount(Globals.ValidatorAddress);
                 if (validator == null) return;
 
@@ -495,10 +516,14 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        private const int MAX_PORT_CHECK_RETRIES = 3;
+
         internal static async Task StartupValidators()
         {
-            //wait 25 seconds
+            //wait 5 seconds
             await Task.Delay(new TimeSpan(0,0,5));
+            int portFailCount = 0;
+
             while (true)
             {
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
@@ -519,14 +544,40 @@ namespace ReserveBlockCore.Services
 
                 if(!Globals.IsFROSTAPIPortOpen || !Globals.IsValidatorAPIPortOpen || !Globals.IsValidatorPortOpen)
                 {
-                    Console.WriteLine("Validator Ports Not Open Please open ports and try again. Retrying in 30 seconds...");
+                    portFailCount++;
+                    Globals.PortsOpened = false;
+
+                    Console.WriteLine($"Validator Ports Not Open (attempt {portFailCount}/{MAX_PORT_CHECK_RETRIES}). Please open ports and try again.");
                     Console.WriteLine("Current Port Status");
                     AnsiConsole.WriteLine("Validator Port (" + Globals.ValPort + "): " + (Globals.IsValidatorPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
                     AnsiConsole.WriteLine("Validator API Port (" + Globals.ValAPIPort + "): " + (Globals.IsValidatorAPIPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
                     AnsiConsole.WriteLine("Frost API Port (" + Globals.FrostValidatorPort + "): " + (Globals.IsFROSTAPIPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
+
+                    if (portFailCount >= MAX_PORT_CHECK_RETRIES)
+                    {
+                        Console.WriteLine("============================================================");
+                        Console.WriteLine("VALIDATOR STOPPED: Required ports are not reachable after " + MAX_PORT_CHECK_RETRIES + " attempts.");
+                        Console.WriteLine("Please ensure your firewall/router has the following ports open:");
+                        Console.WriteLine($"  Validator Port:     {Globals.ValPort}");
+                        Console.WriteLine($"  Validator API Port: {Globals.ValAPIPort}");
+                        Console.WriteLine($"  FROST API Port:     {Globals.FrostValidatorPort}");
+                        Console.WriteLine("Fix your port configuration and restart the wallet to try again.");
+                        Console.WriteLine("============================================================");
+                        LogUtility.Log($"Validator stopped due to unreachable ports after {MAX_PORT_CHECK_RETRIES} attempts. ValPort={Globals.ValPort} open={Globals.IsValidatorPortOpen}, ValAPIPort={Globals.ValAPIPort} open={Globals.IsValidatorAPIPortOpen}, FrostPort={Globals.FrostValidatorPort} open={Globals.IsFROSTAPIPortOpen}",
+                            "ValidatorService.StartupValidators()");
+                        ErrorLogUtility.LogError($"Validator stopped: required ports not reachable after {MAX_PORT_CHECK_RETRIES} attempts on IP {myIP}.",
+                            "ValidatorService.StartupValidators()");
+                        await DoMasterNodeStop();
+                        return;
+                    }
+
                     await Task.Delay(new TimeSpan(0, 0, 30));
                     continue;
                 }
+
+                // All ports verified open — update global flag and reset fail counter
+                portFailCount = 0;
+                Globals.PortsOpened = true;
 
                 var startupCount = Globals.ValidatorNodes.Count / 2 + 1;
                 var delay = new TimeSpan(0,0,15);
@@ -646,11 +697,6 @@ namespace ReserveBlockCore.Services
         {
             string output = "";
             Validators validator = new Validators();
-
-            if (!Globals.PortsOpened)
-            {
-                return "Cannot register as validator: required ports are not open or no IP address was provided. Check rbxlog for port check details.";
-            }
 
             if(Globals.V4Height == Globals.LastBlock.Height + 1)
             {
@@ -1341,11 +1387,6 @@ namespace ReserveBlockCore.Services
         {
             string output = "";
             Validators validator = new Validators();
-
-            if (!Globals.PortsOpened)
-            {
-                return "Cannot register as validator: required ports are not open or no IP address was provided. Check rbxlog for port check details.";
-            }
 
             if (account == null)
             {

@@ -80,6 +80,16 @@ namespace ReserveBlockCore.Services
                 return;
             }
 
+            // Wait for ports to be verified open before starting heartbeat loop
+            while (!Globals.PortsOpened && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                await Task.Delay(5000);
+            }
+
+            // If validator was stopped (e.g. port check failed), exit the loop
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                return;
+
             LogUtility.Log("Starting vBTC V2 validator heartbeat loop (on-chain + HTTP monitoring)",
                 "VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop()");
 

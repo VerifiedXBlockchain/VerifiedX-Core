@@ -328,8 +328,8 @@ namespace ReserveBlockCore
             Config.Config.ProcessConfig(config);
             Config.Config.ProcessABL();
 
-            // Run startup port check for all nodes (uses ReportedIP set from config or --ipaddress arg)
-            ValidatorPortCheckService.RunStartupPortCheck();
+            // Run startup IP check (validates IP is configured; port checks happen later after servers start)
+            ValidatorPortCheckService.RunStartupIPCheck();
 
             LogUtility.Log(logCLIVer, "Main", true);
             LogUtility.Log($"VFX Wallet - {logCLIVer}", "Main");

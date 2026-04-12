@@ -800,6 +800,13 @@ namespace ReserveBlockCore.Nodes
                         continue;
                     }
 
+                    // Don't notify explorer if ports haven't been verified open
+                    if (!Globals.PortsOpened)
+                    {
+                        await delay;
+                        continue;
+                    }
+
                     var account = AccountData.GetLocalValidator();
                     if (account == null)
                         return;
