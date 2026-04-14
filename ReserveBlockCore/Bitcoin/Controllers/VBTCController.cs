@@ -2582,6 +2582,183 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             }
         }
 
+        /// <summary>
+        /// Get the health status of a vBTC V2 contract by checking how many of the original
+        /// DKG validators are still online (heartbeating). Since 67% of original validators
+        /// must be available for FROST signing, this gives users visibility into whether
+        /// their contract can still process withdrawals.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>Validator health report with online/offline breakdown</returns>
+        [HttpGet("GetContractHealth/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetContractHealth(string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(scUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID is required" });
+
+                // Step 1: Resolve the ValidatorAddressesSnapshot from the contract.
+                // Try local DB first, fall back to State Trei + in-memory decompile (works on any node).
+                List<string>? originalValidators = null;
+                int requiredThreshold = 67;
+                long lastActivityBlock = 0;
+                string? depositAddress = null;
+
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract != null)
+                {
+                    lastActivityBlock = vbtcContract.LastValidatorActivityBlock;
+                    depositAddress = vbtcContract.DepositAddress;
+                    requiredThreshold = vbtcContract.RequiredThreshold;
+                }
+
+                // Get contract data from State Trei + decompile to extract ValidatorAddressesSnapshot
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
+                {
+                    try
+                    {
+                        var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                        if (scMainDecompile?.Features != null)
+                        {
+                            var tknzFeature = scMainDecompile.Features
+                                .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                .Select(x => x.FeatureFeatures)
+                                .FirstOrDefault();
+
+                            if (tknzFeature is TokenizationV2Feature tknz)
+                            {
+                                originalValidators = tknz.ValidatorAddressesSnapshot;
+                                if (requiredThreshold <= 0) requiredThreshold = tknz.RequiredThreshold;
+                                if (lastActivityBlock <= 0) lastActivityBlock = tknz.ProofBlockHeight;
+                                if (string.IsNullOrEmpty(depositAddress)) depositAddress = tknz.DepositAddress;
+                            }
+                        }
+                    }
+                    catch (Exception decompileEx)
+                    {
+                        ErrorLogUtility.LogError($"Failed to decompile contract {scUID} for health check: {decompileEx.Message}",
+                            "VBTCController.GetContractHealth()");
+                    }
+                }
+
+                if (originalValidators == null || !originalValidators.Any())
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Could not resolve the original validator snapshot for this contract. " +
+                                  "The contract may not exist or may not have a TokenizationV2 feature."
+                    });
+                }
+
+                // Step 2: Get currently active validators from block scanning
+                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                var activeAddressSet = new HashSet<string>(
+                    activeValidators?.Select(v => v.ValidatorAddress) ?? Enumerable.Empty<string>());
+
+                // Step 3: Cross-reference each original validator against the active set
+                var validatorDetails = new List<object>();
+                int onlineCount = 0;
+                int offlineCount = 0;
+
+                foreach (var addr in originalValidators)
+                {
+                    bool isOnline = activeAddressSet.Contains(addr);
+                    long? lastHeartbeat = null;
+
+                    if (isOnline)
+                    {
+                        onlineCount++;
+                        var activeVal = activeValidators!.FirstOrDefault(v => v.ValidatorAddress == addr);
+                        if (activeVal != null)
+                            lastHeartbeat = activeVal.LastHeartbeatBlock;
+                    }
+                    else
+                    {
+                        offlineCount++;
+                    }
+
+                    validatorDetails.Add(new
+                    {
+                        Address = addr,
+                        IsOnline = isOnline,
+                        LastHeartbeatBlock = lastHeartbeat
+                    });
+                }
+
+                // Step 4: Calculate health metrics
+                int totalOriginal = originalValidators.Count;
+                decimal onlinePercentage = totalOriginal > 0
+                    ? Math.Round(((decimal)onlineCount / totalOriginal) * 100m, 2)
+                    : 0m;
+
+                bool meetsThreshold = onlinePercentage >= requiredThreshold;
+                long currentBlock = Globals.LastBlock.Height;
+
+                // Use VBTCThresholdCalculator for adjusted threshold info
+                string thresholdExplanation;
+                int adjustedThreshold;
+                int requiredValidatorCount;
+                try
+                {
+                    adjustedThreshold = Services.VBTCThresholdCalculator.CalculateAdjustedThreshold(
+                        totalOriginal, onlineCount, lastActivityBlock, currentBlock);
+                    requiredValidatorCount = Services.VBTCThresholdCalculator.CalculateRequiredValidators(
+                        adjustedThreshold, onlineCount);
+                    thresholdExplanation = Services.VBTCThresholdCalculator.GetThresholdExplanation(
+                        totalOriginal, onlineCount, lastActivityBlock, currentBlock);
+                }
+                catch
+                {
+                    adjustedThreshold = requiredThreshold;
+                    requiredValidatorCount = (int)Math.Ceiling(onlineCount * (requiredThreshold / 100.0));
+                    thresholdExplanation = $"Original threshold: {requiredThreshold}%. Online: {onlineCount}/{totalOriginal} ({onlinePercentage}%).";
+                }
+
+                // Determine overall health status
+                string healthStatus;
+                if (onlinePercentage >= 80)
+                    healthStatus = "Excellent";
+                else if (onlinePercentage >= 67)
+                    healthStatus = "Healthy";
+                else if (onlinePercentage >= 50)
+                    healthStatus = "Degraded";
+                else if (onlinePercentage > 0)
+                    healthStatus = "Critical";
+                else
+                    healthStatus = "Offline";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Contract health retrieved",
+                    SmartContractUID = scUID,
+                    DepositAddress = depositAddress,
+                    HealthStatus = healthStatus,
+                    TotalOriginalValidators = totalOriginal,
+                    OnlineValidators = onlineCount,
+                    OfflineValidators = offlineCount,
+                    OnlinePercentage = onlinePercentage,
+                    RequiredThreshold = requiredThreshold,
+                    AdjustedThreshold = adjustedThreshold,
+                    RequiredValidatorCount = requiredValidatorCount,
+                    CanProcessWithdrawals = onlineCount >= requiredValidatorCount,
+                    IsHealthy = meetsThreshold,
+                    CurrentBlockHeight = currentBlock,
+                    ScanWindow = Services.VBTCValidatorRegistry.SCAN_WINDOW,
+                    ThresholdExplanation = thresholdExplanation,
+                    Validators = validatorDetails
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
         #endregion
 
         #region Utility
