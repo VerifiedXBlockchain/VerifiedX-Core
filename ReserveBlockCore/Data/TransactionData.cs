@@ -667,7 +667,7 @@ namespace ReserveBlockCore.Data
                                     // this TX hash, it means this TX was already processed into a block
                                     // but not yet cleaned from mempool — allow it through (it will be
                                     // filtered by HasTxBeenCraftedIntoBlock check later).
-                                    var existingVal = Bitcoin.Models.VBTCValidator.GetValidator(tx.FromAddress);
+                                    var existingVal = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
                                     if (existingVal != null && existingVal.IsActive 
                                         && existingVal.RegisterTransactionHash != tx.Hash)
                                     {

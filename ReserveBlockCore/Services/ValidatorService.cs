@@ -133,7 +133,8 @@ namespace ReserveBlockCore.Services
                 }
                 
                 // Scan recent blocks first to rebuild accurate validator state from consensus
-                await VBTCValidatorHeartbeatService.ScanRecentBlocksForValidatorState();
+                // Block-scan-based validator registry replaces startup DB scan
+                // VBTCValidatorRegistry.GetActiveValidators() will scan blocks on-demand
 
                 // Clean stale validator TXs from mempool before sending new ones
                 // This prevents nonce conflicts and duplicate TXs after restart
@@ -236,7 +237,7 @@ namespace ReserveBlockCore.Services
                     return;
                 }
 
-                var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(Globals.ValidatorAddress);
+                var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(Globals.ValidatorAddress);
                 if (existingValidator != null)
                 {
                     // Wait briefly for IP to be discovered before making decisions

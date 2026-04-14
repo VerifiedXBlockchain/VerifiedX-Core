@@ -3187,7 +3187,7 @@ namespace ReserveBlockCore.Data
                 }
 
                 // Verify voter is an active vBTC validator (tx.FromAddress is authoritative)
-                var validator = VBTCValidator.GetValidator(tx.FromAddress);
+                var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
                 if (validator == null || !validator.IsActive)
                 {
                     ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: {tx.FromAddress} is not an active vBTC validator", "StateData.VoteOnVBTCV2Cancellation()");
@@ -3205,7 +3205,7 @@ namespace ReserveBlockCore.Data
                 VBTCWithdrawalCancellation.AddVote(cancellationUID, tx.FromAddress, approve);
 
                 // Check if 75% approval threshold reached
-                var activeValidators = VBTCValidator.GetActiveValidators();
+                var activeValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
                 var totalValidatorCount = activeValidators?.Count ?? 0;
                 
                 if (totalValidatorCount > 0)

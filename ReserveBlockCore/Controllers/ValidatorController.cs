@@ -691,8 +691,7 @@ namespace ReserveBlockCore.Controllers
             {
                 // Get validators using blockchain-based staleness check
                 var currentBlock = Globals.LastBlock.Height;
-                var activeValidators = Bitcoin.Models.VBTCValidator.GetActiveValidatorsWithStalenessCheck(
-                    currentBlock, Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
+                var activeValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -700,7 +699,7 @@ namespace ReserveBlockCore.Controllers
                     Message = "Active validators retrieved",
                     CurrentBlock = currentBlock,
                     TotalValidators = activeValidators?.Count ?? 0,
-                    ActiveValidators = activeValidators ?? new List<Bitcoin.Models.VBTCValidator>()
+                    ActiveValidators = activeValidators
                 });
             }
             catch (Exception ex)

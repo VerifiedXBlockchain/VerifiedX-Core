@@ -746,7 +746,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 SCLogUtility.Log($"Starting FROST withdrawal for contract {scUID}", "VBTCService.CompleteWithdrawal()");
 
                 // Get active validators for FROST signing
-                var validators = VBTCValidator.GetActiveValidators();
+                var validators = VBTCValidatorRegistry.GetActiveValidators();
                 if (validators == null || !validators.Any())
                 {
                     SCLogUtility.Log($"No active validators available for FROST signing", "VBTCService.CompleteWithdrawal()");

@@ -177,7 +177,7 @@ namespace ReserveBlockCore.BrowserWalletServices
                     }
                 }
 
-                var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+                var activeValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
                 if (activeValidators == null || !activeValidators.Any())
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available on the network. Cannot delegate withdrawal." });

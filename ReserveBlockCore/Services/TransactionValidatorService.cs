@@ -2491,8 +2491,8 @@ namespace ReserveBlockCore.Services
                         // Anti-spam check: Ensure validator doesn't already have an active record.
                         // Exception: if the existing record's RegisterTransactionHash matches this TX hash,
                         // it means this TX was already processed into a block but not yet cleaned from mempool.
-                        var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(validatorAddress);
-                        if (existingValidator != null && existingValidator.IsActive 
+                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                        if (existingValidator != null && existingValidator.IsActive
                             && existingValidator.RegisterTransactionHash != txRequest.Hash)
                             return (txResult, "Validator already has an active registration. Cannot register again.");
                         
@@ -2540,7 +2540,7 @@ namespace ReserveBlockCore.Services
                             return (txResult, "Validator exit cannot have an amount.");
                         
                         // Ensure validator actually has an active registration
-                        var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(validatorAddress);
+                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
                         if (existingValidator == null || !existingValidator.IsActive)
                             return (txResult, "Validator does not have an active registration. Cannot exit.");
                     }
@@ -2785,7 +2785,7 @@ namespace ReserveBlockCore.Services
                             // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
                             if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
                             {
-                                var completingValidator = VBTCValidator.GetValidator(txRequest.FromAddress);
+                                var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(txRequest.FromAddress);
                                 if (completingValidator == null || !completingValidator.IsActive)
                                     return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) or an active vBTC validator can complete this withdrawal. Received from: {txRequest.FromAddress}");
                             }
@@ -2883,7 +2883,7 @@ namespace ReserveBlockCore.Services
                             return (txResult, "Cannot vote on an already processed cancellation.");
 
                         // Validate the voter is an active vBTC validator
-                        var validator = VBTCValidator.GetValidator(txRequest.FromAddress);
+                        var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(txRequest.FromAddress);
                         if (validator == null || !validator.IsActive)
                             return (txResult, "Only active vBTC validators can vote on cancellations.");
 

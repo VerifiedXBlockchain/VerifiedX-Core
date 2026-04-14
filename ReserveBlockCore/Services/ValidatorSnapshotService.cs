@@ -48,8 +48,7 @@ namespace ReserveBlockCore.Services
                 tip = 0;
 
             var anchor = SnapshotAnchor(nextBlockHeight);
-            var candidates = VBTCValidator.GetActiveValidatorsWithStalenessCheck(tip, StaleThresholdBlocks)
-                             ?? new List<VBTCValidator>();
+            var candidates = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
 
             var list = new List<ValidatorSnapshotEntry>();
             foreach (var v in candidates.OrderBy(x => x.ValidatorAddress, StringComparer.Ordinal))

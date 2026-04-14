@@ -890,8 +890,8 @@ namespace ReserveBlockCore.Services
                                             RegisterTransactionHash = tx.Hash
                                         };
                                         
-                                        Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
-                                        
+                                        // No DB save needed — VBTCValidatorRegistry derives state from block scanning
+
                                         //LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
@@ -910,8 +910,8 @@ namespace ReserveBlockCore.Services
                                         var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
                                         var exitBlockHeight = jobj["ExitBlockHeight"]?.ToObject<long>();
                                         
-                                        Bitcoin.Models.VBTCValidator.SetInactive(validatorAddress, tx.Hash, exitBlockHeight ?? block.Height);
-                                        
+                                        // No DB update needed — VBTCValidatorRegistry derives state from block scanning
+
                                         //LogUtility.Log($"Processed VBTC V2 validator exit for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
@@ -942,33 +942,7 @@ namespace ReserveBlockCore.Services
                                             continue; // Skip — don't update DB with invalid IP
                                         }
 
-                                        var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(validatorAddress);
-                                        if (existingValidator != null)
-                                        {
-                                            // Update IP, reactivate, and refresh heartbeat block
-                                            existingValidator.IPAddress = ipAddress;
-                                            existingValidator.IsActive = true;
-                                            existingValidator.LastHeartbeatBlock = block.Height;
-                                            if (!string.IsNullOrEmpty(frostPublicKey))
-                                                existingValidator.FrostPublicKey = frostPublicKey;
-                                            Bitcoin.Models.VBTCValidator.SaveValidator(existingValidator);
-                                        }
-                                        else
-                                        {
-                                            // Validator not in local DB — create from heartbeat data
-                                            // (can happen when a node receives the heartbeat before it received the registration)
-                                            var vbtcValidator = new Bitcoin.Models.VBTCValidator
-                                            {
-                                                ValidatorAddress = validatorAddress,
-                                                IPAddress = ipAddress,
-                                                RegistrationBlockHeight = reactivationBlockHeight ?? block.Height,
-                                                LastHeartbeatBlock = block.Height,
-                                                IsActive = true,
-                                                FrostPublicKey = frostPublicKey ?? "",
-                                                RegisterTransactionHash = tx.Hash
-                                            };
-                                            Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
-                                        }
+                                        // No DB save needed — VBTCValidatorRegistry derives state from block scanning
 
                                         //LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}", "BlockValidatorService");
                                     }

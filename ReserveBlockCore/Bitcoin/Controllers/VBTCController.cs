@@ -226,14 +226,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 ceremony.ProgressPercentage = 5;
 
                 var currentBlock = Globals.LastBlock.Height;
-                var activeValidators = VBTCValidator.GetActiveValidatorsWithStalenessCheck(currentBlock, ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
-                var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                var totalRegisteredValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
 
                 if (activeValidators == null || !activeValidators.Any())
                 {
                     ceremony.Status = CeremonyStatus.Failed;
                     ceremony.ErrorMessage = $"No active validators available for vBTC V2 contract creation. Total registered: {totalRegisteredValidators}. " +
-                        $"Validators may be stale (no on-chain heartbeat within {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks).";
+                        $"No active validators found in recent blocks.";
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
@@ -242,13 +242,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (activeValidators.Count < requiredActiveValidators)
                 {
                     // Log details about each validator's staleness for debugging
-                    var allVals = VBTCValidator.GetAllValidators();
+                    var allVals = Services.VBTCValidatorRegistry.GetActiveValidators();
                     var valDetails = allVals != null
                         ? string.Join(", ", allVals.Select(v => $"{v.ValidatorAddress.Substring(0, 8)}...(Active:{v.IsActive}, HB:{v.LastHeartbeatBlock}, Gap:{currentBlock - v.LastHeartbeatBlock})"))
                         : "N/A";
                     ceremony.Status = CeremonyStatus.Failed;
                     ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}. " +
-                        $"Stale threshold: {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks. Validators: [{valDetails}]";
+                        $"Scan window: {Services.VBTCValidatorRegistry.SCAN_WINDOW} blocks. Validators: [{valDetails}]";
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
@@ -336,14 +336,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             try
             {
                 var validators = activeOnly
-                    ? VBTCValidator.GetActiveValidators()
-                    : VBTCValidator.GetAllValidators();
+                    ? Services.VBTCValidatorRegistry.GetActiveValidators()
+                    : Services.VBTCValidatorRegistry.GetActiveValidators();
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Validators retrieved",
-                    Validators = validators ?? new List<VBTCValidator>()
+                    Validators = validators
                 });
             }
             catch (Exception ex)
@@ -364,12 +364,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             try
             {
                 // Update validator's last heartbeat block
-                var validator = VBTCValidator.GetValidator(validatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
                 if (validator == null)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
                 }
-                VBTCValidator.UpdateHeartbeat(validatorAddress, Globals.LastBlock.Height);
+                // No DB update needed — VBTCValidatorRegistry derives state from block scanning
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -396,7 +396,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                var validator = VBTCValidator.GetValidator(validatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
                 if (validator == null)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
@@ -654,14 +654,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
             // Step 1: Get list of active validators (using blockchain-based staleness check)
             var currentBlock = Globals.LastBlock.Height;
-            var activeValidators = VBTCValidator.GetActiveValidatorsWithStalenessCheck(currentBlock, ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
-            var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+            var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+            var totalRegisteredValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
 
             if (activeValidators == null || !activeValidators.Any())
             {
                 ceremony.Status = CeremonyStatus.Failed;
                 ceremony.ErrorMessage = $"No active validators available for vBTC V2 contract creation. Total registered: {totalRegisteredValidators}. " +
-                    $"Validators may be stale (no on-chain heartbeat within {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks).";
+                    $"No active validators found in recent blocks.";
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
@@ -669,13 +669,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
             if (activeValidators.Count < requiredActiveValidators)
             {
-                var allVals = VBTCValidator.GetAllValidators();
+                var allVals = Services.VBTCValidatorRegistry.GetActiveValidators();
                 var valDetails = allVals != null
                     ? string.Join(", ", allVals.Select(v => $"{v.ValidatorAddress.Substring(0, 8)}...(Active:{v.IsActive}, HB:{v.LastHeartbeatBlock}, Gap:{currentBlock - v.LastHeartbeatBlock})"))
                     : "N/A";
                 ceremony.Status = CeremonyStatus.Failed;
                 ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}. " +
-                    $"Stale threshold: {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks. Validators: [{valDetails}]";
+                    $"Scan window: {Services.VBTCValidatorRegistry.SCAN_WINDOW} blocks. Validators: [{valDetails}]";
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
@@ -735,7 +735,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             ceremony.ProgressPercentage = 5;
 
             // Step 1: Discover active validators from the network
-            var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+            var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
             if (activeValidators == null || !activeValidators.Any())
             {
                 ceremony.Status = CeremonyStatus.Failed;
@@ -934,7 +934,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 }
 
                 // Discover active validators from the network
-                var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
                 if (activeValidators == null || !activeValidators.Any())
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available on the network. Cannot delegate withdrawal." });
@@ -1878,7 +1878,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "CancellationUID and ValidatorAddress are required" });
 
                 // Verify validator is active
-                var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
                 if (validator == null || !validator.IsActive)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
@@ -1907,7 +1907,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 // Refresh cancellation data after vote
                 cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
-                int totalValidators = VBTCValidator.GetActiveValidatorCount();
+                int totalValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
                 int votePercentage = totalValidators > 0 
                     ? VBTCWithdrawalCancellation.GetVotePercentage(payload.CancellationUID, totalValidators) 
                     : 0;
@@ -2108,7 +2108,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 }
 
                 // 3. Verify validator is active and eligible
-                var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
                 if (validator == null || !validator.IsActive)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });

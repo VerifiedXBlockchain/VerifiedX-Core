@@ -823,7 +823,7 @@ namespace ReserveBlockCore.Services
                             // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
                             if (withdrawalRequest.RequestorAddress != tx.FromAddress)
                             {
-                                var completingValidator = VBTCValidator.GetValidator(tx.FromAddress);
+                                var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
                                 if (completingValidator == null || !completingValidator.IsActive)
                                 {
                                     SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: tx.FromAddress ({tx.FromAddress}) is neither the original requester ({withdrawalRequest.RequestorAddress}) nor an active vBTC validator",
@@ -983,7 +983,7 @@ namespace ReserveBlockCore.Services
                             }
                             else
                             {
-                                var validator = VBTCValidator.GetValidator(tx.FromAddress);
+                                var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
                                 if (validator == null || !validator.IsActive)
                                 {
                                     SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: {tx.FromAddress} is not an active vBTC validator",

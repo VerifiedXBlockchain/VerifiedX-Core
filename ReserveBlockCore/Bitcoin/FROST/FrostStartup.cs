@@ -150,7 +150,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var leaderValidator = VBTCValidator.GetValidator(request.LeaderAddress);
+                            var leaderValidator = Services.VBTCValidatorRegistry.GetValidator(request.LeaderAddress);
                             if (leaderValidator == null || !leaderValidator.IsActive)
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -165,7 +165,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             // FIND-0013 Fix: Verify all participants are registered active validators
                             foreach (var participantAddr in request.ParticipantAddresses)
                             {
-                                var participantValidator = VBTCValidator.GetValidator(participantAddr);
+                                var participantValidator = Services.VBTCValidatorRegistry.GetValidator(participantAddr);
                                 if (participantValidator == null || !participantValidator.IsActive)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -1319,7 +1319,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var leaderValidator = VBTCValidator.GetValidator(request.LeaderAddress);
+                            var leaderValidator = Services.VBTCValidatorRegistry.GetValidator(request.LeaderAddress);
                             if (leaderValidator == null || !leaderValidator.IsActive)
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
