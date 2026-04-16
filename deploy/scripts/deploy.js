@@ -50,20 +50,44 @@ async function main() {
 
     console.log("\n=== DEPLOYMENT SUCCESSFUL ===");
     console.log("Proxy address (USE THIS):", proxyAddress);
-    
-    // Read back state to verify
-    const count = await proxy.validatorCount();
-    const requiredMint = await proxy.requiredMintSignatures();
-    const requiredRemove = await proxy.requiredRemoveSignatures();
-    const decimals = await proxy.decimals();
-    const validators = await proxy.getValidators();
 
-    console.log("\nContract state:");
-    console.log("  Validator count:", count.toString());
-    console.log("  Required mint signatures:", requiredMint.toString());
-    console.log("  Required remove signatures:", requiredRemove.toString());
-    console.log("  Decimals:", decimals.toString());
-    console.log("  Validators on contract:", validators);
+    // Public RPCs sometimes lag right after a tx; eth_call can briefly return empty (BAD_DATA).
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let count;
+    let requiredMint;
+    let requiredRemove;
+    let decimals;
+    let validators;
+    const delaysMs = [0, 2000, 4000, 8000];
+    let lastErr;
+    for (const ms of delaysMs) {
+        if (ms) await sleep(ms);
+        try {
+            count = await proxy.validatorCount();
+            requiredMint = await proxy.requiredMintSignatures();
+            requiredRemove = await proxy.requiredRemoveSignatures();
+            decimals = await proxy.decimals();
+            validators = await proxy.getValidators();
+            lastErr = undefined;
+            break;
+        } catch (e) {
+            lastErr = e;
+        }
+    }
+    if (lastErr) {
+        console.warn(
+            "\nCould not read contract state yet (often public RPC lag). Deployment tx already succeeded — confirm on BaseScan:"
+        );
+        console.warn("  https://sepolia.basescan.org/address/" + proxyAddress);
+        console.warn("Underlying error:", lastErr.message || lastErr);
+    } else {
+        console.log("\nContract state:");
+        console.log("  Validator count:", count.toString());
+        console.log("  Required mint signatures:", requiredMint.toString());
+        console.log("  Required remove signatures:", requiredRemove.toString());
+        console.log("  Decimals:", decimals.toString());
+        console.log("  Validators on contract:", validators);
+    }
 
     console.log("\n=== NEXT STEPS ===");
     console.log("1. Set this environment variable on ALL VFX nodes:");

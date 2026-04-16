@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -44,7 +44,6 @@ contract VBTCbV2 is ERC20Upgradeable, UUPSUpgradeable {
         address[] memory initialValidators
     ) public initializer {
         __ERC20_init(name_, symbol_);
-        __UUPSUpgradeable_init();
 
         require(initialValidators.length >= 2, "Need at least 2 validators");
 
