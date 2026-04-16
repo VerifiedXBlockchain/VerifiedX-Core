@@ -119,7 +119,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             foreach (var v in validators)
             {
                 if (string.IsNullOrEmpty(v.IPAddress)) continue;
-                var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.APIPort}/vbtcapi/VBTC/SignMintAttestation";
+                var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.APIPort}/vbtcapi/Validator/SignMintAttestation";
                 var body = JsonConvert.SerializeObject(new MintAttestationRequest
                 {
                     LockId = record.LockId,
@@ -197,12 +197,15 @@ namespace ReserveBlockCore.Bitcoin.Services
         private static void WriteUint256(MemoryStream ms, BigInteger v)
         {
             if (v.Sign < 0) throw new ArgumentOutOfRangeException(nameof(v));
-            var raw = v.ToByteArray(); // little endian
-            if (raw.Length > 32) throw new ArgumentOutOfRangeException(nameof(v));
+            var raw = v.ToByteArray(); // little-endian, may have leading zero byte for unsigned
+            // Strip trailing zero byte that BigInteger adds for positive numbers that have high bit set
+            var len = raw.Length;
+            if (len > 1 && raw[len - 1] == 0) len--;
+            if (len > 32) throw new ArgumentOutOfRangeException(nameof(v));
+            // Convert to big-endian, right-aligned in 32 bytes (matches Solidity abi.encodePacked uint256)
             var be = new byte[32];
-            Array.Copy(raw, 0, be, 32 - raw.Length, raw.Length);
-            if (BitConverter.IsLittleEndian)
-                Array.Reverse(be);
+            for (int i = 0; i < len; i++)
+                be[31 - i] = raw[i];
             ms.Write(be, 0, 32);
         }
     }

@@ -364,5 +364,92 @@ namespace ReserveBlockCore.BrowserWalletServices
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error delegating withdrawal: {ex.Message}" });
             }
         }
+
+        /// <summary>
+        /// Bridge vBTC to Base as vBTC.b (ERC-20). Creates a VBTC_V2_BRIDGE_LOCK transaction on VFX.
+        /// After validators attest, the user can call mintWithProof on the Base contract.
+        /// </summary>
+        public static async Task<object> BridgeToBase(string scUID, string ownerAddress, decimal amount, string evmDestination)
+        {
+            try
+            {
+                if (!Bitcoin.Services.BaseBridgeService.IsV2MintBridge)
+                    return new { success = false, message = "Base bridge not configured. Set BaseBridgeV2Contract in config." };
+
+                // Validate EVM address format
+                if (!evmDestination.StartsWith("0x") || evmDestination.Length != 42)
+                    return new { success = false, message = "Invalid EVM destination address. Expected 0x + 40 hex characters." };
+
+                var result = await Bitcoin.Services.VBTCService.CreateBridgeLockTx(scUID, ownerAddress, amount, evmDestination);
+
+                if (result.Success)
+                {
+                    return new
+                    {
+                        success = true,
+                        message = "Bridge lock transaction submitted. Validators will collect attestations for minting on Base.",
+                        txHash = result.TxHashOrError,
+                        lockId = result.LockId,
+                        amount = amount,
+                        evmDestination = evmDestination,
+                        contractAddress = Bitcoin.Services.BaseBridgeService.VBTCbV2ContractAddress,
+                        chainId = Bitcoin.Services.BaseBridgeService.BaseChainId
+                    };
+                }
+                else
+                {
+                    return new { success = false, message = result.TxHashOrError };
+                }
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Error creating bridge lock: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
+        /// Get the status of a bridge lock by lockId.
+        /// Returns the BridgeLockRecord including attestation progress and status.
+        /// </summary>
+        public static object GetBridgeLockStatus(string lockId)
+        {
+            try
+            {
+                var record = BridgeLockRecord.GetByLockId(lockId);
+                if (record == null)
+                    return new { success = false, message = $"Bridge lock not found: {lockId}" };
+
+                var sigCount = record.ValidatorSignatures?.Count ?? 0;
+
+                return new
+                {
+                    success = true,
+                    lockId = record.LockId,
+                    scUID = record.SmartContractUID,
+                    ownerAddress = record.OwnerAddress,
+                    amount = record.Amount,
+                    amountSats = record.AmountSats,
+                    evmDestination = record.EvmDestination,
+                    status = record.Status.ToString(),
+                    vfxLockTxHash = record.VfxLockTxHash,
+                    vfxLockConfirmedOnChain = record.VfxLockConfirmedOnChain,
+                    vfxLockBlockHeight = record.VfxLockBlockHeight,
+                    baseTxHash = record.BaseTxHash,
+                    exitBurnTxHash = record.ExitBurnTxHash,
+                    signaturesCollected = sigCount,
+                    requiredSignatures = record.RequiredSignatures,
+                    mintNonce = record.MintNonce,
+                    signatures = record.ValidatorSignatures,
+                    createdAtUtc = record.CreatedAtUtc,
+                    relayedAtUtc = record.RelayedAtUtc,
+                    finalizedAtUtc = record.FinalizedAtUtc,
+                    errorMessage = record.ErrorMessage
+                };
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Error retrieving bridge lock status: {ex.Message}" };
+            }
+        }
     }
 }

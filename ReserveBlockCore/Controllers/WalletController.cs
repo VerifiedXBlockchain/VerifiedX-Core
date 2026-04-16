@@ -169,6 +169,58 @@ namespace ReserveBlockCore.Controllers
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
+        //  vBTC Bridge to Base Endpoints
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        [HttpPost("api/vbtc/bridge/toBase")]
+        public async Task<IActionResult> VBTCBridgeToBase([FromBody] VBTCBridgeToBaseRequest req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.OwnerAddress) ||
+                    string.IsNullOrWhiteSpace(req.Amount) || string.IsNullOrWhiteSpace(req.EvmDestination))
+                    return BadRequest(new { success = false, message = "scUID, ownerAddress, amount, and evmDestination are required." });
+
+                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
+                    return BadRequest(new { success = false, message = "Invalid amount." });
+
+                var result = await WalletVbtcService.BridgeToBase(req.ScUID, req.OwnerAddress, amount, req.EvmDestination);
+                return Ok(result);
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpGet("api/vbtc/bridge/status/{lockId}")]
+        public IActionResult VBTCBridgeLockStatus(string lockId)
+        {
+            try { return Ok(WalletVbtcService.GetBridgeLockStatus(lockId)); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpPost("api/vbtc/bridge/submitMint/{lockId}")]
+        public async Task<IActionResult> VBTCSubmitMint(string lockId)
+        {
+            try
+            {
+                var result = await Bitcoin.Services.BaseBridgeMintSubmissionService.ManualSubmitMintWithProof(lockId);
+                return Ok(new { success = result.Success, message = result.Message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpGet("api/vbtc/bridge/base-balance/{evmAddress}")]
+        public async Task<IActionResult> VBTCBaseBalance(string evmAddress)
+        {
+            try
+            {
+                var result = await Bitcoin.Services.BaseBridgeService.GetBaseBalance(evmAddress);
+                return Ok(new { success = result.Success, evmAddress, balance = result.Balance.ToString(System.Globalization.CultureInfo.InvariantCulture), message = result.Message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
         //  VFX Privacy / Shielded Endpoints
         // ═══════════════════════════════════════════════════════════════════════════
 
