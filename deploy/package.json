@@ -1,0 +1,17 @@
+{
+  "name": "vbtcb-v2-deploy",
+  "version": "1.0.0",
+  "description": "VBTCbV2 deployment to Base Sepolia",
+  "scripts": {
+    "compile": "npx hardhat compile",
+    "deploy": "npx hardhat run scripts/deploy.js --network baseSepolia",
+    "verify": "npx hardhat run scripts/verify.js --network baseSepolia"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.0.0",
+    "@openzeppelin/contracts-upgradeable": "^5.0.0",
+    "@openzeppelin/hardhat-upgrades": "^3.0.0",
+    "hardhat": "^2.22.0"
+  }
+}

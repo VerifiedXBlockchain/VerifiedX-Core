@@ -295,4 +295,12 @@ ReserveBlockCore/Properties/launchSettings.json
 .cursor
 .cline
 .claude
-*.md
+
+docs/
+# Hardhat / Solidity deploy artifacts
+deploy/artifacts/
+deploy/cache/
+deploy/typechain-types/
+.env
+.env.*
+.github/copilot-instructions.md
