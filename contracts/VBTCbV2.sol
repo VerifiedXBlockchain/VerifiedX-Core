@@ -255,11 +255,13 @@ contract VBTCbV2 is ERC20Upgradeable, UUPSUpgradeable {
     }
 
     function _recalculateThresholds() internal {
+        // Mints ALWAYS use 2/3 Byzantine fault tolerance — no exceptions
+        requiredMintSignatures = _max(MIN_REQUIRED_SIGNATURES, (validatorCount * 2 + 2) / 3);
+
         if (validatorCount <= MIN_VALIDATORS_FOR_HIGH_THRESHOLD) {
-            requiredMintSignatures = _max(MIN_REQUIRED_SIGNATURES, (validatorCount + 1) / 2);
+            // Low validator count: use 51% for removals only (prevents lockout)
             requiredRemoveSignatures = _max(MIN_REQUIRED_SIGNATURES, (validatorCount + 1) / 2);
         } else {
-            requiredMintSignatures = (validatorCount * 2 + 2) / 3;
             requiredRemoveSignatures = (validatorCount * 51 + 99) / 100;
         }
     }
