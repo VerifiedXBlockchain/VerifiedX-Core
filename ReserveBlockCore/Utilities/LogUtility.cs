@@ -113,13 +113,24 @@ namespace ReserveBlockCore.Utilities
                     await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + " ");
                 }
 
-                await LogEnqueue(text, "", "rbxlog.txt", true);
+                await LogEnqueue(message, location, "rbxlog.txt", true);
                 //await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + text);
                 VFXLogging.LogInfo(message, location);
             }
             catch (Exception ex)
             {
-                await LogEnqueue($"Error Logging: {ex}", "", "rbxlog.txt", true);
+                try
+                {
+                    // Synchronous fallback — async void swallows exceptions silently,
+                    // so we must not let the catch block itself rely on async infrastructure.
+                    var fallbackText = $"[{DateTime.Now}] [LogUtility.Log] Error Logging: {ex}{Environment.NewLine}Original message: [{location}] {message}";
+                    Console.WriteLine(fallbackText);
+                    LogEnqueue($"Error Logging: {ex}", "", "rbxlog.txt", true).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Last resort — prevent async void from crashing the process
+                }
             }
         }
 
