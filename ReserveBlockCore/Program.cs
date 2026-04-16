@@ -714,6 +714,14 @@ namespace ReserveBlockCore
                     Globals.ValidatorPublicKey = myAccount.PublicKey;
                     Globals.GUIPasswordNeeded = false;
                     LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
+
+                    // Derive Base address now that ValidatorAddress is set
+                    Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                    if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                    {
+                        LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "Program.Main()");
+                        Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                    }
                 }
             }
 

@@ -732,6 +732,17 @@ namespace ReserveBlockCore.Services
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
             }
+
+            // Derive Base address if validator was found
+            if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.SetValidator()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
+            }
         }
 
         internal static async void SetConfigValidator()
@@ -745,6 +756,14 @@ namespace ReserveBlockCore.Services
                 var valResult = await ValidatorService.StartValidating(myAccount, uname, true);
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
+
+                // Derive Base address after config validator is set
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.SetConfigValidator()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
             }
         }
 
@@ -1413,6 +1432,14 @@ namespace ReserveBlockCore.Services
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
                 LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
+
+                // Derive Base address immediately after validator address is confirmed
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.DisplayValidatorAddress()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
             }
         }
 
