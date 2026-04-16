@@ -983,6 +983,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Insufficient balance. Available: {spendable} BTC, Requested: {amount}", string.Empty);
                 }
 
+                // Auto-derive Base address from VFX key if evmDestination not provided
+                if (string.IsNullOrWhiteSpace(evmDestination))
+                    evmDestination = ValidatorEthKeyService.DeriveBaseAddressFromAccount(ownerAddress);
+
                 // Validate EVM destination
                 if (string.IsNullOrWhiteSpace(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                 {

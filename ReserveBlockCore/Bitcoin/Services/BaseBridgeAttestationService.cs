@@ -83,6 +83,14 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             if (!BaseBridgeService.IsV2MintBridge || record == null) return;
 
+            // Pre-check: verify the owner actually has sufficient vBTC balance for this lock
+            var balCheck = await VBTCService.TryGetAvailableTransparentVbtcBalance(record.SmartContractUID, record.OwnerAddress);
+            if (balCheck.success && balCheck.availableBalance < record.Amount)
+            {
+                LogUtility.Log($"[BaseBridgeAttestation] Owner {record.OwnerAddress} has insufficient vBTC balance ({balCheck.availableBalance}) for lock amount ({record.Amount}). Skipping attestation.", "BaseBridgeAttestationService");
+                return;
+            }
+
             var contract = BaseBridgeService.VBTCbV2ContractAddress;
             var nonce = record.VfxLockBlockHeight > 0 ? record.VfxLockBlockHeight : Globals.LastBlock.Height;
             var state = new MintAttestationState

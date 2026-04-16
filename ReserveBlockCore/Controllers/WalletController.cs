@@ -320,5 +320,30 @@ namespace ReserveBlockCore.Controllers
             try { return Ok(WalletPrivacyVbtcService.GetVbtcShieldedPoolState(scUID)); }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        //  Base Address Derivation
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Derives the deterministic Base (EVM) address for a given VFX address.
+        /// Uses the same key derivation as validators — Keccak256 of the secp256k1 private key.
+        /// </summary>
+        [HttpGet("api/base-address/{vfxAddress}")]
+        public IActionResult GetBaseAddress(string vfxAddress)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(vfxAddress))
+                    return BadRequest(new { success = false, message = "VFX address required." });
+
+                var baseAddress = Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromAccount(vfxAddress);
+                if (string.IsNullOrEmpty(baseAddress))
+                    return Ok(new { success = false, message = "Could not derive Base address. Account not found or key unavailable." });
+
+                return Ok(new { success = true, message = "Base address derived.", baseAddress = baseAddress, vfxAddress = vfxAddress });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
     }
 }
