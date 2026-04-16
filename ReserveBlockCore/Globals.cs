@@ -271,7 +271,6 @@ namespace ReserveBlockCore
         public static bool IsValidatorAPIPortOpen = false;
         public static bool IsFROSTAPIPortOpen = false;
         public static bool PortsOpened = false;
-        public static bool IsBaseBridgeRelayer = false;
 
         /// <summary>Ethereum/Base address derived from this node's validator private key (empty if not a validator).</summary>
         public static string ValidatorBaseAddress { get; set; } = string.Empty;
@@ -284,10 +283,6 @@ namespace ReserveBlockCore
 
         /// <summary>Active block casters (3–5). Used for adaptive majority on bridge exit consensus.</summary>
         public static int ActiveCasterCount { get; set; } = 3;
-
-        /// <summary>When true with VBTCbV2, bridge unlock TXs must include caster majority votes and Base receipt checks.</summary>
-        public static bool BaseBridgeStrictV2 { get; set; } =
-            string.Equals(Environment.GetEnvironmentVariable("BASE_BRIDGE_STRICT_V2"), "1", StringComparison.Ordinal);
 
         // HAL-17 Fix: Configurable timeout values
         public static int SignalRShortTimeoutMs = 2000;

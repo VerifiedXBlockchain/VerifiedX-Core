@@ -578,10 +578,6 @@ namespace ReserveBlockCore
             // V2 Bridge: Caster consensus for burn exits
             _ = Task.Run(() => Bitcoin.Services.BurnExitConsensusService.ConsensusLoop(CancellationToken.None));
 
-            // Base bridge: retry pending mint operations (handles failed AutoRelay retries)
-            if (Globals.IsBaseBridgeRelayer)
-                _ = Task.Run(Bitcoin.Services.BaseBridgeService.BridgeMintRetryLoop);
-
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL

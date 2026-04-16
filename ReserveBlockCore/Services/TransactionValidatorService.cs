@@ -2992,11 +2992,11 @@ namespace ReserveBlockCore.Services
                     if (!IsValidEvmTxHash32(exitBurnTxHash))
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
-                    if (Globals.BaseBridgeStrictV2 && BaseBridgeService.IsV2MintBridge)
+                    if (BaseBridgeService.IsV2MintBridge)
                     {
                         var votesTok = jobj["CasterConsensusVotes"];
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
-                            return (txResult, "VBTCbV2 strict mode requires CasterConsensusVotes array on bridge unlock.");
+                            return (txResult, "VBTCbV2 bridge unlock requires CasterConsensusVotes array.");
 
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
                         if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "EXIT"))
@@ -3061,11 +3061,11 @@ namespace ReserveBlockCore.Services
                     if (VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash) != null)
                         return (txResult, "Duplicate Base burn transaction for bridge exit to BTC.");
 
-                    if (Globals.BaseBridgeStrictV2 && BaseBridgeService.IsV2MintBridge)
+                    if (BaseBridgeService.IsV2MintBridge)
                     {
                         var votesTok = jobj["CasterConsensusVotes"];
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
-                            return (txResult, "VBTCbV2 strict mode requires CasterConsensusVotes for exit to BTC.");
+                            return (txResult, "VBTCbV2 exit to BTC requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
                         if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, baseBurnTxHash.Trim(), "BTC_EXIT"))
                             return (txResult, "Caster consensus votes invalid or insufficient for exit to BTC.");

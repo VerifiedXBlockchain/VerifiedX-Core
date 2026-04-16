@@ -1019,7 +1019,7 @@ window.doBridgeToBase=function(){
     body:JSON.stringify({SmartContractUID:scUID,OwnerAddress:owner,Amount:parseFloat(amt),EvmDestination:evm})
   }).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Bridge to Base';
-    if(d.Success||d.success){showMsg('br-msg','Bridge lock created! Lock ID: '+(d.LockId||d.lockId||'')+'. Relay will mint vBTC.b on Base shortly.','ok');
+    if(d.Success||d.success){showMsg('br-msg','Bridge lock created! Lock ID: '+(d.LockId||d.lockId||'')+'. '+(d.Status||d.status||'After confirmation, validators attest and casters mint vBTC.b on Base.'),'ok');
       setTimeout(function(){closeBridge();tabLoaded.vbtc=false;loadVBTC();},3000);
     }else{showMsg('br-msg',d.Message||d.message||'Bridge failed.','err');}
   }).catch(function(e){btn.disabled=false;btn.textContent='Bridge to Base';showMsg('br-msg',e.message||'Failed.','err');});

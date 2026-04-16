@@ -45,7 +45,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             public string BtcDestination { get; set; } = "";
         }
 
-        /// <summary>Needs contract address + RPC only (relay key not required).</summary>
+        /// <summary>Needs VBTCbV2 proxy address and Base RPC.</summary>
         public static bool IsConfigured =>
             !string.IsNullOrWhiteSpace(BaseBridgeService.VBTCbContractAddress);
 

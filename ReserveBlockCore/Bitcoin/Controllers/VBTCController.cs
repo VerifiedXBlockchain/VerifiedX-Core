@@ -3089,39 +3089,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 LogUtility.Log($"[BaseBridge] VFX bridge lock broadcast. LockId: {lockId}, Tx: {vfxTxHash}, Amount: {payload.Amount} BTC, To: {payload.EvmDestination}",
                     "VBTCController.BridgeToBase");
 
-                string? baseTxHash = null;
-                string relayStatus;
-
-                if (payload.AutoRelay && VbtcBaseBridge.IsEnabled)
-                {
-                    var confirmed = await Services.VBTCService.WaitForBridgeLockInStateAsync(lockId, 120_000);
-                    if (!confirmed)
-                    {
-                        relayStatus = "VFX lock pending block confirmation; mint not sent. Retry RelayPendingBridgeLocks after the lock is included.";
-                    }
-                    else
-                    {
-                        var recordForMint = BridgeLockRecord.GetByLockId(lockId) ?? lockRecord;
-                        var mintResult = await VbtcBaseBridge.MintVBTCbOnBase(recordForMint);
-                        if (mintResult.Success)
-                        {
-                            baseTxHash = mintResult.Result;
-                            relayStatus = "Minted on Base";
-                        }
-                        else
-                        {
-                            relayStatus = $"Relay failed: {mintResult.Result}";
-                        }
-                    }
-                }
-                else if (!VbtcBaseBridge.IsEnabled)
-                {
-                    relayStatus = "VFX lock tx broadcast; configure Base relay (BASE_BRIDGE_*) then RelayPendingBridgeLocks after the lock confirms in a block";
-                }
+                string status;
+                if (VbtcBaseBridge.IsEnabled)
+                    status = "VFX lock broadcast. After the lock confirms on-chain, validators sign mint attestations and casters submit mintWithProof on Base.";
                 else
-                {
-                    relayStatus = "VFX lock tx broadcast; mint later via RelayPendingBridgeLocks (after block confirms)";
-                }
+                    status = "VFX lock broadcast. Configure BaseBridgeRpcUrl and BaseBridgeV2Contract in config.txt for Base mint (VBTCbV2).";
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -3133,10 +3105,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     Amount = payload.Amount,
                     AmountSats = amountSats,
                     EvmDestination = payload.EvmDestination,
-                    BaseTxHash = baseTxHash,
-                    Status = relayStatus,
-                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
-                    AutoRelay = payload.AutoRelay
+                    Status = status,
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled
                 });
             }
             catch (Exception ex)
@@ -3264,30 +3234,17 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Manually trigger relay of pending bridge locks to Base.
-        /// Processes all locks with status = Locked.
+        /// Deprecated: VBTCbV2 does not use a relay-key queue. Mint uses validator attestations and caster-submitted mintWithProof.
         /// </summary>
         [HttpPost("RelayPendingBridgeLocks")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> RelayPendingBridgeLocks()
+        public Task<string> RelayPendingBridgeLocks()
         {
-            try
+            return Task.FromResult(JsonConvert.SerializeObject(new
             {
-                if (!VbtcBaseBridge.IsEnabled)
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Base bridge is not configured. Set BASE_BRIDGE_CONTRACT and BASE_BRIDGE_RELAY_KEY environment variables." });
-
-                var results = await VbtcBaseBridge.ProcessPendingLocks();
-                return JsonConvert.SerializeObject(new
-                {
-                    Success = true,
-                    Message = $"Processed {results.Count} pending bridge locks",
-                    Results = results.Select(r => new { r.LockId, r.Success, r.Result })
-                });
-            }
-            catch (Exception ex)
-            {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
-            }
+                Success = false,
+                Message = "VBTCbV2 has no relay queue. Use SignMintAttestation on validators and caster flow for mintWithProof after the VFX lock confirms."
+            }));
         }
 
         /// <summary>
@@ -3326,7 +3283,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                var pendingCount = BridgeLockRecord.GetPendingRelays().Count;
+                var pendingAttestations = BridgeLockRecord.GetPendingV2Attestations().Count;
                 var totalSupply = VbtcBaseBridge.CanReadVbtcToken
                     ? await VbtcBaseBridge.GetBaseTotalSupply()
                     : (false, 0M, "Not configured");
@@ -3340,7 +3297,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     BaseRpcUrl = VbtcBaseBridge.BaseRpcUrl,
                     VBTCbContractAddress = VbtcBaseBridge.VBTCbContractAddress,
                     BaseChainId = VbtcBaseBridge.BaseChainId,
-                    PendingRelays = pendingCount,
+                    PendingV2Attestations = pendingAttestations,
                     BaseTotalSupply = totalSupply.Item2,
                     ExitPollLastScannedBlock = sync.LastScannedBlock,
                     Network = VbtcBaseBridge.BaseNetworkDisplayName
@@ -3370,9 +3327,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 if (!string.IsNullOrEmpty(payload.VBTCbContractAddress))
                     VbtcBaseBridge.VBTCbContractAddress = payload.VBTCbContractAddress;
-
-                if (!string.IsNullOrEmpty(payload.RelayPrivateKey))
-                    VbtcBaseBridge.RelayPrivateKey = payload.RelayPrivateKey;
 
                 if (payload.BaseChainId > 0)
                     VbtcBaseBridge.BaseChainId = payload.BaseChainId;
@@ -3558,18 +3512,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public string OwnerAddress { get; set; } = string.Empty;
         public decimal Amount { get; set; }
         public string EvmDestination { get; set; } = string.Empty;
-        /// <summary>
-        /// If true and relay is configured, wait for the VFX lock to be included in a block then mint on Base.
-        /// If false, broadcast the VFX lock only — use RelayPendingBridgeLocks after confirmation.
-        /// </summary>
-        public bool AutoRelay { get; set; } = true;
     }
 
     public class VBTCBridgeConfigPayload
     {
         public string? BaseRpcUrl { get; set; }
         public string? VBTCbContractAddress { get; set; }
-        public string? RelayPrivateKey { get; set; }
         public int BaseChainId { get; set; } = 0;
     }
 

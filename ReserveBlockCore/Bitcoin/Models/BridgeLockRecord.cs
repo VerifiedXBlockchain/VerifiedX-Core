@@ -78,20 +78,6 @@ namespace ReserveBlockCore.Bitcoin.Models
             return col.Find(x => x.Status == status).ToList();
         }
 
-        /// <summary>
-        /// Locks ready for Base mint: VFX lock tx confirmed on-chain (state trei), relay not yet started.
-        /// </summary>
-        public static List<BridgeLockRecord> GetPendingRelays()
-        {
-            var col = GetCollection();
-            if (ReserveBlockCore.Bitcoin.Services.BaseBridgeService.IsV2MintBridge && string.IsNullOrEmpty(ReserveBlockCore.Bitcoin.Services.BaseBridgeService.RelayPrivateKey))
-                return new List<BridgeLockRecord>();
-            return col.Find(x =>
-                x.Status == BridgeLockStatus.Locked &&
-                x.VfxLockConfirmedOnChain &&
-                !string.IsNullOrEmpty(x.VfxLockTxHash)).ToList();
-        }
-
         /// <summary>Locks confirmed on VFX that still need validator mint attestations (V2).</summary>
         public static List<BridgeLockRecord> GetPendingV2Attestations()
         {
