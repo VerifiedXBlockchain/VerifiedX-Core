@@ -122,8 +122,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 int syncedCount = 0;
                 foreach (var block in recentBlocks)
                 {
-                    if (block.TransactionList == null || !block.TransactionList.Any()) continue;
-                    foreach (var tx in block.TransactionList)
+                    if (block.Transactions == null || !block.Transactions.Any()) continue;
+                    foreach (var tx in block.Transactions)
                     {
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK ||
                             tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC ||
