@@ -117,6 +117,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return;
                 }
                 Globals.ValidatorBaseAddress = DeriveBaseAddressFromAccount(Globals.ValidatorAddress) ?? string.Empty;
+                LogUtility.Log("Validator Base Address: " + Globals.ValidatorBaseAddress, "ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress");
             }
             catch
             {
