@@ -64,8 +64,16 @@ namespace ReserveBlockCore.Utilities
                 {
                     if(FileQueue.TryDequeue(out var content))
                     {
-                        var text = "[" + content.Time + "]" + " : " + "[" + content.Location + "]" + " : " + content.Message;
-                        await File.AppendAllTextAsync(path + content.FileName, Environment.NewLine + text);
+                        try
+                        {
+                            var text = "[" + content.Time + "]" + " : " + "[" + content.Location + "]" + " : " + content.Message;
+                            await File.AppendAllTextAsync(path + content.FileName, Environment.NewLine + text);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Don't let a single write failure kill the entire log loop
+                            Console.WriteLine($"[LogUtility.LogLoop] Failed to write log entry: {ex.Message}");
+                        }
                     }
                 }
 
