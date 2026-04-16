@@ -473,6 +473,8 @@ namespace ReserveBlockCore.Data
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
                                 tx.TransactionType != TransactionType.VFX_SHIELD &&
                                 tx.TransactionType != TransactionType.VFX_UNSHIELD &&
                                 tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
@@ -1041,6 +1043,8 @@ namespace ReserveBlockCore.Data
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
                 tx.TransactionType != TransactionType.VFX_SHIELD &&
                 tx.TransactionType != TransactionType.VFX_UNSHIELD &&
                 tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&

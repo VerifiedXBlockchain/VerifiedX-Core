@@ -3,6 +3,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Arbiter;
 using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Bitcoin.Services;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.DST;
@@ -2991,6 +2992,21 @@ namespace ReserveBlockCore.Services
                     if (!IsValidEvmTxHash32(exitBurnTxHash))
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
+                    if (Globals.BaseBridgeStrictV2 && BaseBridgeService.IsV2MintBridge)
+                    {
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "VBTCbV2 strict mode requires CasterConsensusVotes array on bridge unlock.");
+
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "EXIT"))
+                            return (txResult, "Caster consensus votes invalid or insufficient for VBTCbV2 unlock.");
+
+                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(exitBurnTxHash.Trim());
+                        if (!burnOk)
+                            return (txResult, "Exit burn transaction could not be verified on Base.");
+                    }
+
                     var rec = VBTCBridgeLockState.GetByLockId(lockId);
                     if (rec == null)
                         return (txResult, "Unknown bridge LockId (no prior lock on-chain).");
@@ -3012,6 +3028,85 @@ namespace ReserveBlockCore.Services
                     ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_UNLOCK transaction: {ex}",
                         "TransactionValidatorService.VerifyTX()");
                     return (txResult, "Failed to validate vBTC V2 bridge unlock transaction.");
+                }
+            }
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for bridge exit to BTC.");
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    if (jobj["Function"]?.ToObject<string>() != "VBTCBridgeExitToBTC()")
+                        return (txResult, "Invalid Function for bridge exit to BTC.");
+
+                    var scUID = jobj["ContractUID"]?.ToObject<string>();
+                    var lockId = jobj["LockId"]?.ToObject<string>();
+                    var amount = jobj["Amount"]?.ToObject<decimal?>();
+                    var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                    var btcDestination = jobj["BtcDestination"]?.ToObject<string>();
+                    var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId) || !amount.HasValue || !amountSats.HasValue ||
+                        string.IsNullOrEmpty(btcDestination) || string.IsNullOrEmpty(baseBurnTxHash))
+                        return (txResult, "Missing required fields for bridge exit to BTC.");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Bridge exit to BTC must be a self-transaction (from == to).");
+
+                    if (!IsValidEvmTxHash32(baseBurnTxHash))
+                        return (txResult, "BaseBurnTxHash must be a valid 32-byte hex transaction hash.");
+
+                    if (VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash) != null)
+                        return (txResult, "Duplicate Base burn transaction for bridge exit to BTC.");
+
+                    if (Globals.BaseBridgeStrictV2 && BaseBridgeService.IsV2MintBridge)
+                    {
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "VBTCbV2 strict mode requires CasterConsensusVotes for exit to BTC.");
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, baseBurnTxHash.Trim(), "BTC_EXIT"))
+                            return (txResult, "Caster consensus votes invalid or insufficient for exit to BTC.");
+                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(baseBurnTxHash.Trim());
+                        if (!burnOk)
+                            return (txResult, "Base burn transaction could not be verified.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_EXIT_TO_BTC: {ex}", "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate bridge exit to BTC transaction.");
+                }
+            }
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for bridge exit to BTC complete.");
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    if (jobj["Function"]?.ToObject<string>() != "VBTCBridgeExitToBTCComplete()")
+                        return (txResult, "Invalid Function for bridge exit to BTC complete.");
+
+                    var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+                    var btcTxHash = jobj["BtcTxHash"]?.ToObject<string>();
+                    if (string.IsNullOrEmpty(baseBurnTxHash) || string.IsNullOrEmpty(btcTxHash))
+                        return (txResult, "BaseBurnTxHash and BtcTxHash are required.");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Must be a self-transaction (from == to).");
+
+                    var st = VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash);
+                    if (st == null || st.IsComplete)
+                        return (txResult, "No pending bridge exit to BTC for this burn hash.");
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE: {ex}", "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate bridge exit to BTC complete transaction.");
                 }
             }
 

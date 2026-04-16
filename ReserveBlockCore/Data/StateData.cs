@@ -510,6 +510,16 @@ namespace ReserveBlockCore.Data
                             ApplyVBTCBridgeUnlock(tx);
                         }
 
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+                        {
+                            ApplyVBTCBridgeExitToBTC(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                        {
+                            ApplyVBTCBridgeExitToBTCComplete(tx);
+                        }
+
                         if(tx.TransactionType == TransactionType.RESERVE)
                         {
                             var txData = tx.Data;
@@ -2777,7 +2787,7 @@ namespace ReserveBlockCore.Data
                 }
                 else
                 {
-                    BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash);
+                    BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash, tx.Height);
                 }
 
                 SCLogUtility.Log($"ApplyVBTCBridgeLock: lockId={lockId}, amount={amount.Value} BTC, owner={tx.FromAddress}, scUID={scUID}",
@@ -2866,6 +2876,65 @@ namespace ReserveBlockCore.Data
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock error: {ex.Message}", "StateData.ApplyVBTCBridgeUnlock()");
+            }
+        }
+
+        private static void ApplyVBTCBridgeExitToBTC(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                    return;
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string>();
+                var lockId = jobj["LockId"]?.ToObject<string>();
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                var btcDestination = jobj["BtcDestination"]?.ToObject<string>();
+                var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId) || !amount.HasValue || !amountSats.HasValue ||
+                    string.IsNullOrEmpty(btcDestination) || string.IsNullOrEmpty(baseBurnTxHash))
+                    return;
+
+                var st = new VBTCBridgeBtcExitState
+                {
+                    BaseBurnTxHash = baseBurnTxHash.Trim(),
+                    LockId = lockId.Trim(),
+                    SmartContractUID = scUID,
+                    OwnerAddress = tx.FromAddress,
+                    Amount = amount.Value,
+                    AmountSats = amountSats.Value,
+                    BtcDestination = btcDestination,
+                    ExitTxHash = tx.Hash,
+                    CreatedTimestamp = tx.Timestamp,
+                    IsComplete = false
+                };
+                VBTCBridgeBtcExitState.TryInsert(st);
+                SCLogUtility.Log($"ApplyVBTCBridgeExitToBTC: burn={baseBurnTxHash}, lockId={lockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTC()");
+            }
+        }
+
+        private static void ApplyVBTCBridgeExitToBTCComplete(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                    return;
+                var jobj = JObject.Parse(tx.Data);
+                var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+                var btcTxHash = jobj["BtcTxHash"]?.ToObject<string>();
+                if (string.IsNullOrEmpty(baseBurnTxHash) || string.IsNullOrEmpty(btcTxHash))
+                    return;
+                VBTCBridgeBtcExitState.MarkComplete(baseBurnTxHash.Trim(), btcTxHash.Trim());
+                SCLogUtility.Log($"ApplyVBTCBridgeExitToBTCComplete: burn={baseBurnTxHash}, btcTx={btcTxHash}", "StateData.ApplyVBTCBridgeExitToBTCComplete()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCComplete error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCComplete()");
             }
         }
 

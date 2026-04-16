@@ -273,6 +273,22 @@ namespace ReserveBlockCore
         public static bool PortsOpened = false;
         public static bool IsBaseBridgeRelayer = false;
 
+        /// <summary>Ethereum/Base address derived from this node's validator private key (empty if not a validator).</summary>
+        public static string ValidatorBaseAddress { get; set; } = string.Empty;
+
+        /// <summary>VBTCbV2 proxy contract on Base (set from config/env). When set, V2 bridge paths apply.</summary>
+        public static string VBTCbV2ContractAddress { get; set; } = string.Empty;
+
+        /// <summary>Base (Ethereum) chain id: 84532 Sepolia when testnet, 8453 mainnet.</summary>
+        public static long BaseEvmChainId => IsTestNet ? 84532L : 8453L;
+
+        /// <summary>Active block casters (3–5). Used for adaptive majority on bridge exit consensus.</summary>
+        public static int ActiveCasterCount { get; set; } = 3;
+
+        /// <summary>When true with VBTCbV2, bridge unlock TXs must include caster majority votes and Base receipt checks.</summary>
+        public static bool BaseBridgeStrictV2 { get; set; } =
+            string.Equals(Environment.GetEnvironmentVariable("BASE_BRIDGE_STRICT_V2"), "1", StringComparison.Ordinal);
+
         // HAL-17 Fix: Configurable timeout values
         public static int SignalRShortTimeoutMs = 2000;
         public static int SignalRLongTimeoutMs = 6000;
@@ -415,6 +431,8 @@ namespace ReserveBlockCore
                         PublicKey = p.ValidatorPublicKey ?? ""
                     });
                 }
+
+                ActiveCasterCount = Math.Max(3, Math.Min(5, KnownCasters.Count > 0 ? KnownCasters.Count : 3));
             }
         }
 

@@ -1094,7 +1094,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// <param name="exitBurnTxHash">The Base transaction hash of the burnForExit call</param>
         /// <returns>(Success, TxHashOrError)</returns>
         public static async Task<(bool Success, string TxHashOrError)> CreateBridgeUnlockTx(
-            string scUID, string ownerAddress, string lockId, decimal amount, string exitBurnTxHash)
+            string scUID, string ownerAddress, string lockId, decimal amount, string exitBurnTxHash,
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
         {
             try
             {
@@ -1108,15 +1109,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                 long amountSats = (long)(amount * 100_000_000M);
 
                 // Create transaction data
-                var txData = JsonConvert.SerializeObject(new
+                object payload = new
                 {
                     Function = "VBTCBridgeUnlock()",
                     ContractUID = scUID,
                     LockId = lockId,
                     Amount = amount,
                     AmountSats = amountSats,
-                    ExitBurnTxHash = exitBurnTxHash
-                });
+                    ExitBurnTxHash = exitBurnTxHash,
+                    CasterConsensusVotes = casterConsensusVotes
+                };
+                var txData = JsonConvert.SerializeObject(payload);
 
                 // Build transaction (self-TX: from=to=owner, amount=0 VFX)
                 var unlockTx = new Transaction
@@ -1176,6 +1179,89 @@ namespace ReserveBlockCore.Bitcoin.Services
                 SCLogUtility.Log($"vBTC V2 Bridge Unlock Error: {ex.Message}", "VBTCService.CreateBridgeUnlockTx()");
                 return (false, $"Error: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC"/> after a Base <c>burnForBTCExit</c> is agreed by casters.
+        /// </summary>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeExitToBTCTx(
+            string scUID,
+            string ownerAddress,
+            string lockId,
+            decimal amount,
+            string btcDestination,
+            string baseBurnTxHash,
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                    return (false, $"Account not found: {ownerAddress}");
+
+                var amountSats = (long)(amount * 100_000_000M);
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeExitToBTC()",
+                    ContractUID = scUID,
+                    LockId = lockId,
+                    Amount = amount,
+                    AmountSats = amountSats,
+                    BtcDestination = btcDestination,
+                    BaseBurnTxHash = baseBurnTxHash,
+                    CasterConsensusVotes = casterConsensusVotes
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = ownerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
+                    Data = txData
+                };
+                tx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+                if (privateKey == null)
+                    return (false, "Private key was null");
+                tx.Signature = ReserveBlockCore.Services.SignatureService.CreateSignature(tx.Hash, privateKey, publicKey);
+                if (tx.Signature == "ERROR")
+                    return (false, "TX Signature Failed");
+
+                var result = await TransactionValidatorService.VerifyTX(tx);
+                if (!result.Item1)
+                    return (false, $"TX Verify Failed: {result.Item2}");
+
+                await TransactionData.AddTxToWallet(tx, true);
+                await AccountData.UpdateLocalBalance(ownerAddress, tx.Fee + tx.Amount);
+                await TransactionData.AddToPool(tx);
+                await P2PClient.SendTXMempool(tx);
+                return (true, tx.Hash);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Records BTC payout for a Base→BTC bridge exit (FROST integration hooks in later phases).
+        /// </summary>
+        public static async Task<(bool Success, string VfxTxHash, string BtcTxHash, string Error)> ProcessBTCExitBurn(
+            string scUID,
+            string lockId,
+            decimal amount,
+            string btcDestination,
+            string baseBurnTxHash,
+            int feeRate = 10)
+        {
+            await Task.CompletedTask;
+            return (false, string.Empty, string.Empty, "ProcessBTCExitBurn: FROST coordination not wired in this build — record exit via CreateBridgeExitToBTCTx first.");
         }
 
         #endregion

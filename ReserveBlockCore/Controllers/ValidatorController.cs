@@ -20,6 +20,168 @@ namespace ReserveBlockCore.Controllers
             return "Hello from ValidatorController!";
         }
 
+        #region vBTC V2 Bridge Endpoints
+
+        /// <summary>
+        /// Validators sign add/remove operations for the Base contract.
+        /// Called by BaseValidatorSyncService when collecting signatures.
+        /// </summary>
+        [HttpPost]
+        [Route("SignValidatorUpdate")]
+        public ActionResult<string> SignValidatorUpdate([FromBody] object requestBody)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Not a validator" }));
+
+                var json = requestBody?.ToString() ?? "";
+                var request = JsonConvert.DeserializeObject<dynamic>(json);
+                string action = request?.Action;
+                long vfxBlockHeight = request?.VfxBlockHeight ?? 0;
+
+                // Get target addresses
+                var targetAddresses = new List<string>();
+                if (request?.TargetAddresses != null)
+                {
+                    foreach (var addr in request.TargetAddresses)
+                        targetAddresses.Add((string)addr);
+                }
+                else if (request?.TargetAddress != null)
+                {
+                    targetAddresses.Add((string)request.TargetAddress);
+                }
+
+                if (string.IsNullOrEmpty(action) || !targetAddresses.Any())
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Missing action or target address" }));
+
+                var sig = Bitcoin.Services.BaseValidatorSyncService.SignValidatorUpdateLocally(
+                    action, targetAddresses.ToArray(), vfxBlockHeight);
+
+                if (sig == null)
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Failed to sign" }));
+
+                return Ok(JsonConvert.SerializeObject(new { Success = true, Signature = "0x" + Convert.ToHexString(sig).ToLowerInvariant() }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Returns the current Base contract state: validators, nonce, thresholds.
+        /// </summary>
+        [HttpGet]
+        [Route("GetBaseContractState")]
+        public async Task<ActionResult<string>> GetBaseContractState()
+        {
+            try
+            {
+                var rpcUrl = Bitcoin.Services.BaseBridgeService.BaseRpcUrl;
+                var contractAddr = Bitcoin.Services.BaseBridgeService.VBTCbV2ContractAddress;
+
+                if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddr))
+                    return Ok(JsonConvert.SerializeObject(new { Success = false, Message = "Base bridge not configured" }));
+
+                var web3 = new Nethereum.Web3.Web3(rpcUrl);
+                var abi = @"[
+                    {""inputs"":[],""name"":""getValidators"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+                    {""inputs"":[],""name"":""getAdminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+                    {""inputs"":[],""name"":""validatorCount"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+                    {""inputs"":[],""name"":""requiredMintSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+                    {""inputs"":[],""name"":""requiredRemoveSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+                ]";
+
+                var contract = web3.Eth.GetContract(abi, contractAddr);
+                var validators = await contract.GetFunction("getValidators").CallAsync<List<string>>();
+                var adminNonce = await contract.GetFunction("getAdminNonce").CallAsync<System.Numerics.BigInteger>();
+                var valCount = await contract.GetFunction("validatorCount").CallAsync<System.Numerics.BigInteger>();
+                var mintSigs = await contract.GetFunction("requiredMintSignatures").CallAsync<System.Numerics.BigInteger>();
+                var removeSigs = await contract.GetFunction("requiredRemoveSignatures").CallAsync<System.Numerics.BigInteger>();
+
+                return Ok(JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Validators = validators,
+                    AdminNonce = adminNonce.ToString(),
+                    ValidatorCount = valCount.ToString(),
+                    RequiredMintSignatures = mintSigs.ToString(),
+                    RequiredRemoveSignatures = removeSigs.ToString(),
+                    Network = Bitcoin.Services.BaseBridgeService.BaseNetworkDisplayName
+                }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Receives a BurnAlert from another caster.
+        /// </summary>
+        [HttpPost]
+        [Route("BurnAlert")]
+        public ActionResult<string> BurnAlert([FromBody] Bitcoin.Services.BurnExitConsensusService.BurnAlert alert)
+        {
+            try
+            {
+                if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash))
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid alert" }));
+
+                _ = Bitcoin.Services.BurnExitConsensusService.HandleBurnAlert(alert);
+                return Ok(JsonConvert.SerializeObject(new { Success = true }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Receives a BurnExitProposal from another caster.
+        /// </summary>
+        [HttpPost]
+        [Route("BurnExitProposal")]
+        public ActionResult<string> BurnExitProposal([FromBody] Bitcoin.Services.BurnExitConsensusService.BurnExitProposal proposal)
+        {
+            try
+            {
+                if (proposal == null || string.IsNullOrEmpty(proposal.BaseBurnTxHash))
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid proposal" }));
+
+                Bitcoin.Services.BurnExitConsensusService.HandleBurnExitProposal(proposal);
+                return Ok(JsonConvert.SerializeObject(new { Success = true }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Receives a BurnExitConfirmation from another caster.
+        /// </summary>
+        [HttpPost]
+        [Route("BurnExitConfirmation")]
+        public ActionResult<string> BurnExitConfirmation([FromBody] Bitcoin.Services.BurnExitConsensusService.BurnExitConfirmation confirmation)
+        {
+            try
+            {
+                if (confirmation == null || string.IsNullOrEmpty(confirmation.BaseBurnTxHash))
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid confirmation" }));
+
+                Bitcoin.Services.BurnExitConsensusService.HandleBurnExitConfirmation(confirmation);
+                return Ok(JsonConvert.SerializeObject(new { Success = true }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        #endregion
+
         [HttpPost]
         [Route("Status")]
         public ActionResult<string> Status([FromBody] NetworkValidator networkVal)

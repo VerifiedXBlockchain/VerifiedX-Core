@@ -20,5 +20,11 @@ namespace ReserveBlockCore.Bitcoin.Models
         public string RegisterTransactionHash { get; set; }  // TX hash of join transaction
         public string ExitTransactionHash { get; set; }      // TX hash of exit transaction (if exited)
         public long? ExitBlockHeight { get; set; }           // Block height when exited (if exited)
+
+        public string BaseAddress { get; set; } = string.Empty;
+        public string BaseAddressSignature { get; set; } = string.Empty;
+        public long BaseSignatureTimestamp { get; set; }
+        public long BaseSignatureBlockHeight { get; set; }
+        public bool IsRegisteredOnBase { get; set; }
     }
 }

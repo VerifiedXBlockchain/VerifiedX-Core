@@ -3172,6 +3172,52 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// Validator node: sign the VBTCbV2 mint message for a confirmed VFX bridge lock.
+        /// Casters POST the same <see cref="MintAttestationRequest"/> body to each validator; response uses lowercase <c>success</c> / <c>signature</c> for collector compatibility.
+        /// </summary>
+        [HttpPost("SignMintAttestation")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SignMintAttestation([FromBody] MintAttestationRequest request)
+        {
+            try
+            {
+                if (request == null)
+                    return JsonConvert.SerializeObject(new { success = false, message = "Payload cannot be null" });
+
+                var (ok, sig, err) = await Services.BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                if (!ok)
+                    return JsonConvert.SerializeObject(new { success = false, message = err ?? "Signing failed" });
+
+                return JsonConvert.SerializeObject(new { success = true, signature = sig });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { success = false, message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Returns in-memory mint attestation progress for a lock ID on this node (caster-collected signatures).
+        /// </summary>
+        [HttpGet("GetMintAttestation/{lockId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetMintAttestation(string lockId)
+        {
+            try
+            {
+                var state = Services.BaseBridgeAttestationService.GetAttestationState(lockId);
+                if (state == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "No attestation state for this lock on this node" }));
+
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Attestation = state }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
         /// List all bridge locks for a contract
         /// </summary>
         [HttpGet("GetBridgeLocks/{scUID}")]

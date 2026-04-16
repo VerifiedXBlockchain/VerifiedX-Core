@@ -10,9 +10,9 @@ using ReserveBlockCore.Utilities;
 namespace ReserveBlockCore.Bitcoin.Services
 {
     /// <summary>
-    /// Polls Base for <c>ExitBurned</c> from <see cref="VBTCb"/> <c>burnForExit</c> and broadcasts
-    /// <see cref="TransactionType.VBTC_V2_BRIDGE_UNLOCK"/> on VerifiedX for this node's local locks
-    /// (after <see cref="VBTCBridgeLockState"/> exists on-chain from <see cref="VBTCService.CreateBridgeLockTx"/>).
+    /// Polls Base for <c>ExitBurned</c> and <c>BTCExitBurned</c> events from VBTCbV2.
+    /// For ExitBurned: broadcasts <see cref="TransactionType.VBTC_V2_BRIDGE_UNLOCK"/> on VFX.
+    /// For BTCExitBurned: feeds into <see cref="BurnExitConsensusService"/> for caster consensus + FROST.
     /// </summary>
     public static class BaseBridgeExitWatchService
     {
@@ -30,6 +30,19 @@ namespace ReserveBlockCore.Bitcoin.Services
 
             [Parameter("string", "vfxLockId", 3, false)]
             public string VfxLockId { get; set; } = "";
+        }
+
+        [Event("BTCExitBurned")]
+        public class BTCExitBurnedEventDTO : IEventDTO
+        {
+            [Parameter("address", "burner", 1, true)]
+            public string Burner { get; set; } = "";
+
+            [Parameter("uint256", "amount", 2, false)]
+            public BigInteger Amount { get; set; }
+
+            [Parameter("string", "btcDestination", 3, false)]
+            public string BtcDestination { get; set; } = "";
         }
 
         /// <summary>Needs contract address + RPC only (relay key not required).</summary>
@@ -126,6 +139,18 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var txHash = log.TransactionHash;
                 if (string.IsNullOrEmpty(txHash)) continue;
 
+                // If this node is a caster, delegate to BurnExitConsensusService for coordinated handling
+                if (Globals.IsBlockCaster && !BurnExitConsensusService.IsAlreadyProcessed(txHash))
+                {
+                    var amountDecimal = (decimal)amount / 100_000_000M;
+                    _ = BurnExitConsensusService.HandleDetectedBurn(
+                        txHash,
+                        BurnExitConsensusService.BurnExitType.VfxUnlock,
+                        lockId, "", amountDecimal, burner);
+                    processed++;
+                    continue;
+                }
+
                 var chainLock = VBTCBridgeLockState.GetByLockId(lockId);
                 if (chainLock == null || chainLock.IsUnlocked)
                     continue;
@@ -165,6 +190,58 @@ namespace ReserveBlockCore.Bitcoin.Services
                     LogUtility.Log($"[BaseBridgeExit] CreateBridgeUnlockTx failed for lock {lockId}: {unlockResult.TxHashOrError}",
                         "BaseBridgeExitWatchService.PollOnceInternal");
                 }
+            }
+
+            // --- BTCExitBurned events (burnForBTCExit → direct BTC withdrawal) ---
+            try
+            {
+                // Also scan the V2 contract if configured
+                var v2Contract = BaseBridgeService.VBTCbV2ContractAddress;
+                var btcExitContract = !string.IsNullOrEmpty(v2Contract) ? v2Contract : contract;
+
+                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
+                var btcFilter = btcEventHandler.CreateFilterInput(
+                    new BlockParameter(new HexBigInteger(from)),
+                    new BlockParameter(new HexBigInteger(to)));
+
+                var btcLogs = await btcEventHandler.GetAllChangesAsync(btcFilter);
+
+                foreach (var ev in btcLogs)
+                {
+                    var log = ev.Log;
+                    var burner = ev.Event?.Burner ?? "";
+                    var amount = ev.Event?.Amount ?? BigInteger.Zero;
+                    var btcDest = ev.Event?.BtcDestination?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(burner) || string.IsNullOrEmpty(btcDest)) continue;
+                    if (amount > long.MaxValue || amount <= 0) continue;
+
+                    var txHash = log.TransactionHash;
+                    if (string.IsNullOrEmpty(txHash)) continue;
+
+                    if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
+                        continue;
+
+                    var amountDecimal = (decimal)amount / 100_000_000M;
+
+                    LogUtility.Log($"[BaseBridgeExit] Detected BTCExitBurned: {txHash}, amount={amountDecimal}, dest={btcDest}",
+                        "BaseBridgeExitWatchService.PollOnceInternal");
+
+                    // Feed into BurnExitConsensusService for caster consensus + FROST
+                    if (Globals.IsBlockCaster)
+                    {
+                        _ = BurnExitConsensusService.HandleDetectedBurn(
+                            txHash,
+                            BurnExitConsensusService.BurnExitType.BtcExit,
+                            "", btcDest, amountDecimal, burner);
+                    }
+
+                    processed++;
+                }
+            }
+            catch (Exception btcEx)
+            {
+                LogUtility.Log($"[BaseBridgeExit] BTCExitBurned scan error: {btcEx.Message}",
+                    "BaseBridgeExitWatchService.PollOnceInternal");
             }
 
             state.LastScannedBlock = to;

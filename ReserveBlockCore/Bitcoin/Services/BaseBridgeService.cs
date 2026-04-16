@@ -6,7 +6,9 @@ using Nethereum.Hex.HexTypes;
 using Newtonsoft.Json;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Utilities;
+using System.Net.Http;
 using System.Numerics;
+using System.Text;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
@@ -19,18 +21,28 @@ namespace ReserveBlockCore.Bitcoin.Services
     {
         // ── Configuration (set from config.txt via ProcessConfig) ──
         public static string BaseRpcUrl { get; set; } = "https://sepolia.base.org";
+        public static string BaseRpcUrl2 { get; set; } = "";
+        public static string BaseRpcUrl3 { get; set; } = "";
         public static string VBTCbContractAddress { get; set; } = "";
+        /// <summary>VBTCbV2 proxy on Base (multi-sig mint). When set, V2 attestation path is used.</summary>
+        public static string VBTCbV2ContractAddress { get; set; } = "";
         public static string RelayPrivateKey { get; set; } = "";
         public static int BaseChainId { get; set; } = 84532; // default until LoadConfig
-        /// <summary>Contract + relay key — can submit mint txs.</summary>
+        /// <summary>True when VBTCbV2 proxy is configured (users mint with proofs; no relay).</summary>
+        public static bool IsV2MintBridge => !string.IsNullOrWhiteSpace(VBTCbV2ContractAddress);
+        /// <summary>Contract + relay key — can submit legacy relay mint txs.</summary>
         public static bool IsEnabled => !string.IsNullOrEmpty(VBTCbContractAddress) && !string.IsNullOrEmpty(RelayPrivateKey);
         /// <summary>RPC + token contract — can read vBTC.b balances (no relay key).</summary>
-        public static bool CanReadVbtcToken => !string.IsNullOrWhiteSpace(VBTCbContractAddress) && !string.IsNullOrWhiteSpace(BaseRpcUrl);
+        public static bool CanReadVbtcToken =>
+            (!string.IsNullOrWhiteSpace(VBTCbContractAddress) || IsV2MintBridge) && !string.IsNullOrWhiteSpace(BaseRpcUrl);
         /// <summary>RPC available — can read native ETH balance on Base.</summary>
         public static bool CanReadEth => !string.IsNullOrWhiteSpace(BaseRpcUrl);
 
         /// <summary>Human-readable Base network name (follows Globals.IsTestNet).</summary>
         public static string BaseNetworkDisplayName => ReserveBlockCore.Globals.IsTestNet ? "Base Sepolia" : "Base Mainnet";
+
+        private static string EffectiveReadContractAddress =>
+            !string.IsNullOrWhiteSpace(VBTCbV2ContractAddress) ? VBTCbV2ContractAddress : VBTCbContractAddress;
 
         // ── Minimal ERC-20 + mint ABI ──
         // function mint(address to, uint256 amount) external
@@ -93,7 +105,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var web3 = new Web3(account, BaseRpcUrl);
                 web3.TransactionManager.UseLegacyAsDefault = false;
 
-                // Get contract instance
+                // Get contract instance (legacy V1 relay mint only)
                 var contract = web3.Eth.GetContract(MINT_ABI, VBTCbContractAddress);
                 var mintFunction = contract.GetFunction("mint");
 
@@ -191,7 +203,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, 0, "Base vBTC.b read not configured (set BASE_BRIDGE_RPC_URL and BASE_BRIDGE_CONTRACT)");
 
                 var web3 = new Web3(BaseRpcUrl);
-                var contract = web3.Eth.GetContract(MINT_ABI, VBTCbContractAddress);
+                var contract = web3.Eth.GetContract(MINT_ABI, EffectiveReadContractAddress);
 
                 var balanceFunc = contract.GetFunction("balanceOf");
                 var balance = await balanceFunc.CallAsync<BigInteger>(evmAddress);
@@ -217,7 +229,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, 0, "Base vBTC.b read not configured");
 
                 var web3 = new Web3(BaseRpcUrl);
-                var contract = web3.Eth.GetContract(MINT_ABI, VBTCbContractAddress);
+                var contract = web3.Eth.GetContract(MINT_ABI, EffectiveReadContractAddress);
 
                 var supplyFunc = contract.GetFunction("totalSupply");
                 var supply = await supplyFunc.CallAsync<BigInteger>();
@@ -258,6 +270,20 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// </summary>
         public static void LoadConfig()
         {
+            var envV2 = Environment.GetEnvironmentVariable("BASE_BRIDGE_V2_CONTRACT");
+            if (!string.IsNullOrWhiteSpace(envV2))
+                VBTCbV2ContractAddress = envV2.Trim();
+            var envR2 = Environment.GetEnvironmentVariable("BASE_RPC_URL_2");
+            if (!string.IsNullOrWhiteSpace(envR2))
+                BaseRpcUrl2 = envR2.Trim();
+            var envR3 = Environment.GetEnvironmentVariable("BASE_RPC_URL_3");
+            if (!string.IsNullOrWhiteSpace(envR3))
+                BaseRpcUrl3 = envR3.Trim();
+
+            Globals.VBTCbV2ContractAddress = VBTCbV2ContractAddress;
+            if (BaseChainId == 0)
+                BaseChainId = (int)Globals.BaseEvmChainId;
+
             if (IsEnabled)
             {
                 ReserveBlockCore.Globals.IsBaseBridgeRelayer = true;
@@ -266,7 +292,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
             else if (CanReadVbtcToken)
             {
-                LogUtility.Log($"[BaseBridge] Read-only (balances). RPC: {BaseRpcUrl}, Contract: {VBTCbContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
+                var c = IsV2MintBridge ? VBTCbV2ContractAddress : VBTCbContractAddress;
+                LogUtility.Log($"[BaseBridge] Read-only (balances). RPC: {BaseRpcUrl}, Contract: {c}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}, V2={IsV2MintBridge}",
                     "BaseBridgeService.LoadConfig");
             }
             else if (CanReadEth)
@@ -311,6 +338,53 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 await Task.Delay(30_000);
             }
+        }
+
+        public static IEnumerable<string> RpcUrlCandidates()
+        {
+            if (!string.IsNullOrWhiteSpace(BaseRpcUrl)) yield return BaseRpcUrl;
+            if (!string.IsNullOrWhiteSpace(BaseRpcUrl2)) yield return BaseRpcUrl2;
+            if (!string.IsNullOrWhiteSpace(BaseRpcUrl3)) yield return BaseRpcUrl3;
+        }
+
+        private const string RequiredMintSigsAbi = @"[{""inputs"":[],""name"":""requiredMintSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}]";
+
+        /// <summary>Reads <c>requiredMintSignatures</c> from VBTCbV2 (defaults to 2 if RPC fails).</summary>
+        public static async Task<int> GetRequiredMintSignaturesFromChainAsync()
+        {
+            if (!IsV2MintBridge) return 2;
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var web3 = new Web3(url);
+                    var c = web3.Eth.GetContract(RequiredMintSigsAbi, VBTCbV2ContractAddress);
+                    var fn = c.GetFunction("requiredMintSignatures");
+                    var v = await fn.CallAsync<BigInteger>();
+                    var i = (int)v;
+                    return i < 2 ? 2 : i;
+                }
+                catch { }
+            }
+            return 2;
+        }
+
+        /// <summary>Best-effort: confirms a Base tx receipt exists and succeeded (full log decode is done in exit watch).</summary>
+        public static async Task<bool> HasSuccessfulReceiptAsync(string txHash)
+        {
+            if (string.IsNullOrWhiteSpace(txHash)) return false;
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var web3 = new Web3(url);
+                    var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+                    if (r != null && r.Status?.Value == 1)
+                        return true;
+                }
+                catch { }
+            }
+            return false;
         }
 
         #region Helpers

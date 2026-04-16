@@ -552,12 +552,31 @@ namespace ReserveBlockCore
 
             // Base Bridge: Load configuration from environment variables
             Bitcoin.Services.BaseBridgeService.LoadConfig();
+            Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+            if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+            {
+                LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "Program.Main()");
+                Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+            }
+            else
+            {
+                LogUtility.Log("[vBTC Bridge V2] No validator Base address derived (node may not be a validator).", "Program.Main()");
+            }
 
             // vBTC V2: Start deposit balance scan loop (scans owned contracts via Electrum)
             _ = Task.Run(Bitcoin.Services.VBTCService.VBTCV2BalanceScanLoop);
 
             // Base bridge-back: poll ExitBurned logs (burnForExit) and unlock VFX bridge locks
             _ = Task.Run(Bitcoin.Services.BaseBridgeExitWatchService.BridgeExitScanLoop);
+
+            // VBTCbV2: casters collect validator mint attestations over HTTP (validators expose SignMintAttestation)
+            _ = Task.Run(Bitcoin.Services.BaseBridgeAttestationService.ProcessPendingAttestationsLoop);
+
+            // V2 Bridge: Sync VFX validator set to Base contract
+            _ = Task.Run(() => Bitcoin.Services.BaseValidatorSyncService.ValidatorSyncLoop(CancellationToken.None));
+
+            // V2 Bridge: Caster consensus for burn exits
+            _ = Task.Run(() => Bitcoin.Services.BurnExitConsensusService.ConsensusLoop(CancellationToken.None));
 
             // Base bridge: retry pending mint operations (handles failed AutoRelay retries)
             if (Globals.IsBaseBridgeRelayer)
