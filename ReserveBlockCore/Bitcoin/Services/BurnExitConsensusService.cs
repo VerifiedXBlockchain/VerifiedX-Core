@@ -293,13 +293,16 @@ namespace ReserveBlockCore.Bitcoin.Services
 
             LogUtility.Log($"[BurnExitConsensus] Winner for {baseBurnTxHash}: {winner.ProposerCasterAddress} ({allProposals.Count} proposals)", "BurnExitConsensusService");
 
-            // Step 5: Broadcast confirmation
+            // Step 5: Broadcast confirmation (sign the vote so TryVerifyVotes can validate it)
+            var burnType = BurnTypeString(record.ExitType);
             var timestamp = TimeUtil.GetTime();
+            var voteSig = SignVoteMessage(baseBurnTxHash, burnType, timestamp);
             var confirmation = new BurnExitConfirmation
             {
                 BaseBurnTxHash = baseBurnTxHash,
                 ConfirmingCasterAddress = Globals.ValidatorAddress,
                 AgreedHandlerAddress = winner.ProposerCasterAddress,
+                Signature = voteSig,
                 Timestamp = timestamp
             };
 
@@ -322,9 +325,12 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
 
             record.Status = BurnExitStatus.ConsensusReached;
+            var voteBurnType = BurnTypeString(record.ExitType);
             record.ConsensusVotes = confirmations.Select(c => new CasterConsensusVote
             {
                 CasterAddress = c.ConfirmingCasterAddress,
+                BaseBurnTxHash = c.BaseBurnTxHash,
+                BurnType = voteBurnType,
                 Signature = c.Signature,
                 Timestamp = c.Timestamp
             }).ToList();
@@ -619,5 +625,28 @@ namespace ReserveBlockCore.Bitcoin.Services
 
         public static bool IsAlreadyProcessed(string baseBurnTxHash) =>
             _processedBurns.ContainsKey(baseBurnTxHash);
+
+        /// <summary>Map internal BurnExitType enum to the string burn type used by BridgeCasterConsensus vote verification.</summary>
+        private static string BurnTypeString(BurnExitType t) => t == BurnExitType.BtcExit ? "BTC_EXIT" : "EXIT";
+
+        /// <summary>
+        /// Sign a vote message for a burn exit confirmation using this node's validator key.
+        /// Returns empty string on failure.
+        /// </summary>
+        private static string SignVoteMessage(string baseBurnTxHash, string burnType, long timestamp)
+        {
+            try
+            {
+                var account = Data.AccountData.GetSingleAccount(Globals.ValidatorAddress);
+                if (account == null) return "";
+                var privKey = account.GetPrivKey;
+                var pubKey = account.PublicKey;
+                if (privKey == null) return "";
+                var msg = BridgeCasterConsensus.BuildVoteMessage(baseBurnTxHash, burnType, timestamp);
+                var sig = ReserveBlockCore.Services.SignatureService.CreateSignature(msg, privKey, pubKey);
+                return sig == "ERROR" ? "" : sig;
+            }
+            catch { return ""; }
+        }
     }
 }
