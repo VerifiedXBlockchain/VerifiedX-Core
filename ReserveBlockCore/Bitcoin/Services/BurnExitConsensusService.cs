@@ -185,7 +185,10 @@ namespace ReserveBlockCore.Bitcoin.Services
             string vfxDestinationAddress = "")
         {
             if (_processedBurns.ContainsKey(baseBurnTxHash))
+            {
+                LogUtility.Log($"[BurnExitConsensus] Skipping already-tracked burn: {baseBurnTxHash}", "BurnExitConsensusService");
                 return;
+            }
 
             var record = new ProcessedBurnRecord
             {
@@ -280,6 +283,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             if (!allProposals.Any())
             {
                 record.Status = BurnExitStatus.Failed;
+                LogUtility.Log($"[BurnExitConsensus] No proposals received for {baseBurnTxHash}. Marking as Failed.", "BurnExitConsensusService");
                 return;
             }
 
@@ -359,6 +363,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
+                LogUtility.Log($"[BurnExitConsensus] Executing exit type={record.ExitType} for burn={record.BaseBurnTxHash}, amount={record.Amount}", "BurnExitConsensusService");
+
                 if (record.ExitType == BurnExitType.VfxUnlock)
                     await ExecuteVfxUnlock(record);
                 else if (record.ExitType == BurnExitType.VfxPoolUnlock)
@@ -410,6 +416,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         private static async Task ExecuteVfxPoolUnlock(ProcessedBurnRecord record)
         {
             var vfxDestinationAddress = record.VfxDestinationAddress;
+            LogUtility.Log($"[BurnExitConsensus] VfxPoolUnlock: vfxDest={vfxDestinationAddress}, amount={record.Amount}, burn={record.BaseBurnTxHash}", "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
             var allocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount);
 
             if (allocations == null || allocations.Count == 0)
@@ -419,6 +426,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
                 return;
             }
+
+            LogUtility.Log($"[BurnExitConsensus] Pool allocation plan: {allocations.Count} lock(s) across contracts for {record.Amount} BTC", "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
 
             var result = await BridgePoolUnlockService.CreateBridgePoolUnlockTx(
                 Globals.ValidatorAddress,
@@ -452,7 +461,10 @@ namespace ReserveBlockCore.Bitcoin.Services
             var scUID = "";
             var vbtcContracts = VBTCContractV2.GetAllContracts();
             if (vbtcContracts != null && vbtcContracts.Any())
+            {
                 scUID = vbtcContracts.First().SmartContractUID;
+                LogUtility.Log($"[BurnExitConsensus] BTC exit using contract {scUID} for burn {record.BaseBurnTxHash}", "BurnExitConsensusService.ExecuteBtcExit()");
+            }
 
             if (string.IsNullOrEmpty(scUID))
             {
@@ -550,7 +562,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                         var url = $"http://{c.PeerIP}:{Globals.APIPort}/valapi/Validator/{endpoint}";
                         await httpClient.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
                     }
-                    catch { }
+                    catch (Exception broadcastEx)
+                    {
+                        LogUtility.Log($"[BurnExitConsensus] Failed to broadcast {endpoint} to caster {c.ValidatorAddress} ({c.PeerIP}): {broadcastEx.Message}", "BurnExitConsensusService");
+                    }
                 });
             await Task.WhenAll(tasks);
         }
