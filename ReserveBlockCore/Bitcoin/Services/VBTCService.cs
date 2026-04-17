@@ -1138,7 +1138,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Data = txData
                 };
 
-                unlockTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(unlockTx);
+                unlockTx.Fee = 0.00M;
 
                 // Build and sign
                 unlockTx.Build();
@@ -1227,7 +1227,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
                     Data = txData
                 };
-                tx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(tx);
+                tx.Fee = 0.00M;
                 tx.Build();
                 var privateKey = account.GetPrivKey;
                 var publicKey = account.PublicKey;

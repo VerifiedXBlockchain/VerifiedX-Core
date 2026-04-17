@@ -103,14 +103,14 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = signerAddress,
                     ToAddress = signerAddress,
-                    Amount = 0.0M,
-                    Fee = 0.0M,
+                    Amount = 0.00M,
+                    Fee = 0.00M,
                     Nonce = AccountStateTrei.GetNextNonce(signerAddress),
                     TransactionType = TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK,
                     Data = txData
                 };
 
-                poolUnlockTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(poolUnlockTx);
+                poolUnlockTx.Fee = 0.00M;
 
                 poolUnlockTx.Build();
                 var txHash = poolUnlockTx.Hash;

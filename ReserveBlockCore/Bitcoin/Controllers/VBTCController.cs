@@ -1047,8 +1047,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                                         Timestamp = TimeUtil.GetTime(),
                                         FromAddress = fromAddress,
                                         ToAddress = fromAddress,
-                                        Amount = 0.0M,
-                                        Fee = 0.0M,
+                                        Amount = 0.00M,
+                                        Fee = 0.00M,
                                         Nonce = AccountStateTrei.GetNextNonce(fromAddress),
                                         TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
                                         Data = txData

@@ -94,7 +94,11 @@ namespace ReserveBlockCore.Services
                 && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
                 && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
                 && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT
-                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
+                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
             }
@@ -106,7 +110,11 @@ namespace ReserveBlockCore.Services
                     && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
                     && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
                     && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT
-                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
                 {
                     return (txResult, "Fee cannot be less than 0.000003 VFX");
                 }
@@ -3028,6 +3036,66 @@ namespace ReserveBlockCore.Services
                     ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_UNLOCK transaction: {ex}",
                         "TransactionValidatorService.VerifyTX()");
                     return (txResult, "Failed to validate vBTC V2 bridge unlock transaction.");
+                }
+            }
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for vBTC V2 bridge pool unlock.");
+
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    var fn = jobj["Function"]?.ToObject<string>();
+                    if (fn != "VBTCBridgePoolUnlock()")
+                        return (txResult, "Invalid Function for vBTC V2 bridge pool unlock.");
+
+                    var totalAmount = jobj["TotalAmount"]?.ToObject<decimal?>();
+                    var totalAmountSats = jobj["TotalAmountSats"]?.ToObject<long?>();
+                    var vfxDestAddr = jobj["VfxDestinationAddress"]?.ToObject<string>();
+                    var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string>();
+                    var allocations = jobj["Allocations"];
+
+                    if (!totalAmount.HasValue || totalAmount.Value <= 0 || !totalAmountSats.HasValue)
+                        return (txResult, "TotalAmount and TotalAmountSats are required for bridge pool unlock.");
+
+                    var expectedSats = (long)(totalAmount.Value * 100_000_000M);
+                    if (expectedSats != totalAmountSats.Value)
+                        return (txResult, "TotalAmountSats does not match TotalAmount for bridge pool unlock.");
+
+                    if (string.IsNullOrEmpty(vfxDestAddr))
+                        return (txResult, "VfxDestinationAddress is required for bridge pool unlock.");
+
+                    if (!IsValidEvmTxHash32(exitBurnTxHash))
+                        return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Bridge pool unlock must be a self-transaction (from == to).");
+
+                    if (allocations == null || allocations.Type != JTokenType.Array || !allocations.HasValues)
+                        return (txResult, "Allocations array is required for bridge pool unlock.");
+
+                    if (BaseBridgeService.IsBridgeConfigured)
+                    {
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
+
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "EXIT"))
+                            return (txResult, "Caster consensus votes invalid or insufficient for pool unlock.");
+
+                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(exitBurnTxHash.Trim());
+                        if (!burnOk)
+                            return (txResult, "Exit burn transaction could not be verified on Base.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_POOL_UNLOCK transaction: {ex}",
+                        "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate vBTC V2 bridge pool unlock transaction.");
                 }
             }
 
