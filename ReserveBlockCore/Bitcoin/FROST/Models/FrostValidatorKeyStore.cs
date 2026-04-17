@@ -30,6 +30,13 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         /// <summary>The aggregated group public key (32-byte x-only hex)</summary>
         public string GroupPublicKey { get; set; } = string.Empty;
         
+        /// <summary>
+        /// The sorted participant addresses used during DKG, serialized as JSON array.
+        /// This preserves the exact ordering that produced the FROST Identifiers baked into
+        /// the key packages, so signing ceremonies can reconstruct the same mapping.
+        /// </summary>
+        public string ParticipantOrderJson { get; set; } = string.Empty;
+        
         /// <summary>Timestamp when this key was created</summary>
         public long CreatedTimestamp { get; set; }
 

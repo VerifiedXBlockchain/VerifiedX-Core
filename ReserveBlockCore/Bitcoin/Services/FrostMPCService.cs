@@ -965,7 +965,26 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // FIND-026 Fix: Remap signature shares and nonce commitments from VFX address keys
                 // to FROST Identifier keys (64-char hex scalars). The FROST native library expects
                 // BTreeMap<Identifier, SignatureShare> and BTreeMap<Identifier, NonceCommitment>.
-                var addrToFrostId = BuildAddressToFrostIdentifierMap(signerAddresses);
+                // Use stored participant order from DKG if available, otherwise fall back to sorted order.
+                List<string>? storedOrderForAggregate = null;
+                if (!string.IsNullOrEmpty(myAddr) && !string.IsNullOrEmpty(keyLookupId))
+                {
+                    var keyStoreForOrder = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
+                    if (keyStoreForOrder != null && !string.IsNullOrEmpty(keyStoreForOrder.ParticipantOrderJson))
+                    {
+                        try
+                        {
+                            storedOrderForAggregate = JsonConvert.DeserializeObject<List<string>>(keyStoreForOrder.ParticipantOrderJson);
+                            LogUtility.Log($"[FROST MPC] Using stored participant order for aggregation ({storedOrderForAggregate?.Count ?? 0} entries)", "FrostMPCService.AggregateSignature");
+                        }
+                        catch (Exception orderEx)
+                        {
+                            LogUtility.Log($"[FROST MPC] WARNING: Failed to parse stored participant order: {orderEx.Message}. Falling back to sorted order.", "FrostMPCService.AggregateSignature");
+                        }
+                    }
+                }
+                var addressListForAggregate = storedOrderForAggregate ?? signerAddresses;
+                var addrToFrostId = BuildAddressToFrostIdentifierMap(addressListForAggregate);
 
                 // Remap shares: VFX address → FROST Identifier
                 var remappedShares = new JObject();

@@ -1042,10 +1042,11 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                         session.DKGProof = GenerateDKGProof(session.SessionId, groupPubkey, pubkeyPackage);
                                         session.IsCompleted = true;
 
-                                        // Persist key package for future signing
+                                        // Persist key package for future signing, including sorted participant order
                                         var myAddr = Globals.ValidatorAddress;
                                         if (!string.IsNullOrEmpty(myAddr))
                                         {
+                                            var sortedR3Order = session.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
                                             FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
                                             {
                                                 SmartContractUID = session.SmartContractUID,
@@ -1053,6 +1054,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                                 KeyPackage = keyPackage,
                                                 PubkeyPackage = pubkeyPackage,
                                                 GroupPublicKey = groupPubkey,
+                                                ParticipantOrderJson = JsonConvert.SerializeObject(sortedR3Order),
                                                 CreatedTimestamp = TimeUtil.GetTime()
                                             });
                                         }
@@ -1397,6 +1399,21 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // Load stored participant order from DKG key store if available
+                            List<string>? storedOrder = null;
+                            if (!string.IsNullOrEmpty(keyStore.ParticipantOrderJson))
+                            {
+                                try
+                                {
+                                    storedOrder = JsonConvert.DeserializeObject<List<string>>(keyStore.ParticipantOrderJson);
+                                    LogUtility.Log($"[FROST] Loaded stored participant order from DKG key store ({storedOrder?.Count ?? 0} entries)", "FrostStartup.SignStart");
+                                }
+                                catch (Exception orderEx)
+                                {
+                                    LogUtility.Log($"[FROST] WARNING: Failed to parse stored participant order: {orderEx.Message}. Will fall back to sorted order.", "FrostStartup.SignStart");
+                                }
+                            }
+
                             // Create signing session with FROST state
                             var signingSession = new SigningSession
                             {
@@ -1408,7 +1425,8 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 RequiredThreshold = request.RequiredThreshold,
                                 StartTimestamp = TimeUtil.GetTime(),
                                 MyKeyPackage = keyStore.KeyPackage,
-                                NonceSecret = nonceSecret
+                                NonceSecret = nonceSecret,
+                                StoredParticipantOrder = storedOrder
                             };
 
                             // Auto-store this validator's nonce commitment
@@ -1692,7 +1710,9 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                             if (addressNonces != null && addressNonces.Count > 0 && session.SignerAddresses != null && session.SignerAddresses.Count > 0)
                             {
-                                var signerAddrToId = BuildAddressToIdentifierMap(session.SignerAddresses);
+                            // Use stored participant order from DKG if available, otherwise fall back to sorted order
+                            var addressListForMapping = session.StoredParticipantOrder ?? session.SignerAddresses;
+                            var signerAddrToId = BuildAddressToIdentifierMap(addressListForMapping);
                                 var noncesBTreeMap = new Newtonsoft.Json.Linq.JObject();
 
                                 foreach (var kvp in addressNonces)
@@ -2051,6 +2071,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 // Build BTreeMap<Identifier, round1::Package> from commitments (exclude self)
                 // FROST part3 expects only OTHER participants' round1 packages
                 var myAddr2 = Globals.ValidatorAddress;
+                var sortedParticipantOrder = session.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
                 var addrToIdMap = BuildAddressToIdentifierMap(session.ParticipantAddresses);
                 var round1BTreeMap = new Newtonsoft.Json.Linq.JObject();
                 foreach (var kvp in session.Round1Commitments)
@@ -2109,7 +2130,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 {
                     session.Round3Verifications.TryAdd(myAddr, true);
 
-                    // Persist key package for future signing
+                    // Persist key package for future signing, including the sorted participant order
                     FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
                     {
                         SmartContractUID = session.SmartContractUID,
@@ -2117,6 +2138,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                         KeyPackage = keyPackage,
                         PubkeyPackage = pubkeyPackage,
                         GroupPublicKey = groupPubkey,
+                        ParticipantOrderJson = Newtonsoft.Json.JsonConvert.SerializeObject(sortedParticipantOrder),
                         CreatedTimestamp = TimeUtil.GetTime()
                     });
                 }

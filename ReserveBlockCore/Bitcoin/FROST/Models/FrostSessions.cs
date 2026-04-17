@@ -67,6 +67,13 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public string? MyKeyPackage { get; set; }              // This validator's key package (loaded from persistent store)
         public string? NonceSecret { get; set; }               // Secret nonce from SignRound1Nonces (kept private)
         
+        /// <summary>
+        /// Stored participant order from DKG key store. If populated, this is used instead of
+        /// recomputing from SignerAddresses, ensuring signing uses the exact same identifier
+        /// mapping that was used during DKG.
+        /// </summary>
+        public List<string>? StoredParticipantOrder { get; set; }
+        
         // Round 1: Nonce commitments (from all validators)
         public ConcurrentDictionary<string, string> Round1Nonces { get; set; } = new();
         
