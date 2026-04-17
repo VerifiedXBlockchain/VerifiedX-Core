@@ -1075,7 +1075,7 @@ window.openBridge=function(scUID,owner,bal){
       if(d.vbtcBBalance!=null){el('br-vbtcb-bal').textContent=fmtBal(d.vbtcBBalance)+' vBTC.b';}
       else{el('br-vbtcb-bal').textContent=d.vbtcBError||'N/A';}
       el('br-network-name').textContent=d.networkName||'Base';
-      if(!d.bridgeConfigured){showMsg('br-msg','Bridge not configured on this node. Set BaseBridgeV2Contract and BaseBridgeRpcUrl in config.txt.','err');el('br-btn').disabled=true;}
+      if(!d.bridgeConfigured){showMsg('br-msg','Bridge not configured on this node. Set BaseBridgeContract and BaseBridgeRpcUrl in config.txt.','err');el('br-btn').disabled=true;}
     }).catch(function(e){
       el('br-loading').style.display='none';el('br-body').style.opacity='1';
       showMsg('br-msg','Failed to load bridge info: '+(e.message||''),'err');

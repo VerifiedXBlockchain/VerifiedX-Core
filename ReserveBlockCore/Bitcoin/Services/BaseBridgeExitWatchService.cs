@@ -60,7 +60,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             public string BtcDestination { get; set; } = "";
         }
 
-        /// <summary>Needs VBTCbV2 proxy address and Base RPC.</summary>
+        /// <summary>Needs VBTCb proxy address and Base RPC.</summary>
         public static bool IsConfigured =>
             !string.IsNullOrWhiteSpace(BaseBridgeService.VBTCbContractAddress);
 
@@ -210,7 +210,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
             try
             {
-                var v3Contract = BaseBridgeService.VBTCbV3ContractAddress;
+                var v3Contract = BaseBridgeService.ContractAddress;
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
                     var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
@@ -262,7 +262,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             try
             {
                 // Also scan the V2 contract if configured
-                var v2Contract = BaseBridgeService.VBTCbV2ContractAddress;
+                var v2Contract = BaseBridgeService.ContractAddress;
                 var btcExitContract = !string.IsNullOrEmpty(v2Contract) ? v2Contract : contract;
 
                 var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);

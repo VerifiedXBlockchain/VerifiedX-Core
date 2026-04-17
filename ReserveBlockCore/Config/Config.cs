@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Utilities;
 using System;
@@ -65,12 +65,11 @@ namespace ReserveBlockCore.Config
         public int MaxBlockSizeBytes { get; set; }
         public int BlockValidationTimeoutMs { get; set; }
 
-        // Base Bridge V2 configuration (config.txt keys)
+        // Base Bridge configuration (config.txt keys)
         public string? BaseBridgeRpcUrl { get; set; }
         public string? BaseBridgeRpcUrl2 { get; set; }
         public string? BaseBridgeRpcUrl3 { get; set; }
-        public string? BaseBridgeV2Contract { get; set; }
-        public string? BaseBridgeV3Contract { get; set; }
+        public string? BaseBridgeContract { get; set; }
         public int BaseBridgeChainId { get; set; }
 
         public static Config ReadConfigFile()
@@ -168,17 +167,16 @@ namespace ReserveBlockCore.Config
 					".fjl", ".delf", ".buk", ".bmw", ".capxml", ".bps", ".cyw", ".iva", ".pid", ".lpaq5", ".dx", ".bqf", ".qit", ".pr", ".lok", 
 					".xnt"};
 
-                // Base Bridge V2 (optional). BaseBridgeContract is accepted as alias for BaseBridgeV2Contract.
+                // Base Bridge (optional). Accepts BaseBridgeContract or legacy BaseBridgeV2Contract key.
                 config.BaseBridgeRpcUrl = dict.ContainsKey("BaseBridgeRpcUrl") ? dict["BaseBridgeRpcUrl"] : null;
                 config.BaseBridgeRpcUrl2 = dict.ContainsKey("BaseBridgeRpcUrl2") ? dict["BaseBridgeRpcUrl2"] : null;
                 config.BaseBridgeRpcUrl3 = dict.ContainsKey("BaseBridgeRpcUrl3") ? dict["BaseBridgeRpcUrl3"] : null;
-                if (dict.ContainsKey("BaseBridgeV2Contract"))
-                    config.BaseBridgeV2Contract = dict["BaseBridgeV2Contract"];
-                else if (dict.ContainsKey("BaseBridgeContract"))
-                    config.BaseBridgeV2Contract = dict["BaseBridgeContract"];
+                if (dict.ContainsKey("BaseBridgeContract"))
+                    config.BaseBridgeContract = dict["BaseBridgeContract"];
+                else if (dict.ContainsKey("BaseBridgeV2Contract"))
+                    config.BaseBridgeContract = dict["BaseBridgeV2Contract"];
                 else
-                    config.BaseBridgeV2Contract = null;
-                config.BaseBridgeV3Contract = dict.ContainsKey("BaseBridgeV3Contract") ? dict["BaseBridgeV3Contract"] : null;
+                    config.BaseBridgeContract = null;
                 config.BaseBridgeChainId = dict.ContainsKey("BaseBridgeChainId") ? Convert.ToInt32(dict["BaseBridgeChainId"]) : 0;
 
                 config.MotherAddress = dict.ContainsKey("MotherAddress") ? dict["MotherAddress"] : null;
@@ -552,17 +550,15 @@ namespace ReserveBlockCore.Config
 		Globals.MaxBlockSizeBytes = config.MaxBlockSizeBytes;
 	Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
 
-		// Base Bridge V2: apply config.txt (primary RPC + optional fallbacks + proxy)
+		// Base Bridge: apply config.txt (primary RPC + optional fallbacks + contract)
 		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl))
 			Bitcoin.Services.BaseBridgeService.BaseRpcUrl = config.BaseBridgeRpcUrl.Trim();
 		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl2))
 			Bitcoin.Services.BaseBridgeService.BaseRpcUrl2 = config.BaseBridgeRpcUrl2.Trim();
 		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl3))
 			Bitcoin.Services.BaseBridgeService.BaseRpcUrl3 = config.BaseBridgeRpcUrl3.Trim();
-		if (!string.IsNullOrWhiteSpace(config.BaseBridgeV2Contract))
-			Bitcoin.Services.BaseBridgeService.VBTCbV2ContractAddress = config.BaseBridgeV2Contract.Trim();
-		if (!string.IsNullOrWhiteSpace(config.BaseBridgeV3Contract))
-			Bitcoin.Services.BaseBridgeService.VBTCbV3ContractAddress = config.BaseBridgeV3Contract.Trim();
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeContract))
+			Bitcoin.Services.BaseBridgeService.ContractAddress = config.BaseBridgeContract.Trim();
 		if (config.BaseBridgeChainId > 0)
 			Bitcoin.Services.BaseBridgeService.BaseChainId = config.BaseBridgeChainId;
         }
@@ -623,9 +619,9 @@ namespace ReserveBlockCore.Config
 				File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
-                    // Base Bridge V2 defaults (mainnet — set BaseBridgeV2Contract to your proxy)
+                    // Base Bridge V2 defaults (mainnet — set BaseBridgeContract to your proxy)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://mainnet.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeV2Contract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=8453");
                 }
                 else if(Globals.IsCustomTestNet) //devnet
@@ -639,7 +635,7 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (devnet — Base Sepolia)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeV2Contract=0xd2bB4BdA89A23c63eaaD464F15658845a2114Ffa");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x1154DDB476A38c01A389E1324121E15Df6703D19");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
                 else //testnet
@@ -652,7 +648,7 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (testnet — Base Sepolia)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeV2Contract=0xd2bB4BdA89A23c63eaaD464F15658845a2114Ffa");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x1154DDB476A38c01A389E1324121E15Df6703D19");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
 				

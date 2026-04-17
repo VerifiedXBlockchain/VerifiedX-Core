@@ -66,7 +66,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 return;
 
             var rpcUrl = BaseBridgeService.BaseRpcUrl;
-            var contractAddress = BaseBridgeService.VBTCbV2ContractAddress;
+            var contractAddress = BaseBridgeService.ContractAddress;
             if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddress))
                 return;
 
@@ -75,7 +75,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var web3 = new Web3(rpcUrl);
 
                 // Call getValidators() on the Base contract
-                var baseValidators = await web3.Eth.GetContract(MinimalAbi.VBTCbV2, contractAddress)
+                var baseValidators = await web3.Eth.GetContract(MinimalAbi.VBTCb, contractAddress)
                     .GetFunction("getValidators")
                     .CallAsync<List<string>>();
 
@@ -255,14 +255,14 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 var privBytes = Convert.FromHexString(privHex.StartsWith("0x") ? privHex[2..] : privHex);
                 var chainId = BaseBridgeService.BaseChainId;
-                var contractAddr = BaseBridgeService.VBTCbV2ContractAddress;
+                var contractAddr = BaseBridgeService.ContractAddress;
 
                 // Read adminNonce from Base contract
                 BigInteger adminNonce = 0;
                 try
                 {
                     var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
-                    var contract = web3.Eth.GetContract(MinimalAbi.VBTCbV2, contractAddr);
+                    var contract = web3.Eth.GetContract(MinimalAbi.VBTCb, contractAddr);
                     adminNonce = contract.GetFunction("getAdminNonce").CallAsync<BigInteger>().GetAwaiter().GetResult();
                 }
                 catch { }
@@ -319,7 +319,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// <summary>Minimal ABI fragments for read-only calls.</summary>
         private static class MinimalAbi
         {
-            public const string VBTCbV2 = @"[
+            public const string VBTCb = @"[
                 {""inputs"":[],""name"":""getValidators"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
                 {""inputs"":[],""name"":""getAdminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
                 {""inputs"":[],""name"":""validatorCount"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},

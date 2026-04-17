@@ -24,7 +24,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         public string? VfxLockTxHash { get; set; }
         /// <summary>True after the lock is applied in the state trei (included in a block).</summary>
         public bool VfxLockConfirmedOnChain { get; set; }
-        /// <summary>VFX block height when the lock TX was included (used as mint attestation nonce for VBTCbV2).</summary>
+        /// <summary>VFX block height when the lock TX was included (used as mint attestation nonce for VBTCb).</summary>
         public long VfxLockBlockHeight { get; set; }
         public string? BaseTxHash { get; set; }
         /// <summary>Set when burnForExit on Base is observed and the lock is released on VFX (demo bridge-back).</summary>
@@ -81,7 +81,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         /// <summary>Locks confirmed on VFX that still need validator mint attestations (V2).</summary>
         public static List<BridgeLockRecord> GetPendingV2Attestations()
         {
-            if (!ReserveBlockCore.Bitcoin.Services.BaseBridgeService.IsV2MintBridge)
+            if (!ReserveBlockCore.Bitcoin.Services.BaseBridgeService.IsBridgeConfigured)
                 return new List<BridgeLockRecord>();
             var col = GetCollection();
             return col.Find(x =>

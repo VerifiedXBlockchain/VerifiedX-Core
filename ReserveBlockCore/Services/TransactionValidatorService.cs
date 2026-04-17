@@ -2992,15 +2992,15 @@ namespace ReserveBlockCore.Services
                     if (!IsValidEvmTxHash32(exitBurnTxHash))
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
-                    if (BaseBridgeService.IsV2MintBridge)
+                    if (BaseBridgeService.IsBridgeConfigured)
                     {
                         var votesTok = jobj["CasterConsensusVotes"];
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
-                            return (txResult, "VBTCbV2 bridge unlock requires CasterConsensusVotes array.");
+                            return (txResult, "Bridge unlock requires CasterConsensusVotes array.");
 
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
                         if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "EXIT"))
-                            return (txResult, "Caster consensus votes invalid or insufficient for VBTCbV2 unlock.");
+                            return (txResult, "Caster consensus votes invalid or insufficient for VBTCb unlock.");
 
                         var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(exitBurnTxHash.Trim());
                         if (!burnOk)
@@ -3061,11 +3061,11 @@ namespace ReserveBlockCore.Services
                     if (VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash) != null)
                         return (txResult, "Duplicate Base burn transaction for bridge exit to BTC.");
 
-                    if (BaseBridgeService.IsV2MintBridge)
+                    if (BaseBridgeService.IsBridgeConfigured)
                     {
                         var votesTok = jobj["CasterConsensusVotes"];
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
-                            return (txResult, "VBTCbV2 exit to BTC requires CasterConsensusVotes array.");
+                            return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
                         if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, baseBurnTxHash.Trim(), "BTC_EXIT"))
                             return (txResult, "Caster consensus votes invalid or insufficient for exit to BTC.");

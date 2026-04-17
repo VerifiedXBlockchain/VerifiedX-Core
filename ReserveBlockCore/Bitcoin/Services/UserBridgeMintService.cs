@@ -19,7 +19,7 @@ namespace ReserveBlockCore.Bitcoin.Services
     /// </summary>
     public static class UserBridgeMintService
     {
-        /// <summary>ABI for mintWithProof on VBTCbV2.</summary>
+        /// <summary>ABI for mintWithProof on VBTCb.</summary>
         private const string MINT_WITH_PROOF_ABI = @"[
             {
                 ""inputs"": [
@@ -48,8 +48,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                if (!BaseBridgeService.IsV2MintBridge)
-                    return (false, "Base bridge not configured. Set BaseBridgeV2Contract in config.", null);
+                if (!BaseBridgeService.IsBridgeConfigured)
+                    return (false, "Base bridge not configured. Set BaseBridgeContract in config.", null);
 
                 // Validate EVM address
                 if (string.IsNullOrWhiteSpace(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
@@ -144,7 +144,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             // Step 2: Collect validator attestation signatures
             // Use BaseBridgeService.BaseChainId consistently (same source used for mint submission)
             var requiredSigs = await BaseBridgeService.GetRequiredMintSignaturesFromChainAsync();
-            var contractAddress = BaseBridgeService.VBTCbV2ContractAddress;
+            var contractAddress = BaseBridgeService.ContractAddress;
             var chainId = (long)BaseBridgeService.BaseChainId;
             var nonce = record.VfxLockBlockHeight;
 
@@ -279,7 +279,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var ethKey = new EthECKey(privBytes, true);
 
                 var rpcUrl = BaseBridgeService.BaseRpcUrl;
-                var contractAddress = BaseBridgeService.VBTCbV2ContractAddress;
+                var contractAddress = BaseBridgeService.ContractAddress;
                 var chainId = BaseBridgeService.BaseChainId;
 
                 if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddress))

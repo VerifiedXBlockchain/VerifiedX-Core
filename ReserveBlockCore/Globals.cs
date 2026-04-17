@@ -275,8 +275,8 @@ namespace ReserveBlockCore
         /// <summary>Ethereum/Base address derived from this node's validator private key (empty if not a validator).</summary>
         public static string ValidatorBaseAddress { get; set; } = string.Empty;
 
-        /// <summary>VBTCbV2 proxy contract on Base (set from config/env). When set, V2 bridge paths apply.</summary>
-        public static string VBTCbV2ContractAddress { get; set; } = string.Empty;
+        /// <summary>VBTCb proxy contract on Base (set from config). When set, bridge paths apply.</summary>
+        public static string VBTCbContractAddress { get; set; } = string.Empty;
 
         /// <summary>Base (Ethereum) chain id: 84532 Sepolia when testnet, 8453 mainnet.</summary>
         public static long BaseEvmChainId => IsTestNet ? 84532L : 8453L;

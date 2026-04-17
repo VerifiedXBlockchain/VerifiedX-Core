@@ -12,13 +12,13 @@ using System.Net.Http;
 namespace ReserveBlockCore.Bitcoin.Services
 {
     /// <summary>
-    /// Collects validator ECDSA signatures for VBTCbV2 <c>mintWithProof</c> after a VFX bridge lock confirms.
+    /// Collects validator ECDSA signatures for VBTCb <c>mintWithProof</c> after a VFX bridge lock confirms.
     /// </summary>
     public static class BaseBridgeAttestationService
     {
         private static readonly ConcurrentDictionary<string, MintAttestationState> Pending = new();
 
-        /// <summary>Keccak256(abi.encodePacked(to, amount, lockId, nonce, chainId, contract)) — matches VBTCbV2.sol.</summary>
+        /// <summary>Keccak256(abi.encodePacked(to, amount, lockId, nonce, chainId, contract)) — matches VBTCb.sol.</summary>
         public static byte[] ConstructMintMessageHash(string to, long amountSats, string lockId, long nonce, long chainId, string contractAddress)
         {
             using var ms = new MemoryStream();
@@ -115,7 +115,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// <summary>Caster: request signatures from active validators over HTTP.</summary>
         public static async Task CollectMintAttestationsForLock(BridgeLockRecord record, int requiredSignatures)
         {
-            if (!BaseBridgeService.IsV2MintBridge || record == null) return;
+            if (!BaseBridgeService.IsBridgeConfigured || record == null) return;
 
             // Pre-check: verify the owner actually has sufficient vBTC balance for this lock
             var balCheck = await VBTCService.TryGetAvailableTransparentVbtcBalance(record.SmartContractUID, record.OwnerAddress);
@@ -125,7 +125,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 return;
             }
 
-            var contract = BaseBridgeService.VBTCbV2ContractAddress;
+            var contract = BaseBridgeService.ContractAddress;
             var nonce = record.VfxLockBlockHeight > 0 ? record.VfxLockBlockHeight : Globals.LastBlock.Height;
             var state = new MintAttestationState
             {
@@ -201,7 +201,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 try
                 {
-                    if (Globals.IsBlockCaster && BaseBridgeService.IsV2MintBridge)
+                    if (Globals.IsBlockCaster && BaseBridgeService.IsBridgeConfigured)
                     {
                         var required = await BaseBridgeService.GetRequiredMintSignaturesFromChainAsync();
                         foreach (var rec in BridgeLockRecord.GetPendingV2Attestations())

@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
@@ -25,7 +25,7 @@ namespace ReserveBlockCore.Controllers
         /// <summary>
         /// Validators sign a mint attestation for a VFX bridge lock.
         /// Called by the user's node (or any node) to collect validator ECDSA signatures
-        /// for the VBTCbV2 <c>mintWithProof</c> call on Base.
+        /// for the VBTCb <c>mintWithProof</c> call on Base.
         /// </summary>
         [HttpPost]
         [Route("SignMintAttestation")]
@@ -119,7 +119,7 @@ namespace ReserveBlockCore.Controllers
             try
             {
                 var rpcUrl = Bitcoin.Services.BaseBridgeService.BaseRpcUrl;
-                var contractAddr = Bitcoin.Services.BaseBridgeService.VBTCbV2ContractAddress;
+                var contractAddr = Bitcoin.Services.BaseBridgeService.ContractAddress;
 
                 if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddr))
                     return Ok(JsonConvert.SerializeObject(new { Success = false, Message = "Base bridge not configured" }));
@@ -499,7 +499,7 @@ namespace ReserveBlockCore.Controllers
                 // The winning caster's consensus loop (iAmWinner path) is solely responsible for crafting
                 // the block and storing it in CasterRoundDict. If RequestBlock independently crafts a block,
                 // it races with the consensus loop and produces a DIFFERENT block (different timestamp/txs = 
-                // different hash), causing non-winners to end up with a different block than the winner → FORK.
+                // different hash), causing non-winners to end up with a different block than the winner ? FORK.
                 // Return "0" (not found) so the requesting caster retries until the consensus loop stores the block.
                 return Ok("0");
             }
@@ -555,7 +555,7 @@ namespace ReserveBlockCore.Controllers
         [Route("CasterInvitation")]
         public ActionResult<string> CasterInvitation([FromBody] CasterRotationBroadcast? _)
         {
-            return Accepted("CasterInvitation reserved for signed rotation flow (plan §7.4).");
+            return Accepted("CasterInvitation reserved for signed rotation flow (plan �7.4).");
         }
 
         /// <summary>
@@ -570,7 +570,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Caster readiness check — returns this caster's current height and ready status.
+        /// Caster readiness check � returns this caster's current height and ready status.
         /// Used by the startup readiness barrier so all casters sync before beginning consensus.
         /// </summary>
         [HttpGet]
@@ -816,7 +816,7 @@ namespace ReserveBlockCore.Controllers
         /// Returns this node's wallet/CLI version string.
         /// Used by casters during VerifyWinnerAvailability to reject validators
         /// running outdated versions that can't participate in consensus properly.
-        /// Old nodes won't have this endpoint → 404 → rejected as winner.
+        /// Old nodes won't have this endpoint ? 404 ? rejected as winner.
         /// </summary>
         [HttpGet]
         [Route("GetWalletVersion")]

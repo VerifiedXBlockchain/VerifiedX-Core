@@ -21,7 +21,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         private static bool _running;
         private static readonly object _lock = new();
 
-        /// <summary>ABI for mintWithProof on VBTCbV2.</summary>
+        /// <summary>ABI for mintWithProof on VBTCb.</summary>
         private const string MINT_WITH_PROOF_ABI = @"[
             {
                 ""inputs"": [
@@ -84,7 +84,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// </summary>
         private static async Task ProcessAttestationReadyRecords()
         {
-            if (!BaseBridgeService.IsV2MintBridge)
+            if (!BaseBridgeService.IsBridgeConfigured)
                 return;
 
             // Only validators/casters with an ETH key can submit
@@ -147,7 +147,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
 
             var rpcUrl = BaseBridgeService.BaseRpcUrl;
-            var contractAddress = BaseBridgeService.VBTCbV2ContractAddress;
+            var contractAddress = BaseBridgeService.ContractAddress;
             var chainId = BaseBridgeService.BaseChainId;
 
             if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddress))

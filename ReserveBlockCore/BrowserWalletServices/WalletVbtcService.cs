@@ -385,7 +385,7 @@ namespace ReserveBlockCore.BrowserWalletServices
                         lockId = result.LockId,
                         amount = amount,
                         evmDestination = evmDestination,
-                        contractAddress = Bitcoin.Services.BaseBridgeService.VBTCbV2ContractAddress,
+                        contractAddress = Bitcoin.Services.BaseBridgeService.ContractAddress,
                         chainId = Bitcoin.Services.BaseBridgeService.BaseChainId
                     };
                 }
@@ -429,12 +429,12 @@ namespace ReserveBlockCore.BrowserWalletServices
                 var hasDerivedAddress = !string.IsNullOrEmpty(derivedBaseAddress);
 
                 // Bridge config status
-                var bridgeConfigured = Bitcoin.Services.BaseBridgeService.IsV2MintBridge;
+                var bridgeConfigured = Bitcoin.Services.BaseBridgeService.IsBridgeConfigured;
                 var canReadEth = Bitcoin.Services.BaseBridgeService.CanReadEth;
                 var canReadVbtc = Bitcoin.Services.BaseBridgeService.CanReadVbtcToken;
                 var networkName = Bitcoin.Services.BaseBridgeService.BaseNetworkDisplayName;
                 var chainId = Bitcoin.Services.BaseBridgeService.BaseChainId;
-                var contractAddress = Bitcoin.Services.BaseBridgeService.VBTCbV2ContractAddress;
+                var contractAddress = Bitcoin.Services.BaseBridgeService.ContractAddress;
 
                 // Fetch vBTC available balance on VFX side
                 decimal availableVbtc = 0M;

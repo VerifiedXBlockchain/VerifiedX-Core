@@ -569,7 +569,7 @@ namespace ReserveBlockCore
             // Base bridge-back: poll ExitBurned logs (burnForExit) and unlock VFX bridge locks
             _ = Task.Run(Bitcoin.Services.BaseBridgeExitWatchService.BridgeExitScanLoop);
 
-            // VBTCbV2: casters collect validator mint attestations over HTTP (validators expose SignMintAttestation)
+            // VBTCb: casters collect validator mint attestations over HTTP (validators expose SignMintAttestation)
             // Caster attestation loop kept for backwards compatibility — but user nodes now handle minting directly via UserBridgeMintService.
             _ = Task.Run(Bitcoin.Services.BaseBridgeAttestationService.ProcessPendingAttestationsLoop);
 

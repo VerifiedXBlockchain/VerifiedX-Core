@@ -3093,7 +3093,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (VbtcBaseBridge.IsEnabled)
                     status = "VFX lock broadcast. After the lock confirms on-chain, validators sign mint attestations and casters submit mintWithProof on Base.";
                 else
-                    status = "VFX lock broadcast. Configure BaseBridgeRpcUrl and BaseBridgeV2Contract in config.txt for Base mint (VBTCbV2).";
+                    status = "VFX lock broadcast. Configure BaseBridgeRpcUrl and BaseBridgeContract in config.txt for Base mint (VBTCb).";
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -3142,7 +3142,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Validator node: sign the VBTCbV2 mint message for a confirmed VFX bridge lock.
+        /// Validator node: sign the VBTCb mint message for a confirmed VFX bridge lock.
         /// Casters POST the same <see cref="MintAttestationRequest"/> body to each validator; response uses lowercase <c>success</c> / <c>signature</c> for collector compatibility.
         /// </summary>
         [HttpPost("SignMintAttestation")]
@@ -3234,7 +3234,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Deprecated: VBTCbV2 does not use a relay-key queue. Mint uses validator attestations and caster-submitted mintWithProof.
+        /// Deprecated: VBTCb does not use a relay-key queue. Mint uses validator attestations and caster-submitted mintWithProof.
         /// </summary>
         [HttpPost("RelayPendingBridgeLocks")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
@@ -3243,7 +3243,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             return Task.FromResult(JsonConvert.SerializeObject(new
             {
                 Success = false,
-                Message = "VBTCbV2 has no relay queue. Use SignMintAttestation on validators and caster flow for mintWithProof after the VFX lock confirms."
+                Message = "VBTCb has no relay queue. Use SignMintAttestation on validators and caster flow for mintWithProof after the VFX lock confirms."
             }));
         }
 
@@ -3320,7 +3320,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             {
                 Success = true,
                 IsEnabled = VbtcBaseBridge.IsEnabled,
-                ContractAddress = VbtcBaseBridge.VBTCbV2ContractAddress,
+                ContractAddress = VbtcBaseBridge.ContractAddress,
                 ChainId = VbtcBaseBridge.BaseChainId,
                 Network = VbtcBaseBridge.BaseNetworkDisplayName,
                 Abi = Services.BaseBridgeService.CONTRACT_ABI
