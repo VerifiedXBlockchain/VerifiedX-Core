@@ -119,7 +119,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             foreach (var v in validators)
             {
                 if (string.IsNullOrEmpty(v.IPAddress)) continue;
-                var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.APIPort}/vbtcapi/Validator/SignMintAttestation";
+                var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
                 var body = JsonConvert.SerializeObject(new MintAttestationRequest
                 {
                     LockId = record.LockId,

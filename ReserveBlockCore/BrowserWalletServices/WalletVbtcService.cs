@@ -366,29 +366,22 @@ namespace ReserveBlockCore.BrowserWalletServices
         }
 
         /// <summary>
-        /// Bridge vBTC to Base as vBTC.b (ERC-20). Creates a VBTC_V2_BRIDGE_LOCK transaction on VFX.
-        /// After validators attest, the user can call mintWithProof on the Base contract.
+        /// Bridge vBTC to Base as vBTC.b (ERC-20). 
+        /// User-driven: creates lock TX on VFX, collects validator attestations, 
+        /// and submits mintWithProof on Base using the user's own ETH key (user pays gas).
         /// </summary>
         public static async Task<object> BridgeToBase(string scUID, string ownerAddress, decimal amount, string evmDestination)
         {
             try
             {
-                if (!Bitcoin.Services.BaseBridgeService.IsV2MintBridge)
-                    return new { success = false, message = "Base bridge not configured. Set BaseBridgeV2Contract in config." };
-
-                // Validate EVM address format
-                if (!evmDestination.StartsWith("0x") || evmDestination.Length != 42)
-                    return new { success = false, message = "Invalid EVM destination address. Expected 0x + 40 hex characters." };
-
-                var result = await Bitcoin.Services.VBTCService.CreateBridgeLockTx(scUID, ownerAddress, amount, evmDestination);
+                var result = await Bitcoin.Services.UserBridgeMintService.ExecuteBridgeToBase(scUID, ownerAddress, amount, evmDestination);
 
                 if (result.Success)
                 {
                     return new
                     {
                         success = true,
-                        message = "Bridge lock transaction submitted. Validators will collect attestations for minting on Base.",
-                        txHash = result.TxHashOrError,
+                        message = result.Message,
                         lockId = result.LockId,
                         amount = amount,
                         evmDestination = evmDestination,
@@ -398,12 +391,28 @@ namespace ReserveBlockCore.BrowserWalletServices
                 }
                 else
                 {
-                    return new { success = false, message = result.TxHashOrError };
+                    return new { success = false, message = result.Message };
                 }
             }
             catch (Exception ex)
             {
-                return new { success = false, message = $"Error creating bridge lock: {ex.Message}" };
+                return new { success = false, message = $"Error bridging to Base: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
+        /// Retry a failed or timed-out bridge mint for a specific lock ID.
+        /// </summary>
+        public static async Task<object> RetryBridgeMint(string lockId, string ownerAddress)
+        {
+            try
+            {
+                var result = await Bitcoin.Services.UserBridgeMintService.RetryMintForLock(lockId, ownerAddress);
+                return new { success = result.Success, message = result.Message };
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Error retrying mint: {ex.Message}" };
             }
         }
 

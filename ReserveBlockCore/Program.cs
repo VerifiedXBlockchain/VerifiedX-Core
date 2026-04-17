@@ -570,6 +570,7 @@ namespace ReserveBlockCore
             _ = Task.Run(Bitcoin.Services.BaseBridgeExitWatchService.BridgeExitScanLoop);
 
             // VBTCbV2: casters collect validator mint attestations over HTTP (validators expose SignMintAttestation)
+            // Caster attestation loop kept for backwards compatibility — but user nodes now handle minting directly via UserBridgeMintService.
             _ = Task.Run(Bitcoin.Services.BaseBridgeAttestationService.ProcessPendingAttestationsLoop);
 
             // V2 Bridge: Sync VFX validator set to Base contract

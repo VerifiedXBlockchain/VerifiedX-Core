@@ -217,8 +217,23 @@ namespace ReserveBlockCore.Controllers
         {
             try
             {
-                var result = await Bitcoin.Services.BaseBridgeMintSubmissionService.ManualSubmitMintWithProof(lockId);
-                return Ok(new { success = result.Success, message = result.Message });
+                // Manual mint submission removed — user-driven model now handles this automatically.
+                // Use the retry endpoint instead if a bridge failed.
+                return Ok(new { success = false, message = "Manual caster mint removed. Use /api/vbtc/bridge/retry to retry a failed bridge." });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpPost("api/vbtc/bridge/retry/{lockId}/{ownerAddress}")]
+        public async Task<IActionResult> VBTCBridgeRetry(string lockId, string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(lockId) || string.IsNullOrWhiteSpace(ownerAddress))
+                    return BadRequest(new { success = false, message = "lockId and ownerAddress are required." });
+
+                var result = await WalletVbtcService.RetryBridgeMint(lockId, ownerAddress);
+                return Ok(result);
             }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }

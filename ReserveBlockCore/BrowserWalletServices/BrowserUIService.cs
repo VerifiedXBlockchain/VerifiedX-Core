@@ -572,9 +572,11 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
         </div>
         <input class='form-inp' id='br-evm' type='text' placeholder='0x...' readonly style='color:var(--accent)'>
       </div>
+      <div id='br-eth-warn' style='padding:12px;background:rgba(255,50,50,.1);border:1px solid rgba(255,50,50,.25);border-radius:8px;font-size:12px;color:#ff5555;margin-bottom:12px;line-height:1.5;display:none'>
+        <strong>&#9888; No ETH on Base:</strong> Your derived Base address has no ETH to pay gas. Fund it with ETH on Base before bridging.
+      </div>
       <div style='padding:12px;background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.15);border-radius:8px;font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5'>
-        <strong style='color:var(--accent)'>How it works:</strong> This locks your vBTC on VerifiedX. Validators automatically attest the lock and a caster submits <code>mintWithProof</code> on Base &mdash; <strong>you do not pay Base gas</strong>. The vBTC.b ERC-20 tokens appear at the destination address.<br><br>
-        <strong style='color:var(--orange)'>Note:</strong> To later transfer or burn vBTC.b on Base, the destination address will need ETH for gas.
+        <strong style='color:var(--accent)'>How it works:</strong> This locks your vBTC on VerifiedX. Your node collects validator attestation signatures, then submits <code>mintWithProof</code> on Base using your derived key &mdash; <strong>you pay Base gas</strong>. The vBTC.b ERC-20 tokens appear at the destination address.
       </div>
       <div class='msg' id='br-msg'></div>
       <div class='modal-foot'>
@@ -1054,12 +1056,26 @@ window.openBridge=function(scUID,owner,bal){
         el('br-derived-addr').textContent='Could not derive (account not found)';
         el('br-derived-addr').style.color='var(--red)';
       }
-      if(d.ethBalance!=null){el('br-eth-bal').textContent=fmtBal(d.ethBalance)+' ETH';}
-      else{el('br-eth-bal').textContent=d.ethError||'N/A';}
+      if(d.ethBalance!=null){
+        el('br-eth-bal').textContent=fmtBal(d.ethBalance)+' ETH';
+        if(d.ethBalance<=0){
+          el('br-eth-warn').style.display='block';
+          el('br-btn').disabled=true;
+          el('br-btn').title='Fund your Base address with ETH first';
+        }else{
+          el('br-eth-warn').style.display='none';
+          el('br-btn').disabled=false;
+          el('br-btn').title='';
+        }
+      }else{
+        el('br-eth-bal').textContent=d.ethError||'N/A';
+        el('br-eth-warn').style.display='block';
+        el('br-btn').disabled=true;
+      }
       if(d.vbtcBBalance!=null){el('br-vbtcb-bal').textContent=fmtBal(d.vbtcBBalance)+' vBTC.b';}
       else{el('br-vbtcb-bal').textContent=d.vbtcBError||'N/A';}
       el('br-network-name').textContent=d.networkName||'Base';
-      if(!d.bridgeConfigured){showMsg('br-msg','Bridge not configured on this node. Set BaseBridgeV2Contract and BaseBridgeRpcUrl in config.txt.','err');}
+      if(!d.bridgeConfigured){showMsg('br-msg','Bridge not configured on this node. Set BaseBridgeV2Contract and BaseBridgeRpcUrl in config.txt.','err');el('br-btn').disabled=true;}
     }).catch(function(e){
       el('br-loading').style.display='none';el('br-body').style.opacity='1';
       showMsg('br-msg','Failed to load bridge info: '+(e.message||''),'err');
@@ -1087,7 +1103,7 @@ window.doBridgeToBase=function(){
     body:JSON.stringify({ScUID:scUID,OwnerAddress:owner,Amount:amt,EvmDestination:evm})
   }).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Bridge to Base';
-    if(d.success){showMsg('br-msg','Bridge lock created! Lock ID: '+(d.lockId||'')+'. Validators will attest and casters will mint vBTC.b on Base automatically.','ok');
+    if(d.success){showMsg('br-msg','Bridge lock created! Lock ID: '+(d.lockId||'')+'. Your node will collect validator signatures and submit mintWithProof on Base. Check bridge history for status.','ok');
       setTimeout(function(){closeBridge();tabLoaded.vbtc=false;loadVBTC();},3000);
     }else{showMsg('br-msg',d.message||'Bridge failed.','err');}
   }).catch(function(e){btn.disabled=false;btn.textContent='Bridge to Base';showMsg('br-msg',e.message||'Failed.','err');});

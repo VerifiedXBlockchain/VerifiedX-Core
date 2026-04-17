@@ -23,6 +23,33 @@ namespace ReserveBlockCore.Controllers
         #region vBTC V2 Bridge Endpoints
 
         /// <summary>
+        /// Validators sign a mint attestation for a VFX bridge lock.
+        /// Called by the user's node (or any node) to collect validator ECDSA signatures
+        /// for the VBTCbV2 <c>mintWithProof</c> call on Base.
+        /// </summary>
+        [HttpPost]
+        [Route("SignMintAttestation")]
+        public async Task<ActionResult<string>> SignMintAttestation([FromBody] Bitcoin.Models.MintAttestationRequest? request)
+        {
+            try
+            {
+                if (request == null)
+                    return BadRequest(JsonConvert.SerializeObject(new { success = false, error = "Empty request body" }));
+
+                var (success, signatureHex, error) = await Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+
+                if (success)
+                    return Ok(JsonConvert.SerializeObject(new { success = true, signature = signatureHex }));
+                else
+                    return Ok(JsonConvert.SerializeObject(new { success = false, error = error ?? "Attestation failed" }));
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, JsonConvert.SerializeObject(new { success = false, error = ex.Message }));
+            }
+        }
+
+        /// <summary>
         /// Validators sign add/remove operations for the Base contract.
         /// Called by BaseValidatorSyncService when collecting signatures.
         /// </summary>
