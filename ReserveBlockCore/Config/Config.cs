@@ -70,6 +70,7 @@ namespace ReserveBlockCore.Config
         public string? BaseBridgeRpcUrl2 { get; set; }
         public string? BaseBridgeRpcUrl3 { get; set; }
         public string? BaseBridgeV2Contract { get; set; }
+        public string? BaseBridgeV3Contract { get; set; }
         public int BaseBridgeChainId { get; set; }
 
         public static Config ReadConfigFile()
@@ -177,6 +178,7 @@ namespace ReserveBlockCore.Config
                     config.BaseBridgeV2Contract = dict["BaseBridgeContract"];
                 else
                     config.BaseBridgeV2Contract = null;
+                config.BaseBridgeV3Contract = dict.ContainsKey("BaseBridgeV3Contract") ? dict["BaseBridgeV3Contract"] : null;
                 config.BaseBridgeChainId = dict.ContainsKey("BaseBridgeChainId") ? Convert.ToInt32(dict["BaseBridgeChainId"]) : 0;
 
                 config.MotherAddress = dict.ContainsKey("MotherAddress") ? dict["MotherAddress"] : null;
@@ -559,6 +561,8 @@ namespace ReserveBlockCore.Config
 			Bitcoin.Services.BaseBridgeService.BaseRpcUrl3 = config.BaseBridgeRpcUrl3.Trim();
 		if (!string.IsNullOrWhiteSpace(config.BaseBridgeV2Contract))
 			Bitcoin.Services.BaseBridgeService.VBTCbV2ContractAddress = config.BaseBridgeV2Contract.Trim();
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeV3Contract))
+			Bitcoin.Services.BaseBridgeService.VBTCbV3ContractAddress = config.BaseBridgeV3Contract.Trim();
 		if (config.BaseBridgeChainId > 0)
 			Bitcoin.Services.BaseBridgeService.BaseChainId = config.BaseBridgeChainId;
         }

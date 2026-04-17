@@ -1,7 +1,7 @@
 const { ethers, upgrades } = require("hardhat");
 
 async function main() {
-    console.log("=== VBTCbV2 Deployment to Base Sepolia ===\n");
+    console.log("=== VBTCbV3 Deployment to Base Sepolia ===\n");
 
     const [deployer] = await ethers.getSigners();
     console.log("Deployer address:", deployer.address);
@@ -29,11 +29,11 @@ async function main() {
     console.log();
 
     // Deploy as UUPS proxy
-    const VBTCbV2 = await ethers.getContractFactory("VBTCbV2");
+    const VBTCbV3 = await ethers.getContractFactory("VBTCbV3");
     
-    console.log("Deploying VBTCbV2 as UUPS proxy...");
+    console.log("Deploying VBTCbV3 as UUPS proxy...");
     const proxy = await upgrades.deployProxy(
-        VBTCbV2,
+        VBTCbV3,
         [
             "Verified Bitcoin on Base",  // name
             "vBTC.b",                    // symbol
@@ -91,7 +91,7 @@ async function main() {
 
     console.log("\n=== NEXT STEPS ===");
     console.log("1. Set this environment variable on ALL VFX nodes:");
-    console.log(`   set BASE_BRIDGE_V2_CONTRACT=${proxyAddress}`);
+    console.log(`   set BASE_BRIDGE_V3_CONTRACT=${proxyAddress}`);
     console.log("2. Restart all VFX nodes");
     console.log("3. Verify on BaseScan: https://sepolia.basescan.org/address/" + proxyAddress);
 }

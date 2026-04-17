@@ -27,7 +27,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         private const int PROPOSAL_WAIT_MS = 8_000;
         private const int CONFIRMATION_WAIT_MS = 8_000;
 
-        public enum BurnExitType { VfxUnlock, BtcExit }
+        public enum BurnExitType { VfxUnlock, BtcExit, VfxPoolUnlock }
         public enum BurnExitStatus { Pending, InConsensus, ConsensusReached, VfxTxCreated, FrostInProgress, Complete, Failed }
 
         public class ProcessedBurnRecord
@@ -353,6 +353,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 if (record.ExitType == BurnExitType.VfxUnlock)
                     await ExecuteVfxUnlock(record);
+                else if (record.ExitType == BurnExitType.VfxPoolUnlock)
+                    await ExecuteVfxPoolUnlock(record);
                 else if (record.ExitType == BurnExitType.BtcExit)
                     await ExecuteBtcExit(record);
             }
@@ -391,6 +393,46 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 record.Status = BurnExitStatus.Failed;
                 ErrorLogUtility.LogError($"[BurnExitConsensus] VFX unlock failed: {result.TxHashOrError}", "BurnExitConsensusService");
+            }
+        }
+
+        /// <summary>
+        /// V3 pool-based unlock: compute FIFO allocation plan and broadcast VBTC_V2_BRIDGE_POOL_UNLOCK.
+        /// record.VfxLockId holds the VFX destination address (repurposed field from HandleDetectedBurn).
+        /// </summary>
+        private static async Task ExecuteVfxPoolUnlock(ProcessedBurnRecord record)
+        {
+            var vfxDestinationAddress = record.VfxLockId; // VfxExitBurned passes vfxDest in this field
+            var allocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount);
+
+            if (allocations == null || allocations.Count == 0)
+            {
+                record.Status = BurnExitStatus.Failed;
+                ErrorLogUtility.LogError($"[BurnExitConsensus] No pool liquidity for VfxPoolUnlock {record.BaseBurnTxHash}, amount={record.Amount}",
+                    "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
+                return;
+            }
+
+            var result = await BridgePoolUnlockService.CreateBridgePoolUnlockTx(
+                Globals.ValidatorAddress,
+                vfxDestinationAddress,
+                record.Amount,
+                record.BaseBurnTxHash,
+                allocations,
+                record.ConsensusVotes);
+
+            if (result.Success)
+            {
+                record.Status = BurnExitStatus.Complete;
+                record.CompletionVfxTxHash = result.TxHashOrError;
+                LogUtility.Log($"[BurnExitConsensus] VFX pool unlock TX: {result.TxHashOrError} for burn {record.BaseBurnTxHash}",
+                    "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
+            }
+            else
+            {
+                record.Status = BurnExitStatus.Failed;
+                ErrorLogUtility.LogError($"[BurnExitConsensus] VFX pool unlock failed: {result.TxHashOrError}",
+                    "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
             }
         }
 

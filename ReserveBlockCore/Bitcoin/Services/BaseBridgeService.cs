@@ -36,6 +36,14 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
         }
 
+        private static string _vbtcV3ContractAddress = "";
+        /// <summary>V3 contract address (pool-based burnForVfxExit). Set via BASE_BRIDGE_V3_CONTRACT env var.</summary>
+        public static string VBTCbV3ContractAddress
+        {
+            get => _vbtcV3ContractAddress;
+            set => _vbtcV3ContractAddress = value?.Trim() ?? "";
+        }
+
         /// <summary>Same as <see cref="VBTCbV2ContractAddress"/> (exit watcher / legacy API name).</summary>
         public static string VBTCbContractAddress
         {

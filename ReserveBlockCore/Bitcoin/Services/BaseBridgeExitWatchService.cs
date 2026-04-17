@@ -10,8 +10,9 @@ using ReserveBlockCore.Utilities;
 namespace ReserveBlockCore.Bitcoin.Services
 {
     /// <summary>
-    /// Polls Base for <c>ExitBurned</c> and <c>BTCExitBurned</c> events from VBTCbV2.
-    /// For ExitBurned: broadcasts <see cref="TransactionType.VBTC_V2_BRIDGE_UNLOCK"/> on VFX.
+    /// Polls Base for <c>ExitBurned</c> (V2), <c>VfxExitBurned</c> (V3), and <c>BTCExitBurned</c> events.
+    /// For ExitBurned (V2 legacy): broadcasts <see cref="TransactionType.VBTC_V2_BRIDGE_UNLOCK"/> on VFX.
+    /// For VfxExitBurned (V3 pool): feeds into <see cref="BurnExitConsensusService"/> → <see cref="BridgePoolUnlockService"/>.
     /// For BTCExitBurned: feeds into <see cref="BurnExitConsensusService"/> for caster consensus + FROST.
     /// </summary>
     public static class BaseBridgeExitWatchService
@@ -30,6 +31,20 @@ namespace ReserveBlockCore.Bitcoin.Services
 
             [Parameter("string", "vfxLockId", 3, false)]
             public string VfxLockId { get; set; } = "";
+        }
+
+        /// <summary>V3 contract event: burnForVfxExit(amount, vfxDestinationAddress)</summary>
+        [Event("VfxExitBurned")]
+        public class VfxExitBurnedEventDTO : IEventDTO
+        {
+            [Parameter("address", "burner", 1, true)]
+            public string Burner { get; set; } = "";
+
+            [Parameter("uint256", "amount", 2, false)]
+            public BigInteger Amount { get; set; }
+
+            [Parameter("string", "vfxDestinationAddress", 3, false)]
+            public string VfxDestinationAddress { get; set; } = "";
         }
 
         [Event("BTCExitBurned")]
@@ -190,6 +205,57 @@ namespace ReserveBlockCore.Bitcoin.Services
                     LogUtility.Log($"[BaseBridgeExit] CreateBridgeUnlockTx failed for lock {lockId}: {unlockResult.TxHashOrError}",
                         "BaseBridgeExitWatchService.PollOnceInternal");
                 }
+            }
+
+            // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
+            try
+            {
+                var v3Contract = BaseBridgeService.VBTCbV3ContractAddress;
+                if (!string.IsNullOrEmpty(v3Contract))
+                {
+                    var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
+                    var vfxExitFilter = vfxExitHandler.CreateFilterInput(
+                        new BlockParameter(new HexBigInteger(from)),
+                        new BlockParameter(new HexBigInteger(to)));
+
+                    var vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitFilter);
+
+                    foreach (var ev in vfxExitLogs)
+                    {
+                        var log = ev.Log;
+                        var burner = ev.Event?.Burner ?? "";
+                        var amount = ev.Event?.Amount ?? BigInteger.Zero;
+                        var vfxDest = ev.Event?.VfxDestinationAddress?.Trim() ?? "";
+                        if (string.IsNullOrEmpty(burner) || string.IsNullOrEmpty(vfxDest)) continue;
+                        if (amount > long.MaxValue || amount <= 0) continue;
+
+                        var txHash = log.TransactionHash;
+                        if (string.IsNullOrEmpty(txHash)) continue;
+
+                        if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
+                            continue;
+
+                        var amountDecimal = (decimal)amount / 100_000_000M;
+
+                        LogUtility.Log($"[BaseBridgeExit] Detected VfxExitBurned (V3 pool): {txHash}, amount={amountDecimal}, vfxDest={vfxDest}",
+                            "BaseBridgeExitWatchService.PollOnceInternal");
+
+                        if (Globals.IsBlockCaster)
+                        {
+                            _ = BurnExitConsensusService.HandleDetectedBurn(
+                                txHash,
+                                BurnExitConsensusService.BurnExitType.VfxPoolUnlock,
+                                vfxDest, "", amountDecimal, burner);
+                        }
+
+                        processed++;
+                    }
+                }
+            }
+            catch (Exception v3Ex)
+            {
+                LogUtility.Log($"[BaseBridgeExit] VfxExitBurned scan error: {v3Ex.Message}",
+                    "BaseBridgeExitWatchService.PollOnceInternal");
             }
 
             // --- BTCExitBurned events (burnForBTCExit → direct BTC withdrawal) ---

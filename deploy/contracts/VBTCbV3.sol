@@ -7,11 +7,16 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /**
- * @title VBTCbV2 - Verified Bitcoin on Base (Production)
+ * @title VBTCbV3 - Verified Bitcoin on Base (Production)
  * @notice Multi-sig verified ERC-20 for vBTC bridged from VFX. No owner; upgrades via validator multi-sig.
  * @dev Deploy behind an ERC1967 UUPS proxy. Initializer seeds the validator registry.
+ *
+ * V3 Changes:
+ * - Replaced burnForExit(amount, lockId) with burnForVfxExit(amount, vfxDestinationAddress)
+ *   to support pool-based unlocks (fungible exit — any holder can exit, not just original locker)
+ * - Added VfxExitBurned event with vfxDestinationAddress instead of lockId
  */
-contract VBTCbV2 is ERC20Upgradeable, UUPSUpgradeable {
+contract VBTCbV3 is ERC20Upgradeable, UUPSUpgradeable {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
 
@@ -28,7 +33,7 @@ contract VBTCbV2 is ERC20Upgradeable, UUPSUpgradeable {
     uint256 public adminNonce;
 
     event MintExecuted(address indexed to, uint256 amount, string lockId, uint256 nonce);
-    event ExitBurned(address indexed burner, uint256 amount, string vfxLockId, uint256 chainId);
+    event VfxExitBurned(address indexed burner, uint256 amount, string vfxDestinationAddress, uint256 chainId);
     event BTCExitBurned(address indexed burner, uint256 amount, string btcDestination, uint256 chainId);
     event ValidatorAdded(address indexed validator, uint256 vfxBlockHeight);
     event ValidatorRemoved(address indexed validator, uint256 vfxBlockHeight);
@@ -106,13 +111,27 @@ contract VBTCbV2 is ERC20Upgradeable, UUPSUpgradeable {
         emit MintExecuted(to, amount, lockId, nonce);
     }
 
-    function burnForExit(uint256 amount, string calldata vfxLockId) external {
+    /**
+     * @notice Burn vBTC.b tokens to exit back to VFX chain.
+     * @dev Pool-based unlock: burner specifies a VFX destination address.
+     *      The VFX network will select available bridge locks FIFO to fulfill the exit,
+     *      crediting vBTC from one or more contracts to the destination address.
+     * @param amount Amount of vBTC.b to burn (8 decimals, in sats)
+     * @param vfxDestinationAddress The VFX address to receive the unlocked vBTC
+     */
+    function burnForVfxExit(uint256 amount, string calldata vfxDestinationAddress) external {
         require(amount > 0, "Amount must be > 0");
-        require(bytes(vfxLockId).length > 0, "vfxLockId required");
+        require(bytes(vfxDestinationAddress).length > 0, "VFX destination required");
         _burn(msg.sender, amount);
-        emit ExitBurned(msg.sender, amount, vfxLockId, block.chainid);
+        emit VfxExitBurned(msg.sender, amount, vfxDestinationAddress, block.chainid);
     }
 
+    /**
+     * @notice Burn vBTC.b tokens to exit directly to a BTC address.
+     * @dev The VFX network FROST-signs a BTC transaction to the specified destination.
+     * @param amount Amount of vBTC.b to burn (8 decimals, in sats)
+     * @param btcDestination The Bitcoin address to send BTC to
+     */
     function burnForBTCExit(uint256 amount, string calldata btcDestination) external {
         require(amount > 0, "Amount must be > 0");
         require(bytes(btcDestination).length >= 26, "Invalid BTC address");
@@ -302,7 +321,7 @@ contract VBTCbV2 is ERC20Upgradeable, UUPSUpgradeable {
 
     function _authorizeUpgrade(address newImplementation) internal override {
         newImplementation; // silence
-        require(_upgradeAuthorized, "VBTCbV2: use upgradeWithValidatorApproval");
+        require(_upgradeAuthorized, "VBTCbV3: use upgradeWithValidatorApproval");
         _upgradeAuthorized = false;
     }
 

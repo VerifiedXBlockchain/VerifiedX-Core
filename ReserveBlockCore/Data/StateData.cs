@@ -510,6 +510,11 @@ namespace ReserveBlockCore.Data
                             ApplyVBTCBridgeUnlock(tx);
                         }
 
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK)
+                        {
+                            ApplyVBTCBridgePoolUnlock(tx);
+                        }
+
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
                         {
                             ApplyVBTCBridgeExitToBTC(tx);
@@ -2878,6 +2883,106 @@ namespace ReserveBlockCore.Data
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock error: {ex.Message}", "StateData.ApplyVBTCBridgeUnlock()");
+            }
+        }
+
+        /// <summary>
+        /// V3 pool-based unlock: credit vBTC to a destination VFX address by consuming
+        /// available bridge locks FIFO. The TX data contains a pre-computed allocation plan
+        /// (list of lockId + unlockAmount pairs) so all nodes produce identical state.
+        /// </summary>
+        private static void ApplyVBTCBridgePoolUnlock(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgePoolUnlock: expected self-transaction (from == to)", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                var jobj = JObject.Parse(tx.Data);
+                var totalAmount = jobj["TotalAmount"]?.ToObject<decimal?>();
+                var totalAmountSats = jobj["TotalAmountSats"]?.ToObject<long?>();
+                var vfxDestinationAddress = jobj["VfxDestinationAddress"]?.ToObject<string?>();
+                var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string?>();
+                var allocationsToken = jobj["Allocations"];
+
+                if (!totalAmount.HasValue || !totalAmountSats.HasValue ||
+                    string.IsNullOrEmpty(vfxDestinationAddress) || string.IsNullOrEmpty(exitBurnTxHash) ||
+                    allocationsToken == null)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgePoolUnlock: missing required fields", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                var allocations = allocationsToken.ToObject<List<PoolUnlockAllocation>>();
+                if (allocations == null || allocations.Count == 0)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgePoolUnlock: empty allocations", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                // Verify allocations sum matches total
+                decimal allocSum = allocations.Sum(a => a.UnlockAmount);
+                if (Math.Abs(allocSum - totalAmount.Value) > 0.00000001M)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: allocation sum {allocSum} != totalAmount {totalAmount.Value}", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                // Process each allocation: partial-unlock each lock, credit each lock's contract
+                foreach (var alloc in allocations)
+                {
+                    var rec = VBTCBridgeLockState.GetByLockId(alloc.LockId);
+                    if (rec == null || rec.IsUnlocked)
+                    {
+                        ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: lock {alloc.LockId} not found or already fully unlocked", "StateData.ApplyVBTCBridgePoolUnlock()");
+                        continue;
+                    }
+
+                    long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
+
+                    // Credit the lock's original contract to the destination address
+                    var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(rec.SmartContractUID);
+                    if (scStateTreiRec == null)
+                    {
+                        ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: contract {rec.SmartContractUID} not found for lock {alloc.LockId}", "StateData.ApplyVBTCBridgePoolUnlock()");
+                        continue;
+                    }
+
+                    var tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                    {
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = alloc.UnlockAmount,
+                            FromAddress = "+",
+                            ToAddress = vfxDestinationAddress
+                        }
+                    };
+
+                    if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                    else
+                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+
+                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                    // Update partial unlock state
+                    if (!VBTCBridgeLockState.ApplyPartialUnlock(alloc.LockId, alloc.UnlockAmount, allocSats))
+                    {
+                        ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: failed to apply partial unlock for lock {alloc.LockId}", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    }
+
+                    BridgeLockRecord.FinalizeFromChainUnlockIfPending(alloc.LockId);
+                }
+
+                SCLogUtility.Log($"ApplyVBTCBridgePoolUnlock: totalAmount={totalAmount.Value} BTC, dest={vfxDestinationAddress}, allocations={allocations.Count}, exitBurn={exitBurnTxHash}",
+                    "StateData.ApplyVBTCBridgePoolUnlock()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock error: {ex.Message}", "StateData.ApplyVBTCBridgePoolUnlock()");
             }
         }
 
