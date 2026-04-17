@@ -206,8 +206,10 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Determine this validator's participant index (1-based)
+                            // CRITICAL: Use sorted order to match BuildAddressToIdentifierMap
                             var myAddress = Globals.ValidatorAddress;
-                            var participantIndex = request.ParticipantAddresses.IndexOf(myAddress);
+                            var sortedParticipants = request.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
+                            var participantIndex = sortedParticipants.IndexOf(myAddress);
                             if (participantIndex < 0)
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -2148,12 +2150,21 @@ namespace ReserveBlockCore.Bitcoin.FROST
         /// <summary>
         /// Build a lookup from VFX address to FROST Identifier hex string using participant list ordering.
         /// </summary>
+        /// <summary>
+        /// Build a deterministic mapping from participant addresses to FROST Identifiers.
+        /// CRITICAL: Addresses are sorted alphabetically before assigning identifiers so that
+        /// the same set of addresses ALWAYS produces the same identifier mapping, regardless
+        /// of the order they were returned by GetActiveValidators() or any other source.
+        /// This ensures DKG and signing ceremonies use consistent identifiers even when
+        /// the validator list grows, shrinks, or the dictionary iteration order changes.
+        /// </summary>
         private static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
         {
+            var sorted = participantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();
-            for (int i = 0; i < participantAddresses.Count; i++)
+            for (int i = 0; i < sorted.Count; i++)
             {
-                map[participantAddresses[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
+                map[sorted[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
             }
             return map;
         }

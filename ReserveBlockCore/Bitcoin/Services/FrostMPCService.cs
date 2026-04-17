@@ -1096,12 +1096,19 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// using participant list ordering. The ordering must be identical to how the signing
         /// session was created (i.e., the SignerAddresses list order from BroadcastSigningStart).
         /// </summary>
+        /// <summary>
+        /// Build a deterministic mapping from signer addresses to FROST Identifiers.
+        /// CRITICAL: Addresses are sorted alphabetically (Ordinal) before assigning identifiers
+        /// so that the same set of addresses ALWAYS produces the same mapping, regardless of
+        /// input order. This must match FrostStartup.BuildAddressToIdentifierMap exactly.
+        /// </summary>
         private static Dictionary<string, string> BuildAddressToFrostIdentifierMap(List<string> signerAddresses)
         {
+            var sorted = signerAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();
-            for (int i = 0; i < signerAddresses.Count; i++)
+            for (int i = 0; i < sorted.Count; i++)
             {
-                map[signerAddresses[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
+                map[sorted[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
             }
             return map;
         }
