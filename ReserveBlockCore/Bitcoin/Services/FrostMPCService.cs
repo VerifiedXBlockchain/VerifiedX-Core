@@ -728,59 +728,139 @@ namespace ReserveBlockCore.Bitcoin.Services
                 
                 LogUtility.Log($"[FROST MPC] Broadcasting nonces and collecting signature shares...", "FrostMPCService.CollectSigningRound2Shares");
                 
-                // Broadcast aggregated nonces to all validators
+                // Broadcast aggregated nonces to all validators, extract signature shares
+                // directly from POST responses (the endpoint returns the share inline)
                 var noncePayload = JsonConvert.SerializeObject(nonces);
-                var tasks = validators.Select(async validator =>
+                var postSuccessCount = 0;
+                var postTasks = validators.Select(async validator =>
                 {
                     try
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/round2/{sessionId}";
                         var content = new StringContent(noncePayload, Encoding.UTF8, "application/json");
-                        await _httpClient.PostAsync(url, content);
-                    }
-                    catch { }
-                });
-                await Task.WhenAll(tasks);
-
-                await Task.Delay(2000);
-
-                // FIND-015 Fix: Collect signature shares using actual server response format
-                // Server GET /frost/sign/share/{sessionId} returns {Success, SessionId, Shares: {addr:data}, ...}
-                foreach (var validator in validators)
-                {
-                    try
-                    {
-                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/share/{sessionId}";
-                        var response = await _httpClient.GetAsync(url);
+                        var response = await _httpClient.PostAsync(url, content);
                         
                         if (response.IsSuccessStatusCode)
                         {
-                            var responseBody = await response.Content.ReadAsStringAsync();
-                            var json = JObject.Parse(responseBody);
+                            Interlocked.Increment(ref postSuccessCount);
                             
-                            if (json["Success"]?.Value<bool>() == true 
-                                && json["SessionId"]?.Value<string>() == sessionId
-                                && json["Shares"] is JObject sharesObj)
+                            // Extract the signature share directly from the POST response
+                            // instead of relying solely on a later GET poll.
+                            // POST /frost/sign/round2/{sessionId} returns:
+                            //   { Success: true, SignatureShare: "...", SessionId: "..." }
+                            try
                             {
-                                foreach (var kvp in sharesObj)
+                                var responseBody = await response.Content.ReadAsStringAsync();
+                                var json = JObject.Parse(responseBody);
+                                if (json["Success"]?.Value<bool>() == true 
+                                    && json["ShareGenerated"]?.Value<bool>() == true)
                                 {
-                                    var addr = kvp.Key;
-                                    var data = kvp.Value?.Value<string>();
-                                    if (!string.IsNullOrEmpty(data))
+                                    var share = json["SignatureShare"]?.Value<string>();
+                                    if (!string.IsNullOrEmpty(share))
                                     {
-                                        shares[addr] = data;
+                                        lock (shares)
+                                        {
+                                            if (!shares.ContainsKey(validator.ValidatorAddress))
+                                            {
+                                                shares[validator.ValidatorAddress] = share;
+                                                LogUtility.Log($"[FROST MPC] Extracted signature share from POST response for {validator.ValidatorAddress}",
+                                                    "FrostMPCService.CollectSigningRound2Shares");
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            catch (Exception parseEx)
+                            {
+                                LogUtility.Log($"[FROST MPC] Failed to parse POST response from {validator.ValidatorAddress}: {parseEx.Message}",
+                                    "FrostMPCService.CollectSigningRound2Shares");
+                            }
+                            
+                            return true;
+                        }
+                        else
+                        {
+                            var errorBody = await response.Content.ReadAsStringAsync();
+                            LogUtility.Log($"[FROST MPC] Sign Round 2 POST REJECTED by {validator.ValidatorAddress} ({validator.IPAddress}): HTTP {(int)response.StatusCode} — {errorBody}",
+                                "FrostMPCService.CollectSigningRound2Shares");
+                            return false;
                         }
                     }
                     catch (Exception ex)
                     {
-                        LogUtility.Log($"[FROST MPC] Failed to collect share from {validator.ValidatorAddress}: {ex.Message}", "FrostMPCService.CollectSigningRound2Shares");
+                        LogUtility.Log($"[FROST MPC] Sign Round 2 POST EXCEPTION contacting {validator.ValidatorAddress} ({validator.IPAddress}): {ex.Message}",
+                            "FrostMPCService.CollectSigningRound2Shares");
+                        return false;
                     }
+                });
+                var postResults = await Task.WhenAll(postTasks);
+
+                LogUtility.Log($"[FROST MPC] Sign Round 2 broadcast: {postSuccessCount}/{validators.Count} accepted, {shares.Count} shares extracted from POST responses",
+                    "FrostMPCService.CollectSigningRound2Shares");
+
+                // If we already have all shares from POST responses, skip polling entirely
+                if (shares.Count >= validators.Count)
+                {
+                    LogUtility.Log($"[FROST MPC] All {shares.Count} signature shares collected from POST responses — skipping GET polling",
+                        "FrostMPCService.CollectSigningRound2Shares");
+                    return shares;
                 }
 
-                LogUtility.Log($"[FROST MPC] Collected {shares.Count}/{validators.Count} signature shares", "FrostMPCService.CollectSigningRound2Shares");
+                // Retry polling with backoff: poll up to 5 times with increasing delays
+                // instead of a single fixed 2-second wait. This accommodates network latency
+                // and FROST native crypto processing time on remote validators.
+                var requiredCount = validators.Count; // ideally collect all shares
+                var maxAttempts = 5;
+                var pollDelaysMs = new[] { 2000, 2000, 3000, 3000, 5000 }; // total up to 15 seconds
+
+                for (int attempt = 0; attempt < maxAttempts; attempt++)
+                {
+                    await Task.Delay(pollDelaysMs[attempt]);
+
+                    // FIND-015 Fix: Collect signature shares using actual server response format
+                    // Server GET /frost/sign/share/{sessionId} returns {Success, SessionId, Shares: {addr:data}, ...}
+                    foreach (var validator in validators)
+                    {
+                        try
+                        {
+                            var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/share/{sessionId}";
+                            var response = await _httpClient.GetAsync(url);
+                            
+                            if (response.IsSuccessStatusCode)
+                            {
+                                var responseBody = await response.Content.ReadAsStringAsync();
+                                var json = JObject.Parse(responseBody);
+                                
+                                if (json["Success"]?.Value<bool>() == true 
+                                    && json["SessionId"]?.Value<string>() == sessionId
+                                    && json["Shares"] is JObject sharesObj)
+                                {
+                                    foreach (var kvp in sharesObj)
+                                    {
+                                        var addr = kvp.Key;
+                                        var data = kvp.Value?.Value<string>();
+                                        if (!string.IsNullOrEmpty(data) && !shares.ContainsKey(addr))
+                                        {
+                                            shares[addr] = data;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            LogUtility.Log($"[FROST MPC] Failed to collect share from {validator.ValidatorAddress} (attempt {attempt + 1}): {ex.Message}", "FrostMPCService.CollectSigningRound2Shares");
+                        }
+                    }
+
+                    LogUtility.Log($"[FROST MPC] Collected {shares.Count}/{validators.Count} signature shares (attempt {attempt + 1}/{maxAttempts})", "FrostMPCService.CollectSigningRound2Shares");
+
+                    // If we have all shares, no need to keep polling
+                    if (shares.Count >= requiredCount)
+                        break;
+                }
+
+                LogUtility.Log($"[FROST MPC] Final signature share collection: {shares.Count}/{validators.Count}", "FrostMPCService.CollectSigningRound2Shares");
                 return shares.Count > 0 ? shares : null;
             }
             catch (Exception ex)
