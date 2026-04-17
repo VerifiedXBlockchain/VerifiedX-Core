@@ -31,20 +31,33 @@ namespace ReserveBlockCore.Controllers
         [Route("SignMintAttestation")]
         public async Task<ActionResult<string>> SignMintAttestation([FromBody] Bitcoin.Models.MintAttestationRequest? request)
         {
+            var reqIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
             try
             {
                 if (request == null)
+                {
+                    LogUtility.Log($"[BridgeAttest] SignMintAttestation: empty request body from IP={reqIp}", "ValidatorController.SignMintAttestation");
                     return BadRequest(JsonConvert.SerializeObject(new { success = false, error = "Empty request body" }));
+                }
+
+                LogUtility.Log($"[BridgeAttest] SignMintAttestation request from IP={reqIp}: lockId={request.LockId}, evmDest={request.EvmDestination}, amountSats={request.AmountSats}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}, scUID={request.SmartContractUID}", "ValidatorController.SignMintAttestation");
 
                 var (success, signatureHex, error) = await Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(request);
 
                 if (success)
+                {
+                    LogUtility.Log($"[BridgeAttest] SignMintAttestation SUCCESS for lockId={request.LockId}. Signature={signatureHex?.Substring(0, Math.Min(20, signatureHex?.Length ?? 0))}...", "ValidatorController.SignMintAttestation");
                     return Ok(JsonConvert.SerializeObject(new { success = true, signature = signatureHex }));
+                }
                 else
+                {
+                    LogUtility.Log($"[BridgeAttest] SignMintAttestation REJECTED for lockId={request.LockId}: {error}", "ValidatorController.SignMintAttestation");
                     return Ok(JsonConvert.SerializeObject(new { success = false, error = error ?? "Attestation failed" }));
+                }
             }
             catch (Exception ex)
             {
+                LogUtility.Log($"[BridgeAttest] SignMintAttestation EXCEPTION for lockId={request?.LockId}: {ex.Message}", "ValidatorController.SignMintAttestation");
                 return StatusCode(500, JsonConvert.SerializeObject(new { success = false, error = ex.Message }));
             }
         }

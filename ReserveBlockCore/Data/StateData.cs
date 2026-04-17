@@ -2784,10 +2784,12 @@ namespace ReserveBlockCore.Data
                 if (!VBTCBridgeLockState.TryInsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination))
                 {
                     ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: failed to persist VBTCBridgeLockState for {lockId}", "StateData.ApplyVBTCBridgeLock()");
+                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: FAILED to insert VBTCBridgeLockState. lockId={lockId}, txHash={tx.Hash}", "StateData.ApplyVBTCBridgeLock");
                 }
                 else
                 {
                     BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash, tx.Height);
+                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: Bridge lock CONFIRMED on-chain. lockId={lockId}, owner={tx.FromAddress}, amount={amount.Value} BTC, amountSats={amountSats.Value}, evmDest={evmDestination}, txHash={tx.Hash}, blockHeight={tx.Height}, scUID={scUID}. Balance deducted from owner. Validators can now sign attestation requests for this lockId.", "StateData.ApplyVBTCBridgeLock");
                 }
 
                 SCLogUtility.Log($"ApplyVBTCBridgeLock: lockId={lockId}, amount={amount.Value} BTC, owner={tx.FromAddress}, scUID={scUID}",
