@@ -527,36 +527,60 @@ code,.mono{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:12px}
         private static string BuildBridgeToBaseModal() => @"
 <!-- Bridge to Base Modal -->
 <div class='overlay' id='bridge-overlay'>
-  <div class='modal'>
+  <div class='modal' style='max-width:520px'>
     <div class='modal-hdr'>
       <div class='modal-ttl'>&#127881; Bridge vBTC to Base</div>
       <button class='modal-close' onclick='closeBridge()'>&#215;</button>
     </div>
     <input type='hidden' id='br-scuid'>
     <input type='hidden' id='br-owner'>
-    <div class='form-grp'>
-      <label>vBTC Contract</label>
-      <input class='form-inp' id='br-contract-disp' type='text' readonly>
-    </div>
-    <div class='form-grp'>
-      <label>Available Balance</label>
-      <input class='form-inp' id='br-bal-disp' type='text' readonly>
-    </div>
-    <div class='form-grp'>
-      <label>Amount (vBTC)</label>
-      <input class='form-inp' id='br-amount' type='text' placeholder='0.00000000'>
-    </div>
-    <div class='form-grp'>
-      <label>Base EVM Destination (0x...)</label>
-      <input class='form-inp' id='br-evm' type='text' placeholder='0x...'>
-    </div>
-    <div style='padding:12px;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);border-radius:8px;font-size:13px;color:var(--accent);margin-bottom:12px'>
-      This locks your vBTC on VerifiedX and mints vBTC.b (ERC-20) on Base at the destination address. The relay node will process the mint automatically.
-    </div>
-    <div class='msg' id='br-msg'></div>
-    <div class='modal-foot'>
-      <button class='btn-sec' onclick='closeBridge()'>Cancel</button>
-      <button class='btn-prim' id='br-btn' onclick='doBridgeToBase()'>Bridge to Base</button>
+    <input type='hidden' id='br-derived-addr-val'>
+    <div id='br-loading' style='text-align:center;padding:24px;display:none'><span class='spin'></span> Loading bridge info...</div>
+    <div id='br-body'>
+      <div class='form-grp'>
+        <label>vBTC Contract</label>
+        <input class='form-inp' id='br-contract-disp' type='text' readonly>
+      </div>
+      <div class='form-grp'>
+        <label>Available vBTC to Bridge</label>
+        <input class='form-inp' id='br-bal-disp' type='text' readonly>
+      </div>
+      <!-- Derived Base address section -->
+      <div id='br-derived-section' style='background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:16px'>
+        <div style='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:8px'>Your Derived Base Address</div>
+        <div id='br-derived-addr' style='font-family:monospace;font-size:12px;color:var(--accent);word-break:break-all;margin-bottom:8px'>Loading...</div>
+        <div style='display:flex;gap:12px;flex-wrap:wrap'>
+          <div id='br-eth-bal-wrap' style='font-size:12px'><span class='muted'>ETH:</span> <span id='br-eth-bal' class='grn'>--</span></div>
+          <div id='br-vbtcb-bal-wrap' style='font-size:12px'><span class='muted'>vBTC.b:</span> <span id='br-vbtcb-bal' class='org'>--</span></div>
+          <div id='br-network-wrap' style='font-size:11px;color:var(--muted)'>(<span id='br-network-name'>Base</span>)</div>
+        </div>
+      </div>
+      <div class='form-grp'>
+        <label>Amount (vBTC)</label>
+        <input class='form-inp' id='br-amount' type='text' placeholder='0.00000000'>
+      </div>
+      <!-- Destination toggle -->
+      <div class='form-grp'>
+        <label>Destination Base Address</label>
+        <div style='display:flex;gap:8px;margin-bottom:6px'>
+          <label style='font-size:12px;color:var(--text);cursor:pointer;display:flex;align-items:center;gap:4px;text-transform:none;letter-spacing:0;font-weight:500'>
+            <input type='radio' name='br-dest-mode' value='derived' checked onchange='brDestMode(this.value)'> Use my derived address
+          </label>
+          <label style='font-size:12px;color:var(--text);cursor:pointer;display:flex;align-items:center;gap:4px;text-transform:none;letter-spacing:0;font-weight:500'>
+            <input type='radio' name='br-dest-mode' value='custom' onchange='brDestMode(this.value)'> Send to a different address
+          </label>
+        </div>
+        <input class='form-inp' id='br-evm' type='text' placeholder='0x...' readonly style='color:var(--accent)'>
+      </div>
+      <div style='padding:12px;background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.15);border-radius:8px;font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5'>
+        <strong style='color:var(--accent)'>How it works:</strong> This locks your vBTC on VerifiedX. Validators automatically attest the lock and a caster submits <code>mintWithProof</code> on Base &mdash; <strong>you do not pay Base gas</strong>. The vBTC.b ERC-20 tokens appear at the destination address.<br><br>
+        <strong style='color:var(--orange)'>Note:</strong> To later transfer or burn vBTC.b on Base, the destination address will need ETH for gas.
+      </div>
+      <div class='msg' id='br-msg'></div>
+      <div class='modal-foot'>
+        <button class='btn-sec' onclick='closeBridge()'>Cancel</button>
+        <button class='btn-prim' id='br-btn' onclick='doBridgeToBase()'>Bridge to Base</button>
+      </div>
     </div>
   </div>
 </div>";
@@ -1006,22 +1030,66 @@ function renderVBTC(contracts){
 window.openBridge=function(scUID,owner,bal){
   el('br-scuid').value=scUID;el('br-owner').value=owner;
   el('br-contract-disp').value=scUID;el('br-bal-disp').value=fmtBal(bal)+' vBTC';
-  el('br-amount').value='';el('br-evm').value='';hideMsg('br-msg');
+  el('br-amount').value='';el('br-evm').value='';el('br-evm').readOnly=true;
+  el('br-evm').style.color='var(--accent)';
+  hideMsg('br-msg');
+  el('br-derived-addr').textContent='Loading...';
+  el('br-derived-addr-val').value='';
+  el('br-eth-bal').textContent='--';el('br-vbtcb-bal').textContent='--';
+  el('br-network-name').textContent='Base';
+  var radios=document.querySelectorAll('input[name=""br-dest-mode""]');
+  if(radios.length>0)radios[0].checked=true;
+  el('br-loading').style.display='block';el('br-body').style.opacity='0.4';
   el('bridge-overlay').classList.add('on');
+  fetch('/wallet/api/vbtc/bridge/preflight/'+encodeURIComponent(owner)+'/'+encodeURIComponent(scUID))
+    .then(function(r){return r.json();}).then(function(d){
+      el('br-loading').style.display='none';el('br-body').style.opacity='1';
+      if(!d.success){showMsg('br-msg',d.message||'Failed to load bridge info.','err');return;}
+      el('br-bal-disp').value=fmtBal(d.availableVbtc)+' vBTC';
+      if(d.hasDerivedAddress){
+        el('br-derived-addr').textContent=d.derivedBaseAddress;
+        el('br-derived-addr-val').value=d.derivedBaseAddress;
+        el('br-evm').value=d.derivedBaseAddress;
+      }else{
+        el('br-derived-addr').textContent='Could not derive (account not found)';
+        el('br-derived-addr').style.color='var(--red)';
+      }
+      if(d.ethBalance!=null){el('br-eth-bal').textContent=fmtBal(d.ethBalance)+' ETH';}
+      else{el('br-eth-bal').textContent=d.ethError||'N/A';}
+      if(d.vbtcBBalance!=null){el('br-vbtcb-bal').textContent=fmtBal(d.vbtcBBalance)+' vBTC.b';}
+      else{el('br-vbtcb-bal').textContent=d.vbtcBError||'N/A';}
+      el('br-network-name').textContent=d.networkName||'Base';
+      if(!d.bridgeConfigured){showMsg('br-msg','Bridge not configured on this node. Set BaseBridgeV2Contract and BaseBridgeRpcUrl in config.txt.','err');}
+    }).catch(function(e){
+      el('br-loading').style.display='none';el('br-body').style.opacity='1';
+      showMsg('br-msg','Failed to load bridge info: '+(e.message||''),'err');
+    });
+};
+window.brDestMode=function(mode){
+  var inp=el('br-evm');
+  if(mode==='derived'){
+    var derived=el('br-derived-addr-val').value;
+    inp.value=derived||'';inp.readOnly=true;inp.style.color='var(--accent)';
+  }else{
+    inp.readOnly=false;inp.style.color='var(--text)';inp.placeholder='0x...';
+    if(inp.value===el('br-derived-addr-val').value)inp.value='';
+    inp.focus();
+  }
 };
 window.closeBridge=function(){el('bridge-overlay').classList.remove('on');};
 window.doBridgeToBase=function(){
   var scUID=el('br-scuid').value,owner=el('br-owner').value,amt=el('br-amount').value.trim(),evm=el('br-evm').value.trim();
   if(!amt||!evm){showMsg('br-msg','Fill amount and EVM destination.','err');return;}
-  if(!evm.startsWith('0x')||evm.length!==42){showMsg('br-msg','Invalid EVM address.','err');return;}
+  if(parseFloat(amt)<=0){showMsg('br-msg','Amount must be greater than 0.','err');return;}
+  if(!evm.startsWith('0x')||evm.length!==42){showMsg('br-msg','Invalid EVM address. Must be 0x + 40 hex characters.','err');return;}
   var btn=el('br-btn');btn.disabled=true;btn.textContent='Bridging...';
-  fetch('/vbtcapi/VBTC/BridgeToBase',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({SmartContractUID:scUID,OwnerAddress:owner,Amount:parseFloat(amt),EvmDestination:evm})
+  fetch('/wallet/api/vbtc/bridge/toBase',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ScUID:scUID,OwnerAddress:owner,Amount:amt,EvmDestination:evm})
   }).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Bridge to Base';
-    if(d.Success||d.success){showMsg('br-msg','Bridge lock created! Lock ID: '+(d.LockId||d.lockId||'')+'. '+(d.Status||d.status||'After confirmation, validators attest and casters mint vBTC.b on Base.'),'ok');
+    if(d.success){showMsg('br-msg','Bridge lock created! Lock ID: '+(d.lockId||'')+'. Validators will attest and casters will mint vBTC.b on Base automatically.','ok');
       setTimeout(function(){closeBridge();tabLoaded.vbtc=false;loadVBTC();},3000);
-    }else{showMsg('br-msg',d.Message||d.message||'Bridge failed.','err');}
+    }else{showMsg('br-msg',d.message||'Bridge failed.','err');}
   }).catch(function(e){btn.disabled=false;btn.textContent='Bridge to Base';showMsg('br-msg',e.message||'Failed.','err');});
 };
 function loadBridgeHistory(){

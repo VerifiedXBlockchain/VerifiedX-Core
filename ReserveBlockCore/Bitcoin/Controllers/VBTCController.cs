@@ -3310,6 +3310,24 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// Returns the contract address, chainId, and ABI needed by the frontend to call mintWithProof via MetaMask.
+        /// </summary>
+        [HttpGet("GetBridgeConfig")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string GetBridgeConfig()
+        {
+            return JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                IsEnabled = VbtcBaseBridge.IsEnabled,
+                ContractAddress = VbtcBaseBridge.VBTCbV2ContractAddress,
+                ChainId = VbtcBaseBridge.BaseChainId,
+                Network = VbtcBaseBridge.BaseNetworkDisplayName,
+                Abi = Services.BaseBridgeService.CONTRACT_ABI
+            });
+        }
+
+        /// <summary>
         /// Configure the Base bridge at runtime (alternative to environment variables).
         /// WARNING: Only use in development/demo. In production, use environment variables.
         /// </summary>

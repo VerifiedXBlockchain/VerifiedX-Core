@@ -172,6 +172,20 @@ namespace ReserveBlockCore.Controllers
         //  vBTC Bridge to Base Endpoints
         // ═══════════════════════════════════════════════════════════════════════════
 
+        [HttpGet("api/vbtc/bridge/preflight/{ownerAddress}/{scUID}")]
+        public async Task<IActionResult> VBTCBridgePreflight(string ownerAddress, string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(ownerAddress) || string.IsNullOrWhiteSpace(scUID))
+                    return BadRequest(new { success = false, message = "ownerAddress and scUID are required." });
+
+                var result = await WalletVbtcService.GetBridgePreflight(ownerAddress, scUID);
+                return Ok(result);
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
         [HttpPost("api/vbtc/bridge/toBase")]
         public async Task<IActionResult> VBTCBridgeToBase([FromBody] VBTCBridgeToBaseRequest req)
         {

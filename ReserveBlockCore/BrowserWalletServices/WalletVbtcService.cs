@@ -408,6 +408,112 @@ namespace ReserveBlockCore.BrowserWalletServices
         }
 
         /// <summary>
+        /// Pre-flight info for the Bridge to Base modal.
+        /// Returns derived Base address, ETH balance, vBTC.b balance, available vBTC, and bridge config status.
+        /// </summary>
+        public static async Task<object> GetBridgePreflight(string ownerAddress, string scUID)
+        {
+            try
+            {
+                // Derive Base address from the VFX key
+                var derivedBaseAddress = Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromAccount(ownerAddress);
+                var hasDerivedAddress = !string.IsNullOrEmpty(derivedBaseAddress);
+
+                // Bridge config status
+                var bridgeConfigured = Bitcoin.Services.BaseBridgeService.IsV2MintBridge;
+                var canReadEth = Bitcoin.Services.BaseBridgeService.CanReadEth;
+                var canReadVbtc = Bitcoin.Services.BaseBridgeService.CanReadVbtcToken;
+                var networkName = Bitcoin.Services.BaseBridgeService.BaseNetworkDisplayName;
+                var chainId = Bitcoin.Services.BaseBridgeService.BaseChainId;
+                var contractAddress = Bitcoin.Services.BaseBridgeService.VBTCbV2ContractAddress;
+
+                // Fetch vBTC available balance on VFX side
+                decimal availableVbtc = 0M;
+                string vbtcError = null;
+                try
+                {
+                    var balResult = await Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(scUID, ownerAddress);
+                    if (balResult.success)
+                    {
+                        // Subtract local bridge reserves not yet confirmed on-chain
+                        var reserved = Bitcoin.Models.BridgeLockRecord.GetLockedAmount(ownerAddress, scUID);
+                        availableVbtc = balResult.availableBalance - reserved;
+                        if (availableVbtc < 0) availableVbtc = 0;
+                    }
+                    else
+                    {
+                        vbtcError = balResult.error;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    vbtcError = ex.Message;
+                }
+
+                // Fetch ETH balance on Base for the derived address
+                decimal? ethBalance = null;
+                string ethError = null;
+                if (hasDerivedAddress && canReadEth)
+                {
+                    try
+                    {
+                        var ethResult = await Bitcoin.Services.BaseBridgeService.GetEthBalanceAsync(derivedBaseAddress);
+                        if (ethResult.Success)
+                            ethBalance = ethResult.BalanceEth;
+                        else
+                            ethError = ethResult.Message;
+                    }
+                    catch (Exception ex) { ethError = ex.Message; }
+                }
+
+                // Fetch vBTC.b balance on Base for the derived address
+                decimal? vbtcBBalance = null;
+                string vbtcBError = null;
+                if (hasDerivedAddress && canReadVbtc)
+                {
+                    try
+                    {
+                        var tokResult = await Bitcoin.Services.BaseBridgeService.GetBaseBalance(derivedBaseAddress);
+                        if (tokResult.Success)
+                            vbtcBBalance = tokResult.Balance;
+                        else
+                            vbtcBError = tokResult.Message;
+                    }
+                    catch (Exception ex) { vbtcBError = ex.Message; }
+                }
+
+                return new
+                {
+                    success = true,
+                    // VFX side
+                    ownerAddress = ownerAddress,
+                    scUID = scUID,
+                    availableVbtc = availableVbtc,
+                    vbtcError = vbtcError,
+                    // Derived Base address
+                    derivedBaseAddress = derivedBaseAddress ?? "",
+                    hasDerivedAddress = hasDerivedAddress,
+                    // Base balances
+                    ethBalance = ethBalance,
+                    ethError = ethError,
+                    vbtcBBalance = vbtcBBalance,
+                    vbtcBError = vbtcBError,
+                    // Config
+                    bridgeConfigured = bridgeConfigured,
+                    canReadEth = canReadEth,
+                    canReadVbtc = canReadVbtc,
+                    networkName = networkName,
+                    chainId = chainId,
+                    contractAddress = contractAddress
+                };
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Preflight error: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
         /// Get the status of a bridge lock by lockId.
         /// Returns the BridgeLockRecord including attestation progress and status.
         /// </summary>
