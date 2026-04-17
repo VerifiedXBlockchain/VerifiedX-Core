@@ -3103,6 +3103,14 @@ namespace ReserveBlockCore.Services
             {
                 if (string.IsNullOrWhiteSpace(txRequest.Data))
                     return (txResult, "Transaction data cannot be null for bridge exit to BTC.");
+
+                // Bridge exit TXs are broadcast by casters on behalf of Base users and MUST be fee-free.
+                // Any non-zero fee indicates a misconfigured builder (see the prior CompleteWithdrawal bug).
+                if (txRequest.Fee != 0M)
+                    return (txResult, "Bridge exit to BTC must be fee-free (Fee must equal 0).");
+                if (txRequest.Amount != 0M)
+                    return (txResult, "Bridge exit to BTC must carry zero VFX amount.");
+
                 try
                 {
                     var jobj = JObject.Parse(txRequest.Data);
@@ -3153,6 +3161,13 @@ namespace ReserveBlockCore.Services
             {
                 if (string.IsNullOrWhiteSpace(txRequest.Data))
                     return (txResult, "Transaction data cannot be null for bridge exit to BTC complete.");
+
+                // Bridge exit completion TX is broadcast by the caster — must be fee-free and carry no VFX amount.
+                if (txRequest.Fee != 0M)
+                    return (txResult, "Bridge exit to BTC complete must be fee-free (Fee must equal 0).");
+                if (txRequest.Amount != 0M)
+                    return (txResult, "Bridge exit to BTC complete must carry zero VFX amount.");
+
                 try
                 {
                     var jobj = JObject.Parse(txRequest.Data);

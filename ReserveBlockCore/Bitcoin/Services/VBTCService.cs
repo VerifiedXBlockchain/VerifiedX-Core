@@ -886,8 +886,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Data = txData
                 };
 
-                completionTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(completionTx);
-                
+                // BURN-EXIT FIX: Bridge/withdrawal-complete transactions MUST remain fee-free.
+                // The previous call to FeeCalcService.CalculateTXFee(...) was overwriting Fee = 0.0M
+                // with a non-zero value which broke consensus on fee-free TX types and caused
+                // validator balance checks to reject casters that don't have a funded wallet.
+                completionTx.Fee = 0.0M;
+
                 // Build and sign transaction
                 completionTx.Build();
                 var txHash = completionTx.Hash;
@@ -1249,6 +1253,105 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE"/> after the caster has
+        /// FROST-signed and broadcast the Bitcoin withdrawal for a <c>burnForBTCExit</c>.
+        /// This is the consensus-critical second half of the BTC-exit flow — it is what causes
+        /// <see cref="StateData.ApplyVBTCBridgeExitToBTCComplete"/> to mark the pending
+        /// <see cref="VBTCBridgeBtcExitState"/> row as complete.
+        /// Runs entirely on the caster — signer is the caster's validator address, Fee is 0, self-TX.
+        /// </summary>
+        /// <param name="signerAddress">Caster / validator VFX address (must have a local account).</param>
+        /// <param name="baseBurnTxHash">The Base <c>burnForBTCExit</c> transaction hash (32-byte hex).</param>
+        /// <param name="btcTxHash">The broadcasted Bitcoin withdrawal transaction hash.</param>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeExitToBTCCompleteTx(
+            string signerAddress,
+            string baseBurnTxHash,
+            string btcTxHash)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(signerAddress))
+                    return (false, "Signer address is required for bridge exit to BTC complete.");
+                if (string.IsNullOrWhiteSpace(baseBurnTxHash))
+                    return (false, "BaseBurnTxHash is required for bridge exit to BTC complete.");
+                if (string.IsNullOrWhiteSpace(btcTxHash))
+                    return (false, "BtcTxHash is required for bridge exit to BTC complete.");
+
+                var account = AccountData.GetSingleAccount(signerAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found for signer: {signerAddress}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                    return (false, $"Account not found: {signerAddress}");
+                }
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {signerAddress}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                    return (false, $"Private key was null for account {signerAddress}");
+                }
+
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeExitToBTCComplete()",
+                    BaseBurnTxHash = baseBurnTxHash.Trim(),
+                    BtcTxHash = btcTxHash.Trim()
+                });
+
+                // Self-TX signed by the caster. Fee = 0 (enforced by validator). Amount = 0.
+                var completionTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = signerAddress,
+                    ToAddress = signerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(signerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE,
+                    Data = txData
+                };
+
+                // Do NOT call FeeCalcService.CalculateTXFee here — bridge TXs must remain fee-free.
+                completionTx.Fee = 0.00M;
+                completionTx.Build();
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(completionTx.Hash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX signature failed for bridge exit-to-BTC complete. BurnHash: {baseBurnTxHash}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                    return (false, "TX Signature Failed");
+                }
+
+                completionTx.Signature = signature;
+
+                var result = await TransactionValidatorService.VerifyTX(completionTx);
+                if (!result.Item1)
+                {
+                    SCLogUtility.Log($"Bridge exit-to-BTC complete TX verify failed: {result.Item2}. BurnHash: {baseBurnTxHash}, BtcTxHash: {btcTxHash}",
+                        "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+
+                await TransactionData.AddTxToWallet(completionTx, true);
+                await AccountData.UpdateLocalBalance(signerAddress, completionTx.Fee + completionTx.Amount);
+                await TransactionData.AddToPool(completionTx);
+                await P2PClient.SendTXMempool(completionTx);
+
+                SCLogUtility.Log(
+                    $"vBTC V2 Bridge Exit-to-BTC Complete TX broadcast. TxHash: {completionTx.Hash}, BurnHash: {baseBurnTxHash}, BtcTxHash: {btcTxHash}",
+                    "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+
+                return (true, completionTx.Hash);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Bridge exit-to-BTC complete error: {ex.Message}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
                 return (false, $"Error: {ex.Message}");
             }
         }
