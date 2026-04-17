@@ -26,9 +26,14 @@ namespace ReserveBlockCore.Bitcoin.Services
             var account = AccountData.GetSingleAccount(validatorAddress);
             if (account == null)
                 return string.Empty;
+
             var privHex = account.GetKey;
             if (string.IsNullOrEmpty(privHex))
                 return string.Empty;
+
+            if (privHex.Length % 2 != 0)
+                privHex = "0" + privHex;
+
             var bytes = HexByteUtility.HexToByte(privHex);
             return DeriveBaseAddress(bytes);
         }
