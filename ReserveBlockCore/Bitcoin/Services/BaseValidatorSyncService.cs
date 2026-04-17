@@ -204,7 +204,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 {
                     try
                     {
-                        var url = $"http://{v.IPAddress}:{Globals.APIPort}/valapi/Validator/SignValidatorUpdate";
+                        var url = $"http://{v.IPAddress}:{Globals.ValAPIPort}/valapi/Validator/SignValidatorUpdate";
                         var payload = new
                         {
                             Action = action,
