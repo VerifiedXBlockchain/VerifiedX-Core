@@ -492,21 +492,36 @@ namespace ReserveBlockCore.Bitcoin.Services
                 return;
             }
 
-            // Find a vBTC contract UID
-            var scUID = "";
-            var vbtcContracts = VBTCContractV2.GetAllContracts();
-            if (vbtcContracts != null && vbtcContracts.Any())
-            {
-                scUID = vbtcContracts.First().SmartContractUID;
-                LogUtility.Log($"[BurnExitConsensus] BTC exit using contract {scUID} for burn {record.BaseBurnTxHash}", "BurnExitConsensusService.ExecuteBtcExit()");
-            }
+            // ----------------------------------------------------------------
+            // Resolve the vBTC contract UID from consensus-shared pool state.
+            //
+            // Any available bridge lock row names its SmartContractUID, so one targeted
+            // query gives us a valid scUID without touching the local VBTCContractV2 LiteDB
+            // (which only the minter/deployer node has). Downstream CreateBridgeExitToBTCTx
+            // and CompleteWithdrawal already pull the decompiled contract data from the
+            // state trei by UID when needed, so resolving the UID here is sufficient.
+            //
+            // If no available locks exist, the bridge has no liquidity and the BTC exit
+            // cannot be serviced anyway, so failing fast is correct.
+            // ----------------------------------------------------------------
+            var fifoLocks = VBTCBridgeLockState.GetAvailableLocksFIFO();
+            var scUID = fifoLocks?.FirstOrDefault()?.SmartContractUID ?? string.Empty;
 
             if (string.IsNullOrEmpty(scUID))
             {
                 record.Status = BurnExitStatus.Failed;
-                ErrorLogUtility.LogError($"[BurnExitConsensus] No vBTC contract for BTC exit {record.BaseBurnTxHash}", "BurnExitConsensusService");
+                ErrorLogUtility.LogError(
+                    $"[BurnExitConsensus] No vBTC contract resolvable for BTC exit {record.BaseBurnTxHash}. " +
+                    $"fifoLocks={fifoLocks?.Count ?? 0}, validator={Globals.ValidatorAddress}",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
                 return;
             }
+
+            LogUtility.Log(
+                $"[BurnExitConsensus] BTC exit using contract {scUID} for burn {record.BaseBurnTxHash}",
+                "BurnExitConsensusService.ExecuteBtcExit()");
+
+
 
             // ----------------------------------------------------------------
             // Step 1: Broadcast VFX EXIT_TO_BTC TX (records the pending exit state)
