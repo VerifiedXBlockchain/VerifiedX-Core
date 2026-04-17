@@ -3392,6 +3392,30 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             }
         }
 
+        /// <summary>
+        /// Reset the exit burn scan cursor to rescan from a specific Base block number.
+        /// Use this to re-detect missed burn events (e.g. VfxExitBurned, BTCExitBurned).
+        /// The background loop will automatically rescan from the specified block on its next tick.
+        /// </summary>
+        [HttpPost("RescanExitBurns/{fromBlock}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string RescanExitBurns(long fromBlock)
+        {
+            try
+            {
+                var result = VbtcBaseBridgeExit.RescanFromBlock(fromBlock);
+                return JsonConvert.SerializeObject(new
+                {
+                    result.Success,
+                    result.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
         #endregion
 
         #endregion

@@ -45,6 +45,9 @@ namespace ReserveBlockCore.Bitcoin.Services
 
             [Parameter("string", "vfxDestinationAddress", 3, false)]
             public string VfxDestinationAddress { get; set; } = "";
+
+            [Parameter("uint256", "chainId", 4, false)]
+            public BigInteger ChainId { get; set; }
         }
 
         [Event("BTCExitBurned")]
@@ -58,6 +61,9 @@ namespace ReserveBlockCore.Bitcoin.Services
 
             [Parameter("string", "btcDestination", 3, false)]
             public string BtcDestination { get; set; } = "";
+
+            [Parameter("uint256", "chainId", 4, false)]
+            public BigInteger ChainId { get; set; }
         }
 
         /// <summary>Needs VBTCb proxy address and Base RPC.</summary>
@@ -89,6 +95,22 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 await Task.Delay(12_000);
             }
+        }
+
+        /// <summary>Reset the scan cursor to rescan from a specific block. Next poll will start from fromBlock.</summary>
+        public static (bool Success, string Message) RescanFromBlock(long fromBlock)
+        {
+            if (fromBlock < 0)
+                return (false, "Block number must be >= 0");
+
+            var state = BridgeExitSyncState.GetOrCreate();
+            var previousBlock = state.LastScannedBlock;
+            state.LastScannedBlock = Math.Max(0, fromBlock - 1);
+            BridgeExitSyncState.Save(state);
+
+            var msg = $"Reset exit scan cursor from {previousBlock} to {state.LastScannedBlock} (will rescan from block {fromBlock})";
+            LogUtility.Log($"[BaseBridgeExit] {msg}", "BaseBridgeExitWatchService.RescanFromBlock");
+            return (true, msg);
         }
 
         /// <summary>Single poll; for API manual trigger.</summary>

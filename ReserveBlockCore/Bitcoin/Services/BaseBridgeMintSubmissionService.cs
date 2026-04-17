@@ -170,7 +170,8 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Prepare signature bytes array
                 var sigValues = record.ValidatorSignatures.Values.ToList();
-                var sigBytes = sigValues.Select(s => ReserveBlockCore.Extensions.GenericExtensions.HexToByteArray(s)).ToList();
+                var sigBytes = sigValues.Select(s => ReserveBlockCore.Extensions.GenericExtensions.HexToByteArray(
+                    s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s)).ToList();
 
                 LogUtility.Log($"[MintSubmission] Submitting mintWithProof for lock {record.LockId}: to={record.EvmDestination}, amount={record.AmountSats}sats, nonce={record.MintNonce}, sigs={sigValues.Count}",
                     "BaseBridgeMintSubmissionService.SubmitMintWithProof");
