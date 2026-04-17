@@ -559,7 +559,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 {
                     try
                     {
-                        var url = $"http://{c.PeerIP}:{Globals.APIPort}/valapi/Validator/{endpoint}";
+                        var url = $"http://{c.PeerIP}:{Globals.ValAPIPort}/valapi/Validator/{endpoint}";
                         await httpClient.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
                     }
                     catch (Exception broadcastEx)
