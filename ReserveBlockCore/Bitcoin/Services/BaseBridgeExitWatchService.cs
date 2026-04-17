@@ -245,7 +245,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                             _ = BurnExitConsensusService.HandleDetectedBurn(
                                 txHash,
                                 BurnExitConsensusService.BurnExitType.VfxPoolUnlock,
-                                vfxDest, "", amountDecimal, burner);
+                                "", "", amountDecimal, burner,
+                                vfxDestinationAddress: vfxDest);
                         }
 
                         processed++;

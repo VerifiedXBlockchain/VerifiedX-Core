@@ -37,6 +37,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             public BurnExitStatus Status { get; set; } = BurnExitStatus.Pending;
             public string VfxLockId { get; set; } = "";
             public string BtcDestination { get; set; } = "";
+            /// <summary>VFX destination address for V3 pool-based unlocks (VfxPoolUnlock exit type).</summary>
+            public string VfxDestinationAddress { get; set; } = "";
             public decimal Amount { get; set; }
             public string BurnerAddress { get; set; } = "";
             public long DetectedAtBlock { get; set; }
@@ -53,6 +55,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             public BurnExitType ExitType { get; set; }
             public string VfxLockId { get; set; } = "";
             public string BtcDestination { get; set; } = "";
+            /// <summary>VFX destination address for V3 pool-based unlocks.</summary>
+            public string VfxDestinationAddress { get; set; } = "";
             public decimal Amount { get; set; }
             public string BurnerAddress { get; set; } = "";
             public string SenderCasterAddress { get; set; } = "";
@@ -177,7 +181,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// Called by BaseBridgeExitWatchService when a burn event is detected on Base.
         /// </summary>
         public static async Task HandleDetectedBurn(string baseBurnTxHash, BurnExitType exitType,
-            string vfxLockId, string btcDestination, decimal amount, string burnerAddress)
+            string vfxLockId, string btcDestination, decimal amount, string burnerAddress,
+            string vfxDestinationAddress = "")
         {
             if (_processedBurns.ContainsKey(baseBurnTxHash))
                 return;
@@ -188,6 +193,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 ExitType = exitType,
                 VfxLockId = vfxLockId,
                 BtcDestination = btcDestination,
+                VfxDestinationAddress = vfxDestinationAddress,
                 Amount = amount,
                 BurnerAddress = burnerAddress,
                 DetectedAtBlock = Globals.LastBlock?.Height ?? 0,
@@ -205,6 +211,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 ExitType = exitType,
                 VfxLockId = vfxLockId,
                 BtcDestination = btcDestination,
+                VfxDestinationAddress = vfxDestinationAddress,
                 Amount = amount,
                 BurnerAddress = burnerAddress,
                 SenderCasterAddress = Globals.ValidatorAddress
@@ -225,6 +232,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 ExitType = alert.ExitType,
                 VfxLockId = alert.VfxLockId,
                 BtcDestination = alert.BtcDestination,
+                VfxDestinationAddress = alert.VfxDestinationAddress,
                 Amount = alert.Amount,
                 BurnerAddress = alert.BurnerAddress,
                 DetectedAtBlock = Globals.LastBlock?.Height ?? 0,
@@ -398,11 +406,10 @@ namespace ReserveBlockCore.Bitcoin.Services
 
         /// <summary>
         /// V3 pool-based unlock: compute FIFO allocation plan and broadcast VBTC_V2_BRIDGE_POOL_UNLOCK.
-        /// record.VfxLockId holds the VFX destination address (repurposed field from HandleDetectedBurn).
         /// </summary>
         private static async Task ExecuteVfxPoolUnlock(ProcessedBurnRecord record)
         {
-            var vfxDestinationAddress = record.VfxLockId; // VfxExitBurned passes vfxDest in this field
+            var vfxDestinationAddress = record.VfxDestinationAddress;
             var allocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount);
 
             if (allocations == null || allocations.Count == 0)

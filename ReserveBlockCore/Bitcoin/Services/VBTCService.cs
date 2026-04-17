@@ -1253,21 +1253,6 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
         }
 
-        /// <summary>
-        /// Records BTC payout for a Base→BTC bridge exit (FROST integration hooks in later phases).
-        /// </summary>
-        public static async Task<(bool Success, string VfxTxHash, string BtcTxHash, string Error)> ProcessBTCExitBurn(
-            string scUID,
-            string lockId,
-            decimal amount,
-            string btcDestination,
-            string baseBurnTxHash,
-            int feeRate = 10)
-        {
-            await Task.CompletedTask;
-            return (false, string.Empty, string.Empty, "ProcessBTCExitBurn: FROST coordination not wired in this build — record exit via CreateBridgeExitToBTCTx first.");
-        }
-
         #endregion
     }
 }
