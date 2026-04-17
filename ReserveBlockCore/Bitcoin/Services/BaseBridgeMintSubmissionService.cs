@@ -287,6 +287,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 if (account == null) return null;
                 var privHex = account.GetKey;
                 if (string.IsNullOrEmpty(privHex)) return null;
+
+                if (privHex.Length % 2 != 0)
+                    privHex = "0" + privHex;
+
                 var bytes = HexByteUtility.HexToByte(privHex);
                 return new EthECKey(bytes, true);
             }

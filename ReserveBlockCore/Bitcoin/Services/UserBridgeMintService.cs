@@ -275,6 +275,9 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return;
                 }
 
+                if (privHex.Length % 2 != 0)
+                    privHex = "0" + privHex;
+
                 var privBytes = HexByteUtility.HexToByte(privHex);
                 var ethKey = new EthECKey(privBytes, true);
 

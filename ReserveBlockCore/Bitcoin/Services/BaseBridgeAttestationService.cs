@@ -84,6 +84,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
 
                 var privHex = account.GetKey;
+                if (privHex.Length % 2 != 0)
+                    privHex = "0" + privHex;
                 var privBytes = HexByteUtility.HexToByte(privHex);
                 var derivedBaseAddr = ValidatorEthKeyService.DeriveBaseAddressFromAccount(Globals.ValidatorAddress);
                 
