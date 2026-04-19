@@ -1280,7 +1280,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         public static async Task<(bool Success, string TxHashOrError)> CreateBridgeExitToBTCCompleteTx(
             string signerAddress,
             string baseBurnTxHash,
-            string btcTxHash)
+            string btcTxHash,
+            List<BtcExitWithdrawalRecord>? btcWithdrawals = null)
         {
             try
             {
@@ -1310,7 +1311,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 {
                     Function = "VBTCBridgeExitToBTCComplete()",
                     BaseBurnTxHash = baseBurnTxHash.Trim(),
-                    BtcTxHash = btcTxHash.Trim()
+                    BtcTxHash = btcTxHash.Trim(),
+                    BtcWithdrawals = btcWithdrawals
                 });
 
                 // Self-TX signed by the caster. Fee = 0 (enforced by validator). Amount = 0.
