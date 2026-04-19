@@ -28,7 +28,10 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// Compute the FIFO allocation plan for a given exit amount.
         /// Returns null if insufficient pool liquidity.
         /// </summary>
-        public static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc)
+        /// <param name="exitAmountBtc">Amount of BTC to allocate.</param>
+        /// <param name="excludeContractUIDs">Optional set of contract UIDs to skip during allocation
+        /// (e.g. blacklisted or known-broken FROST contracts).</param>
+        public static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs = null)
         {
             var available = VBTCBridgeLockState.GetAvailableLocksFIFO();
             if (available == null || available.Count == 0)
@@ -40,6 +43,10 @@ namespace ReserveBlockCore.Bitcoin.Services
             foreach (var lockRec in available)
             {
                 if (remaining <= 0) break;
+
+                // Skip locks belonging to excluded contracts
+                if (excludeContractUIDs != null && excludeContractUIDs.Contains(lockRec.SmartContractUID))
+                    continue;
 
                 decimal useAmount = Math.Min(remaining, lockRec.RemainingAmount);
                 if (useAmount <= 0) continue;

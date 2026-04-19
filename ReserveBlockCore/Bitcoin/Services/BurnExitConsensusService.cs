@@ -428,14 +428,15 @@ namespace ReserveBlockCore.Bitcoin.Services
 
         /// <summary>
         /// Executes the full BTC-exit flow on a caster node in response to a detected <c>burnForBTCExit</c> event.
-        /// The pipeline now uses FIFO allocation (like pool unlocks) to consume locks partially:
-        ///   (1) Compute FIFO allocation plan to determine which locks to consume and how much.
-        ///   (2) Group allocations by contract UID (each contract has its own FROST deposit address).
+        /// The pipeline uses FIFO allocation with progressive retry:
+        ///   (1) Build exclusion set from blacklisted + invalid contracts.
+        ///   (2) Compute FIFO allocation plan (excluding bad contracts).
         ///   (3) For each contract group: FROST sign-only + broadcast BTC tx.
-        ///   (4) Broadcast a single <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC"/> on VFX
-        ///       with the full allocation plan and per-contract BTC tx hashes.
-        ///   (5) Wait for VFX TX confirmation.
-        ///   (6) Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE"/> on VFX.
+        ///   (4) If a contract fails, add it to the exclusion set, recompute allocation for
+        ///       the remaining amount, and continue — no reliance on global blacklist state.
+        ///   (5) Broadcast a single <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC"/> on VFX.
+        ///   (6) Wait for VFX TX confirmation.
+        ///   (7) Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE"/> on VFX.
         /// </summary>
         private static async Task ExecuteBtcExit(ProcessedBurnRecord record)
         {
@@ -460,135 +461,157 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
 
             // ----------------------------------------------------------------
-            // Step 1: Compute FIFO allocation plan
+            // Step 1: Build initial exclusion set from blacklist + missing participant order
             // ----------------------------------------------------------------
-            var allocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount);
-            if (allocations == null || allocations.Count == 0)
+            var excludedContracts = new HashSet<string>();
+
+            // Pre-scan all available locks to find contracts that should be excluded upfront
+            var allAvailableLocks = VBTCBridgeLockState.GetAvailableLocksFIFO();
+            if (allAvailableLocks != null)
             {
-                record.Status = BurnExitStatus.Failed;
-                ErrorLogUtility.LogError(
-                    $"[BurnExitConsensus] No pool liquidity for BTC exit {record.BaseBurnTxHash}, amount={record.Amount}",
-                    "BurnExitConsensusService.ExecuteBtcExit()");
-                return;
+                var distinctContracts = allAvailableLocks.Select(l => l.SmartContractUID).Distinct();
+                foreach (var scUID in distinctContracts)
+                {
+                    if (FrostContractBlacklist.IsBlacklisted(scUID))
+                    {
+                        excludedContracts.Add(scUID);
+                        LogUtility.Log($"[BurnExitConsensus] Pre-excluding blacklisted contract {scUID} for BTC exit {record.BaseBurnTxHash}",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                    }
+                    else if (!FROST.Models.FrostValidatorKeyStore.HasValidParticipantOrder(scUID))
+                    {
+                        excludedContracts.Add(scUID);
+                        FrostContractBlacklist.Blacklist(scUID, "Missing ParticipantOrderJson — DKG'd before participant ordering fix");
+                        LogUtility.Log($"[BurnExitConsensus] Pre-excluding contract {scUID} — missing ParticipantOrderJson. Auto-blacklisted.",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                    }
+                }
             }
 
-            LogUtility.Log($"[BurnExitConsensus] BTC exit FIFO allocation plan: {allocations.Count} lock(s) for {record.Amount} BTC, burn={record.BaseBurnTxHash}",
-                "BurnExitConsensusService.ExecuteBtcExit()");
-
             // ----------------------------------------------------------------
-            // Step 2: Group allocations by contract UID, filter blacklisted/invalid
+            // Step 2: Progressive retry loop — recompute allocation as contracts fail
             // ----------------------------------------------------------------
-            var contractGroups = allocations
-                .GroupBy(a => a.SmartContractUID)
-                .ToList();
-
             var btcWithdrawals = new List<BtcExitWithdrawalRecord>();
-            var failedContracts = new List<string>();
+            var allSuccessfulAllocations = new List<PoolUnlockAllocation>();
+            decimal remainingAmount = record.Amount;
+            const int MAX_RETRY_ROUNDS = 10; // safety cap to prevent infinite loops
 
-            foreach (var group in contractGroups)
+            for (int round = 0; round < MAX_RETRY_ROUNDS && remainingAmount > 0.00000001M; round++)
             {
-                var scUID = group.Key;
-                var groupAmount = group.Sum(a => a.UnlockAmount);
-
-                if (FrostContractBlacklist.IsBlacklisted(scUID))
+                var allocations = BridgePoolUnlockService.ComputeAllocationPlan(remainingAmount, excludedContracts);
+                if (allocations == null || allocations.Count == 0)
                 {
-                    LogUtility.Log($"[BurnExitConsensus] Skipping blacklisted contract {scUID} for BTC exit {record.BaseBurnTxHash}",
+                    LogUtility.Log($"[BurnExitConsensus] No eligible locks for remaining {remainingAmount} BTC (round {round + 1}, " +
+                        $"{excludedContracts.Count} excluded contracts). Burn: {record.BaseBurnTxHash}",
                         "BurnExitConsensusService.ExecuteBtcExit()");
-                    failedContracts.Add(scUID);
-                    continue;
+                    break;
                 }
 
-                if (!FROST.Models.FrostValidatorKeyStore.HasValidParticipantOrder(scUID))
+                LogUtility.Log($"[BurnExitConsensus] BTC exit FIFO allocation plan (round {round + 1}): {allocations.Count} lock(s) for {remainingAmount} BTC, burn={record.BaseBurnTxHash}",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
+
+                var contractGroups = allocations
+                    .GroupBy(a => a.SmartContractUID)
+                    .ToList();
+
+                bool needRecompute = false;
+
+                foreach (var group in contractGroups)
                 {
-                    LogUtility.Log($"[BurnExitConsensus] Skipping contract {scUID} — missing ParticipantOrderJson. Auto-blacklisting.",
-                        "BurnExitConsensusService.ExecuteBtcExit()");
-                    FrostContractBlacklist.Blacklist(scUID, "Missing ParticipantOrderJson — DKG'd before participant ordering fix");
-                    failedContracts.Add(scUID);
-                    continue;
-                }
+                    var scUID = group.Key;
+                    var groupAmount = group.Sum(a => a.UnlockAmount);
 
-                // ----------------------------------------------------------------
-                // Step 3: FROST sign-only for this contract group
-                // ----------------------------------------------------------------
-                try
-                {
-                    record.Status = BurnExitStatus.FrostInProgress;
-
-                    // Use a synthetic withdrawal request hash for FROST delegation
-                    var syntheticHash = $"btcexit_{record.BaseBurnTxHash[..Math.Min(16, record.BaseBurnTxHash.Length)]}_{scUID[..Math.Min(8, scUID.Length)]}";
-
-                    var frostResult = await VBTCService.CompleteWithdrawal(
-                        scUID, syntheticHash,
-                        delegatedAmount: groupAmount,
-                        delegatedBTCDestination: record.BtcDestination,
-                        delegatedFeeRate: 10,
-                        signOnly: true);
-
-                    if (!frostResult.Success)
-                    {
-                        FrostContractBlacklist.Blacklist(scUID, $"FROST signing failed: {frostResult.ErrorMessage}");
-                        LogUtility.Log($"[BurnExitConsensus] FROST sign-only failed for contract {scUID}: {frostResult.ErrorMessage}. Auto-blacklisted.",
-                            "BurnExitConsensusService.ExecuteBtcExit()");
-                        failedContracts.Add(scUID);
+                    // Double-check exclusion (safety net — shouldn't happen with pre-filtering)
+                    if (excludedContracts.Contains(scUID))
                         continue;
-                    }
 
-                    var signedTxHex = frostResult.BTCTxHash;
-                    if (string.IsNullOrWhiteSpace(signedTxHex))
+                    try
                     {
-                        LogUtility.Log($"[BurnExitConsensus] FROST sign-only produced empty signed hex for contract {scUID}, burn {record.BaseBurnTxHash}.",
+                        record.Status = BurnExitStatus.FrostInProgress;
+
+                        // Use a synthetic withdrawal request hash for FROST delegation
+                        var syntheticHash = $"btcexit_{record.BaseBurnTxHash[..Math.Min(16, record.BaseBurnTxHash.Length)]}_{scUID[..Math.Min(8, scUID.Length)]}";
+
+                        var frostResult = await VBTCService.CompleteWithdrawal(
+                            scUID, syntheticHash,
+                            delegatedAmount: groupAmount,
+                            delegatedBTCDestination: record.BtcDestination,
+                            delegatedFeeRate: 10,
+                            signOnly: true);
+
+                        if (!frostResult.Success)
+                        {
+                            FrostContractBlacklist.Blacklist(scUID, $"FROST signing failed: {frostResult.ErrorMessage}");
+                            LogUtility.Log($"[BurnExitConsensus] FROST sign-only failed for contract {scUID}: {frostResult.ErrorMessage}. Auto-blacklisted. Will retry with other contracts.",
+                                "BurnExitConsensusService.ExecuteBtcExit()");
+                            excludedContracts.Add(scUID);
+                            needRecompute = true;
+                            break; // break inner loop to recompute allocation for remaining amount
+                        }
+
+                        var signedTxHex = frostResult.BTCTxHash;
+                        if (string.IsNullOrWhiteSpace(signedTxHex))
+                        {
+                            LogUtility.Log($"[BurnExitConsensus] FROST sign-only produced empty signed hex for contract {scUID}. Will retry with other contracts.",
+                                "BurnExitConsensusService.ExecuteBtcExit()");
+                            excludedContracts.Add(scUID);
+                            needRecompute = true;
+                            break;
+                        }
+
+                        // Broadcast signed BTC tx for this contract group
+                        var btcNetwork = Globals.BTCNetwork;
+                        var signedBtcTx = NBitcoin.Transaction.Parse(signedTxHex, btcNetwork);
+                        var broadcastResult = await BitcoinTransactionService.BroadcastTransaction(signedBtcTx);
+                        if (!broadcastResult.Success)
+                        {
+                            LogUtility.Log($"[BurnExitConsensus] BTC broadcast failed for contract {scUID}: {broadcastResult.ErrorMessage}. Will retry with other contracts.",
+                                "BurnExitConsensusService.ExecuteBtcExit()");
+                            excludedContracts.Add(scUID);
+                            needRecompute = true;
+                            break;
+                        }
+
+                        long groupAmountSats = (long)(groupAmount * 100_000_000M);
+                        btcWithdrawals.Add(new BtcExitWithdrawalRecord
+                        {
+                            SmartContractUID = scUID,
+                            Amount = groupAmount,
+                            AmountSats = groupAmountSats,
+                            BtcTxHash = broadcastResult.TxHash
+                        });
+
+                        // Track successful allocations from this group
+                        allSuccessfulAllocations.AddRange(group);
+                        remainingAmount -= groupAmount;
+
+                        LogUtility.Log($"[BurnExitConsensus] BTC withdrawal broadcast for contract {scUID}: {groupAmount} BTC, BTC TxHash: {broadcastResult.TxHash}. Remaining: {remainingAmount} BTC",
                             "BurnExitConsensusService.ExecuteBtcExit()");
-                        failedContracts.Add(scUID);
-                        continue;
                     }
-
-                    // Step 4: Broadcast signed BTC tx for this contract group
-                    var btcNetwork = Globals.BTCNetwork;
-                    var signedBtcTx = NBitcoin.Transaction.Parse(signedTxHex, btcNetwork);
-                    var broadcastResult = await BitcoinTransactionService.BroadcastTransaction(signedBtcTx);
-                    if (!broadcastResult.Success)
+                    catch (Exception frostEx)
                     {
-                        LogUtility.Log($"[BurnExitConsensus] BTC broadcast failed for contract {scUID}: {broadcastResult.ErrorMessage}.",
+                        ErrorLogUtility.LogError($"[BurnExitConsensus] FROST/BTC exception for contract {scUID}: {frostEx}",
                             "BurnExitConsensusService.ExecuteBtcExit()");
-                        failedContracts.Add(scUID);
-                        continue;
+                        FrostContractBlacklist.Blacklist(scUID, $"FROST exception: {frostEx.Message}");
+                        excludedContracts.Add(scUID);
+                        needRecompute = true;
+                        break; // break inner loop to recompute
                     }
-
-                    long groupAmountSats = (long)(groupAmount * 100_000_000M);
-                    btcWithdrawals.Add(new BtcExitWithdrawalRecord
-                    {
-                        SmartContractUID = scUID,
-                        Amount = groupAmount,
-                        AmountSats = groupAmountSats,
-                        BtcTxHash = broadcastResult.TxHash
-                    });
-
-                    LogUtility.Log($"[BurnExitConsensus] BTC withdrawal broadcast for contract {scUID}: {groupAmount} BTC, BTC TxHash: {broadcastResult.TxHash}",
-                        "BurnExitConsensusService.ExecuteBtcExit()");
                 }
-                catch (Exception frostEx)
-                {
-                    ErrorLogUtility.LogError($"[BurnExitConsensus] FROST/BTC exception for contract {scUID}: {frostEx}",
-                        "BurnExitConsensusService.ExecuteBtcExit()");
-                    FrostContractBlacklist.Blacklist(scUID, $"FROST exception: {frostEx.Message}");
-                    failedContracts.Add(scUID);
-                }
+
+                // If all groups in this round succeeded, no need to recompute
+                if (!needRecompute)
+                    break;
             }
 
             // Check if any BTC withdrawals succeeded
             if (btcWithdrawals.Count == 0)
             {
                 record.Status = BurnExitStatus.Failed;
-                ErrorLogUtility.LogError($"[BurnExitConsensus] All contract groups failed for BTC exit {record.BaseBurnTxHash}. Stuck exit will retry.",
+                ErrorLogUtility.LogError($"[BurnExitConsensus] All contract groups failed for BTC exit {record.BaseBurnTxHash} after exhausting all eligible contracts ({excludedContracts.Count} excluded). Stuck exit will retry.",
                     "BurnExitConsensusService.ExecuteBtcExit()");
                 return;
             }
-
-            // If some contracts failed, only proceed with the successful ones
-            // Filter allocations to only include locks from successful contracts
-            var successfulAllocations = allocations
-                .Where(a => !failedContracts.Contains(a.SmartContractUID))
-                .ToList();
 
             var totalWithdrawnBtc = btcWithdrawals.Sum(w => w.Amount);
             record.BtcTxHash = string.Join(",", btcWithdrawals.Select(w => w.BtcTxHash));
@@ -605,7 +628,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 record.Amount,
                 record.BtcDestination,
                 record.BaseBurnTxHash,
-                successfulAllocations,
+                allSuccessfulAllocations,
                 btcWithdrawals,
                 record.ConsensusVotes);
 
