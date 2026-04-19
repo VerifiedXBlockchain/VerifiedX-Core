@@ -1200,7 +1200,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             string btcDestination,
             string baseBurnTxHash,
             List<PoolUnlockAllocation> allocations,
-            List<BtcExitWithdrawalRecord> btcWithdrawals,
+            List<BtcExitWithdrawalRecord>? btcWithdrawals = null,
             IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
         {
             try
@@ -1210,9 +1210,16 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Account not found: {ownerAddress}");
 
                 var totalAmountSats = (long)(totalAmount * 100_000_000M);
+                var firstAlloc = allocations?.FirstOrDefault();
                 var txData = JsonConvert.SerializeObject(new
                 {
                     Function = "VBTCBridgeExitToBTC()",
+                    // Backward-compatible fields required by TransactionValidatorService
+                    ContractUID = firstAlloc?.SmartContractUID ?? "",
+                    LockId = firstAlloc?.LockId ?? "",
+                    Amount = totalAmount,
+                    AmountSats = totalAmountSats,
+                    // V3 fields
                     TotalAmount = totalAmount,
                     TotalAmountSats = totalAmountSats,
                     BtcDestination = btcDestination,
