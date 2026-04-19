@@ -117,6 +117,50 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         }
 
         /// <summary>
+        /// Look up a validator's key package by GroupPublicKey (fallback when SCUID doesn't match
+        /// because the key store was saved under a DKG ceremony GUID instead of the real SCUID).
+        /// </summary>
+        public static FrostValidatorKeyStore? GetKeyPackageByGroupPublicKey(string groupPublicKey, string validatorAddress)
+        {
+            try
+            {
+                var db = GetDb();
+                return db.FindOne(x =>
+                    x.GroupPublicKey == groupPublicKey &&
+                    x.ValidatorAddress == validatorAddress);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to get FROST key package by GroupPublicKey: {ex.Message}", "FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Update the SmartContractUID on a key store record (used to fix ceremonyId → real SCUID).
+        /// </summary>
+        public static void UpdateSmartContractUID(long recordId, string newSmartContractUID)
+        {
+            try
+            {
+                var db = GetDb();
+                var record = db.FindById(recordId);
+                if (record != null)
+                {
+                    var oldUID = record.SmartContractUID;
+                    record.SmartContractUID = newSmartContractUID;
+                    db.UpdateSafe(record);
+                    LogUtility.Log($"[FROST KeyStore] Updated SCUID from {oldUID} → {newSmartContractUID} for validator {record.ValidatorAddress}",
+                        "FrostValidatorKeyStore.UpdateSmartContractUID");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to update FROST key store SCUID: {ex.Message}", "FrostValidatorKeyStore.UpdateSmartContractUID");
+            }
+        }
+
+        /// <summary>
         /// Check if a contract has valid FROST keys with stored participant ordering.
         /// Contracts DKG'd before the participant ordering fix will not have ParticipantOrderJson,
         /// meaning their key packages may have inconsistent FROST Identifiers across validators.

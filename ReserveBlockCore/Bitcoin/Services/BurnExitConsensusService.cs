@@ -478,13 +478,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                         LogUtility.Log($"[BurnExitConsensus] Pre-excluding blacklisted contract {scUID} for BTC exit {record.BaseBurnTxHash}",
                             "BurnExitConsensusService.ExecuteBtcExit()");
                     }
-                    else if (!FROST.Models.FrostValidatorKeyStore.HasValidParticipantOrder(scUID))
-                    {
-                        excludedContracts.Add(scUID);
-                        FrostContractBlacklist.Blacklist(scUID, "Missing ParticipantOrderJson — DKG'd before participant ordering fix");
-                        LogUtility.Log($"[BurnExitConsensus] Pre-excluding contract {scUID} — missing ParticipantOrderJson. Auto-blacklisted.",
-                            "BurnExitConsensusService.ExecuteBtcExit()");
-                    }
+                    // NOTE: HasValidParticipantOrder check removed — the FrostValidatorKeyStore uses
+                    // a different ID format (session GUID) than the SC UID used in lock state,
+                    // so the lookup always fails and incorrectly excludes all contracts.
+                    // FROST signing failures are handled by the progressive retry loop below.
                 }
             }
 

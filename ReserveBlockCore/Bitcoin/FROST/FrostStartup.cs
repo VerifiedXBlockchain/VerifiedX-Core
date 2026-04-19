@@ -1362,18 +1362,44 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Load this validator's key package and generate nonces
-                            // Use CeremonyId (original DKG ceremony ID) for key lookup when available,
-                            // since key packages are stored under the ceremonyId during DKG (before scUID exists).
                             var myAddr = Globals.ValidatorAddress;
-                            var keyLookupId = !string.IsNullOrEmpty(request.CeremonyId) ? request.CeremonyId : request.SmartContractUID;
 
-                            if (request.SmartContractUID == "10e833cd81404daab9820d081dfefd06:1773167612")
-                                keyLookupId = "e4ac5290-5d9f-48db-be4f-909081276134";
+                            // Try direct SCUID lookup first
+                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(request.SmartContractUID, myAddr);
 
-                            if(request.SmartContractUID == "fd06ec2ce20a4a2aa7b3f2f2d2a92d11:1773205606")
-                                keyLookupId = "069f6dc5-d918-4018-a5b1-10e322f6b777";
+                            // If CeremonyId was provided and direct lookup failed, try ceremony ID
+                            if ((keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
+                                && !string.IsNullOrEmpty(request.CeremonyId))
+                            {
+                                keyStore = FrostValidatorKeyStore.GetKeyPackage(request.CeremonyId, myAddr);
+                                if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage))
+                                {
+                                    // Auto-fix: update the key store record to use the real SCUID
+                                    LogUtility.Log($"[FROST] Key found via CeremonyId fallback for SC={request.SmartContractUID} (was {request.CeremonyId}). Auto-updating.",
+                                        "FrostStartup.SignStart");
+                                    FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID);
+                                    keyStore.SmartContractUID = request.SmartContractUID;
+                                }
+                            }
 
-                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
+                            // Fallback: look up via FrostGroupPublicKey from VBTCContractV2
+                            if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
+                            {
+                                var vbtcContract = ReserveBlockCore.Bitcoin.Models.VBTCContractV2.GetContract(request.SmartContractUID);
+                                if (vbtcContract != null && !string.IsNullOrEmpty(vbtcContract.FrostGroupPublicKey))
+                                {
+                                    keyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
+                                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage))
+                                    {
+                                        // Auto-fix: update the key store record to use the real SCUID
+                                        LogUtility.Log($"[FROST] Key found via GroupPublicKey fallback for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
+                                            "FrostStartup.SignStart");
+                                        FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID);
+                                        keyStore.SmartContractUID = request.SmartContractUID;
+                                    }
+                                }
+                            }
+
                             if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
