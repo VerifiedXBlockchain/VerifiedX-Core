@@ -47,6 +47,10 @@ namespace ReserveBlockCore.Bitcoin.Services
             public List<CasterConsensusVote> ConsensusVotes { get; set; } = new();
             public string CompletionVfxTxHash { get; set; } = "";
             public string BtcTxHash { get; set; } = "";
+            /// <summary>Serialized BtcExitWithdrawalRecord list for stuck exit COMPLETE retry.</summary>
+            public string BtcWithdrawalsJson { get; set; } = "";
+            /// <summary>Serialized PoolUnlockAllocation list — the original allocations reserved by EXIT_TO_BTC.</summary>
+            public string AllocationsJson { get; set; } = "";
         }
 
         public class BurnAlert
@@ -499,6 +503,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
 
                 allSuccessfulAllocations = allocations;
+                record.AllocationsJson = JsonConvert.SerializeObject(allocations);
 
                 LogUtility.Log($"[BurnExitConsensus] BTC exit FIFO allocation plan: {allocations.Count} lock(s) for {record.Amount} BTC, burn={record.BaseBurnTxHash}",
                     "BurnExitConsensusService.ExecuteBtcExit()");
@@ -562,8 +567,24 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 try
                 {
-                    var retryAllocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount, excludedContracts)
-                        ?? new List<PoolUnlockAllocation>();
+                    // Use the ORIGINAL allocations that were reserved by EXIT_TO_BTC,
+                    // not freshly computed ones — the FAIL TX must restore the exact locks
+                    // that were deducted on-chain by the original EXIT_TO_BTC.
+                    List<PoolUnlockAllocation> retryAllocations;
+                    if (!string.IsNullOrEmpty(record.AllocationsJson))
+                    {
+                        retryAllocations = JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(record.AllocationsJson)
+                            ?? new List<PoolUnlockAllocation>();
+                    }
+                    else
+                    {
+                        // Fallback: if no stored allocations (e.g., pre-upgrade records), compute fresh.
+                        // This is best-effort — may not match the original locks exactly.
+                        ErrorLogUtility.LogError($"[BurnExitConsensus] No stored AllocationsJson for {record.BaseBurnTxHash}. Using fresh allocation (best-effort).",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                        retryAllocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount, excludedContracts)
+                            ?? new List<PoolUnlockAllocation>();
+                    }
 
                     var failResult = await VBTCService.CreateBridgeExitToBTCFailTx(
                         ownerAddress,
@@ -574,8 +595,19 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                     if (failResult.Success)
                     {
-                        LogUtility.Log($"[BurnExitConsensus] FAIL TX for retry: {failResult.TxHashOrError}. Will restart full flow.",
+                        LogUtility.Log($"[BurnExitConsensus] FAIL TX for retry: {failResult.TxHashOrError}. Waiting for confirmation before restart.",
                             "BurnExitConsensusService.ExecuteBtcExit()");
+
+                        // Wait for FAIL TX confirmation before resetting to Pending,
+                        // otherwise the retry could allocate locks that haven't been restored yet.
+                        var failConfirmed = await WaitForVfxTxConfirmation(failResult.TxHashOrError, 120_000);
+                        if (!failConfirmed)
+                        {
+                            LogUtility.Log($"[BurnExitConsensus] FAIL TX not confirmed in time. Stuck exit will retry next cycle.",
+                                "BurnExitConsensusService.ExecuteBtcExit()");
+                            return;
+                        }
+
                         record.CompletionVfxTxHash = "";
                         record.Status = BurnExitStatus.Pending;
                         return; // Will be picked up again by ProcessPendingBurns
@@ -759,6 +791,49 @@ namespace ReserveBlockCore.Bitcoin.Services
 
             var totalWithdrawnBtc = btcWithdrawals.Sum(w => w.Amount);
             record.BtcTxHash = string.Join(",", btcWithdrawals.Select(w => w.BtcTxHash));
+            record.BtcWithdrawalsJson = JsonConvert.SerializeObject(btcWithdrawals);
+
+            // If partial failure (some groups succeeded, some failed), broadcast a FAIL TX
+            // for the failed allocations to restore/blacklist those locks on-chain.
+            if (remainingAmount > 0.00000001M)
+            {
+                var succeededContracts = new HashSet<string>(btcWithdrawals.Select(w => w.SmartContractUID));
+                var failedAllocations = allSuccessfulAllocations
+                    .Where(a => !succeededContracts.Contains(a.SmartContractUID))
+                    .ToList();
+
+                if (failedAllocations.Count > 0)
+                {
+                    LogUtility.Log($"[BurnExitConsensus] Partial FROST failure: {btcWithdrawals.Count} succeeded, {failedAllocations.Count} allocation(s) failed. Broadcasting FAIL TX for failed locks.",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
+
+                    try
+                    {
+                        var partialFailResult = await VBTCService.CreateBridgeExitToBTCFailTx(
+                            ownerAddress,
+                            record.BaseBurnTxHash,
+                            record.CompletionVfxTxHash,
+                            failedAllocations,
+                            $"Partial FROST failure: {failedAllocations.Count} lock(s) failed");
+
+                        if (partialFailResult.Success)
+                        {
+                            LogUtility.Log($"[BurnExitConsensus] Partial FAIL TX broadcast: {partialFailResult.TxHashOrError}. Failed locks will be restored/blacklisted on-chain.",
+                                "BurnExitConsensusService.ExecuteBtcExit()");
+                        }
+                        else
+                        {
+                            ErrorLogUtility.LogError($"[BurnExitConsensus] Partial FAIL TX broadcast failed: {partialFailResult.TxHashOrError}. Failed locks remain deducted.",
+                                "BurnExitConsensusService.ExecuteBtcExit()");
+                        }
+                    }
+                    catch (Exception partialFailEx)
+                    {
+                        ErrorLogUtility.LogError($"[BurnExitConsensus] Partial FAIL TX exception: {partialFailEx.Message}",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                    }
+                }
+            }
 
             LogUtility.Log($"[BurnExitConsensus] BTC exit: {btcWithdrawals.Count} BTC tx(s) broadcast, total={totalWithdrawnBtc} BTC. Now broadcasting VFX EXIT_TO_BTC_COMPLETE.",
                 "BurnExitConsensusService.ExecuteBtcExit()");
@@ -860,12 +935,21 @@ namespace ReserveBlockCore.Bitcoin.Services
                         var ownerAddress = Globals.ValidatorAddress;
                         var btcTxHashes = stuck.BtcTxHash;
 
-                        // Parse BtcExitWithdrawalRecords from stored BtcTxHash (comma-separated)
-                        var withdrawalHashes = btcTxHashes.Split(',', StringSplitOptions.RemoveEmptyEntries);
-                        var btcWithdrawals = withdrawalHashes.Select(h => new BtcExitWithdrawalRecord
+                        // Reconstruct BtcExitWithdrawalRecords from stored JSON, falling back to hash-only
+                        List<BtcExitWithdrawalRecord> btcWithdrawals;
+                        if (!string.IsNullOrEmpty(stuck.BtcWithdrawalsJson))
                         {
-                            BtcTxHash = h.Trim()
-                        }).ToList();
+                            btcWithdrawals = JsonConvert.DeserializeObject<List<BtcExitWithdrawalRecord>>(stuck.BtcWithdrawalsJson)
+                                ?? new List<BtcExitWithdrawalRecord>();
+                        }
+                        else
+                        {
+                            var withdrawalHashes = btcTxHashes.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                            btcWithdrawals = withdrawalHashes.Select(h => new BtcExitWithdrawalRecord
+                            {
+                                BtcTxHash = h.Trim()
+                            }).ToList();
+                        }
 
                         var completeResult = await VBTCService.CreateBridgeExitToBTCCompleteTx(
                             ownerAddress,

@@ -19,19 +19,6 @@ namespace ReserveBlockCore.Bitcoin.Services
         private const int MaxBlockSpan = 4000;
         private static long? _startBlockOverride;
 
-        [Event("ExitBurned")]
-        public class ExitBurnedEventDTO : IEventDTO
-        {
-            [Parameter("address", "burner", 1, true)]
-            public string Burner { get; set; } = "";
-
-            [Parameter("uint256", "amount", 2, false)]
-            public BigInteger Amount { get; set; }
-
-            [Parameter("string", "vfxLockId", 3, false)]
-            public string VfxLockId { get; set; } = "";
-        }
-
         /// <summary>V3 contract event: burnForVfxExit(amount, vfxDestinationAddress)</summary>
         [Event("VfxExitBurned")]
         public class VfxExitBurnedEventDTO : IEventDTO

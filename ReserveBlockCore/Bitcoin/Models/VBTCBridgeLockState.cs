@@ -116,7 +116,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         /// </summary>
         public static decimal GetTotalAvailableAmount()
         {
-            var locks = GetCollection().Find(x => !x.IsUnlocked).ToList();
+            var locks = GetCollection().Find(x => !x.IsUnlocked && !x.IsBlacklisted).ToList();
             return locks.Sum(x => x.RemainingAmount);
         }
 
