@@ -3085,7 +3085,7 @@ namespace ReserveBlockCore.Services
                             return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
 
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "EXIT"))
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "POOL_EXIT"))
                             return (txResult, "Caster consensus votes invalid or insufficient for pool unlock.");
 
                         var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(exitBurnTxHash.Trim());
