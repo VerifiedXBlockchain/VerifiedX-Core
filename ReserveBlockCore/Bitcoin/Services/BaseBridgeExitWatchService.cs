@@ -182,7 +182,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     var amountDecimal = (decimal)amount / 100_000_000M;
                     _ = BurnExitConsensusService.HandleDetectedBurn(
                         txHash,
-                        BurnExitConsensusService.BurnExitType.VfxUnlock,
+                        BurnExitConsensusService.BurnExitType.VfxPoolUnlock,
                         lockId, "", amountDecimal, burner);
                     processed++;
                     continue;

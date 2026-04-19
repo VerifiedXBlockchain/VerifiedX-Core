@@ -47,7 +47,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 allocations.Add(new PoolUnlockAllocation
                 {
                     LockId = lockRec.LockId,
-                    UnlockAmount = useAmount
+                    UnlockAmount = useAmount,
+                    SmartContractUID = lockRec.SmartContractUID
                 });
 
                 remaining -= useAmount;

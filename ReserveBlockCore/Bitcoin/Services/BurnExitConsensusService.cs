@@ -27,7 +27,7 @@ namespace ReserveBlockCore.Bitcoin.Services
         private const int PROPOSAL_WAIT_MS = 8_000;
         private const int CONFIRMATION_WAIT_MS = 8_000;
 
-        public enum BurnExitType { VfxUnlock, BtcExit, VfxPoolUnlock }
+        public enum BurnExitType { BtcExit, VfxPoolUnlock }
         public enum BurnExitStatus { Pending, InConsensus, ConsensusReached, VfxTxCreated, FrostInProgress, Complete, Failed }
 
         public class ProcessedBurnRecord
@@ -372,9 +372,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 LogUtility.Log($"[BurnExitConsensus] Executing exit type={record.ExitType} for burn={record.BaseBurnTxHash}, amount={record.Amount}", "BurnExitConsensusService");
 
-                if (record.ExitType == BurnExitType.VfxUnlock)
-                    await ExecuteVfxUnlock(record);
-                else if (record.ExitType == BurnExitType.VfxPoolUnlock)
+                if (record.ExitType == BurnExitType.VfxPoolUnlock)
                     await ExecuteVfxPoolUnlock(record);
                 else if (record.ExitType == BurnExitType.BtcExit)
                     await ExecuteBtcExit(record);
@@ -383,37 +381,6 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 record.Status = BurnExitStatus.Failed;
                 ErrorLogUtility.LogError($"[BurnExitConsensus] ExecuteExitTransaction error: {ex.Message}", "BurnExitConsensusService");
-            }
-        }
-
-        private static async Task ExecuteVfxUnlock(ProcessedBurnRecord record)
-        {
-            var lockState = VBTCBridgeLockState.GetByLockId(record.VfxLockId);
-            if (lockState == null)
-            {
-                record.Status = BurnExitStatus.Failed;
-                ErrorLogUtility.LogError($"[BurnExitConsensus] Lock not found for lockId {record.VfxLockId}", "BurnExitConsensusService");
-                return;
-            }
-
-            var result = await VBTCService.CreateBridgeUnlockTx(
-                lockState.SmartContractUID,
-                lockState.OwnerAddress,
-                record.VfxLockId,
-                lockState.Amount,
-                record.BaseBurnTxHash,
-                record.ConsensusVotes);
-
-            if (result.Success)
-            {
-                record.Status = BurnExitStatus.Complete;
-                record.CompletionVfxTxHash = result.TxHashOrError;
-                LogUtility.Log($"[BurnExitConsensus] VFX unlock TX: {result.TxHashOrError} for burn {record.BaseBurnTxHash}", "BurnExitConsensusService");
-            }
-            else
-            {
-                record.Status = BurnExitStatus.Failed;
-                ErrorLogUtility.LogError($"[BurnExitConsensus] VFX unlock failed: {result.TxHashOrError}", "BurnExitConsensusService");
             }
         }
 
@@ -461,24 +428,24 @@ namespace ReserveBlockCore.Bitcoin.Services
 
         /// <summary>
         /// Executes the full BTC-exit flow on a caster node in response to a detected <c>burnForBTCExit</c> event.
-        /// The entire pipeline runs caster-side with no user wallet / user node involvement:
-        ///   (1) Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC"/> on VFX to record the intent.
-        ///   (2) Wait for that TX to be confirmed in a block so state is consensus-valid.
-        ///   (3) Coordinate a FROST sign-only round against the deposit UTXO to produce a signed BTC tx.
-        ///   (4) Broadcast the signed BTC tx to the Bitcoin network.
-        ///   (5) Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE"/> on VFX to mark the burn
-        ///       complete via <see cref="StateData.ApplyVBTCBridgeExitToBTCComplete"/>.
+        /// The pipeline now uses FIFO allocation (like pool unlocks) to consume locks partially:
+        ///   (1) Compute FIFO allocation plan to determine which locks to consume and how much.
+        ///   (2) Group allocations by contract UID (each contract has its own FROST deposit address).
+        ///   (3) For each contract group: FROST sign-only + broadcast BTC tx.
+        ///   (4) Broadcast a single <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC"/> on VFX
+        ///       with the full allocation plan and per-contract BTC tx hashes.
+        ///   (5) Wait for VFX TX confirmation.
+        ///   (6) Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE"/> on VFX.
         /// </summary>
         private static async Task ExecuteBtcExit(ProcessedBurnRecord record)
         {
-            var lockId = $"btcexit_{record.BaseBurnTxHash[..Math.Min(16, record.BaseBurnTxHash.Length)]}";
             var ownerAddress = Globals.ValidatorAddress;
 
-            // Guard: non-validator casters can't run this flow — they'd fail at Account lookup / FROST signing.
+            // Guard: non-validator casters can't run this flow.
             if (string.IsNullOrWhiteSpace(ownerAddress))
             {
                 record.Status = BurnExitStatus.Failed;
-                ErrorLogUtility.LogError($"[BurnExitConsensus] Cannot execute BTC exit: Globals.ValidatorAddress is empty (this node is not a validator). Burn: {record.BaseBurnTxHash}",
+                ErrorLogUtility.LogError($"[BurnExitConsensus] Cannot execute BTC exit: Globals.ValidatorAddress is empty. Burn: {record.BaseBurnTxHash}",
                     "BurnExitConsensusService.ExecuteBtcExit()");
                 return;
             }
@@ -493,194 +460,205 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
 
             // ----------------------------------------------------------------
-            // Resolve the vBTC contract UID from consensus-shared pool state.
-            //
-            // Any available bridge lock row names its SmartContractUID, so one targeted
-            // query gives us a valid scUID without touching the local VBTCContractV2 LiteDB
-            // (which only the minter/deployer node has). Downstream CreateBridgeExitToBTCTx
-            // and CompleteWithdrawal already pull the decompiled contract data from the
-            // state trei by UID when needed, so resolving the UID here is sufficient.
-            //
-            // If no available locks exist, the bridge has no liquidity and the BTC exit
-            // cannot be serviced anyway, so failing fast is correct.
+            // Step 1: Compute FIFO allocation plan
             // ----------------------------------------------------------------
-            var fifoLocks = VBTCBridgeLockState.GetAvailableLocksFIFO();
-
-            // ----------------------------------------------------------------
-            // Filter FIFO locks: skip blacklisted contracts and contracts without
-            // valid FROST participant ordering (DKG'd before the ordering fix).
-            // Group by contract UID to get unique contracts in FIFO order.
-            // ----------------------------------------------------------------
-            var candidateContracts = new List<string>();
-            var seenUIDs = new HashSet<string>();
-            if (fifoLocks != null)
-            {
-                foreach (var lockEntry in fifoLocks)
-                {
-                    var uid = lockEntry.SmartContractUID;
-                    if (string.IsNullOrEmpty(uid) || !seenUIDs.Add(uid)) continue;
-
-                    if (FrostContractBlacklist.IsBlacklisted(uid))
-                    {
-                        LogUtility.Log($"[BurnExitConsensus] Skipping blacklisted contract {uid} for burn {record.BaseBurnTxHash}",
-                            "BurnExitConsensusService.ExecuteBtcExit()");
-                        continue;
-                    }
-
-                    if (!FROST.Models.FrostValidatorKeyStore.HasValidParticipantOrder(uid))
-                    {
-                        LogUtility.Log($"[BurnExitConsensus] Skipping contract {uid} — missing ParticipantOrderJson (pre-fix DKG). Auto-blacklisting.",
-                            "BurnExitConsensusService.ExecuteBtcExit()");
-                        FrostContractBlacklist.Blacklist(uid, "Missing ParticipantOrderJson — DKG'd before participant ordering fix");
-                        continue;
-                    }
-
-                    candidateContracts.Add(uid);
-                }
-            }
-
-            if (candidateContracts.Count == 0)
+            var allocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount);
+            if (allocations == null || allocations.Count == 0)
             {
                 record.Status = BurnExitStatus.Failed;
                 ErrorLogUtility.LogError(
-                    $"[BurnExitConsensus] No viable vBTC contract for BTC exit {record.BaseBurnTxHash}. " +
-                    $"fifoLocks={fifoLocks?.Count ?? 0}, allBlacklistedOrInvalid=true, validator={Globals.ValidatorAddress}",
+                    $"[BurnExitConsensus] No pool liquidity for BTC exit {record.BaseBurnTxHash}, amount={record.Amount}",
                     "BurnExitConsensusService.ExecuteBtcExit()");
                 return;
             }
 
+            LogUtility.Log($"[BurnExitConsensus] BTC exit FIFO allocation plan: {allocations.Count} lock(s) for {record.Amount} BTC, burn={record.BaseBurnTxHash}",
+                "BurnExitConsensusService.ExecuteBtcExit()");
+
             // ----------------------------------------------------------------
-            // Try each candidate contract in FIFO order. On FROST failure,
-            // auto-blacklist the failed contract and try the next one.
+            // Step 2: Group allocations by contract UID, filter blacklisted/invalid
             // ----------------------------------------------------------------
-            foreach (var scUID in candidateContracts)
+            var contractGroups = allocations
+                .GroupBy(a => a.SmartContractUID)
+                .ToList();
+
+            var btcWithdrawals = new List<BtcExitWithdrawalRecord>();
+            var failedContracts = new List<string>();
+
+            foreach (var group in contractGroups)
             {
-                LogUtility.Log(
-                    $"[BurnExitConsensus] BTC exit attempting contract {scUID} for burn {record.BaseBurnTxHash}",
-                    "BurnExitConsensusService.ExecuteBtcExit()");
+                var scUID = group.Key;
+                var groupAmount = group.Sum(a => a.UnlockAmount);
 
-                // ----------------------------------------------------------------
-                // Step 1: Broadcast VFX EXIT_TO_BTC TX (records the pending exit state)
-                // ----------------------------------------------------------------
-                record.Status = BurnExitStatus.VfxTxCreated;
-                var exitResult = await VBTCService.CreateBridgeExitToBTCTx(
-                    scUID, ownerAddress, lockId, record.Amount,
-                    record.BtcDestination, record.BaseBurnTxHash,
-                    record.ConsensusVotes);
-
-                if (!exitResult.Success)
+                if (FrostContractBlacklist.IsBlacklisted(scUID))
                 {
-                    var err = exitResult.TxHashOrError ?? string.Empty;
-                    if (err.IndexOf("Duplicate", StringComparison.OrdinalIgnoreCase) >= 0
-                        || err.IndexOf("already", StringComparison.OrdinalIgnoreCase) >= 0
-                        || err.IndexOf("pending bridge exit to BTC", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        record.Status = BurnExitStatus.Complete;
-                        LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already broadcast by another caster for burn {record.BaseBurnTxHash} — treating as handled. Detail: {err}",
-                            "BurnExitConsensusService.ExecuteBtcExit()");
-                        return;
-                    }
-
-                    record.Status = BurnExitStatus.Failed;
-                    ErrorLogUtility.LogError($"[BurnExitConsensus] BTC exit VFX TX failed: {err}", "BurnExitConsensusService");
-                    return;
+                    LogUtility.Log($"[BurnExitConsensus] Skipping blacklisted contract {scUID} for BTC exit {record.BaseBurnTxHash}",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
+                    failedContracts.Add(scUID);
+                    continue;
                 }
 
-                record.CompletionVfxTxHash = exitResult.TxHashOrError;
-                LogUtility.Log($"[BurnExitConsensus] BTC exit VFX TX: {exitResult.TxHashOrError}. Waiting for block inclusion before FROST.", "BurnExitConsensusService");
-
-                // ----------------------------------------------------------------
-                // Step 2: Wait for VFX TX confirmation before FROST
-                // ----------------------------------------------------------------
-                record.Status = BurnExitStatus.FrostInProgress;
-                var confirmed = await WaitForVfxTxConfirmation(exitResult.TxHashOrError, 120_000);
-                if (!confirmed)
+                if (!FROST.Models.FrostValidatorKeyStore.HasValidParticipantOrder(scUID))
                 {
-                    LogUtility.Log($"[BurnExitConsensus] VFX TX not confirmed in time for {record.BaseBurnTxHash}. Stuck exit detection will retry.", "BurnExitConsensusService");
-                    return;
+                    LogUtility.Log($"[BurnExitConsensus] Skipping contract {scUID} — missing ParticipantOrderJson. Auto-blacklisting.",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
+                    FrostContractBlacklist.Blacklist(scUID, "Missing ParticipantOrderJson — DKG'd before participant ordering fix");
+                    failedContracts.Add(scUID);
+                    continue;
                 }
 
                 // ----------------------------------------------------------------
-                // Step 3: FROST sign-only + Step 4: broadcast BTC + Step 5: EXIT_TO_BTC_COMPLETE VFX TX
+                // Step 3: FROST sign-only for this contract group
                 // ----------------------------------------------------------------
                 try
                 {
+                    record.Status = BurnExitStatus.FrostInProgress;
+
+                    // Use a synthetic withdrawal request hash for FROST delegation
+                    var syntheticHash = $"btcexit_{record.BaseBurnTxHash[..Math.Min(16, record.BaseBurnTxHash.Length)]}_{scUID[..Math.Min(8, scUID.Length)]}";
+
                     var frostResult = await VBTCService.CompleteWithdrawal(
-                        scUID, exitResult.TxHashOrError,
-                        delegatedAmount: record.Amount,
+                        scUID, syntheticHash,
+                        delegatedAmount: groupAmount,
                         delegatedBTCDestination: record.BtcDestination,
                         delegatedFeeRate: 10,
                         signOnly: true);
 
                     if (!frostResult.Success)
                     {
-                        // Auto-blacklist the failed contract and try the next one
                         FrostContractBlacklist.Blacklist(scUID, $"FROST signing failed: {frostResult.ErrorMessage}");
-                        LogUtility.Log($"[BurnExitConsensus] FROST sign-only failed for contract {scUID}: {frostResult.ErrorMessage}. Auto-blacklisted. Trying next contract.",
+                        LogUtility.Log($"[BurnExitConsensus] FROST sign-only failed for contract {scUID}: {frostResult.ErrorMessage}. Auto-blacklisted.",
                             "BurnExitConsensusService.ExecuteBtcExit()");
-                        continue; // Try next contract in the loop
+                        failedContracts.Add(scUID);
+                        continue;
                     }
 
-                // frostResult.BTCTxHash contains the signed tx hex when signOnly = true
-                var signedTxHex = frostResult.BTCTxHash;
-                if (string.IsNullOrWhiteSpace(signedTxHex))
-                {
-                    LogUtility.Log($"[BurnExitConsensus] FROST sign-only produced empty signed hex for {record.BaseBurnTxHash}. Retrying later.", "BurnExitConsensusService");
-                    return;
-                }
+                    var signedTxHex = frostResult.BTCTxHash;
+                    if (string.IsNullOrWhiteSpace(signedTxHex))
+                    {
+                        LogUtility.Log($"[BurnExitConsensus] FROST sign-only produced empty signed hex for contract {scUID}, burn {record.BaseBurnTxHash}.",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                        failedContracts.Add(scUID);
+                        continue;
+                    }
 
-                // Step 4: Broadcast signed BTC tx
-                string btcTxHash;
-                try
-                {
+                    // Step 4: Broadcast signed BTC tx for this contract group
                     var btcNetwork = Globals.BTCNetwork;
                     var signedBtcTx = NBitcoin.Transaction.Parse(signedTxHex, btcNetwork);
                     var broadcastResult = await BitcoinTransactionService.BroadcastTransaction(signedBtcTx);
                     if (!broadcastResult.Success)
                     {
-                        LogUtility.Log($"[BurnExitConsensus] BTC broadcast failed for {record.BaseBurnTxHash}: {broadcastResult.ErrorMessage}. Stuck exit will retry.",
-                            "BurnExitConsensusService");
-                        return;
+                        LogUtility.Log($"[BurnExitConsensus] BTC broadcast failed for contract {scUID}: {broadcastResult.ErrorMessage}.",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                        failedContracts.Add(scUID);
+                        continue;
                     }
-                    btcTxHash = broadcastResult.TxHash;
-                }
-                catch (Exception btcEx)
-                {
-                    ErrorLogUtility.LogError($"[BurnExitConsensus] Exception broadcasting signed BTC tx for {record.BaseBurnTxHash}: {btcEx}", "BurnExitConsensusService");
-                    return;
-                }
 
-                record.BtcTxHash = btcTxHash;
-                LogUtility.Log($"[BurnExitConsensus] BTC withdrawal broadcast. BTC TxHash: {btcTxHash}. Now broadcasting VFX EXIT_TO_BTC_COMPLETE.", "BurnExitConsensusService");
+                    long groupAmountSats = (long)(groupAmount * 100_000_000M);
+                    btcWithdrawals.Add(new BtcExitWithdrawalRecord
+                    {
+                        SmartContractUID = scUID,
+                        Amount = groupAmount,
+                        AmountSats = groupAmountSats,
+                        BtcTxHash = broadcastResult.TxHash
+                    });
 
-                // Step 5: Broadcast VFX EXIT_TO_BTC_COMPLETE TX (the ONLY TX type that StateData.ApplyVBTCBridgeExitToBTCComplete accepts)
-                var completeResult = await VBTCService.CreateBridgeExitToBTCCompleteTx(
-                    ownerAddress,
-                    record.BaseBurnTxHash,
-                    btcTxHash);
-
-                if (!completeResult.Success)
-                {
-                    // Not fatal — BTC has already been sent. Another caster may finalize the completion TX.
-                    LogUtility.Log($"[BurnExitConsensus] BTC sent ({btcTxHash}) but EXIT_TO_BTC_COMPLETE broadcast failed: {completeResult.TxHashOrError}. Stuck exit detection will retry the completion TX.",
-                        "BurnExitConsensusService");
-                    return;
-                }
-
-                record.Status = BurnExitStatus.Complete;
-                LogUtility.Log($"[BurnExitConsensus] BTC exit complete! BTC TX: {btcTxHash}, VFX Complete TX: {completeResult.TxHashOrError}", "BurnExitConsensusService");
-                return; // Success — exit the foreach loop
+                    LogUtility.Log($"[BurnExitConsensus] BTC withdrawal broadcast for contract {scUID}: {groupAmount} BTC, BTC TxHash: {broadcastResult.TxHash}",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
                 }
                 catch (Exception frostEx)
                 {
-                    ErrorLogUtility.LogError($"[BurnExitConsensus] FROST/BTC-broadcast exception for contract {scUID}: {frostEx}", "BurnExitConsensusService");
+                    ErrorLogUtility.LogError($"[BurnExitConsensus] FROST/BTC exception for contract {scUID}: {frostEx}",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
                     FrostContractBlacklist.Blacklist(scUID, $"FROST exception: {frostEx.Message}");
-                    continue; // Try next contract
+                    failedContracts.Add(scUID);
                 }
-            } // end foreach candidateContracts
+            }
 
-            // If we get here, all candidate contracts failed
-            LogUtility.Log($"[BurnExitConsensus] All candidate contracts exhausted for burn {record.BaseBurnTxHash}. Stuck exit will retry.", "BurnExitConsensusService.ExecuteBtcExit()");
+            // Check if any BTC withdrawals succeeded
+            if (btcWithdrawals.Count == 0)
+            {
+                record.Status = BurnExitStatus.Failed;
+                ErrorLogUtility.LogError($"[BurnExitConsensus] All contract groups failed for BTC exit {record.BaseBurnTxHash}. Stuck exit will retry.",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
+                return;
+            }
+
+            // If some contracts failed, only proceed with the successful ones
+            // Filter allocations to only include locks from successful contracts
+            var successfulAllocations = allocations
+                .Where(a => !failedContracts.Contains(a.SmartContractUID))
+                .ToList();
+
+            var totalWithdrawnBtc = btcWithdrawals.Sum(w => w.Amount);
+            record.BtcTxHash = string.Join(",", btcWithdrawals.Select(w => w.BtcTxHash));
+
+            LogUtility.Log($"[BurnExitConsensus] BTC exit: {btcWithdrawals.Count} BTC tx(s) broadcast, total={totalWithdrawnBtc} BTC. Now broadcasting VFX EXIT_TO_BTC.",
+                "BurnExitConsensusService.ExecuteBtcExit()");
+
+            // ----------------------------------------------------------------
+            // Step 5: Broadcast single VFX EXIT_TO_BTC TX with full allocation plan + BTC tx hashes
+            // ----------------------------------------------------------------
+            record.Status = BurnExitStatus.VfxTxCreated;
+            var exitResult = await VBTCService.CreateBridgeExitToBTCTx(
+                ownerAddress,
+                record.Amount,
+                record.BtcDestination,
+                record.BaseBurnTxHash,
+                successfulAllocations,
+                btcWithdrawals,
+                record.ConsensusVotes);
+
+            if (!exitResult.Success)
+            {
+                var err = exitResult.TxHashOrError ?? string.Empty;
+                if (err.IndexOf("Duplicate", StringComparison.OrdinalIgnoreCase) >= 0
+                    || err.IndexOf("already", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    record.Status = BurnExitStatus.Complete;
+                    LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already broadcast for burn {record.BaseBurnTxHash} — treating as handled.",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
+                    return;
+                }
+
+                // Not fatal — BTC has already been sent. Stuck exit will retry the VFX TX.
+                LogUtility.Log($"[BurnExitConsensus] VFX EXIT_TO_BTC broadcast failed: {err}. BTC already sent. Stuck exit will retry.",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
+                return;
+            }
+
+            record.CompletionVfxTxHash = exitResult.TxHashOrError;
+            LogUtility.Log($"[BurnExitConsensus] VFX EXIT_TO_BTC TX: {exitResult.TxHashOrError}. Waiting for block inclusion.",
+                "BurnExitConsensusService.ExecuteBtcExit()");
+
+            // ----------------------------------------------------------------
+            // Step 6: Wait for VFX TX confirmation, then broadcast EXIT_TO_BTC_COMPLETE
+            // ----------------------------------------------------------------
+            var confirmed = await WaitForVfxTxConfirmation(exitResult.TxHashOrError, 120_000);
+            if (!confirmed)
+            {
+                LogUtility.Log($"[BurnExitConsensus] VFX TX not confirmed in time for {record.BaseBurnTxHash}. Stuck exit detection will retry.",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
+                return;
+            }
+
+            // Broadcast EXIT_TO_BTC_COMPLETE with all BTC tx hashes
+            var allBtcTxHashes = string.Join(",", btcWithdrawals.Select(w => w.BtcTxHash));
+            var completeResult = await VBTCService.CreateBridgeExitToBTCCompleteTx(
+                ownerAddress,
+                record.BaseBurnTxHash,
+                allBtcTxHashes);
+
+            if (!completeResult.Success)
+            {
+                LogUtility.Log($"[BurnExitConsensus] BTC sent but EXIT_TO_BTC_COMPLETE broadcast failed: {completeResult.TxHashOrError}. Stuck exit will retry.",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
+                return;
+            }
+
+            record.Status = BurnExitStatus.Complete;
+            LogUtility.Log($"[BurnExitConsensus] BTC exit complete! {btcWithdrawals.Count} BTC tx(s), VFX Complete TX: {completeResult.TxHashOrError}",
+                "BurnExitConsensusService.ExecuteBtcExit()");
         }
 
         private static async Task<bool> WaitForVfxTxConfirmation(string txHash, int timeoutMs)
@@ -778,7 +756,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             _processedBurns.ContainsKey(baseBurnTxHash);
 
         /// <summary>Map internal BurnExitType enum to the string burn type used by BridgeCasterConsensus vote verification.</summary>
-        private static string BurnTypeString(BurnExitType t) => t == BurnExitType.BtcExit ? "BTC_EXIT" : "EXIT";
+        private static string BurnTypeString(BurnExitType t) => t == BurnExitType.BtcExit ? "BTC_EXIT" : "POOL_EXIT";
 
         /// <summary>
         /// Sign a vote message for a burn exit confirmation using this node's validator key.

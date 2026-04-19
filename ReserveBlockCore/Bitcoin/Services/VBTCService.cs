@@ -1191,14 +1191,16 @@ namespace ReserveBlockCore.Bitcoin.Services
 
         /// <summary>
         /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC"/> after a Base <c>burnForBTCExit</c> is agreed by casters.
+        /// V3: Now includes FIFO allocation plan and per-contract BTC withdrawal records so
+        /// <see cref="StateData.ApplyVBTCBridgeExitToBTC"/> can apply partial unlocks to each lock.
         /// </summary>
         public static async Task<(bool Success, string TxHashOrError)> CreateBridgeExitToBTCTx(
-            string scUID,
             string ownerAddress,
-            string lockId,
-            decimal amount,
+            decimal totalAmount,
             string btcDestination,
             string baseBurnTxHash,
+            List<PoolUnlockAllocation> allocations,
+            List<BtcExitWithdrawalRecord> btcWithdrawals,
             IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
         {
             try
@@ -1207,16 +1209,16 @@ namespace ReserveBlockCore.Bitcoin.Services
                 if (account == null)
                     return (false, $"Account not found: {ownerAddress}");
 
-                var amountSats = (long)(amount * 100_000_000M);
+                var totalAmountSats = (long)(totalAmount * 100_000_000M);
                 var txData = JsonConvert.SerializeObject(new
                 {
                     Function = "VBTCBridgeExitToBTC()",
-                    ContractUID = scUID,
-                    LockId = lockId,
-                    Amount = amount,
-                    AmountSats = amountSats,
+                    TotalAmount = totalAmount,
+                    TotalAmountSats = totalAmountSats,
                     BtcDestination = btcDestination,
                     BaseBurnTxHash = baseBurnTxHash,
+                    Allocations = allocations,
+                    BtcWithdrawals = btcWithdrawals,
                     CasterConsensusVotes = casterConsensusVotes
                 });
 
