@@ -13,6 +13,7 @@ using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
+using FrostBlacklist = ReserveBlockCore.Bitcoin.Services.FrostContractBlacklist;
 using System.Collections.Concurrent;
 
 namespace ReserveBlockCore.Bitcoin.Controllers
@@ -3417,6 +3418,47 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         #endregion
+
+        #endregion
+
+        #region FROST Contract Blacklist
+
+        /// <summary>
+        /// Manually blacklist a contract's FROST keys (e.g., contracts DKG'd before the participant ordering fix).
+        /// Blacklisted contracts are skipped during BTC exit contract selection.
+        /// </summary>
+        [HttpPost("InvalidateFrostContract/{scUID}")]
+        public IActionResult InvalidateFrostContract(string scUID)
+        {
+            if (string.IsNullOrWhiteSpace(scUID))
+                return BadRequest(new { Success = false, Message = "scUID is required" });
+
+            FrostBlacklist.Blacklist(scUID, "Manually invalidated via API");
+            return Ok(new { Success = true, Message = $"Contract {scUID} has been blacklisted for FROST signing (24h TTL)" });
+        }
+
+        /// <summary>
+        /// Remove a contract from the FROST blacklist (e.g., after successful re-DKG).
+        /// </summary>
+        [HttpPost("RemoveFrostBlacklist/{scUID}")]
+        public IActionResult RemoveFrostBlacklist(string scUID)
+        {
+            if (string.IsNullOrWhiteSpace(scUID))
+                return BadRequest(new { Success = false, Message = "scUID is required" });
+
+            var removed = FrostBlacklist.Remove(scUID);
+            return Ok(new { Success = true, Message = removed ? $"Contract {scUID} removed from blacklist" : $"Contract {scUID} was not in the blacklist" });
+        }
+
+        /// <summary>
+        /// List all currently blacklisted FROST contracts.
+        /// </summary>
+        [HttpGet("GetFrostBlacklist")]
+        public IActionResult GetFrostBlacklist()
+        {
+            var blacklist = FrostBlacklist.GetAll();
+            return Ok(new { Success = true, Blacklist = blacklist });
+        }
 
         #endregion
     }

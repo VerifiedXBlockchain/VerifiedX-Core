@@ -117,6 +117,27 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         }
 
         /// <summary>
+        /// Check if a contract has valid FROST keys with stored participant ordering.
+        /// Contracts DKG'd before the participant ordering fix will not have ParticipantOrderJson,
+        /// meaning their key packages may have inconsistent FROST Identifiers across validators.
+        /// </summary>
+        public static bool HasValidParticipantOrder(string smartContractUID)
+        {
+            try
+            {
+                var db = GetDb();
+                var record = db.FindOne(x => x.SmartContractUID == smartContractUID);
+                if (record == null) return false;
+                return !string.IsNullOrWhiteSpace(record.ParticipantOrderJson);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to check FROST participant order: {ex.Message}", "FrostValidatorKeyStore.HasValidParticipantOrder");
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Delete key packages for a contract (e.g., if DKG needs to be re-run)
         /// </summary>
         public static void DeleteKeyPackages(string smartContractUID)
