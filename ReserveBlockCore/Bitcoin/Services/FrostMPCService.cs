@@ -8,6 +8,8 @@ using System.Net.Http.Json;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.SmartContracts;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
@@ -921,44 +923,86 @@ namespace ReserveBlockCore.Bitcoin.Services
                     catch { /* Already logged during collection phase */ }
                 }
 
-                // FIND-026 Fix: Look up the pubkey package for THIS SPECIFIC contract.
-                // Key packages are stored under the DKG ceremony ID (not the scUID which doesn't
-                // exist yet during DKG). Use ceremonyId when available, fall back to scUID.
-                var keyLookupId = !string.IsNullOrEmpty(ceremonyId) ? ceremonyId : scUID;
-
-                if (scUID == "10e833cd81404daab9820d081dfefd06:1773167612")
-                    keyLookupId = "e4ac5290-5d9f-48db-be4f-909081276134";
-
-                if (scUID == "fd06ec2ce20a4a2aa7b3f2f2d2a92d11:1773205606")
-                    keyLookupId = "069f6dc5-d918-4018-a5b1-10e322f6b777";
-
-                LogUtility.Log($"[FROST MPC] Key lookup using ID: {keyLookupId} (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
+                // 3-tier key lookup for pubkey package:
+                // 1. Try SCUID first (works after SignStart auto-updated the record)
+                // 2. Try ceremonyId (original DKG session ID)
+                // 3. State Trei fallback → decompile contract → get GroupPublicKey → lookup by GPK
+                LogUtility.Log($"[FROST MPC] Key lookup for aggregation. scUID: {scUID}, ceremonyId: {ceremonyId ?? "null"}", "FrostMPCService.AggregateSignature");
 
                 string? pubkeyPackage = null;
                 var myAddr = Globals.ValidatorAddress;
-                if (!string.IsNullOrEmpty(myAddr) && !string.IsNullOrEmpty(keyLookupId))
+                FrostValidatorKeyStore? resolvedKeyStore = null;
+
+                // Tier 1: Try SCUID (SignStart may have already updated the record to use the real SCUID)
+                if (!string.IsNullOrEmpty(myAddr))
                 {
-                    var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
-                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.PubkeyPackage))
+                    resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackage(scUID, myAddr);
+                    if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
                     {
-                        pubkeyPackage = keyStore.PubkeyPackage;
-                        LogUtility.Log($"[FROST MPC] Found pubkey package for {keyLookupId} via direct lookup", "FrostMPCService.AggregateSignature");
+                        pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package via SCUID lookup: {scUID}", "FrostMPCService.AggregateSignature");
                     }
                 }
 
-                // Fallback: try any validator's key store for this contract
+                // Tier 2: Try ceremonyId (original DKG session GUID)
+                if (string.IsNullOrEmpty(pubkeyPackage) && !string.IsNullOrEmpty(ceremonyId) && !string.IsNullOrEmpty(myAddr))
+                {
+                    resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackage(ceremonyId, myAddr);
+                    if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
+                    {
+                        pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package via ceremonyId fallback: {ceremonyId}", "FrostMPCService.AggregateSignature");
+                    }
+                }
+
+                // Tier 3: State Trei fallback — decompile contract to get FrostGroupPublicKey, then lookup by GPK
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    pubkeyPackage = FrostValidatorKeyStore.GetPubkeyPackage(keyLookupId);
-                    if (!string.IsNullOrEmpty(pubkeyPackage))
+                    string? resolvedGroupPubKey = null;
+
+                    // Try local DB first
+                    var localContract = VBTCContractV2.GetContract(scUID);
+                    if (localContract != null && !string.IsNullOrEmpty(localContract.FrostGroupPublicKey))
                     {
-                        LogUtility.Log($"[FROST MPC] Found pubkey package for {keyLookupId} via fallback lookup", "FrostMPCService.AggregateSignature");
+                        resolvedGroupPubKey = localContract.FrostGroupPublicKey;
+                    }
+
+                    // Fall back to State Trei (works on all nodes including non-owners)
+                    if (string.IsNullOrEmpty(resolvedGroupPubKey))
+                    {
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTreiRec != null && !string.IsNullOrEmpty(scStateTreiRec.ContractData))
+                        {
+                            var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                            if (scMainDecompile?.Features != null)
+                            {
+                                var tknzFeature = scMainDecompile.Features
+                                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                    .Select(x => x.FeatureFeatures)
+                                    .FirstOrDefault();
+                                if (tknzFeature is TokenizationV2Feature tknz)
+                                {
+                                    resolvedGroupPubKey = tknz.FrostGroupPublicKey;
+                                    LogUtility.Log($"[FROST MPC] Resolved GroupPublicKey from State Trei: {resolvedGroupPubKey}", "FrostMPCService.AggregateSignature");
+                                }
+                            }
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(resolvedGroupPubKey) && !string.IsNullOrEmpty(myAddr))
+                    {
+                        resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(resolvedGroupPubKey, myAddr);
+                        if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
+                        {
+                            pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                            LogUtility.Log($"[FROST MPC] Found pubkey package via GroupPublicKey fallback: {resolvedGroupPubKey}", "FrostMPCService.AggregateSignature");
+                        }
                     }
                 }
 
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package for {keyLookupId} (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
+                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
                     return null;
                 }
 
@@ -967,20 +1011,16 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // BTreeMap<Identifier, SignatureShare> and BTreeMap<Identifier, NonceCommitment>.
                 // Use stored participant order from DKG if available, otherwise fall back to sorted order.
                 List<string>? storedOrderForAggregate = null;
-                if (!string.IsNullOrEmpty(myAddr) && !string.IsNullOrEmpty(keyLookupId))
+                if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.ParticipantOrderJson))
                 {
-                    var keyStoreForOrder = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
-                    if (keyStoreForOrder != null && !string.IsNullOrEmpty(keyStoreForOrder.ParticipantOrderJson))
+                    try
                     {
-                        try
-                        {
-                            storedOrderForAggregate = JsonConvert.DeserializeObject<List<string>>(keyStoreForOrder.ParticipantOrderJson);
-                            LogUtility.Log($"[FROST MPC] Using stored participant order for aggregation ({storedOrderForAggregate?.Count ?? 0} entries)", "FrostMPCService.AggregateSignature");
-                        }
-                        catch (Exception orderEx)
-                        {
-                            LogUtility.Log($"[FROST MPC] WARNING: Failed to parse stored participant order: {orderEx.Message}. Falling back to sorted order.", "FrostMPCService.AggregateSignature");
-                        }
+                        storedOrderForAggregate = JsonConvert.DeserializeObject<List<string>>(resolvedKeyStore.ParticipantOrderJson);
+                        LogUtility.Log($"[FROST MPC] Using stored participant order for aggregation ({storedOrderForAggregate?.Count ?? 0} entries)", "FrostMPCService.AggregateSignature");
+                    }
+                    catch (Exception orderEx)
+                    {
+                        LogUtility.Log($"[FROST MPC] WARNING: Failed to parse stored participant order: {orderEx.Message}. Falling back to sorted order.", "FrostMPCService.AggregateSignature");
                     }
                 }
                 var addressListForAggregate = storedOrderForAggregate ?? signerAddresses;
