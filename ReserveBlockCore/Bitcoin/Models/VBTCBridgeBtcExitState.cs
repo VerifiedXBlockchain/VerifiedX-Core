@@ -48,6 +48,15 @@ namespace ReserveBlockCore.Bitcoin.Models
             }
         }
 
+        /// <summary>Alias for <see cref="GetByBurnHash"/> used by FAIL TX handler.</summary>
+        public static VBTCBridgeBtcExitState? GetByBurnTxHash(string baseBurnTxHash)
+            => GetByBurnHash(baseBurnTxHash);
+
+        public static bool Update(VBTCBridgeBtcExitState rec)
+        {
+            try { return GetCollection().Update(rec); } catch { return false; }
+        }
+
         public static void MarkComplete(string baseBurnTxHash, string btcTxHash)
         {
             try

@@ -98,7 +98,8 @@ namespace ReserveBlockCore.Services
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
-                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
             }
@@ -114,7 +115,8 @@ namespace ReserveBlockCore.Services
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
-                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
                 {
                     return (txResult, "Fee cannot be less than 0.000003 VFX");
                 }
@@ -3157,7 +3159,8 @@ namespace ReserveBlockCore.Services
                 }
             }
 
-            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
+                || txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
             {
                 if (string.IsNullOrWhiteSpace(txRequest.Data))
                     return (txResult, "Transaction data cannot be null for bridge exit to BTC complete.");
@@ -3171,13 +3174,27 @@ namespace ReserveBlockCore.Services
                 try
                 {
                     var jobj = JObject.Parse(txRequest.Data);
-                    if (jobj["Function"]?.ToObject<string>() != "VBTCBridgeExitToBTCComplete()")
-                        return (txResult, "Invalid Function for bridge exit to BTC complete.");
+                    var fnName = jobj["Function"]?.ToObject<string>();
+                    if (fnName != "VBTCBridgeExitToBTCComplete()" && fnName != "VBTCBridgeExitToBTCFail()")
+                        return (txResult, "Invalid Function for bridge exit to BTC complete/fail.");
 
                     var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
-                    var btcTxHash = jobj["BtcTxHash"]?.ToObject<string>();
-                    if (string.IsNullOrEmpty(baseBurnTxHash) || string.IsNullOrEmpty(btcTxHash))
-                        return (txResult, "BaseBurnTxHash and BtcTxHash are required.");
+                    if (string.IsNullOrEmpty(baseBurnTxHash))
+                        return (txResult, "BaseBurnTxHash is required.");
+
+                    // COMPLETE requires BtcTxHash; FAIL requires FailedAllocations
+                    if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                    {
+                        var btcTxHash = jobj["BtcTxHash"]?.ToObject<string>();
+                        if (string.IsNullOrEmpty(btcTxHash))
+                            return (txResult, "BtcTxHash is required for bridge exit complete.");
+                    }
+                    else // FAIL
+                    {
+                        var failedAllocs = jobj["FailedAllocations"];
+                        if (failedAllocs == null || failedAllocs.Type != JTokenType.Array || !failedAllocs.HasValues)
+                            return (txResult, "FailedAllocations array is required for bridge exit fail.");
+                    }
 
                     if (txRequest.FromAddress != txRequest.ToAddress)
                         return (txResult, "Must be a self-transaction (from == to).");

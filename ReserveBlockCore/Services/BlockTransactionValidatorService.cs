@@ -1014,7 +1014,8 @@ namespace ReserveBlockCore.Services
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC ||
-                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
                 {
                     try
                     {

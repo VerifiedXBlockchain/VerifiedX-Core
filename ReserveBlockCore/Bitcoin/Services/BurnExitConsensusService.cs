@@ -555,13 +555,46 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
             else
             {
-                // Retry path: EXIT_TO_BTC already confirmed, reload allocations for FROST signing
-                LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already confirmed ({record.CompletionVfxTxHash}). Skipping to FROST signing for burn {record.BaseBurnTxHash}.",
+                // Retry path: EXIT_TO_BTC was confirmed but FROST failed previously.
+                // Broadcast a FAIL TX to restore locks, then restart the full flow.
+                LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already confirmed ({record.CompletionVfxTxHash}) but FROST not done. Broadcasting FAIL TX to restore locks before retry.",
                     "BurnExitConsensusService.ExecuteBtcExit()");
 
-                // Recompute allocations (same FIFO result since locks are already deducted on-chain)
-                var allocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount, excludedContracts);
-                allSuccessfulAllocations = allocations ?? new List<PoolUnlockAllocation>();
+                try
+                {
+                    var retryAllocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount, excludedContracts)
+                        ?? new List<PoolUnlockAllocation>();
+
+                    var failResult = await VBTCService.CreateBridgeExitToBTCFailTx(
+                        ownerAddress,
+                        record.BaseBurnTxHash,
+                        record.CompletionVfxTxHash,
+                        retryAllocations,
+                        "Retry path: restoring locks for fresh allocation");
+
+                    if (failResult.Success)
+                    {
+                        LogUtility.Log($"[BurnExitConsensus] FAIL TX for retry: {failResult.TxHashOrError}. Will restart full flow.",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                        record.CompletionVfxTxHash = "";
+                        record.Status = BurnExitStatus.Pending;
+                        return; // Will be picked up again by ProcessPendingBurns
+                    }
+                    else
+                    {
+                        ErrorLogUtility.LogError($"[BurnExitConsensus] FAIL TX for retry failed: {failResult.TxHashOrError}. Cannot retry safely.",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                        record.Status = BurnExitStatus.Failed;
+                        return;
+                    }
+                }
+                catch (Exception failEx)
+                {
+                    ErrorLogUtility.LogError($"[BurnExitConsensus] FAIL TX for retry exception: {failEx.Message}",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
+                    record.Status = BurnExitStatus.Failed;
+                    return;
+                }
             }
 
             // ----------------------------------------------------------------
@@ -687,9 +720,40 @@ namespace ReserveBlockCore.Bitcoin.Services
             // Check if any BTC withdrawals succeeded
             if (btcWithdrawals.Count == 0)
             {
-                record.Status = BurnExitStatus.Failed;
-                ErrorLogUtility.LogError($"[BurnExitConsensus] All contract groups failed for BTC exit {record.BaseBurnTxHash}. FIFO already reserved on-chain. Stuck exit will retry FROST only.",
+                // All FROST signing failed — broadcast FAIL TX to restore the FIFO locks on-chain
+                // so the stuck exit detector can retry the full flow with fresh allocations.
+                LogUtility.Log($"[BurnExitConsensus] All contract groups failed for BTC exit {record.BaseBurnTxHash}. Broadcasting FAIL TX to restore FIFO locks.",
                     "BurnExitConsensusService.ExecuteBtcExit()");
+
+                try
+                {
+                    var failResult = await VBTCService.CreateBridgeExitToBTCFailTx(
+                        ownerAddress,
+                        record.BaseBurnTxHash,
+                        record.CompletionVfxTxHash,
+                        allSuccessfulAllocations,
+                        "All FROST signing rounds failed");
+
+                    if (failResult.Success)
+                    {
+                        LogUtility.Log($"[BurnExitConsensus] FAIL TX broadcast: {failResult.TxHashOrError}. Locks will be restored on-chain. Stuck exit will retry full flow.",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                        // Clear CompletionVfxTxHash so the retry does the full flow (Steps 2-6)
+                        record.CompletionVfxTxHash = "";
+                    }
+                    else
+                    {
+                        ErrorLogUtility.LogError($"[BurnExitConsensus] FAIL TX broadcast failed: {failResult.TxHashOrError}. Locks remain deducted on-chain.",
+                            "BurnExitConsensusService.ExecuteBtcExit()");
+                    }
+                }
+                catch (Exception failEx)
+                {
+                    ErrorLogUtility.LogError($"[BurnExitConsensus] FAIL TX exception: {failEx.Message}",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
+                }
+
+                record.Status = BurnExitStatus.Failed;
                 return;
             }
 
@@ -767,19 +831,70 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Detects exits stuck in InConsensus/FrostInProgress for too long.
-        /// Resets them to Pending for re-consensus (new handler via lowest-hash-wins).
+        /// Detects exits stuck in any intermediate state for too long.
+        /// For BTC exits where BTC was already sent, only retries the COMPLETE broadcast.
+        /// For all other cases, resets to Pending for re-consensus.
         /// </summary>
         private static async Task CheckForStuckExits()
         {
             var currentBlock = Globals.LastBlock?.Height ?? 0;
             var stuckExits = _processedBurns.Values
-                .Where(r => (r.Status == BurnExitStatus.InConsensus || r.Status == BurnExitStatus.FrostInProgress) &&
+                .Where(r => (r.Status == BurnExitStatus.InConsensus ||
+                             r.Status == BurnExitStatus.ConsensusReached ||
+                             r.Status == BurnExitStatus.VfxTxCreated ||
+                             r.Status == BurnExitStatus.FrostInProgress) &&
                             currentBlock - r.DetectedAtBlock > STUCK_EXIT_BLOCK_THRESHOLD)
                 .ToList();
 
             foreach (var stuck in stuckExits)
             {
+                // If BTC was already sent (BtcTxHash populated), do NOT restart the full flow.
+                // Only retry the EXIT_TO_BTC_COMPLETE broadcast to avoid double-sending BTC.
+                if (stuck.ExitType == BurnExitType.BtcExit && !string.IsNullOrEmpty(stuck.BtcTxHash))
+                {
+                    LogUtility.Log($"[BurnExitConsensus] Stuck exit with BTC already sent: {stuck.BaseBurnTxHash} (status={stuck.Status}, btcTx={stuck.BtcTxHash}). Retrying COMPLETE broadcast only.",
+                        "BurnExitConsensusService.CheckForStuckExits()");
+
+                    try
+                    {
+                        var ownerAddress = Globals.ValidatorAddress;
+                        var btcTxHashes = stuck.BtcTxHash;
+
+                        // Parse BtcExitWithdrawalRecords from stored BtcTxHash (comma-separated)
+                        var withdrawalHashes = btcTxHashes.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                        var btcWithdrawals = withdrawalHashes.Select(h => new BtcExitWithdrawalRecord
+                        {
+                            BtcTxHash = h.Trim()
+                        }).ToList();
+
+                        var completeResult = await VBTCService.CreateBridgeExitToBTCCompleteTx(
+                            ownerAddress,
+                            stuck.BaseBurnTxHash,
+                            btcTxHashes,
+                            btcWithdrawals);
+
+                        if (completeResult.Success)
+                        {
+                            stuck.Status = BurnExitStatus.Complete;
+                            LogUtility.Log($"[BurnExitConsensus] Retry COMPLETE broadcast succeeded: {completeResult.TxHashOrError}",
+                                "BurnExitConsensusService.CheckForStuckExits()");
+                        }
+                        else
+                        {
+                            LogUtility.Log($"[BurnExitConsensus] Retry COMPLETE broadcast failed: {completeResult.TxHashOrError}. Will retry next cycle.",
+                                "BurnExitConsensusService.CheckForStuckExits()");
+                            stuck.DetectedAtBlock = currentBlock; // Reset timer for next retry
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"[BurnExitConsensus] Retry COMPLETE exception: {ex.Message}",
+                            "BurnExitConsensusService.CheckForStuckExits()");
+                        stuck.DetectedAtBlock = currentBlock;
+                    }
+                    continue;
+                }
+
                 LogUtility.Log($"[BurnExitConsensus] Stuck exit: {stuck.BaseBurnTxHash} (status={stuck.Status}). Retrying.", "BurnExitConsensusService");
                 stuck.Status = BurnExitStatus.Pending;
                 stuck.DetectedAtBlock = currentBlock;

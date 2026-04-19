@@ -1367,6 +1367,96 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
         }
 
+        /// <summary>
+        /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL"/> when FROST signing
+        /// fails for one or more lock allocations during a BTC exit. This transaction:
+        /// (1) Reverses the partial unlocks for the failed locks (restores their RemainingAmount).
+        /// (2) Blacklists those locks so they are never selected for future FIFO allocations.
+        /// (3) Allows the burn to be retried with different locks.
+        /// </summary>
+        /// <param name="signerAddress">Caster / validator VFX address.</param>
+        /// <param name="baseBurnTxHash">The original Base burn transaction hash.</param>
+        /// <param name="exitTxHash">The EXIT_TO_BTC transaction hash that reserved the locks.</param>
+        /// <param name="failedAllocations">The allocations whose contracts failed FROST signing.</param>
+        /// <param name="reason">Human-readable reason for the failure.</param>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeExitToBTCFailTx(
+            string signerAddress,
+            string baseBurnTxHash,
+            string exitTxHash,
+            List<PoolUnlockAllocation> failedAllocations,
+            string reason)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(signerAddress))
+                    return (false, "Signer address is required for bridge exit fail TX.");
+                if (string.IsNullOrWhiteSpace(baseBurnTxHash))
+                    return (false, "BaseBurnTxHash is required for bridge exit fail TX.");
+                if (failedAllocations == null || failedAllocations.Count == 0)
+                    return (false, "FailedAllocations must contain at least one allocation.");
+
+                var account = AccountData.GetSingleAccount(signerAddress);
+                if (account == null)
+                    return (false, $"Account not found: {signerAddress}");
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+                if (privateKey == null)
+                    return (false, $"Private key was null for account {signerAddress}");
+
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeExitToBTCFail()",
+                    BaseBurnTxHash = baseBurnTxHash.Trim(),
+                    ExitTxHash = exitTxHash?.Trim() ?? "",
+                    FailedAllocations = failedAllocations,
+                    Reason = reason
+                });
+
+                var failTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = signerAddress,
+                    ToAddress = signerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(signerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL,
+                    Data = txData
+                };
+
+                failTx.Fee = 0.00M;
+                failTx.Build();
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(failTx.Hash, privateKey, publicKey);
+                if (signature == "ERROR")
+                    return (false, "TX Signature Failed");
+
+                failTx.Signature = signature;
+
+                var result = await TransactionValidatorService.VerifyTX(failTx);
+                if (!result.Item1)
+                    return (false, $"TX Verify Failed: {result.Item2}");
+
+                await TransactionData.AddTxToWallet(failTx, true);
+                await AccountData.UpdateLocalBalance(signerAddress, failTx.Fee + failTx.Amount);
+                await TransactionData.AddToPool(failTx);
+                await P2PClient.SendTXMempool(failTx);
+
+                SCLogUtility.Log(
+                    $"vBTC V2 Bridge Exit-to-BTC FAIL TX broadcast. TxHash: {failTx.Hash}, BurnHash: {baseBurnTxHash}, " +
+                    $"FailedLocks: {failedAllocations.Count}, Reason: {reason}",
+                    "VBTCService.CreateBridgeExitToBTCFailTx()");
+
+                return (true, failTx.Hash);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Bridge exit-to-BTC fail error: {ex.Message}", "VBTCService.CreateBridgeExitToBTCFailTx()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
         #endregion
     }
 }

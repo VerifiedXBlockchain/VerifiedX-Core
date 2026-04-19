@@ -525,6 +525,11 @@ namespace ReserveBlockCore.Data
                             ApplyVBTCBridgeExitToBTCComplete(tx);
                         }
 
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+                        {
+                            ApplyVBTCBridgeExitToBTCFail(tx);
+                        }
+
                         if(tx.TransactionType == TransactionType.RESERVE)
                         {
                             var txData = tx.Data;
@@ -3119,6 +3124,75 @@ namespace ReserveBlockCore.Data
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCComplete error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCComplete()");
+            }
+        }
+
+        /// <summary>
+        /// Handle VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL: reverse partial unlocks for failed locks,
+        /// blacklist them, and mark the BTC exit state as failed so a retry can occur.
+        /// </summary>
+        private static void ApplyVBTCBridgeExitToBTCFail(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                    return;
+
+                var jobj = JObject.Parse(tx.Data);
+                var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+                var exitTxHash = jobj["ExitTxHash"]?.ToObject<string>();
+                var reason = jobj["Reason"]?.ToObject<string>() ?? "Unknown";
+                var failedAllocationsToken = jobj["FailedAllocations"];
+
+                if (string.IsNullOrEmpty(baseBurnTxHash) || failedAllocationsToken == null)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeExitToBTCFail: missing required fields", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    return;
+                }
+
+                var failedAllocations = failedAllocationsToken.ToObject<List<PoolUnlockAllocation>>();
+                if (failedAllocations == null || failedAllocations.Count == 0)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeExitToBTCFail: empty FailedAllocations", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    return;
+                }
+
+                // For each failed allocation: restore the partial unlock and blacklist the lock
+                foreach (var alloc in failedAllocations)
+                {
+                    long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
+
+                    var blacklisted = VBTCBridgeLockState.BlacklistLock(
+                        alloc.LockId,
+                        alloc.UnlockAmount,
+                        allocSats,
+                        $"FROST fail: {reason}");
+
+                    if (!blacklisted)
+                    {
+                        ErrorLogUtility.LogError(
+                            $"ApplyVBTCBridgeExitToBTCFail: failed to blacklist lock {alloc.LockId}",
+                            "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    }
+                }
+
+                // Mark the BTC exit state as failed (if it exists)
+                var exitState = VBTCBridgeBtcExitState.GetByBurnTxHash(baseBurnTxHash.Trim());
+                if (exitState != null && !exitState.IsComplete)
+                {
+                    exitState.IsComplete = true; // Mark as "done" so the retry creates a new record
+                    exitState.BtcTxHash = $"FAILED:{tx.Hash}";
+                    VBTCBridgeBtcExitState.Update(exitState);
+                }
+
+                SCLogUtility.Log(
+                    $"ApplyVBTCBridgeExitToBTCFail: burn={baseBurnTxHash}, failedLocks={failedAllocations.Count}, " +
+                    $"locks=[{string.Join(",", failedAllocations.Select(a => $"{a.LockId}:{a.UnlockAmount}"))}], reason={reason}",
+                    "StateData.ApplyVBTCBridgeExitToBTCFail()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCFail()");
             }
         }
 

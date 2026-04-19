@@ -41,6 +41,16 @@ namespace ReserveBlockCore.Bitcoin.Models
         public string? UnlockTxHash { get; set; }
         public string? ExitBurnTxHash { get; set; }
 
+        /// <summary>
+        /// When true, this lock is permanently excluded from FIFO allocation.
+        /// Set on-chain via VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL when FROST signing
+        /// fails because the contract's deposit UTXO is unspendable.
+        /// </summary>
+        public bool IsBlacklisted { get; set; }
+
+        /// <summary>Reason the lock was blacklisted (for diagnostics).</summary>
+        public string? BlacklistReason { get; set; }
+
         /// <summary>Remaining BTC available to unlock.</summary>
         [BsonIgnore]
         public decimal RemainingAmount => Amount - UnlockedAmount;
@@ -71,10 +81,34 @@ namespace ReserveBlockCore.Bitcoin.Models
         public static List<VBTCBridgeLockState> GetAvailableLocksFIFO()
         {
             return GetCollection()
-                .Find(x => !x.IsUnlocked)
+                .Find(x => !x.IsUnlocked && !x.IsBlacklisted)
                 .Where(x => x.RemainingAmount > 0)
                 .OrderBy(x => x.LockTimestamp)
                 .ToList();
+        }
+
+        /// <summary>
+        /// Blacklist a lock on-chain, preventing it from being selected for future FIFO allocations.
+        /// Also reverses the partial unlock so the deducted amount is restored (but remains blacklisted).
+        /// </summary>
+        public static bool BlacklistLock(string lockId, decimal restoreAmount, long restoreSats, string reason)
+        {
+            var col = GetCollection();
+            var rec = col.FindOne(x => x.LockId == lockId);
+            if (rec == null) return false;
+
+            rec.IsBlacklisted = true;
+            rec.BlacklistReason = reason;
+
+            // Restore the previously deducted amount
+            if (restoreAmount > 0)
+            {
+                rec.UnlockedAmount = Math.Max(0, rec.UnlockedAmount - restoreAmount);
+                rec.UnlockedAmountSats = Math.Max(0, rec.UnlockedAmountSats - restoreSats);
+                rec.IsUnlocked = false; // un-mark fully consumed since we restored
+            }
+
+            return col.Update(rec);
         }
 
         /// <summary>

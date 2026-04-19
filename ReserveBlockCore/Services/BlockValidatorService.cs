@@ -564,6 +564,7 @@ namespace ReserveBlockCore.Services
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
                                     blkTransaction.TransactionType != TransactionType.VFX_SHIELD &&
                                     blkTransaction.TransactionType != TransactionType.VFX_UNSHIELD &&
                                     blkTransaction.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&

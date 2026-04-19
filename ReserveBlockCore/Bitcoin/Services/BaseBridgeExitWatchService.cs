@@ -10,8 +10,7 @@ using ReserveBlockCore.Utilities;
 namespace ReserveBlockCore.Bitcoin.Services
 {
     /// <summary>
-    /// Polls Base for <c>ExitBurned</c> (V2), <c>VfxExitBurned</c> (V3), and <c>BTCExitBurned</c> events.
-    /// For ExitBurned (V2 legacy): broadcasts <see cref="TransactionType.VBTC_V2_BRIDGE_UNLOCK"/> on VFX.
+    /// Polls Base for <c>VfxExitBurned</c> (V3) and <c>BTCExitBurned</c> events.
     /// For VfxExitBurned (V3 pool): feeds into <see cref="BurnExitConsensusService"/> → <see cref="BridgePoolUnlockService"/>.
     /// For BTCExitBurned: feeds into <see cref="BurnExitConsensusService"/> for caster consensus + FROST.
     /// </summary>
@@ -156,78 +155,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             var to = Math.Min(from + MaxBlockSpan - 1, latest);
             var contract = BaseBridgeService.VBTCbContractAddress;
 
-            var eventHandler = web3.Eth.GetEvent<ExitBurnedEventDTO>(contract);
-            var filter = eventHandler.CreateFilterInput(
-                new BlockParameter(new HexBigInteger(from)),
-                new BlockParameter(new HexBigInteger(to)));
-
-            var logs = await eventHandler.GetAllChangesAsync(filter);
             var processed = 0;
-
-            foreach (var ev in logs)
-            {
-                var log = ev.Log;
-                var lockId = ev.Event?.VfxLockId?.Trim() ?? "";
-                var burner = ev.Event?.Burner ?? "";
-                var amount = ev.Event?.Amount ?? BigInteger.Zero;
-                if (string.IsNullOrEmpty(lockId) || string.IsNullOrEmpty(burner)) continue;
-                if (amount > long.MaxValue || amount < 0) continue;
-
-                var txHash = log.TransactionHash;
-                if (string.IsNullOrEmpty(txHash)) continue;
-
-                // If this node is a caster, delegate to BurnExitConsensusService for coordinated handling
-                if (Globals.IsBlockCaster && !BurnExitConsensusService.IsAlreadyProcessed(txHash))
-                {
-                    var amountDecimal = (decimal)amount / 100_000_000M;
-                    _ = BurnExitConsensusService.HandleDetectedBurn(
-                        txHash,
-                        BurnExitConsensusService.BurnExitType.VfxPoolUnlock,
-                        lockId, "", amountDecimal, burner);
-                    processed++;
-                    continue;
-                }
-
-                var chainLock = VBTCBridgeLockState.GetByLockId(lockId);
-                if (chainLock == null || chainLock.IsUnlocked)
-                    continue;
-
-                var localRecord = BridgeLockRecord.GetByLockId(lockId);
-                var walletForOwner = AccountData.GetSingleAccount(chainLock.OwnerAddress) != null;
-                if (localRecord == null && !walletForOwner)
-                    continue;
-
-                if (localRecord != null && !BridgeLockRecord.ValidateExitBurnMatchesMinted(lockId, burner, (long)amount))
-                    continue;
-
-                if (localRecord == null)
-                {
-                    if (!string.Equals(chainLock.EvmDestination.Trim(), burner.Trim(), StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (chainLock.AmountSats != (long)amount) continue;
-                }
-
-                var unlockResult = await VBTCService.CreateBridgeUnlockTx(
-                    chainLock.SmartContractUID,
-                    chainLock.OwnerAddress,
-                    lockId,
-                    chainLock.Amount,
-                    txHash);
-
-                if (unlockResult.Success)
-                {
-                    processed++;
-                    if (localRecord != null)
-                        BridgeLockRecord.TryMarkRedeemingForExit(lockId, txHash);
-                    LogUtility.Log($"[BaseBridgeExit] Broadcast VBTC_V2_BRIDGE_UNLOCK for lock {lockId} (burn tx {txHash}) → VFX tx {unlockResult.TxHashOrError}",
-                        "BaseBridgeExitWatchService.PollOnceInternal");
-                }
-                else
-                {
-                    LogUtility.Log($"[BaseBridgeExit] CreateBridgeUnlockTx failed for lock {lockId}: {unlockResult.TxHashOrError}",
-                        "BaseBridgeExitWatchService.PollOnceInternal");
-                }
-            }
 
             // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
             try
@@ -268,7 +196,13 @@ namespace ReserveBlockCore.Bitcoin.Services
                                 txHash,
                                 BurnExitConsensusService.BurnExitType.VfxPoolUnlock,
                                 "", "", amountDecimal, burner,
-                                vfxDestinationAddress: vfxDest);
+                                vfxDestinationAddress: vfxDest)
+                                .ContinueWith(t =>
+                                {
+                                    if (t.IsFaulted)
+                                        ErrorLogUtility.LogError($"[BaseBridgeExit] HandleDetectedBurn (VfxPoolUnlock) faulted for {txHash}: {t.Exception?.InnerException?.Message}",
+                                            "BaseBridgeExitWatchService.PollOnceInternal");
+                                }, TaskContinuationOptions.OnlyOnFaulted);
                         }
 
                         processed++;
@@ -321,7 +255,13 @@ namespace ReserveBlockCore.Bitcoin.Services
                         _ = BurnExitConsensusService.HandleDetectedBurn(
                             txHash,
                             BurnExitConsensusService.BurnExitType.BtcExit,
-                            "", btcDest, amountDecimal, burner);
+                            "", btcDest, amountDecimal, burner)
+                            .ContinueWith(t =>
+                            {
+                                if (t.IsFaulted)
+                                    ErrorLogUtility.LogError($"[BaseBridgeExit] HandleDetectedBurn (BtcExit) faulted for {txHash}: {t.Exception?.InnerException?.Message}",
+                                        "BaseBridgeExitWatchService.PollOnceInternal");
+                            }, TaskContinuationOptions.OnlyOnFaulted);
                     }
 
                     processed++;

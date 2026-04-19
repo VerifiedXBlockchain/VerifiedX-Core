@@ -125,7 +125,8 @@ namespace ReserveBlockCore.Models
         VBTC_V2_BRIDGE_UNLOCK,             // Unlock vBTC after burn on Base (legacy, single-lock exact match)
         VBTC_V2_BRIDGE_POOL_UNLOCK,        // Pool-based unlock: credit vBTC from multiple locks FIFO to a destination VFX address
         VBTC_V2_BRIDGE_EXIT_TO_BTC,        // Base burnForBTCExit → record BTC withdrawal intent on VFX
-        VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE // After BTC broadcast / completion
+        VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE, // After BTC broadcast / completion
+        VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL     // FROST failed for some locks → blacklist + reverse + retry
     }
 
     public enum ReserveTransactionType
