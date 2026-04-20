@@ -348,6 +348,7 @@ namespace ReserveBlockCore.Services
                         ValidatorAddress = validator.Address,
                         IPAddress = ipAddress,
                         FrostPublicKey = validator.PublicKey,
+                        BaseAddress = Globals.ValidatorBaseAddress,
                         RegistrationBlockHeight = Globals.LastBlock.Height,
                         Signature = signature
                     })
@@ -482,6 +483,7 @@ namespace ReserveBlockCore.Services
                         ValidatorAddress = validator.Address,
                         IPAddress = ipAddress,
                         FrostPublicKey = validator.PublicKey,
+                        BaseAddress = Globals.ValidatorBaseAddress,
                         ReactivationBlockHeight = Globals.LastBlock.Height,
                         PreviousIPAddress = existingValidator.IPAddress,
                         Signature = signature

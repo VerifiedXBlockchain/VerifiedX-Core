@@ -133,6 +133,24 @@ namespace ReserveBlockCore.Bitcoin.Services
                 .ToList();
         }
 
+        /// <summary>
+        /// Derives a Base (Ethereum) address from a VFX public key.
+        /// Returns empty string if derivation fails.
+        /// </summary>
+        private static string DeriveBaseAddressFromPublicKey(string? publicKey)
+        {
+            if (string.IsNullOrEmpty(publicKey))
+                return string.Empty;
+            try
+            {
+                return ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(publicKey);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
         private static void ProcessRegister(Transaction tx, long blockHeight, Dictionary<string, VBTCValidator> map)
         {
             try
@@ -143,8 +161,13 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 var ipAddress = jobj["IPAddress"]?.ToObject<string>() ?? "";
                 var frostPublicKey = jobj["FrostPublicKey"]?.ToObject<string>() ?? "";
+                var baseAddress = jobj["BaseAddress"]?.ToObject<string>() ?? "";
                 var registrationBlockHeight = jobj["RegistrationBlockHeight"]?.ToObject<long>() ?? blockHeight;
                 var signature = jobj["Signature"]?.ToObject<string>();
+
+                // Use explicit BaseAddress from TX data; fall back to derivation from public key
+                if (string.IsNullOrEmpty(baseAddress))
+                    baseAddress = DeriveBaseAddressFromPublicKey(frostPublicKey);
 
                 if (map.TryGetValue(validatorAddress, out var existing))
                 {
@@ -154,7 +177,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                         existing.LastHeartbeatBlock = blockHeight;
                         existing.IsActive = true;
                         if (!string.IsNullOrEmpty(ipAddress)) existing.IPAddress = ipAddress;
-                        if (!string.IsNullOrEmpty(frostPublicKey)) existing.FrostPublicKey = frostPublicKey;
+                        if (!string.IsNullOrEmpty(frostPublicKey))
+                            existing.FrostPublicKey = frostPublicKey;
+                        if (!string.IsNullOrEmpty(baseAddress))
+                            existing.BaseAddress = baseAddress;
                     }
                 }
                 else
@@ -168,7 +194,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                         LastHeartbeatBlock = blockHeight,
                         IsActive = true,
                         RegistrationSignature = signature,
-                        RegisterTransactionHash = tx.Hash
+                        RegisterTransactionHash = tx.Hash,
+                        BaseAddress = baseAddress
                     };
                 }
             }
@@ -189,6 +216,11 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 var ipAddress = jobj["IPAddress"]?.ToObject<string>();
                 var frostPublicKey = jobj["FrostPublicKey"]?.ToObject<string>();
+                var baseAddress = jobj["BaseAddress"]?.ToObject<string>() ?? "";
+
+                // Use explicit BaseAddress from TX data; fall back to derivation from public key
+                if (string.IsNullOrEmpty(baseAddress))
+                    baseAddress = DeriveBaseAddressFromPublicKey(frostPublicKey);
 
                 if (map.TryGetValue(validatorAddress, out var existing))
                 {
@@ -199,6 +231,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                         existing.LastHeartbeatBlock = blockHeight;
                         if (!string.IsNullOrEmpty(frostPublicKey))
                             existing.FrostPublicKey = frostPublicKey;
+                        if (!string.IsNullOrEmpty(baseAddress))
+                            existing.BaseAddress = baseAddress;
                     }
                 }
                 else
@@ -212,7 +246,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                         RegistrationBlockHeight = blockHeight,
                         LastHeartbeatBlock = blockHeight,
                         IsActive = true,
-                        RegisterTransactionHash = tx.Hash
+                        RegisterTransactionHash = tx.Hash,
+                        BaseAddress = baseAddress
                     };
                 }
             }

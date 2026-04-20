@@ -88,8 +88,14 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 foreach (var val in vfxValidators)
                 {
-                    if (!string.IsNullOrEmpty(val.BaseAddress))
-                        vfxValidatorBaseAddresses[val.BaseAddress.ToLowerInvariant()] = val.ValidatorAddress;
+                    var baseAddr = val.BaseAddress;
+
+                    // Fallback: derive from FrostPublicKey if BaseAddress not set
+                    if (string.IsNullOrEmpty(baseAddr) && !string.IsNullOrEmpty(val.FrostPublicKey))
+                        baseAddr = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(val.FrostPublicKey);
+
+                    if (!string.IsNullOrEmpty(baseAddr))
+                        vfxValidatorBaseAddresses[baseAddr.ToLowerInvariant()] = val.ValidatorAddress;
                 }
 
                 var currentBlock = Globals.LastBlock?.Height ?? 0;
