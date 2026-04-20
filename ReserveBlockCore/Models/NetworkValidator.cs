@@ -81,7 +81,7 @@ namespace ReserveBlockCore.Models
 
                 if (existingValidator && networkVal != null)
                 {
-                    // Validator already exists and is trusted
+                    // Validator already exists — update confirming sources
                     if (!string.IsNullOrEmpty(advertisingPeerIP))
                     {
                         networkVal.ConfirmingSources.Add(advertisingPeerIP);
@@ -90,8 +90,34 @@ namespace ReserveBlockCore.Models
                     // if it's being advertised by peers again
                     validator.CheckFailCount = 0;
                     validator.ConfirmingSources = networkVal.ConfirmingSources;
-                    validator.IsFullyTrusted = networkVal.IsFullyTrusted;
                     validator.LastSeen = TimeUtil.GetTime(); // HAL-26 Fix: Update last seen timestamp
+
+                    // RESTART-FIX: If validator was added directly (e.g. P2P connect) with
+                    // IsFullyTrusted=false, promote to trusted once we get a peer confirmation
+                    // or if the advertising source is a trusted bootstrap peer.
+                    if (networkVal.IsFullyTrusted)
+                    {
+                        validator.IsFullyTrusted = true;
+                    }
+                    else if (!string.IsNullOrEmpty(advertisingPeerIP))
+                    {
+                        // Another peer is vouching for this validator — check confirmations
+                        if (networkVal.ConfirmingSources.Count >= GetRequiredConfirmations()
+                            || IsTrustedBootstrapSource(advertisingPeerIP))
+                        {
+                            validator.IsFullyTrusted = true;
+                            LogUtility.Log($"Validator {validator.Address} promoted to fully trusted (was untrusted) after confirmation from {networkVal.ConfirmingSources.Count} sources", "NetworkValidator.AddValidatorToPool");
+                        }
+                        else
+                        {
+                            validator.IsFullyTrusted = false;
+                        }
+                    }
+                    else
+                    {
+                        validator.IsFullyTrusted = networkVal.IsFullyTrusted;
+                    }
+
                     Globals.NetworkValidators[networkVal.Address] = validator;
                     return true;
                 }
@@ -191,10 +217,30 @@ namespace ReserveBlockCore.Models
         // HAL-11 Fix: Check if source is a trusted bootstrap peer
         private static bool IsTrustedBootstrapSource(string peerIP)
         {
-            // Could be configured via settings, for now use empty list
-            // This would typically include known seed nodes or configured trusted peers
-            var trustedSources = new HashSet<string>();
-            return trustedSources.Contains(peerIP);
+            if (string.IsNullOrEmpty(peerIP))
+                return false;
+
+            // RESTART-FIX: Use actual bootstrap caster IPs from config
+            // These are the hardcoded bootstrap peers that are inherently trusted.
+            var cleanIP = peerIP.Replace("::ffff:", "");
+            
+            // Check against known bootstrap caster IPs
+            var bootstrapPeers = Globals.BlockCasters
+                .Where(c => !string.IsNullOrEmpty(c.PeerIP))
+                .Select(c => c.PeerIP.Replace("::ffff:", ""))
+                .ToHashSet();
+            
+            if (bootstrapPeers.Contains(cleanIP))
+                return true;
+
+            // Also check against connected validator nodes that are known casters
+            var casterIPs = Globals.ValidatorNodes.Values
+                .Where(v => v.IsConnected)
+                .Select(v => v.NodeIP.Replace("::ffff:", "").Replace(":" + Globals.Port, ""))
+                .ToHashSet();
+
+            // If the advertising peer is one of our connected validators, trust it
+            return casterIPs.Contains(cleanIP);
         }
 
         // HAL-11 Fix: Cleanup stale pending validators

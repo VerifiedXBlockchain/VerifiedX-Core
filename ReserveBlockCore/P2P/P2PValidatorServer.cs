@@ -197,6 +197,11 @@ namespace ReserveBlockCore.P2P
                     Signature = signature,
                     SignatureMessage = SignedMessage,
                     UniqueName = uName,
+                    // RESTART-FIX: Direct P2P connections are authenticated via signature,
+                    // so they are inherently trusted. This ensures returning validators
+                    // are immediately eligible for caster promotion.
+                    IsFullyTrusted = true,
+                    LastSeen = TimeUtil.GetTime(),
                 };
 
                 Globals.NetworkValidators.TryAdd(address, netVal);
