@@ -106,6 +106,11 @@ namespace ReserveBlockCore.Services
                         continue;
                     }
 
+                    // Version gate: reject candidates on outdated major versions.
+                    // This prevents nodes that can't produce valid proofs from inflating the quorum.
+                    if (!await CheckCandidateVersion(ip, v.Address))
+                        continue;
+
                     var newCaster = new Peers
                     {
                         PeerIP = ip,
@@ -130,6 +135,92 @@ namespace ReserveBlockCore.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"EvaluateCasterPool error: {ex.Message}", "CasterDiscoveryService");
+            }
+        }
+
+        /// <summary>
+        /// Checks a candidate's wallet version via HTTP before promotion.
+        /// Returns true if the candidate is on a compatible major version.
+        /// </summary>
+        private static async Task<bool> CheckCandidateVersion(string ip, string address)
+        {
+            try
+            {
+                using var client = Globals.HttpClientFactory.CreateClient();
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                var response = await client.GetAsync(uri, cts.Token);
+                if (response == null || !response.IsSuccessStatusCode)
+                {
+                    ConsoleWriterService.OutputVal(
+                        $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — GetWalletVersion returned {response?.StatusCode}. Skipping.");
+                    return false;
+                }
+                var peerVersion = await response.Content.ReadAsStringAsync();
+                if (string.IsNullOrEmpty(peerVersion) || !ProofUtility.IsMajorVersionCurrent(peerVersion))
+                {
+                    ConsoleWriterService.OutputVal(
+                        $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Skipping.");
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ConsoleWriterService.OutputVal(
+                    $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — version check failed: {ex.Message}. Skipping.");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Periodically audits existing casters and removes any on outdated major versions.
+        /// Called from MonitorCasters or EvaluateCasterPool to keep the pool clean.
+        /// </summary>
+        public static async Task AuditExistingCasterVersions()
+        {
+            if (!Globals.IsBlockCaster)
+                return;
+
+            var casters = Globals.BlockCasters.ToList();
+            var toRemove = new List<string>();
+
+            foreach (var caster in casters)
+            {
+                if (string.IsNullOrEmpty(caster.PeerIP) || string.IsNullOrEmpty(caster.ValidatorAddress))
+                    continue;
+
+                // Don't audit ourselves
+                if (caster.ValidatorAddress == Globals.ValidatorAddress)
+                    continue;
+
+                var ip = caster.PeerIP.Replace("::ffff:", "");
+                if (!await CheckCandidateVersion(ip, caster.ValidatorAddress))
+                {
+                    toRemove.Add(caster.ValidatorAddress);
+                }
+            }
+
+            if (toRemove.Count > 0)
+            {
+                var remaining = casters
+                    .Where(c => !toRemove.Contains(c.ValidatorAddress ?? ""))
+                    .ToList();
+                var nBag = new System.Collections.Concurrent.ConcurrentBag<Peers>();
+                foreach (var x in remaining)
+                    nBag.Add(x);
+                Globals.BlockCasters = nBag;
+                Globals.SyncKnownCastersFromBlockCasters();
+
+                foreach (var addr in toRemove)
+                {
+                    ConsoleWriterService.OutputVal(
+                        $"[CasterDiscovery] VersionAudit: Demoted caster {addr} — outdated version.");
+                }
+
+                // Re-evaluate to fill slots
+                _lastEvaluationHeight = long.MinValue;
+                await EvaluateCasterPool().ConfigureAwait(false);
             }
         }
 
