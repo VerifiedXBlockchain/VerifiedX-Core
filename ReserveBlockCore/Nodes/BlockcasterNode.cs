@@ -140,6 +140,10 @@ namespace ReserveBlockCore.Nodes
 
                 await CasterDiscoveryService.RefreshIfDueAsync();
 
+                // Periodically audit existing casters for outdated versions.
+                // This prevents deadlocks where a caster inflates the quorum but can't produce proofs.
+                await CasterDiscoveryService.AuditExistingCasterVersions();
+
                 await Task.Delay(10000);
 
             }

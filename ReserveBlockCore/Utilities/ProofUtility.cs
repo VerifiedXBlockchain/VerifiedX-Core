@@ -160,7 +160,7 @@ namespace ReserveBlockCore.Utilities
         /// Checks if a wallet version string has a major version matching Globals.MajorVer.
         /// Returns false for null/empty/malformed versions.
         /// </summary>
-        private static bool IsMajorVersionCurrent(string? walletVersion)
+        internal static bool IsMajorVersionCurrent(string? walletVersion)
         {
             if (string.IsNullOrEmpty(walletVersion))
                 return false;
