@@ -17,6 +17,7 @@ using System.Net;
 using System.Reflection.Metadata;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks.Dataflow;
 using System.Xml.Schema;
 using static ReserveBlockCore.Utilities.CasterLogUtility;
@@ -60,12 +61,23 @@ namespace ReserveBlockCore.Nodes
     const int READINESS_CHECK_INTERVAL_MS = 2000;
     const int READINESS_MAX_WAIT_MS = 60000; // 60 seconds max wait for peers
     const int BLOCK_HASH_AGREEMENT_TIMEOUT_MS = 5000; // 5 seconds for block hash agreement phase
+    /// <summary>When message 7 arrives slightly before local hash agreement publishes <see cref="Globals.CasterApprovedBlockHashDict"/>, wait briefly.</summary>
+    const int RECEIVE_AGREED_HASH_SPIN_MS = 300;
     const int WINNER_AGREEMENT_TIMEOUT_MS = 4000; // 4 seconds for mandatory winner agreement phase
 
     /// <summary>Tracks consecutive hash sync failures at the same height to break infinite loops.</summary>
     private static long _hashSyncFailHeight = -1;
     private static int _hashSyncFailCount = 0;
     const int HASH_SYNC_MAX_RETRIES = 3; // After this many consecutive failures at same height, skip sync and proceed
+
+    /// <summary>Consecutive rounds where multi-caster block hash agreement failed (no commit).</summary>
+    private static int _consecutiveBlockHashAgreementFailures;
+    const int BLOCK_HASH_AGREEMENT_RECONCILE_THRESHOLD = 3;
+
+    /// <summary>Consecutive failures to fetch the majority block during hash agreement (divergence risk).</summary>
+    private static int _consecutiveMajorityBlockFetchFailures;
+    const int BLOCK_FETCH_FAIL_HALT_THRESHOLD = 5;
+    private static int _casterConsensusHalted; // 0 = running, 1 = halt until reconciliation
 
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
@@ -561,6 +573,15 @@ namespace ReserveBlockCore.Nodes
                     var roundSw = Stopwatch.StartNew(); // Track total round time
                     CasterLogUtility.Log($"--- ROUND START height={Height} lastBlock={Globals.LastBlock.Height} lastHash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]} ---", "ROUND");
 
+                    if (Volatile.Read(ref _casterConsensusHalted) != 0)
+                    {
+                        await SyncBlockHashWithPeersAsync();
+                        await SyncHeightWithPeersAsync();
+                        try { await BlockDownloadService.GetAllBlocks(); } catch { }
+                        Interlocked.Exchange(ref _casterConsensusHalted, 0);
+                        await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
+                    }
+
                     // FIX 1 (CRITICAL): Block hash sync before VRF computation.
                     // If our LastBlock.Hash differs from peer casters, VRF seeds diverge and
                     // casters pick different winners → fork. Sync BEFORE generating proofs.
@@ -915,52 +936,8 @@ namespace ReserveBlockCore.Nodes
 
                                             if(blockFound)
                                             {
-                                                CasterRoundAudit.AddStep($"Already have block. Height: {block.Height}", true);
-                                                //ConsoleWriterService.OutputVal($"Already have block. Height: {block.Height}");
-                                                var IP = finalizedWinner.IPAddress;
-                                                var nextHeight = Globals.LastBlock.Height + 1;
-                                                var currentHeight = block.Height;
-
-                                                if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                                {
-                                                    CasterRoundAudit.AddStep($"Processing Block.", true);
-                                                    //ConsoleWriterService.OutputVal($"Processing Block");
-                                                    // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                                                    BlockDownloadService.BlockDict.AddOrUpdate(
-                                                        currentHeight,
-                                                        new List<(Block, string)> { (block, IP) },
-                                                        (key, existingList) =>
-                                                        {
-                                                            existingList.Add((block, IP));
-                                                            return existingList;
-                                                        });
-                                                    if (nextHeight == currentHeight)
-                                                        await BlockValidatorService.ValidateBlocks();
-                                                    if (nextHeight < currentHeight)
-                                                        await BlockDownloadService.GetAllBlocks();
-                                                }
-
-                                                if (currentHeight < nextHeight)
-                                                {
-                                                    blockFound = true;
-                                                    //_ = AddConsensusHeaderQueue(consensusHeader);
-                                                    if (Globals.LastBlock.Height < block.Height)
-                                                        await BlockValidatorService.ValidateBlocks();
-
-                                                    if (nextHeight == currentHeight)
-                                                    {
-                                                        CasterRoundAudit.AddStep($"Block found. Broadcasting.", true);
-                                                        //ConsoleWriterService.OutputVal($"Inside block service B");
-                                                        //ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
-                                                        await BroadcastConsensusBlockAsync(block, terminalWinner);
-                                                        //_ = P2PValidatorClient.BroadcastBlock(block);
-                                                    }
-
-                                                    if (nextHeight < currentHeight)
-                                                        await BlockDownloadService.GetAllBlocks();
-
-                                                    break;
-                                                }
+                                                // Staged only in CasterRoundDict above — commit/broadcast runs after VerifyBlockHashAgreementAsync.
+                                                CasterRoundAudit.AddStep($"Staged winning caster block at height {block.Height}; awaiting caster hash agreement before commit.", true);
                                             }
 
                                             
@@ -987,31 +964,7 @@ namespace ReserveBlockCore.Nodes
                                                         round.Validator = block.Validator;
                                                         Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound);
 
-                                                        CasterRoundAudit.AddStep($"Block fetched from {caster.PeerIP}. Height: {block.Height}", true);
-                                                        var IP = finalizedWinner.IPAddress;
-                                                        var nextHeight = Globals.LastBlock.Height + 1;
-                                                        var currentHeight = block.Height;
-
-                                                        if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                                        {
-                                                            BlockDownloadService.BlockDict.AddOrUpdate(
-                                                                currentHeight,
-                                                                new List<(Block, string)> { (block, IP) },
-                                                                (key, existingList) =>
-                                                                {
-                                                                    existingList.Add((block, IP));
-                                                                    return existingList;
-                                                                });
-                                                            if (nextHeight == currentHeight)
-                                                                await BlockValidatorService.ValidateBlocks();
-                                                            if (nextHeight < currentHeight)
-                                                                await BlockDownloadService.GetAllBlocks();
-                                                        }
-
-                                                        if (nextHeight == currentHeight)
-                                                        {
-                                                            await BroadcastConsensusBlockAsync(block, terminalWinner);
-                                                        }
+                                                        CasterRoundAudit.AddStep($"Block fetched from {caster.PeerIP}. Height: {block.Height} (staged; commit after hash agreement).", true);
 
                                                         break;
                                                     }
@@ -1040,14 +993,12 @@ namespace ReserveBlockCore.Nodes
                                         if (agreedBlock != null)
                                         {
                                             block = agreedBlock;
-                                            // Update CasterRoundDict with the agreed block
-                                            if (Globals.CasterRoundDict.TryGetValue(Height, out var agreedRound))
-                                            {
-                                                var compareAgreedRound = agreedRound;
-                                                agreedRound.Block = block;
-                                                Globals.CasterRoundDict.TryUpdate(Height, agreedRound, compareAgreedRound);
-                                            }
+                                            var producerIp = finalizedWinner.IPAddress;
+                                            var winnerCraftedLayout = terminalWinner == Globals.ValidatorAddress;
+                                            await CommitCasterBlockPostAgreementAsync(block, terminalWinner, producerIp, winnerCraftedLayout);
                                         }
+                                        else
+                                            await OnBlockHashAgreementRoundRejectedAsync(Height, terminalWinner);
                                     }
                                 }
                             }
@@ -1677,12 +1628,7 @@ namespace ReserveBlockCore.Nodes
                                                         round.Block = block;
                                                         while(!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound));
                                                     }
-
-                                                    Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var currentVal);
-                                                    if (currentVal != null)
-                                                        while (!Globals.CasterApprovedBlockHashDict.TryUpdate(block.Height, block.Hash, currentVal));
-                                                    else
-                                                        while (!Globals.CasterApprovedBlockHashDict.TryAdd(block.Height, block.Hash));
+                                                    // Agreed hash is registered in CommitCasterBlockPostAgreementAsync after hash agreement.
                                                 }
 
                                                 CasterRoundAudit.AddStep($"Bag was approved. Moving to next block.", true);
@@ -1733,50 +1679,13 @@ namespace ReserveBlockCore.Nodes
                                         //This is done if non-caster wins the block
                                         if (block != null)
                                         {
-                                            CasterRoundAudit.AddStep($"Already have block. Height: {block.Height}", true);
-                                            //ConsoleWriterService.OutputVal($"Already have block. Height: {block.Height}");
-                                            var IP = finalizedWinner.IPAddress;
+                                            CasterRoundAudit.AddStep($"Already have block. Height: {block.Height} (staged; commit after hash agreement).", true);
                                             var nextHeight = Globals.LastBlock.Height + 1;
                                             var currentHeight = block.Height;
-
-                                            if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                            {
-                                                CasterRoundAudit.AddStep($"Processing Block.", true);
-                                                //ConsoleWriterService.OutputVal($"Processing Block");
-                                                // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                                                BlockDownloadService.BlockDict.AddOrUpdate(
-                                                    currentHeight,
-                                                    new List<(Block, string)> { (block, IP) },
-                                                    (key, existingList) =>
-                                                    {
-                                                        existingList.Add((block, IP));
-                                                        return existingList;
-                                                    });
-                                                if (nextHeight == currentHeight)
-                                                    await BlockValidatorService.ValidateBlocks();
-                                                if (nextHeight < currentHeight)
-                                                    await BlockDownloadService.GetAllBlocks();
-                                            }
 
                                             if (currentHeight < nextHeight)
                                             {
                                                 blockFound = true;
-                                                //_ = AddConsensusHeaderQueue(consensusHeader);
-                                                if (Globals.LastBlock.Height < block.Height)
-                                                    await BlockValidatorService.ValidateBlocks();
-
-                                                if (nextHeight == currentHeight)
-                                                {
-                                                    CasterRoundAudit.AddStep($"Block found. Broadcasting.", true);
-                                                    //ConsoleWriterService.OutputVal($"Inside block service B");
-                                                    //ConsoleWriterService.OutputVal($"\r\nBlock found. Broadcasting.");
-                                                                                await BroadcastConsensusBlockAsync(block, terminalWinner);
-                                                    //_ = P2PValidatorClient.BroadcastBlock(block);
-                                                }
-
-                                                if (nextHeight < currentHeight)
-                                                    await BlockDownloadService.GetAllBlocks();
-
                                                 break;
                                             }
                                         }
@@ -1813,104 +1722,19 @@ namespace ReserveBlockCore.Nodes
 
                                                                     failedToReachConsensus = false;
 
-                                                                    Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var currentVal);
-                                                                    if(currentVal != null)
-                                                                        while(!Globals.CasterApprovedBlockHashDict.TryUpdate(block.Height, block.Hash, currentVal));
-                                                                    else
-                                                                        while (!Globals.CasterApprovedBlockHashDict.TryAdd(block.Height, block.Hash));
-
-                                                                    round = Globals.CasterRoundDict[block.Height];
-                                                                    if (round != null)
+                                                                    while (true)
                                                                     {
-                                                                        var compareRound = round;
+                                                                        round = Globals.CasterRoundDict.GetOrAdd(block.Height, new CasterRound { BlockHeight = block.Height });
+                                                                        var compareInner = round;
                                                                         round.Block = block;
-                                                                        while (!Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound));
-                                                                    }
-
-                                                                    CasterRoundAudit.AddStep($"Block deserialized. Height: {block.Height}", true);
-                                                                    //ConsoleWriterService.OutputVal($"Block deserialized. Height: {block.Height}");
-                                                                    var IP = finalizedWinner.IPAddress;
-                                                                    var nextHeight = Globals.LastBlock.Height + 1;
-                                                                    var currentHeight = block.Height;
-
-                                                                    if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                                                    {
-                                                                        //ConsoleWriterService.OutputVal($"Inside block service A");
-                                                                        // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                                                                        BlockDownloadService.BlockDict.AddOrUpdate(
-                                                                            currentHeight,
-                                                                            new List<(Block, string)> { (block, IP) },
-                                                                            (key, existingList) =>
-                                                                            {
-                                                                                existingList.Add((block, IP));
-                                                                                return existingList;
-                                                                            });
-                                                                        if (nextHeight == currentHeight)
-                                                                            await BlockValidatorService.ValidateBlocks();
-                                                                        if (nextHeight < currentHeight)
-                                                                            await BlockDownloadService.GetAllBlocks();
-                                                                    }
-
-                                                                    if (currentHeight < nextHeight)
-                                                                    {
-                                                                        blockFound = true;
-                                                                        //_ = AddConsensusHeaderQueue(consensusHeader);
-                                                                        if (Globals.LastBlock.Height < block.Height)
-                                                                            await BlockValidatorService.ValidateBlocks();
-
-                                                                        if (nextHeight == currentHeight)
-                                                                        {
-                                                                            //ConsoleWriterService.OutputVal($"Inside block service B");
-                                                                            await BroadcastConsensusBlockAsync(block, terminalWinner);
-                                                                            //_ = P2PValidatorClient.BroadcastBlock(block);
-                                                                        }
-
-                                                                        if (nextHeight < currentHeight)
-                                                                            await BlockDownloadService.GetAllBlocks();
-
-                                                                        break;
-                                                                    }
-                                                                    else
-                                                                    {
-                                                                        //ConsoleWriterService.OutputVal($"Inside block service C");
-                                                                        if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-                                                                        {
-                                                                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                                                                            BlockDownloadService.BlockDict.AddOrUpdate(
-                                                                                currentHeight,
-                                                                                new List<(Block, string)> { (block, IP) },
-                                                                                (key, existingList) =>
-                                                                                {
-                                                                                    existingList.Add((block, IP));
-                                                                                    return existingList;
-                                                                                });
-                                                                            if (nextHeight == currentHeight)
-                                                                                await BlockValidatorService.ValidateBlocks();
-                                                                            if (nextHeight < currentHeight)
-                                                                                await BlockDownloadService.GetAllBlocks();
-                                                                        }
-
-                                                                        if (currentHeight < nextHeight)
-                                                                        {
-                                                                            //ConsoleWriterService.OutputVal($"Inside block service D");
-                                                                            blockFound = true;
-                                                                            //_ = AddConsensusHeaderQueue(consensusHeader);
-                                                                            if (Globals.LastBlock.Height < block.Height)
-                                                                                await BlockValidatorService.ValidateBlocks();
-
-                                                                            if (nextHeight == currentHeight)
-                                                                            {
-                                                                                //ConsoleWriterService.OutputVal($"Inside block service E");
-                                                                                await BroadcastConsensusBlockAsync(block, terminalWinner);
-                                                                                //_ = P2PValidatorClient.BroadcastBlock(block);
-                                                                            }
-
-                                                                            if (nextHeight < currentHeight)
-                                                                                await BlockDownloadService.GetAllBlocks();
-
+                                                                        round.Validator = block.Validator;
+                                                                        if (Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareInner))
                                                                             break;
-                                                                        }
                                                                     }
+
+                                                                    CasterRoundAudit.AddStep($"Block deserialized. Height: {block.Height} (staged; commit after hash agreement).", true);
+                                                                    blockFound = true;
+                                                                    break;
 
                                                 await Task.Delay(75);
                                             }
@@ -1918,6 +1742,21 @@ namespace ReserveBlockCore.Nodes
                                         catch (Exception ex) { }
 
                                         await Task.Delay(200);
+                                    }
+
+                                    CasterLogUtility.Log($"BlockFetch done (StartConsensus): found={blockFound}, failed={failedToReachConsensus}", "BLOCKFETCH");
+                                    if (blockFound && block != null && !string.IsNullOrEmpty(terminalWinner))
+                                    {
+                                        var agreeHeight = finalizedWinner.BlockHeight;
+                                        CasterRoundAudit.AddStep($"[BlockHashAgreement] Verifying block hash agreement with peer casters…", true);
+                                        var agreedBlockSc = await VerifyBlockHashAgreementAsync(block, agreeHeight, terminalWinner);
+                                        if (agreedBlockSc != null)
+                                        {
+                                            block = agreedBlockSc;
+                                            await CommitCasterBlockPostAgreementAsync(block, terminalWinner, finalizedWinner.IPAddress, false);
+                                        }
+                                        else
+                                            await OnBlockHashAgreementRoundRejectedAsync(agreeHeight, terminalWinner);
                                     }
 
                                     if (!blockFound && failedToReachConsensus)
@@ -2240,6 +2079,48 @@ namespace ReserveBlockCore.Nodes
                 else if (desyncRecoveryMode)
                 {
                     ConsoleWriterService.OutputVal($"[Desync Recovery] Stuck for {timeSinceLastBlock}ms — bypassing consensus gate for block {nextBlock.Height} from {nextBlock.Validator}");
+                }
+
+                // Supermajority hash is registered in VerifyBlockHashAgreementAsync as soon as it is known (before local commit).
+                // Block casters must not accept message-7 for the next height without that gate (brief spin covers races with local agreement).
+                string? agreedHashForGate = null;
+                Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
+
+                if (!desyncRecoveryMode && Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                    && string.IsNullOrEmpty(agreedHashForGate))
+                {
+                    var spin = Stopwatch.StartNew();
+                    while (spin.ElapsedMilliseconds < RECEIVE_AGREED_HASH_SPIN_MS && string.IsNullOrEmpty(agreedHashForGate))
+                    {
+                        if (Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out var h) && !string.IsNullOrEmpty(h))
+                        {
+                            agreedHashForGate = h;
+                            break;
+                        }
+                        await Task.Delay(10);
+                    }
+                }
+
+                if (!desyncRecoveryMode && Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                    && string.IsNullOrEmpty(agreedHashForGate))
+                {
+                    ConsoleWriterService.OutputVal($"[Consensus Gate] Rejecting height {nextBlock.Height} — no caster-agreed hash yet (message 7 before agreement or wrong fork).");
+                    Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
+                    return;
+                }
+
+                if (!desyncRecoveryMode && !string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
+                {
+                    ConsoleWriterService.OutputVal($"[Consensus Gate] Block at height {nextBlock.Height} hash mismatch — expected {agreedHashForGate[..Math.Min(12, agreedHashForGate.Length)]}… got {nextBlock.Hash?[..Math.Min(12, nextBlock.Hash?.Length ?? 0)]}…");
+                    Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
+                    return;
+                }
+
+                if (nextBlock.Height != Globals.LastBlock.Height + 1)
+                {
+                    ConsoleWriterService.OutputVal($"[Consensus Gate] Rejecting height {nextBlock.Height} — next expected is {Globals.LastBlock.Height + 1}.");
+                    Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
+                    return;
                 }
 
                 var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
@@ -2593,6 +2474,144 @@ namespace ReserveBlockCore.Nodes
         }
 
         /// <summary>
+        /// Publishes the supermajority-agreed block hash as soon as it is known so <see cref="ReceiveConfirmedBlock"/>
+        /// can reject mismatched message-7 traffic before local commit completes. Cleared when agreement fails or a new attempt starts.
+        /// </summary>
+        private static void RegisterPendingCasterBlockHash(long height, string hash)
+        {
+            if (string.IsNullOrEmpty(hash)) return;
+            while (true)
+            {
+                if (Globals.CasterApprovedBlockHashDict.TryGetValue(height, out var cur))
+                {
+                    if (cur == hash) break;
+                    if (Globals.CasterApprovedBlockHashDict.TryUpdate(height, hash, cur)) break;
+                }
+                else if (Globals.CasterApprovedBlockHashDict.TryAdd(height, hash))
+                    break;
+            }
+        }
+
+        private static void ClearPendingCasterBlockHash(long height)
+        {
+            Globals.CasterApprovedBlockHashDict.TryRemove(height, out _);
+        }
+
+        /// <summary>
+        /// Persists agreed hash for <see cref="ReceiveConfirmedBlock"/> validation, updates <see cref="Globals.CasterRoundDict"/>,
+        /// then applies the same chain/broadcast sequencing as the pre-fix paths (winner vs peer-fetch layouts differ).
+        /// Must run only after successful multi-caster hash agreement.
+        /// </summary>
+        private static async Task CommitCasterBlockPostAgreementAsync(Block block, string terminalWinner, string producerIp, bool winnerCraftedLayout)
+        {
+            if (block == null || string.IsNullOrEmpty(producerIp))
+                return;
+
+            while (true)
+            {
+                if (Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var cur))
+                {
+                    if (cur == block.Hash)
+                        break;
+                    if (Globals.CasterApprovedBlockHashDict.TryUpdate(block.Height, block.Hash, cur))
+                        break;
+                }
+                else if (Globals.CasterApprovedBlockHashDict.TryAdd(block.Height, block.Hash))
+                    break;
+            }
+
+            if (Globals.CasterRoundDict.TryGetValue(block.Height, out var round))
+            {
+                var compareRound = round;
+                round.Block = block;
+                round.Validator = terminalWinner;
+                Globals.CasterRoundDict.TryUpdate(block.Height, round, compareRound);
+            }
+
+            var nextHeight = Globals.LastBlock.Height + 1;
+            var currentHeight = block.Height;
+
+            if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
+            {
+                BlockDownloadService.BlockDict.AddOrUpdate(
+                    currentHeight,
+                    new List<(Block, string)> { (block, producerIp) },
+                    (key, existingList) =>
+                    {
+                        existingList.Add((block, producerIp));
+                        return existingList;
+                    });
+                if (nextHeight == currentHeight)
+                    await BlockValidatorService.ValidateBlocks();
+                if (nextHeight < currentHeight)
+                    await BlockDownloadService.GetAllBlocks();
+            }
+
+            if (winnerCraftedLayout)
+            {
+                if (currentHeight < nextHeight)
+                {
+                    if (Globals.LastBlock.Height < block.Height)
+                        await BlockValidatorService.ValidateBlocks();
+
+                    if (nextHeight == currentHeight)
+                    {
+                        CasterRoundAudit?.AddStep($"Block found. Broadcasting.", true);
+                        await BroadcastConsensusBlockAsync(block, terminalWinner);
+                    }
+
+                    if (nextHeight < currentHeight)
+                        await BlockDownloadService.GetAllBlocks();
+                }
+            }
+            else
+            {
+                if (nextHeight == currentHeight)
+                    await BroadcastConsensusBlockAsync(block, terminalWinner);
+            }
+
+            _consecutiveBlockHashAgreementFailures = 0;
+            _consecutiveMajorityBlockFetchFailures = 0;
+            Interlocked.Exchange(ref _casterConsensusHalted, 0);
+        }
+
+        private static async Task OnBlockHashAgreementRoundRejectedAsync(long height, string? terminalWinner)
+        {
+            ClearPendingCasterBlockHash(height);
+            _consecutiveBlockHashAgreementFailures++;
+            CasterLogUtility.Log($"BlockHashAgreement: round rejected at height {height} (streak {_consecutiveBlockHashAgreementFailures}).", "AGREEMENT");
+
+            if (Globals.LastBlock.Height >= height)
+            {
+                CasterLogUtility.Log($"BlockHashAgreement: safety-net — tip already at ≥{height}; reconciling with peers.", "AGREEMENT");
+                await SyncBlockHashWithPeersAsync();
+                await SyncHeightWithPeersAsync();
+                try { await BlockDownloadService.GetAllBlocks(); } catch { }
+            }
+
+            if (_consecutiveBlockHashAgreementFailures >= BLOCK_HASH_AGREEMENT_RECONCILE_THRESHOLD)
+            {
+                _consecutiveBlockHashAgreementFailures = 0;
+                CasterRoundAudit?.AddStep($"[BlockHashAgreement] {BLOCK_HASH_AGREEMENT_RECONCILE_THRESHOLD}+ consecutive failures — forced chain reconciliation.", false);
+                await SyncBlockHashWithPeersAsync();
+                await SyncHeightWithPeersAsync();
+                try { await BlockDownloadService.GetAllBlocks(); } catch { }
+            }
+        }
+
+        private static async Task HaltConsensusForFetchFailuresAndReconcileAsync()
+        {
+            if (Interlocked.Exchange(ref _casterConsensusHalted, 1) != 0)
+                return;
+            CasterRoundAudit?.AddStep($"[BlockFetch] Majority block fetch failures ≥{BLOCK_FETCH_FAIL_HALT_THRESHOLD} — halting caster commit path and reconciling.", false);
+            ConsoleWriterService.OutputVal($"[CasterConsensus] Halted due to repeated majority block fetch failures; syncing with peers.");
+            await SyncBlockHashWithPeersAsync();
+            await SyncHeightWithPeersAsync();
+            try { await BlockDownloadService.GetAllBlocks(); } catch { }
+            // Leave _casterConsensusHalted == 1 until the next casting round clears it after sync (see StartCastingRounds).
+        }
+
+        /// <summary>
         /// Block hash agreement phase: after fetching/crafting a block, exchange hashes with peer casters
         /// to ensure all casters have the SAME block before committing.
         /// Returns the agreed-upon block, or null if agreement could not be reached.
@@ -2601,7 +2620,15 @@ namespace ReserveBlockCore.Nodes
         {
             var casters = Globals.BlockCasters.ToList();
             if (casters.Count <= 1)
-                return block; // Only one caster, no agreement needed
+            {
+                // Single caster: still publish expected hash before commit so ReceiveConfirmedBlock cannot accept a different next block first.
+                if (block != null && !string.IsNullOrEmpty(block.Hash))
+                    RegisterPendingCasterBlockHash(height, block.Hash);
+                return block;
+            }
+
+            // New multi-caster attempt for this height — drop any stale pending hash from a prior failed round.
+            ClearPendingCasterBlockHash(height);
 
             var requiredAgreement = Math.Max(2, casters.Count / 2 + 1);
             var myHash = block.Hash;
@@ -2662,6 +2689,8 @@ namespace ReserveBlockCore.Nodes
                 {
                     majorityHash = best.Key;
                     agreementCount = best.Value;
+                    // Publish immediately so message-7 handlers can enforce this hash before local commit runs.
+                    RegisterPendingCasterBlockHash(height, majorityHash);
                     break;
                 }
 
@@ -2680,7 +2709,10 @@ namespace ReserveBlockCore.Nodes
 
             // If our hash matches, we're good
             if (myHash == majorityHash)
+            {
+                _consecutiveMajorityBlockFetchFailures = 0;
                 return block;
+            }
 
             // Our hash differs from majority — fetch the correct block from a peer that has it
             ConsoleWriterService.OutputVal($"[BlockHashAgreement] Our block hash differs from majority. Fetching correct block from peer.");
@@ -2693,12 +2725,18 @@ namespace ReserveBlockCore.Nodes
                 if (peerBlock != null && peerBlock.Hash == majorityHash)
                 {
                     CasterRoundAudit?.AddStep($"[BlockHashAgreement] Replaced local block with majority block from {sourceIP}.", true);
+                    _consecutiveMajorityBlockFetchFailures = 0;
                     return peerBlock;
                 }
             }
 
-            // Couldn't fetch the majority block — return our block as fallback
-            return block;
+            _consecutiveMajorityBlockFetchFailures++;
+            CasterRoundAudit?.AddStep($"[BlockHashAgreement] Could not fetch majority block — rejecting round (fetch streak {_consecutiveMajorityBlockFetchFailures}).", false);
+            CasterLogUtility.Log($"BlockHashAgreement: majority fetch FAILED streak={_consecutiveMajorityBlockFetchFailures}", "AGREEMENT");
+            if (_consecutiveMajorityBlockFetchFailures >= BLOCK_FETCH_FAIL_HALT_THRESHOLD)
+                await HaltConsensusForFetchFailuresAndReconcileAsync();
+            ClearPendingCasterBlockHash(height);
+            return null;
         }
 
         #endregion

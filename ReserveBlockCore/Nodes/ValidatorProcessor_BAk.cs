@@ -190,6 +190,43 @@ namespace ReserveBlockCore.Nodes
             var lastBlock = Globals.LastBlock;
             if (lastBlock.Height < nextBlock.Height)
             {
+                string? agreedHashForGate = null;
+                Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
+
+                if (Globals.IsBlockCaster && nextBlock.Height == lastBlock.Height + 1
+                    && string.IsNullOrEmpty(agreedHashForGate))
+                {
+                    var spin = System.Diagnostics.Stopwatch.StartNew();
+                    while (spin.ElapsedMilliseconds < 300 && string.IsNullOrEmpty(agreedHashForGate))
+                    {
+                        if (Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out var h) && !string.IsNullOrEmpty(h))
+                        {
+                            agreedHashForGate = h;
+                            break;
+                        }
+                        await Task.Delay(10);
+                    }
+                }
+
+                if (Globals.IsBlockCaster && nextBlock.Height == lastBlock.Height + 1
+                    && string.IsNullOrEmpty(agreedHashForGate))
+                {
+                    ConsoleWriterService.OutputVal($"[Consensus] Rejecting height {nextBlock.Height}: no caster-agreed hash yet.");
+                    return;
+                }
+
+                if (!string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
+                {
+                    ConsoleWriterService.OutputVal($"[Consensus] Rejecting block {nextBlock.Height}: hash does not match caster-agreed value.");
+                    return;
+                }
+
+                if (nextBlock.Height != Globals.LastBlock.Height + 1)
+                {
+                    ConsoleWriterService.OutputVal($"[Consensus] Rejecting height {nextBlock.Height}: expected next height {Globals.LastBlock.Height + 1}.");
+                    return;
+                }
+
                 var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
                 if (result)
                 {
