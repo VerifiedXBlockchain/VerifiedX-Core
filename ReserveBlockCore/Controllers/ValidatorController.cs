@@ -1,4 +1,4 @@
-ï»¿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
@@ -6,7 +6,7 @@ using ReserveBlockCore.Models;
 using ReserveBlockCore.Nodes;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
-using System.Net;
+using System.Linq;
 
 namespace ReserveBlockCore.Controllers
 {
@@ -20,6 +20,208 @@ namespace ReserveBlockCore.Controllers
             return "Hello from ValidatorController!";
         }
 
+        #region vBTC V2 Bridge Endpoints
+
+        /// <summary>
+        /// Validators sign a mint attestation for a VFX bridge lock.
+        /// Called by the user's node (or any node) to collect validator ECDSA signatures
+        /// for the VBTCb <c>mintWithProof</c> call on Base.
+        /// </summary>
+        [HttpPost]
+        [Route("SignMintAttestation")]
+        public async Task<ActionResult<string>> SignMintAttestation([FromBody] Bitcoin.Models.MintAttestationRequest? request)
+        {
+            var reqIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            try
+            {
+                if (request == null)
+                {
+                    LogUtility.Log($"[BridgeAttest] SignMintAttestation: empty request body from IP={reqIp}", "ValidatorController.SignMintAttestation");
+                    return BadRequest(JsonConvert.SerializeObject(new { success = false, error = "Empty request body" }));
+                }
+
+                LogUtility.Log($"[BridgeAttest] SignMintAttestation request from IP={reqIp}: lockId={request.LockId}, evmDest={request.EvmDestination}, amountSats={request.AmountSats}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}, scUID={request.SmartContractUID}", "ValidatorController.SignMintAttestation");
+
+                var (success, signatureHex, error) = await Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+
+                if (success)
+                {
+                    LogUtility.Log($"[BridgeAttest] SignMintAttestation SUCCESS for lockId={request.LockId}. Signature={signatureHex?.Substring(0, Math.Min(20, signatureHex?.Length ?? 0))}...", "ValidatorController.SignMintAttestation");
+                    return Ok(JsonConvert.SerializeObject(new { success = true, signature = signatureHex }));
+                }
+                else
+                {
+                    LogUtility.Log($"[BridgeAttest] SignMintAttestation REJECTED for lockId={request.LockId}: {error}", "ValidatorController.SignMintAttestation");
+                    return Ok(JsonConvert.SerializeObject(new { success = false, error = error ?? "Attestation failed" }));
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[BridgeAttest] SignMintAttestation EXCEPTION for lockId={request?.LockId}: {ex.Message}", "ValidatorController.SignMintAttestation");
+                return StatusCode(500, JsonConvert.SerializeObject(new { success = false, error = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Validators sign add/remove operations for the Base contract.
+        /// Called by BaseValidatorSyncService when collecting signatures.
+        /// </summary>
+        [HttpPost]
+        [Route("SignValidatorUpdate")]
+        public ActionResult<string> SignValidatorUpdate([FromBody] object requestBody)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Not a validator" }));
+
+                var json = requestBody?.ToString() ?? "";
+                var request = JsonConvert.DeserializeObject<dynamic>(json);
+                string action = request?.Action;
+                long vfxBlockHeight = request?.VfxBlockHeight ?? 0;
+
+                // Get target addresses
+                var targetAddresses = new List<string>();
+                if (request?.TargetAddresses != null)
+                {
+                    foreach (var addr in request.TargetAddresses)
+                        targetAddresses.Add((string)addr);
+                }
+                else if (request?.TargetAddress != null)
+                {
+                    targetAddresses.Add((string)request.TargetAddress);
+                }
+
+                if (string.IsNullOrEmpty(action) || !targetAddresses.Any())
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Missing action or target address" }));
+
+                var sig = Bitcoin.Services.BaseValidatorSyncService.SignValidatorUpdateLocally(
+                    action, targetAddresses.ToArray(), vfxBlockHeight);
+
+                if (sig == null)
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Failed to sign" }));
+
+                return Ok(JsonConvert.SerializeObject(new { Success = true, Signature = "0x" + Convert.ToHexString(sig).ToLowerInvariant() }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Returns the current Base contract state: validators, nonce, thresholds.
+        /// </summary>
+        [HttpGet]
+        [Route("GetBaseContractState")]
+        public async Task<ActionResult<string>> GetBaseContractState()
+        {
+            try
+            {
+                var rpcUrl = Bitcoin.Services.BaseBridgeService.BaseRpcUrl;
+                var contractAddr = Bitcoin.Services.BaseBridgeService.ContractAddress;
+
+                if (string.IsNullOrEmpty(rpcUrl) || string.IsNullOrEmpty(contractAddr))
+                    return Ok(JsonConvert.SerializeObject(new { Success = false, Message = "Base bridge not configured" }));
+
+                var web3 = new Nethereum.Web3.Web3(rpcUrl);
+                var abi = @"[
+                    {""inputs"":[],""name"":""getValidators"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+                    {""inputs"":[],""name"":""getAdminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+                    {""inputs"":[],""name"":""validatorCount"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+                    {""inputs"":[],""name"":""requiredMintSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+                    {""inputs"":[],""name"":""requiredRemoveSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+                ]";
+
+                var contract = web3.Eth.GetContract(abi, contractAddr);
+                var validators = await contract.GetFunction("getValidators").CallAsync<List<string>>();
+                var adminNonce = await contract.GetFunction("getAdminNonce").CallAsync<System.Numerics.BigInteger>();
+                var valCount = await contract.GetFunction("validatorCount").CallAsync<System.Numerics.BigInteger>();
+                var mintSigs = await contract.GetFunction("requiredMintSignatures").CallAsync<System.Numerics.BigInteger>();
+                var removeSigs = await contract.GetFunction("requiredRemoveSignatures").CallAsync<System.Numerics.BigInteger>();
+
+                return Ok(JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Validators = validators,
+                    AdminNonce = adminNonce.ToString(),
+                    ValidatorCount = valCount.ToString(),
+                    RequiredMintSignatures = mintSigs.ToString(),
+                    RequiredRemoveSignatures = removeSigs.ToString(),
+                    Network = Bitcoin.Services.BaseBridgeService.BaseNetworkDisplayName
+                }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Receives a BurnAlert from another caster.
+        /// </summary>
+        [HttpPost]
+        [Route("BurnAlert")]
+        public ActionResult<string> BurnAlert([FromBody] Bitcoin.Services.BurnExitConsensusService.BurnAlert alert)
+        {
+            try
+            {
+                if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash))
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid alert" }));
+
+                _ = Bitcoin.Services.BurnExitConsensusService.HandleBurnAlert(alert);
+                return Ok(JsonConvert.SerializeObject(new { Success = true }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Receives a BurnExitProposal from another caster.
+        /// </summary>
+        [HttpPost]
+        [Route("BurnExitProposal")]
+        public ActionResult<string> BurnExitProposal([FromBody] Bitcoin.Services.BurnExitConsensusService.BurnExitProposal proposal)
+        {
+            try
+            {
+                if (proposal == null || string.IsNullOrEmpty(proposal.BaseBurnTxHash))
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid proposal" }));
+
+                Bitcoin.Services.BurnExitConsensusService.HandleBurnExitProposal(proposal);
+                return Ok(JsonConvert.SerializeObject(new { Success = true }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Receives a BurnExitConfirmation from another caster.
+        /// </summary>
+        [HttpPost]
+        [Route("BurnExitConfirmation")]
+        public ActionResult<string> BurnExitConfirmation([FromBody] Bitcoin.Services.BurnExitConsensusService.BurnExitConfirmation confirmation)
+        {
+            try
+            {
+                if (confirmation == null || string.IsNullOrEmpty(confirmation.BaseBurnTxHash))
+                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid confirmation" }));
+
+                Bitcoin.Services.BurnExitConsensusService.HandleBurnExitConfirmation(confirmation);
+                return Ok(JsonConvert.SerializeObject(new { Success = true }));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        #endregion
+
         [HttpPost]
         [Route("Status")]
         public ActionResult<string> Status([FromBody] NetworkValidator networkVal)
@@ -28,13 +230,12 @@ namespace ReserveBlockCore.Controllers
             {
                 var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
 
-                // Convert it to a string if it's not null
-                string peerIP = remoteIpAddress?.ToString().Replace("::ffff:", "");
+                var peerIP = remoteIpAddress?.ToString()?.Replace("::ffff:", "") ?? "";
 
                 if (networkVal == null)
                     return BadRequest("Could not deserialize network val request");
 
-                if (Globals.BannedIPs.ContainsKey(peerIP))
+                if (!string.IsNullOrEmpty(peerIP) && Globals.BannedIPs.ContainsKey(peerIP))
                 {
                     return Unauthorized();
                 }
@@ -85,10 +286,13 @@ namespace ReserveBlockCore.Controllers
                 if (proof == null)
                     return BadRequest("Could not deserialize network val request");
 
-                if (Globals.BannedIPs.ContainsKey(peerIP))
+                if (peerIP != null && Globals.BannedIPs.ContainsKey(peerIP))
                 {
                     return Unauthorized();
                 }
+
+                if (string.IsNullOrEmpty(peerIP))
+                    return BadRequest("Could not determine caller IP");
 
                 // Verify the proof and add it if valid
                 if (proof.VerifyProof())
@@ -119,10 +323,11 @@ namespace ReserveBlockCore.Controllers
             {
                 var remoteIpAddress = HttpContext.Connection.RemoteIpAddress;
 
-                // Convert it to a string if it's not null
                 string? peerIP = remoteIpAddress?.ToString();
+                if (peerIP != null)
+                    peerIP = peerIP.Replace("::ffff:", "");
 
-                if (Globals.BannedIPs.ContainsKey(peerIP))
+                if (!string.IsNullOrEmpty(peerIP) && Globals.BannedIPs.ContainsKey(peerIP))
                 {
                     return Unauthorized();
                 }
@@ -178,10 +383,373 @@ namespace ReserveBlockCore.Controllers
                 if(round.Block == null)
                     return Ok("0");
 
+                // Do not publish attestations from this unauthenticated GET (DoS amplifier). Use authenticated RequestBlock / post-accept paths.
                 return Ok(JsonConvert.SerializeObject(round.Block));
             }
                 
             return Ok("0");
+        }
+
+        static bool IsCasterParticipantAddress(string? address)
+        {
+            if (string.IsNullOrEmpty(address))
+                return false;
+            if (Globals.BlockCasters.Any(x => x.ValidatorAddress == address))
+                return true;
+            lock (Globals.KnownCastersLock)
+                return Globals.KnownCasters.Any(x => x.Address == address);
+        }
+
+        [HttpPost]
+        [Route("SubmitAttestation")]
+        public ActionResult<string> SubmitAttestation([FromBody] SubmitAttestationRequest? body)
+        {
+            try
+            {
+                var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+                if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                    return Unauthorized();
+
+                if (body == null
+                    || string.IsNullOrWhiteSpace(body.BlockHash)
+                    || string.IsNullOrWhiteSpace(body.WinnerAddress)
+                    || string.IsNullOrWhiteSpace(body.PrevHash)
+                    || string.IsNullOrWhiteSpace(body.CasterAddress)
+                    || string.IsNullOrWhiteSpace(body.Signature))
+                    return BadRequest("invalid body");
+
+                if (!IsCasterParticipantAddress(body.CasterAddress))
+                    return Unauthorized();
+
+                var msg = ConsensusMessageFormatter.FormatAttestationV1(body.BlockHeight, body.BlockHash, body.WinnerAddress, body.PrevHash);
+                if (!SignatureService.VerifySignature(body.CasterAddress, msg, body.Signature))
+                    return Unauthorized();
+
+                var att = new CasterAttestation
+                {
+                    CasterAddress = body.CasterAddress,
+                    Signature = body.Signature,
+                    Timestamp = TimeUtil.GetTime()
+                };
+
+                if (!ConsensusAttestationStore.TryAdd(body.BlockHeight, body.CasterAddress, att, out var err))
+                    return Conflict(err);
+
+                return Ok();
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        [HttpGet]
+        [Route("GetAttestations/{blockHeight}")]
+        public ActionResult<string> GetAttestations(long blockHeight)
+        {
+            var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+            if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                return Unauthorized();
+            var list = ConsensusAttestationStore.GetForHeight(blockHeight);
+            return Ok(JsonConvert.SerializeObject(list));
+        }
+
+        [HttpPost]
+        [Route("RequestBlock")]
+        public async Task<ActionResult<string>> RequestBlock([FromBody] RequestBlockRequest? req)
+        {
+            try
+            {
+                var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+                if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                    return Unauthorized();
+
+                if (req == null || string.IsNullOrWhiteSpace(req.CasterAddress) || string.IsNullOrWhiteSpace(req.WinnerAddress) || string.IsNullOrWhiteSpace(req.Signature))
+                    return BadRequest();
+
+                var now = TimeUtil.GetTime();
+                if (Math.Abs(now - req.Timestamp) > 90)
+                    return Unauthorized("timestamp");
+
+                if (!IsCasterParticipantAddress(req.CasterAddress))
+                    return Unauthorized();
+
+                var msg = ConsensusMessageFormatter.FormatRequestBlockV1(req.BlockHeight, req.CasterAddress, req.WinnerAddress, req.Timestamp);
+                if (!SignatureService.VerifySignature(req.CasterAddress, msg, req.Signature))
+                    return Unauthorized();
+
+                if (RequestBlockCache.TryGet(req.BlockHeight, req.WinnerAddress, out var cached) && cached != null)
+                    return Ok(JsonConvert.SerializeObject(cached));
+
+                if (req.BlockHeight != Globals.LastBlock.Height + 1)
+                    return BadRequest("height");
+
+                if (Globals.CasterRoundDict.TryGetValue(req.BlockHeight, out var cr))
+                {
+                    if (!string.IsNullOrEmpty(cr.Validator) && cr.Validator != req.WinnerAddress)
+                        return BadRequest("winner mismatch");
+                    if (cr.Block != null && cr.Block.Validator == req.WinnerAddress)
+                    {
+                        RequestBlockCache.Add(req.BlockHeight, req.WinnerAddress, cr.Block);
+                        return Ok(JsonConvert.SerializeObject(cr.Block));
+                    }
+                }
+
+                // FIX (CRITICAL): Do NOT craft a new block here.
+                // The winning caster's consensus loop (iAmWinner path) is solely responsible for crafting
+                // the block and storing it in CasterRoundDict. If RequestBlock independently crafts a block,
+                // it races with the consensus loop and produces a DIFFERENT block (different timestamp/txs = 
+                // different hash), causing non-winners to end up with a different block than the winner ? FORK.
+                // Return "0" (not found) so the requesting caster retries until the consensus loop stores the block.
+                return Ok("0");
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        [HttpGet]
+        [Route("GetCasterList")]
+        public ActionResult<string> GetCasterList()
+        {
+            try
+            {
+                var acc = AccountData.GetLocalValidator();
+                if (acc == null || acc.GetPrivKey == null)
+                    return BadRequest();
+
+                var list = Globals.BlockCasters
+                    .Where(x => !string.IsNullOrEmpty(x.ValidatorAddress))
+                    .Select(x => new CasterInfo
+                    {
+                        Address = x.ValidatorAddress!,
+                        PeerIP = (x.PeerIP ?? "").Replace("::ffff:", ""),
+                        PublicKey = x.ValidatorPublicKey ?? ""
+                    })
+                    .OrderBy(x => x.Address, StringComparer.Ordinal)
+                    .ToList();
+
+                var h = (int)Math.Min(int.MaxValue, Math.Max(0, Globals.LastBlock.Height));
+                var canonical = ConsensusMessageFormatter.FormatSignedCasterListV1(h, list.Select(c => (c.Address, c.PeerIP, c.PublicKey)));
+                var sig = SignatureService.CreateSignature(canonical, acc.GetPrivKey, acc.PublicKey);
+                if (sig == "ERROR")
+                    return BadRequest("sign failed");
+
+                var resp = new SignedCasterListResponse
+                {
+                    AsOfBlockHeight = h,
+                    Casters = list,
+                    SignerAddress = acc.Address,
+                    Signature = sig
+                };
+                return Ok(JsonConvert.SerializeObject(resp));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        [HttpPost]
+        [Route("CasterInvitation")]
+        public ActionResult<string> CasterInvitation([FromBody] CasterRotationBroadcast? _)
+        {
+            return Accepted("CasterInvitation reserved for signed rotation flow (plan §7.4).");
+        }
+
+        /// <summary>
+        /// Returns this node's current block height as a plain number.
+        /// Used by SyncHeightWithPeersAsync to check if peers are ahead.
+        /// </summary>
+        [HttpGet]
+        [Route("GetBlockHeight")]
+        public ActionResult<string> GetBlockHeight()
+        {
+            return Ok(Globals.LastBlock.Height.ToString());
+        }
+
+        /// <summary>
+        /// Caster readiness check — returns this caster's current height and ready status.
+        /// Used by the startup readiness barrier so all casters sync before beginning consensus.
+        /// </summary>
+        [HttpGet]
+        [Route("CasterReadyCheck/{height}")]
+        public ActionResult<string> CasterReadyCheck(long height)
+        {
+            try
+            {
+                var myHeight = Globals.LastBlock.Height;
+                var ready = Globals.IsBlockCaster && !string.IsNullOrEmpty(Globals.ValidatorAddress);
+                var result = new { Height = myHeight, Ready = ready, Address = Globals.ValidatorAddress ?? "" };
+                return Ok(JsonConvert.SerializeObject(result));
+            }
+            catch { return BadRequest(); }
+        }
+
+        /// <summary>
+        /// CASTER-CONSENSUS-FIX: Winner vote exchange endpoint for mandatory agreement phase.
+        /// Receives a peer caster's winner vote, stores it in CasterWinnerVoteDict,
+        /// and returns all known votes for that height so peers can converge.
+        /// </summary>
+        [HttpPost]
+        [Route("ExchangeWinnerVote")]
+        public ActionResult<string> ExchangeWinnerVote([FromBody] WinnerVoteRequest? req)
+        {
+            try
+            {
+                if (req == null || req.BlockHeight <= 0 || string.IsNullOrEmpty(req.VoterAddress) || string.IsNullOrEmpty(req.WinnerAddress))
+                    return BadRequest("0");
+
+                // Only accept votes from known casters
+                var casterList = Globals.BlockCasters.ToList();
+                if (!casterList.Any(c => c.ValidatorAddress == req.VoterAddress))
+                    return BadRequest("0");
+
+                // Store the incoming vote
+                var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(req.BlockHeight, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, string>());
+                votesForHeight[req.VoterAddress] = req.WinnerAddress;
+
+                // Also ensure our own vote is present (if we have one from CasterRoundDict)
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress) && !votesForHeight.ContainsKey(Globals.ValidatorAddress))
+                {
+                    if (Globals.CasterRoundDict.TryGetValue(req.BlockHeight, out var round) && round?.Proof != null)
+                    {
+                        votesForHeight[Globals.ValidatorAddress] = round.Proof.Address;
+                    }
+                }
+
+                // Return all votes for this height
+                var result = new { BlockHeight = req.BlockHeight, Votes = votesForHeight.ToDictionary(kv => kv.Key, kv => kv.Value) };
+                return Ok(JsonConvert.SerializeObject(result));
+            }
+            catch { return BadRequest("0"); }
+        }
+
+        /// <summary>Receives a signed promotion to join the caster pool (dynamic discovery).</summary>
+        [HttpPost]
+        [Route("PromoteToCaster")]
+        public async Task<ActionResult<string>> PromoteToCaster([FromBody] CasterPromotionRequest? req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrEmpty(req.PromotedAddress))
+                    return BadRequest("invalid");
+                if (req.PromotedAddress != Globals.ValidatorAddress)
+                    return BadRequest("not for us");
+                await CasterDiscoveryService.HandlePromotion(req);
+                return Ok("promoted");
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        /// <summary>Graceful caster departure notice (signed by departing caster).</summary>
+        [HttpPost]
+        [Route("AnnounceCasterDeparture")]
+        public async Task<ActionResult<string>> AnnounceCasterDeparture([FromBody] CasterDepartureNotice? notice)
+        {
+            try
+            {
+                if (notice == null || string.IsNullOrEmpty(notice.DepartingAddress))
+                    return BadRequest("invalid");
+                if (!Globals.BlockCasters.Any(c => c.ValidatorAddress == notice.DepartingAddress))
+                    return BadRequest("not a known caster");
+                await CasterDiscoveryService.HandleDeparture(notice);
+                return Ok();
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        /// <summary>Diagnostics: top caster candidates by balance.</summary>
+        [HttpGet]
+        [Route("GetCasterCandidates")]
+        public ActionResult<string> GetCasterCandidates()
+        {
+            try
+            {
+                var currentCasterAddresses = Globals.BlockCasters.ToList()
+                    .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                    .Select(c => c.ValidatorAddress!)
+                    .ToHashSet();
+
+                var candidates = Globals.NetworkValidators.Values
+                    .Where(v => !string.IsNullOrEmpty(v.Address)
+                             && !currentCasterAddresses.Contains(v.Address)
+                             && v.IsFullyTrusted)
+                    .Select(v => new
+                    {
+                        Address = v.Address,
+                        IP = v.IPAddress,
+                        Balance = AccountStateTrei.GetAccountBalance(v.Address),
+                        LastSeen = v.LastSeen,
+                        FailCount = v.CheckFailCount
+                    })
+                    .OrderByDescending(x => x.Balance)
+                    .Take(10)
+                    .ToList();
+
+                return Ok(JsonConvert.SerializeObject(new
+                {
+                    CurrentCasters = Globals.BlockCasters.Count,
+                    MaxCasters = CasterDiscoveryService.MaxCasters,
+                    MinBalance = CasterDiscoveryService.MinCasterBalance,
+                    SlotsAvailable = Math.Max(0, CasterDiscoveryService.MaxCasters - Globals.BlockCasters.Count),
+                    Candidates = candidates
+                }));
+            }
+            catch { return Ok("0"); }
+        }
+
+        /// <summary>
+        /// Returns the block hash this caster has for the given height.
+        /// Used in the block-hash agreement phase to ensure all casters commit the same block.
+        /// </summary>
+        [HttpGet]
+        [Route("GetBlockHash/{blockHeight}")]
+        public ActionResult<string> GetBlockHash(long blockHeight)
+        {
+            try
+            {
+                // FIX: Return the COMMITTED block hash from the actual blockchain,
+                // not stale CasterRoundDict data. CasterRoundDict may hold an outdated
+                // block version from before hash-agreement or validation replaced it,
+                // causing phantom mismatches and infinite HASHSYNC loops.
+                
+                // 1. If this is the current committed block, return Globals.LastBlock directly
+                if (blockHeight == Globals.LastBlock.Height && !string.IsNullOrEmpty(Globals.LastBlock.Hash))
+                {
+                    var result = new { Hash = Globals.LastBlock.Hash, Validator = Globals.LastBlock.Validator, Height = blockHeight };
+                    return Ok(JsonConvert.SerializeObject(result));
+                }
+                
+                // 2. If this is a past block, look it up from the actual blockchain database
+                if (blockHeight < Globals.LastBlock.Height)
+                {
+                    var block = BlockchainData.GetBlockByHeight(blockHeight);
+                    if (block != null && !string.IsNullOrEmpty(block.Hash))
+                    {
+                        var result = new { Hash = block.Hash, Validator = block.Validator, Height = blockHeight };
+                        return Ok(JsonConvert.SerializeObject(result));
+                    }
+                }
+                
+                // 3. Only for FUTURE blocks (being crafted), use CasterRoundDict
+                if (blockHeight > Globals.LastBlock.Height && 
+                    Globals.CasterRoundDict.TryGetValue(blockHeight, out var round) && round?.Block != null)
+                {
+                    var result = new { Hash = round.Block.Hash, Validator = round.Block.Validator, Height = blockHeight };
+                    return Ok(JsonConvert.SerializeObject(result));
+                }
+                
+                return Ok("0");
+            }
+            catch { return Ok("0"); }
         }
 
         [HttpGet]
@@ -242,6 +810,19 @@ namespace ReserveBlockCore.Controllers
         public ActionResult<string> HeartBeat()
         {
             return Ok();
+        }
+
+        /// <summary>
+        /// Returns this node's wallet/CLI version string.
+        /// Used by casters during VerifyWinnerAvailability to reject validators
+        /// running outdated versions that can't participate in consensus properly.
+        /// Old nodes won't have this endpoint ? 404 ? rejected as winner.
+        /// </summary>
+        [HttpGet]
+        [Route("GetWalletVersion")]
+        public ActionResult<string> GetWalletVersion()
+        {
+            return Ok(Globals.CLIVersion);
         }
 
         [HttpGet]
@@ -312,8 +893,7 @@ namespace ReserveBlockCore.Controllers
             {
                 // Get validators using blockchain-based staleness check
                 var currentBlock = Globals.LastBlock.Height;
-                var activeValidators = Bitcoin.Models.VBTCValidator.GetActiveValidatorsWithStalenessCheck(
-                    currentBlock, Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
+                var activeValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -321,7 +901,7 @@ namespace ReserveBlockCore.Controllers
                     Message = "Active validators retrieved",
                     CurrentBlock = currentBlock,
                     TotalValidators = activeValidators?.Count ?? 0,
-                    ActiveValidators = activeValidators ?? new List<Bitcoin.Models.VBTCValidator>()
+                    ActiveValidators = activeValidators
                 });
             }
             catch (Exception ex)

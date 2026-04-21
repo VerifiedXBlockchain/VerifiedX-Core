@@ -56,6 +56,14 @@ namespace ReserveBlockCore.BrowserWalletServices
         public string? Password { get; set; }
     }
 
+    public class VBTCBridgeToBaseRequest
+    {
+        public string ScUID { get; set; } = "";
+        public string OwnerAddress { get; set; } = "";
+        public string Amount { get; set; } = "";
+        public string EvmDestination { get; set; } = "";
+    }
+
     public class BtcLinkEvmRequest
     {
         public string BtcAddress { get; set; } = "";

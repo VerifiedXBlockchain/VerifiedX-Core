@@ -8,6 +8,8 @@ using System.Net.Http.Json;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.SmartContracts;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
@@ -728,59 +730,139 @@ namespace ReserveBlockCore.Bitcoin.Services
                 
                 LogUtility.Log($"[FROST MPC] Broadcasting nonces and collecting signature shares...", "FrostMPCService.CollectSigningRound2Shares");
                 
-                // Broadcast aggregated nonces to all validators
+                // Broadcast aggregated nonces to all validators, extract signature shares
+                // directly from POST responses (the endpoint returns the share inline)
                 var noncePayload = JsonConvert.SerializeObject(nonces);
-                var tasks = validators.Select(async validator =>
+                var postSuccessCount = 0;
+                var postTasks = validators.Select(async validator =>
                 {
                     try
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/round2/{sessionId}";
                         var content = new StringContent(noncePayload, Encoding.UTF8, "application/json");
-                        await _httpClient.PostAsync(url, content);
-                    }
-                    catch { }
-                });
-                await Task.WhenAll(tasks);
-
-                await Task.Delay(2000);
-
-                // FIND-015 Fix: Collect signature shares using actual server response format
-                // Server GET /frost/sign/share/{sessionId} returns {Success, SessionId, Shares: {addr:data}, ...}
-                foreach (var validator in validators)
-                {
-                    try
-                    {
-                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/share/{sessionId}";
-                        var response = await _httpClient.GetAsync(url);
+                        var response = await _httpClient.PostAsync(url, content);
                         
                         if (response.IsSuccessStatusCode)
                         {
-                            var responseBody = await response.Content.ReadAsStringAsync();
-                            var json = JObject.Parse(responseBody);
+                            Interlocked.Increment(ref postSuccessCount);
                             
-                            if (json["Success"]?.Value<bool>() == true 
-                                && json["SessionId"]?.Value<string>() == sessionId
-                                && json["Shares"] is JObject sharesObj)
+                            // Extract the signature share directly from the POST response
+                            // instead of relying solely on a later GET poll.
+                            // POST /frost/sign/round2/{sessionId} returns:
+                            //   { Success: true, SignatureShare: "...", SessionId: "..." }
+                            try
                             {
-                                foreach (var kvp in sharesObj)
+                                var responseBody = await response.Content.ReadAsStringAsync();
+                                var json = JObject.Parse(responseBody);
+                                if (json["Success"]?.Value<bool>() == true 
+                                    && json["ShareGenerated"]?.Value<bool>() == true)
                                 {
-                                    var addr = kvp.Key;
-                                    var data = kvp.Value?.Value<string>();
-                                    if (!string.IsNullOrEmpty(data))
+                                    var share = json["SignatureShare"]?.Value<string>();
+                                    if (!string.IsNullOrEmpty(share))
                                     {
-                                        shares[addr] = data;
+                                        lock (shares)
+                                        {
+                                            if (!shares.ContainsKey(validator.ValidatorAddress))
+                                            {
+                                                shares[validator.ValidatorAddress] = share;
+                                                LogUtility.Log($"[FROST MPC] Extracted signature share from POST response for {validator.ValidatorAddress}",
+                                                    "FrostMPCService.CollectSigningRound2Shares");
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            catch (Exception parseEx)
+                            {
+                                LogUtility.Log($"[FROST MPC] Failed to parse POST response from {validator.ValidatorAddress}: {parseEx.Message}",
+                                    "FrostMPCService.CollectSigningRound2Shares");
+                            }
+                            
+                            return true;
+                        }
+                        else
+                        {
+                            var errorBody = await response.Content.ReadAsStringAsync();
+                            LogUtility.Log($"[FROST MPC] Sign Round 2 POST REJECTED by {validator.ValidatorAddress} ({validator.IPAddress}): HTTP {(int)response.StatusCode} — {errorBody}",
+                                "FrostMPCService.CollectSigningRound2Shares");
+                            return false;
                         }
                     }
                     catch (Exception ex)
                     {
-                        LogUtility.Log($"[FROST MPC] Failed to collect share from {validator.ValidatorAddress}: {ex.Message}", "FrostMPCService.CollectSigningRound2Shares");
+                        LogUtility.Log($"[FROST MPC] Sign Round 2 POST EXCEPTION contacting {validator.ValidatorAddress} ({validator.IPAddress}): {ex.Message}",
+                            "FrostMPCService.CollectSigningRound2Shares");
+                        return false;
                     }
+                });
+                var postResults = await Task.WhenAll(postTasks);
+
+                LogUtility.Log($"[FROST MPC] Sign Round 2 broadcast: {postSuccessCount}/{validators.Count} accepted, {shares.Count} shares extracted from POST responses",
+                    "FrostMPCService.CollectSigningRound2Shares");
+
+                // If we already have all shares from POST responses, skip polling entirely
+                if (shares.Count >= validators.Count)
+                {
+                    LogUtility.Log($"[FROST MPC] All {shares.Count} signature shares collected from POST responses — skipping GET polling",
+                        "FrostMPCService.CollectSigningRound2Shares");
+                    return shares;
                 }
 
-                LogUtility.Log($"[FROST MPC] Collected {shares.Count}/{validators.Count} signature shares", "FrostMPCService.CollectSigningRound2Shares");
+                // Retry polling with backoff: poll up to 5 times with increasing delays
+                // instead of a single fixed 2-second wait. This accommodates network latency
+                // and FROST native crypto processing time on remote validators.
+                var requiredCount = validators.Count; // ideally collect all shares
+                var maxAttempts = 5;
+                var pollDelaysMs = new[] { 2000, 2000, 3000, 3000, 5000 }; // total up to 15 seconds
+
+                for (int attempt = 0; attempt < maxAttempts; attempt++)
+                {
+                    await Task.Delay(pollDelaysMs[attempt]);
+
+                    // FIND-015 Fix: Collect signature shares using actual server response format
+                    // Server GET /frost/sign/share/{sessionId} returns {Success, SessionId, Shares: {addr:data}, ...}
+                    foreach (var validator in validators)
+                    {
+                        try
+                        {
+                            var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/share/{sessionId}";
+                            var response = await _httpClient.GetAsync(url);
+                            
+                            if (response.IsSuccessStatusCode)
+                            {
+                                var responseBody = await response.Content.ReadAsStringAsync();
+                                var json = JObject.Parse(responseBody);
+                                
+                                if (json["Success"]?.Value<bool>() == true 
+                                    && json["SessionId"]?.Value<string>() == sessionId
+                                    && json["Shares"] is JObject sharesObj)
+                                {
+                                    foreach (var kvp in sharesObj)
+                                    {
+                                        var addr = kvp.Key;
+                                        var data = kvp.Value?.Value<string>();
+                                        if (!string.IsNullOrEmpty(data) && !shares.ContainsKey(addr))
+                                        {
+                                            shares[addr] = data;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            LogUtility.Log($"[FROST MPC] Failed to collect share from {validator.ValidatorAddress} (attempt {attempt + 1}): {ex.Message}", "FrostMPCService.CollectSigningRound2Shares");
+                        }
+                    }
+
+                    LogUtility.Log($"[FROST MPC] Collected {shares.Count}/{validators.Count} signature shares (attempt {attempt + 1}/{maxAttempts})", "FrostMPCService.CollectSigningRound2Shares");
+
+                    // If we have all shares, no need to keep polling
+                    if (shares.Count >= requiredCount)
+                        break;
+                }
+
+                LogUtility.Log($"[FROST MPC] Final signature share collection: {shares.Count}/{validators.Count}", "FrostMPCService.CollectSigningRound2Shares");
                 return shares.Count > 0 ? shares : null;
             }
             catch (Exception ex)
@@ -841,51 +923,108 @@ namespace ReserveBlockCore.Bitcoin.Services
                     catch { /* Already logged during collection phase */ }
                 }
 
-                // FIND-026 Fix: Look up the pubkey package for THIS SPECIFIC contract.
-                // Key packages are stored under the DKG ceremony ID (not the scUID which doesn't
-                // exist yet during DKG). Use ceremonyId when available, fall back to scUID.
-                var keyLookupId = !string.IsNullOrEmpty(ceremonyId) ? ceremonyId : scUID;
-
-                if (scUID == "10e833cd81404daab9820d081dfefd06:1773167612")
-                    keyLookupId = "e4ac5290-5d9f-48db-be4f-909081276134";
-
-                if (scUID == "fd06ec2ce20a4a2aa7b3f2f2d2a92d11:1773205606")
-                    keyLookupId = "069f6dc5-d918-4018-a5b1-10e322f6b777";
-
-                LogUtility.Log($"[FROST MPC] Key lookup using ID: {keyLookupId} (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
+                // 3-tier key lookup for pubkey package:
+                // 1. Try SCUID first (works after SignStart auto-updated the record)
+                // 2. Try ceremonyId (original DKG session ID)
+                // 3. State Trei fallback → decompile contract → get GroupPublicKey → lookup by GPK
+                LogUtility.Log($"[FROST MPC] Key lookup for aggregation. scUID: {scUID}, ceremonyId: {ceremonyId ?? "null"}", "FrostMPCService.AggregateSignature");
 
                 string? pubkeyPackage = null;
                 var myAddr = Globals.ValidatorAddress;
-                if (!string.IsNullOrEmpty(myAddr) && !string.IsNullOrEmpty(keyLookupId))
+                FrostValidatorKeyStore? resolvedKeyStore = null;
+
+                // Tier 1: Try SCUID (SignStart may have already updated the record to use the real SCUID)
+                if (!string.IsNullOrEmpty(myAddr))
                 {
-                    var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
-                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.PubkeyPackage))
+                    resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackage(scUID, myAddr);
+                    if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
                     {
-                        pubkeyPackage = keyStore.PubkeyPackage;
-                        LogUtility.Log($"[FROST MPC] Found pubkey package for {keyLookupId} via direct lookup", "FrostMPCService.AggregateSignature");
+                        pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package via SCUID lookup: {scUID}", "FrostMPCService.AggregateSignature");
                     }
                 }
 
-                // Fallback: try any validator's key store for this contract
+                // Tier 2: Try ceremonyId (original DKG session GUID)
+                if (string.IsNullOrEmpty(pubkeyPackage) && !string.IsNullOrEmpty(ceremonyId) && !string.IsNullOrEmpty(myAddr))
+                {
+                    resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackage(ceremonyId, myAddr);
+                    if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
+                    {
+                        pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package via ceremonyId fallback: {ceremonyId}", "FrostMPCService.AggregateSignature");
+                    }
+                }
+
+                // Tier 3: State Trei fallback — decompile contract to get FrostGroupPublicKey, then lookup by GPK
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    pubkeyPackage = FrostValidatorKeyStore.GetPubkeyPackage(keyLookupId);
-                    if (!string.IsNullOrEmpty(pubkeyPackage))
+                    string? resolvedGroupPubKey = null;
+
+                    // Try local DB first
+                    var localContract = VBTCContractV2.GetContract(scUID);
+                    if (localContract != null && !string.IsNullOrEmpty(localContract.FrostGroupPublicKey))
                     {
-                        LogUtility.Log($"[FROST MPC] Found pubkey package for {keyLookupId} via fallback lookup", "FrostMPCService.AggregateSignature");
+                        resolvedGroupPubKey = localContract.FrostGroupPublicKey;
+                    }
+
+                    // Fall back to State Trei (works on all nodes including non-owners)
+                    if (string.IsNullOrEmpty(resolvedGroupPubKey))
+                    {
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTreiRec != null && !string.IsNullOrEmpty(scStateTreiRec.ContractData))
+                        {
+                            var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                            if (scMainDecompile?.Features != null)
+                            {
+                                var tknzFeature = scMainDecompile.Features
+                                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                    .Select(x => x.FeatureFeatures)
+                                    .FirstOrDefault();
+                                if (tknzFeature is TokenizationV2Feature tknz)
+                                {
+                                    resolvedGroupPubKey = tknz.FrostGroupPublicKey;
+                                    LogUtility.Log($"[FROST MPC] Resolved GroupPublicKey from State Trei: {resolvedGroupPubKey}", "FrostMPCService.AggregateSignature");
+                                }
+                            }
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(resolvedGroupPubKey) && !string.IsNullOrEmpty(myAddr))
+                    {
+                        resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(resolvedGroupPubKey, myAddr);
+                        if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
+                        {
+                            pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                            LogUtility.Log($"[FROST MPC] Found pubkey package via GroupPublicKey fallback: {resolvedGroupPubKey}", "FrostMPCService.AggregateSignature");
+                        }
                     }
                 }
 
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package for {keyLookupId} (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
+                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
                     return null;
                 }
 
                 // FIND-026 Fix: Remap signature shares and nonce commitments from VFX address keys
                 // to FROST Identifier keys (64-char hex scalars). The FROST native library expects
                 // BTreeMap<Identifier, SignatureShare> and BTreeMap<Identifier, NonceCommitment>.
-                var addrToFrostId = BuildAddressToFrostIdentifierMap(signerAddresses);
+                // Use stored participant order from DKG if available, otherwise fall back to sorted order.
+                List<string>? storedOrderForAggregate = null;
+                if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.ParticipantOrderJson))
+                {
+                    try
+                    {
+                        storedOrderForAggregate = JsonConvert.DeserializeObject<List<string>>(resolvedKeyStore.ParticipantOrderJson);
+                        LogUtility.Log($"[FROST MPC] Using stored participant order for aggregation ({storedOrderForAggregate?.Count ?? 0} entries)", "FrostMPCService.AggregateSignature");
+                    }
+                    catch (Exception orderEx)
+                    {
+                        LogUtility.Log($"[FROST MPC] WARNING: Failed to parse stored participant order: {orderEx.Message}. Falling back to sorted order.", "FrostMPCService.AggregateSignature");
+                    }
+                }
+                var addressListForAggregate = storedOrderForAggregate ?? signerAddresses;
+                var addrToFrostId = BuildAddressToFrostIdentifierMap(addressListForAggregate);
 
                 // Remap shares: VFX address → FROST Identifier
                 var remappedShares = new JObject();
@@ -1016,12 +1155,19 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// using participant list ordering. The ordering must be identical to how the signing
         /// session was created (i.e., the SignerAddresses list order from BroadcastSigningStart).
         /// </summary>
+        /// <summary>
+        /// Build a deterministic mapping from signer addresses to FROST Identifiers.
+        /// CRITICAL: Addresses are sorted alphabetically (Ordinal) before assigning identifiers
+        /// so that the same set of addresses ALWAYS produces the same mapping, regardless of
+        /// input order. This must match FrostStartup.BuildAddressToIdentifierMap exactly.
+        /// </summary>
         private static Dictionary<string, string> BuildAddressToFrostIdentifierMap(List<string> signerAddresses)
         {
+            var sorted = signerAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();
-            for (int i = 0; i < signerAddresses.Count; i++)
+            for (int i = 0; i < sorted.Count; i++)
             {
-                map[signerAddresses[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
+                map[sorted[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
             }
             return map;
         }

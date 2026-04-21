@@ -177,7 +177,7 @@ namespace ReserveBlockCore.BrowserWalletServices
                     }
                 }
 
-                var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+                var activeValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
                 if (activeValidators == null || !activeValidators.Any())
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available on the network. Cannot delegate withdrawal." });
@@ -362,6 +362,208 @@ namespace ReserveBlockCore.BrowserWalletServices
             catch (Exception ex)
             {
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error delegating withdrawal: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Bridge vBTC to Base as vBTC.b (ERC-20). 
+        /// User-driven: creates lock TX on VFX, collects validator attestations, 
+        /// and submits mintWithProof on Base using the user's own ETH key (user pays gas).
+        /// </summary>
+        public static async Task<object> BridgeToBase(string scUID, string ownerAddress, decimal amount, string evmDestination)
+        {
+            try
+            {
+                var result = await Bitcoin.Services.UserBridgeMintService.ExecuteBridgeToBase(scUID, ownerAddress, amount, evmDestination);
+
+                if (result.Success)
+                {
+                    return new
+                    {
+                        success = true,
+                        message = result.Message,
+                        lockId = result.LockId,
+                        amount = amount,
+                        evmDestination = evmDestination,
+                        contractAddress = Bitcoin.Services.BaseBridgeService.ContractAddress,
+                        chainId = Bitcoin.Services.BaseBridgeService.BaseChainId
+                    };
+                }
+                else
+                {
+                    return new { success = false, message = result.Message };
+                }
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Error bridging to Base: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
+        /// Retry a failed or timed-out bridge mint for a specific lock ID.
+        /// </summary>
+        public static async Task<object> RetryBridgeMint(string lockId, string ownerAddress)
+        {
+            try
+            {
+                var result = await Bitcoin.Services.UserBridgeMintService.RetryMintForLock(lockId, ownerAddress);
+                return new { success = result.Success, message = result.Message };
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Error retrying mint: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
+        /// Pre-flight info for the Bridge to Base modal.
+        /// Returns derived Base address, ETH balance, vBTC.b balance, available vBTC, and bridge config status.
+        /// </summary>
+        public static async Task<object> GetBridgePreflight(string ownerAddress, string scUID)
+        {
+            try
+            {
+                // Derive Base address from the VFX key
+                var derivedBaseAddress = Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromAccount(ownerAddress);
+                var hasDerivedAddress = !string.IsNullOrEmpty(derivedBaseAddress);
+
+                // Bridge config status
+                var bridgeConfigured = Bitcoin.Services.BaseBridgeService.IsBridgeConfigured;
+                var canReadEth = Bitcoin.Services.BaseBridgeService.CanReadEth;
+                var canReadVbtc = Bitcoin.Services.BaseBridgeService.CanReadVbtcToken;
+                var networkName = Bitcoin.Services.BaseBridgeService.BaseNetworkDisplayName;
+                var chainId = Bitcoin.Services.BaseBridgeService.BaseChainId;
+                var contractAddress = Bitcoin.Services.BaseBridgeService.ContractAddress;
+
+                // Fetch vBTC available balance on VFX side
+                decimal availableVbtc = 0M;
+                string vbtcError = null;
+                try
+                {
+                    var balResult = await Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(scUID, ownerAddress);
+                    if (balResult.success)
+                    {
+                        // Subtract local bridge reserves not yet confirmed on-chain
+                        var reserved = Bitcoin.Models.BridgeLockRecord.GetLockedAmount(ownerAddress, scUID);
+                        availableVbtc = balResult.availableBalance - reserved;
+                        if (availableVbtc < 0) availableVbtc = 0;
+                    }
+                    else
+                    {
+                        vbtcError = balResult.error;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    vbtcError = ex.Message;
+                }
+
+                // Fetch ETH balance on Base for the derived address
+                decimal? ethBalance = null;
+                string ethError = null;
+                if (hasDerivedAddress && canReadEth)
+                {
+                    try
+                    {
+                        var ethResult = await Bitcoin.Services.BaseBridgeService.GetEthBalanceAsync(derivedBaseAddress);
+                        if (ethResult.Success)
+                            ethBalance = ethResult.BalanceEth;
+                        else
+                            ethError = ethResult.Message;
+                    }
+                    catch (Exception ex) { ethError = ex.Message; }
+                }
+
+                // Fetch vBTC.b balance on Base for the derived address
+                decimal? vbtcBBalance = null;
+                string vbtcBError = null;
+                if (hasDerivedAddress && canReadVbtc)
+                {
+                    try
+                    {
+                        var tokResult = await Bitcoin.Services.BaseBridgeService.GetBaseBalance(derivedBaseAddress);
+                        if (tokResult.Success)
+                            vbtcBBalance = tokResult.Balance;
+                        else
+                            vbtcBError = tokResult.Message;
+                    }
+                    catch (Exception ex) { vbtcBError = ex.Message; }
+                }
+
+                return new
+                {
+                    success = true,
+                    // VFX side
+                    ownerAddress = ownerAddress,
+                    scUID = scUID,
+                    availableVbtc = availableVbtc,
+                    vbtcError = vbtcError,
+                    // Derived Base address
+                    derivedBaseAddress = derivedBaseAddress ?? "",
+                    hasDerivedAddress = hasDerivedAddress,
+                    // Base balances
+                    ethBalance = ethBalance,
+                    ethError = ethError,
+                    vbtcBBalance = vbtcBBalance,
+                    vbtcBError = vbtcBError,
+                    // Config
+                    bridgeConfigured = bridgeConfigured,
+                    canReadEth = canReadEth,
+                    canReadVbtc = canReadVbtc,
+                    networkName = networkName,
+                    chainId = chainId,
+                    contractAddress = contractAddress
+                };
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Preflight error: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
+        /// Get the status of a bridge lock by lockId.
+        /// Returns the BridgeLockRecord including attestation progress and status.
+        /// </summary>
+        public static object GetBridgeLockStatus(string lockId)
+        {
+            try
+            {
+                var record = BridgeLockRecord.GetByLockId(lockId);
+                if (record == null)
+                    return new { success = false, message = $"Bridge lock not found: {lockId}" };
+
+                var sigCount = record.ValidatorSignatures?.Count ?? 0;
+
+                return new
+                {
+                    success = true,
+                    lockId = record.LockId,
+                    scUID = record.SmartContractUID,
+                    ownerAddress = record.OwnerAddress,
+                    amount = record.Amount,
+                    amountSats = record.AmountSats,
+                    evmDestination = record.EvmDestination,
+                    status = record.Status.ToString(),
+                    vfxLockTxHash = record.VfxLockTxHash,
+                    vfxLockConfirmedOnChain = record.VfxLockConfirmedOnChain,
+                    vfxLockBlockHeight = record.VfxLockBlockHeight,
+                    baseTxHash = record.BaseTxHash,
+                    exitBurnTxHash = record.ExitBurnTxHash,
+                    signaturesCollected = sigCount,
+                    requiredSignatures = record.RequiredSignatures,
+                    mintNonce = record.MintNonce,
+                    signatures = record.ValidatorSignatures,
+                    createdAtUtc = record.CreatedAtUtc,
+                    relayedAtUtc = record.RelayedAtUtc,
+                    finalizedAtUtc = record.FinalizedAtUtc,
+                    errorMessage = record.ErrorMessage
+                };
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Error retrieving bridge lock status: {ex.Message}" };
             }
         }
     }

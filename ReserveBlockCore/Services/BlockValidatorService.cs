@@ -10,6 +10,7 @@ using ReserveBlockCore.P2P;
 using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
 using System.Security.Principal;
@@ -19,6 +20,8 @@ namespace ReserveBlockCore.Services
 {
     public class BlockValidatorService
     {
+        /// <summary>Rate-limits "block rejected" log messages — one log per validator:height combo.</summary>
+        private static readonly ConcurrentDictionary<string, bool> _blockRejectionLog = new();
         public static SemaphoreSlim ValidateBlocksSemaphore = new SemaphoreSlim(1, 1);
         public static SemaphoreSlim ValidateBlockSemaphore = new SemaphoreSlim(1, 1);
 
@@ -385,6 +388,14 @@ namespace ReserveBlockCore.Services
                     //no rules
                 }
 
+                // Certificates are attached after local craft (TryAttachCertificateAsync) and before broadcast.
+                // validateOnly preflight must not require a cert yet; full acceptance paths use validateOnly=false.
+                if (!validateOnly && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                {
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
+                    return result;
+                }
+
                 //ensures the timestamps being produced are correct
                 if (block.Height != 0)
                 {
@@ -550,6 +561,10 @@ namespace ReserveBlockCore.Services
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
                                     blkTransaction.TransactionType != TransactionType.VFX_SHIELD &&
                                     blkTransaction.TransactionType != TransactionType.VFX_UNSHIELD &&
                                     blkTransaction.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
@@ -879,10 +894,9 @@ namespace ReserveBlockCore.Services
                                             RegisterTransactionHash = tx.Hash
                                         };
                                         
-                                        Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
-                                        
-                                        LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", 
-                                            "BlockValidatorService");
+                                        // No DB save needed — VBTCValidatorRegistry derives state from block scanning
+
+                                        //LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
@@ -900,10 +914,9 @@ namespace ReserveBlockCore.Services
                                         var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
                                         var exitBlockHeight = jobj["ExitBlockHeight"]?.ToObject<long>();
                                         
-                                        Bitcoin.Models.VBTCValidator.SetInactive(validatorAddress, tx.Hash, exitBlockHeight ?? block.Height);
-                                        
-                                        LogUtility.Log($"Processed VBTC V2 validator exit for {validatorAddress} at block {block.Height}", 
-                                            "BlockValidatorService");
+                                        // No DB update needed — VBTCValidatorRegistry derives state from block scanning
+
+                                        //LogUtility.Log($"Processed VBTC V2 validator exit for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
@@ -933,36 +946,9 @@ namespace ReserveBlockCore.Services
                                             continue; // Skip — don't update DB with invalid IP
                                         }
 
-                                        var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(validatorAddress);
-                                        if (existingValidator != null)
-                                        {
-                                            // Update IP, reactivate, and refresh heartbeat block
-                                            existingValidator.IPAddress = ipAddress;
-                                            existingValidator.IsActive = true;
-                                            existingValidator.LastHeartbeatBlock = block.Height;
-                                            if (!string.IsNullOrEmpty(frostPublicKey))
-                                                existingValidator.FrostPublicKey = frostPublicKey;
-                                            Bitcoin.Models.VBTCValidator.SaveValidator(existingValidator);
-                                        }
-                                        else
-                                        {
-                                            // Validator not in local DB — create from heartbeat data
-                                            // (can happen when a node receives the heartbeat before it received the registration)
-                                            var vbtcValidator = new Bitcoin.Models.VBTCValidator
-                                            {
-                                                ValidatorAddress = validatorAddress,
-                                                IPAddress = ipAddress,
-                                                RegistrationBlockHeight = reactivationBlockHeight ?? block.Height,
-                                                LastHeartbeatBlock = block.Height,
-                                                IsActive = true,
-                                                FrostPublicKey = frostPublicKey ?? "",
-                                                RegisterTransactionHash = tx.Hash
-                                            };
-                                            Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
-                                        }
+                                        // No DB save needed — VBTCValidatorRegistry derives state from block scanning
 
-                                        LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}",
-                                            "BlockValidatorService");
+                                        //LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
@@ -1106,6 +1092,9 @@ namespace ReserveBlockCore.Services
                     await TransactionData.UpdateWalletTXTask();
 
                     //DbContext.Commit();
+
+                    if (!validateOnly && !blockDownloads && ConsensusCertificateRules.SupportsConsensusCertificate(block.Version) && !Globals.IsBootstrapMode)
+                        _ = ConsensusAttestationPublisher.PublishLocalAsync(block);
 
                     return result;//block accepted
                 }
@@ -1257,7 +1246,9 @@ namespace ReserveBlockCore.Services
                     ValidatorLogUtility.Log("Block validated failed due to transactions not validating", "BlockValidatorService.ValidateBlockForTask()");
                     return result;//block rejected due to bad transaction(s)
                 }
-                    
+
+                if (!ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                    return result;
 
                 result = true;
             }

@@ -24,6 +24,8 @@ namespace ReserveBlockCore.Bitcoin.Models
         public string? VfxLockTxHash { get; set; }
         /// <summary>True after the lock is applied in the state trei (included in a block).</summary>
         public bool VfxLockConfirmedOnChain { get; set; }
+        /// <summary>VFX block height when the lock TX was included (used as mint attestation nonce for VBTCb).</summary>
+        public long VfxLockBlockHeight { get; set; }
         public string? BaseTxHash { get; set; }
         /// <summary>Set when burnForExit on Base is observed and the lock is released on VFX (demo bridge-back).</summary>
         public string? ExitBurnTxHash { get; set; }
@@ -32,6 +34,14 @@ namespace ReserveBlockCore.Bitcoin.Models
         public long? RelayedAtUtc { get; set; }
         public long? FinalizedAtUtc { get; set; }
         public string? ErrorMessage { get; set; }
+
+        public Dictionary<string, string>? ValidatorSignatures { get; set; }
+        public int RequiredSignatures { get; set; }
+        public long MintNonce { get; set; }
+        public string? BtcExitDestination { get; set; }
+        public string? BtcExitTxHash { get; set; }
+        public decimal? BtcExitAmountSent { get; set; }
+        public decimal? BtcExitFeePaid { get; set; }
 
         #region DB Constants
         private const string COLLECTION_NAME = "rsrv_bridge_locks";
@@ -68,16 +78,16 @@ namespace ReserveBlockCore.Bitcoin.Models
             return col.Find(x => x.Status == status).ToList();
         }
 
-        /// <summary>
-        /// Locks ready for Base mint: VFX lock tx confirmed on-chain (state trei), relay not yet started.
-        /// </summary>
-        public static List<BridgeLockRecord> GetPendingRelays()
+        /// <summary>Locks confirmed on VFX that still need validator mint attestations (V2).</summary>
+        public static List<BridgeLockRecord> GetPendingV2Attestations()
         {
+            if (!ReserveBlockCore.Bitcoin.Services.BaseBridgeService.IsBridgeConfigured)
+                return new List<BridgeLockRecord>();
             var col = GetCollection();
             return col.Find(x =>
-                x.Status == BridgeLockStatus.Locked &&
                 x.VfxLockConfirmedOnChain &&
-                !string.IsNullOrEmpty(x.VfxLockTxHash)).ToList();
+                !string.IsNullOrEmpty(x.VfxLockTxHash) &&
+                (x.Status == BridgeLockStatus.Locked || x.Status == BridgeLockStatus.AttestationPending)).ToList();
         }
 
         /// <summary>
@@ -97,7 +107,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         }
 
         /// <summary>Called when a VBTC_V2_BRIDGE_LOCK is applied chain-wide (state trei update).</summary>
-        public static bool TryMarkVfxLockConfirmed(string lockId, string vfxTxHash)
+        public static bool TryMarkVfxLockConfirmed(string lockId, string vfxTxHash, long vfxBlockHeight = 0)
         {
             try
             {
@@ -109,6 +119,8 @@ namespace ReserveBlockCore.Bitcoin.Models
                 r.VfxLockConfirmedOnChain = true;
                 if (string.IsNullOrEmpty(r.VfxLockTxHash))
                     r.VfxLockTxHash = vfxTxHash;
+                if (vfxBlockHeight > 0)
+                    r.VfxLockBlockHeight = vfxBlockHeight;
                 col.Update(r);
                 return true;
             }
@@ -146,7 +158,7 @@ namespace ReserveBlockCore.Bitcoin.Models
 
                 if (newStatus == BridgeLockStatus.ProofSubmitted)
                     record.RelayedAtUtc = TimeUtil.GetTime();
-                else if (newStatus == BridgeLockStatus.Minted || newStatus == BridgeLockStatus.Redeemed || newStatus == BridgeLockStatus.Unlocked)
+                else if (newStatus == BridgeLockStatus.Minted || newStatus == BridgeLockStatus.MintedOnBase || newStatus == BridgeLockStatus.Redeemed || newStatus == BridgeLockStatus.Unlocked || newStatus == BridgeLockStatus.UnlockedOnVFX || newStatus == BridgeLockStatus.BTCExitComplete)
                     record.FinalizedAtUtc = TimeUtil.GetTime();
 
                 col.Update(record);
@@ -166,7 +178,7 @@ namespace ReserveBlockCore.Bitcoin.Models
             try
             {
                 var record = GetByLockId(lockId);
-                if (record == null || record.Status != BridgeLockStatus.Minted) return false;
+                if (record == null || (record.Status != BridgeLockStatus.Minted && record.Status != BridgeLockStatus.MintedOnBase)) return false;
                 if (record.AmountSats != amountSats) return false;
                 if (string.IsNullOrEmpty(burnerAddress) ||
                     !string.Equals(record.EvmDestination.Trim(), burnerAddress.Trim(), StringComparison.OrdinalIgnoreCase))
@@ -189,7 +201,7 @@ namespace ReserveBlockCore.Bitcoin.Models
             {
                 var col = GetCollection();
                 var record = col.FindOne(x => x.LockId == lockId.Trim());
-                if (record == null || record.Status != BridgeLockStatus.Minted) return false;
+                if (record == null || (record.Status != BridgeLockStatus.Minted && record.Status != BridgeLockStatus.MintedOnBase)) return false;
                 if (!string.IsNullOrEmpty(record.ExitBurnTxHash)) return false;
 
                 record.Status = BridgeLockStatus.Redeeming;
@@ -234,6 +246,16 @@ namespace ReserveBlockCore.Bitcoin.Models
         Redeeming = 3,
         Redeemed = 4,
         Unlocked = 5,
-        Failed = 6
+        Failed = 6,
+        AttestationPending = 7,
+        AttestationReady = 8,
+        MintedOnBase = 9,
+        ExitBurned = 10,
+        UnlockedOnVFX = 11,
+        BTCExitBurned = 12,
+        BTCExitSigning = 13,
+        BTCExitBroadcast = 14,
+        BTCExitComplete = 15,
+        Expired = 16
     }
 }

@@ -150,7 +150,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var leaderValidator = VBTCValidator.GetValidator(request.LeaderAddress);
+                            var leaderValidator = Services.VBTCValidatorRegistry.GetValidator(request.LeaderAddress);
                             if (leaderValidator == null || !leaderValidator.IsActive)
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -165,7 +165,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             // FIND-0013 Fix: Verify all participants are registered active validators
                             foreach (var participantAddr in request.ParticipantAddresses)
                             {
-                                var participantValidator = VBTCValidator.GetValidator(participantAddr);
+                                var participantValidator = Services.VBTCValidatorRegistry.GetValidator(participantAddr);
                                 if (participantValidator == null || !participantValidator.IsActive)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -206,8 +206,10 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Determine this validator's participant index (1-based)
+                            // CRITICAL: Use sorted order to match BuildAddressToIdentifierMap
                             var myAddress = Globals.ValidatorAddress;
-                            var participantIndex = request.ParticipantAddresses.IndexOf(myAddress);
+                            var sortedParticipants = request.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
+                            var participantIndex = sortedParticipants.IndexOf(myAddress);
                             if (participantIndex < 0)
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -1040,10 +1042,11 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                         session.DKGProof = GenerateDKGProof(session.SessionId, groupPubkey, pubkeyPackage);
                                         session.IsCompleted = true;
 
-                                        // Persist key package for future signing
+                                        // Persist key package for future signing, including sorted participant order
                                         var myAddr = Globals.ValidatorAddress;
                                         if (!string.IsNullOrEmpty(myAddr))
                                         {
+                                            var sortedR3Order = session.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
                                             FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
                                             {
                                                 SmartContractUID = session.SmartContractUID,
@@ -1051,6 +1054,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                                 KeyPackage = keyPackage,
                                                 PubkeyPackage = pubkeyPackage,
                                                 GroupPublicKey = groupPubkey,
+                                                ParticipantOrderJson = JsonConvert.SerializeObject(sortedR3Order),
                                                 CreatedTimestamp = TimeUtil.GetTime()
                                             });
                                         }
@@ -1319,7 +1323,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var leaderValidator = VBTCValidator.GetValidator(request.LeaderAddress);
+                            var leaderValidator = Services.VBTCValidatorRegistry.GetValidator(request.LeaderAddress);
                             if (leaderValidator == null || !leaderValidator.IsActive)
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -1358,18 +1362,44 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Load this validator's key package and generate nonces
-                            // Use CeremonyId (original DKG ceremony ID) for key lookup when available,
-                            // since key packages are stored under the ceremonyId during DKG (before scUID exists).
                             var myAddr = Globals.ValidatorAddress;
-                            var keyLookupId = !string.IsNullOrEmpty(request.CeremonyId) ? request.CeremonyId : request.SmartContractUID;
 
-                            if (request.SmartContractUID == "10e833cd81404daab9820d081dfefd06:1773167612")
-                                keyLookupId = "e4ac5290-5d9f-48db-be4f-909081276134";
+                            // Try direct SCUID lookup first
+                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(request.SmartContractUID, myAddr);
 
-                            if(request.SmartContractUID == "fd06ec2ce20a4a2aa7b3f2f2d2a92d11:1773205606")
-                                keyLookupId = "069f6dc5-d918-4018-a5b1-10e322f6b777";
+                            // If CeremonyId was provided and direct lookup failed, try ceremony ID
+                            if ((keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
+                                && !string.IsNullOrEmpty(request.CeremonyId))
+                            {
+                                keyStore = FrostValidatorKeyStore.GetKeyPackage(request.CeremonyId, myAddr);
+                                if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage))
+                                {
+                                    // Auto-fix: update the key store record to use the real SCUID
+                                    LogUtility.Log($"[FROST] Key found via CeremonyId fallback for SC={request.SmartContractUID} (was {request.CeremonyId}). Auto-updating.",
+                                        "FrostStartup.SignStart");
+                                    FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID);
+                                    keyStore.SmartContractUID = request.SmartContractUID;
+                                }
+                            }
 
-                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
+                            // Fallback: look up via FrostGroupPublicKey from VBTCContractV2
+                            if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
+                            {
+                                var vbtcContract = ReserveBlockCore.Bitcoin.Models.VBTCContractV2.GetContract(request.SmartContractUID);
+                                if (vbtcContract != null && !string.IsNullOrEmpty(vbtcContract.FrostGroupPublicKey))
+                                {
+                                    keyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
+                                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage))
+                                    {
+                                        // Auto-fix: update the key store record to use the real SCUID
+                                        LogUtility.Log($"[FROST] Key found via GroupPublicKey fallback for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
+                                            "FrostStartup.SignStart");
+                                        FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID);
+                                        keyStore.SmartContractUID = request.SmartContractUID;
+                                    }
+                                }
+                            }
+
                             if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -1395,6 +1425,21 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // Load stored participant order from DKG key store if available
+                            List<string>? storedOrder = null;
+                            if (!string.IsNullOrEmpty(keyStore.ParticipantOrderJson))
+                            {
+                                try
+                                {
+                                    storedOrder = JsonConvert.DeserializeObject<List<string>>(keyStore.ParticipantOrderJson);
+                                    LogUtility.Log($"[FROST] Loaded stored participant order from DKG key store ({storedOrder?.Count ?? 0} entries)", "FrostStartup.SignStart");
+                                }
+                                catch (Exception orderEx)
+                                {
+                                    LogUtility.Log($"[FROST] WARNING: Failed to parse stored participant order: {orderEx.Message}. Will fall back to sorted order.", "FrostStartup.SignStart");
+                                }
+                            }
+
                             // Create signing session with FROST state
                             var signingSession = new SigningSession
                             {
@@ -1406,7 +1451,8 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 RequiredThreshold = request.RequiredThreshold,
                                 StartTimestamp = TimeUtil.GetTime(),
                                 MyKeyPackage = keyStore.KeyPackage,
-                                NonceSecret = nonceSecret
+                                NonceSecret = nonceSecret,
+                                StoredParticipantOrder = storedOrder
                             };
 
                             // Auto-store this validator's nonce commitment
@@ -1690,7 +1736,9 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                             if (addressNonces != null && addressNonces.Count > 0 && session.SignerAddresses != null && session.SignerAddresses.Count > 0)
                             {
-                                var signerAddrToId = BuildAddressToIdentifierMap(session.SignerAddresses);
+                            // Use stored participant order from DKG if available, otherwise fall back to sorted order
+                            var addressListForMapping = session.StoredParticipantOrder ?? session.SignerAddresses;
+                            var signerAddrToId = BuildAddressToIdentifierMap(addressListForMapping);
                                 var noncesBTreeMap = new Newtonsoft.Json.Linq.JObject();
 
                                 foreach (var kvp in addressNonces)
@@ -2049,6 +2097,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 // Build BTreeMap<Identifier, round1::Package> from commitments (exclude self)
                 // FROST part3 expects only OTHER participants' round1 packages
                 var myAddr2 = Globals.ValidatorAddress;
+                var sortedParticipantOrder = session.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
                 var addrToIdMap = BuildAddressToIdentifierMap(session.ParticipantAddresses);
                 var round1BTreeMap = new Newtonsoft.Json.Linq.JObject();
                 foreach (var kvp in session.Round1Commitments)
@@ -2107,7 +2156,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 {
                     session.Round3Verifications.TryAdd(myAddr, true);
 
-                    // Persist key package for future signing
+                    // Persist key package for future signing, including the sorted participant order
                     FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
                     {
                         SmartContractUID = session.SmartContractUID,
@@ -2115,6 +2164,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                         KeyPackage = keyPackage,
                         PubkeyPackage = pubkeyPackage,
                         GroupPublicKey = groupPubkey,
+                        ParticipantOrderJson = Newtonsoft.Json.JsonConvert.SerializeObject(sortedParticipantOrder),
                         CreatedTimestamp = TimeUtil.GetTime()
                     });
                 }
@@ -2148,12 +2198,21 @@ namespace ReserveBlockCore.Bitcoin.FROST
         /// <summary>
         /// Build a lookup from VFX address to FROST Identifier hex string using participant list ordering.
         /// </summary>
+        /// <summary>
+        /// Build a deterministic mapping from participant addresses to FROST Identifiers.
+        /// CRITICAL: Addresses are sorted alphabetically before assigning identifiers so that
+        /// the same set of addresses ALWAYS produces the same identifier mapping, regardless
+        /// of the order they were returned by GetActiveValidators() or any other source.
+        /// This ensures DKG and signing ceremonies use consistent identifiers even when
+        /// the validator list grows, shrinks, or the dictionary iteration order changes.
+        /// </summary>
         private static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
         {
+            var sorted = participantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();
-            for (int i = 0; i < participantAddresses.Count; i++)
+            for (int i = 0; i < sorted.Count; i++)
             {
-                map[participantAddresses[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
+                map[sorted[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
             }
             return map;
         }

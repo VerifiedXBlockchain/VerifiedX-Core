@@ -117,9 +117,12 @@ namespace ReserveBlockCore.Nodes
                             continue;
                         }
                     }
+                    var totalVals = !Globals.IsBootstrapMode && ValidatorSnapshotService.CurrentSnapshot.Count > 0
+                        ? ValidatorSnapshotService.CurrentSnapshot.Count
+                        : Globals.NetworkValidators.Count;
                     var block = await BlockchainData.CraftBlock_V5(
                                                     Globals.ValidatorAddress,
-                                                    Globals.NetworkValidators.Count(),
+                                                    totalVals,
                                                     proof.Item2, nextHeight, false, true);
 
                     if (block != null)
@@ -159,8 +162,15 @@ namespace ReserveBlockCore.Nodes
 
         public static async Task GetBlockcasters()
         {
-            if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+            if (Globals.StopAllTimers && !Globals.IsChainSynced)
+                return;
+            // Hardcoded bootstrap caster list does not require P2P; allow injection while Nodes is still empty.
+            if (Globals.Nodes.Count == 0 && !SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
+                return;
+
+            if (!SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
             {
+                Globals.SyncKnownCastersFromBlockCasters();
                 return;
             }
 
@@ -285,6 +295,62 @@ namespace ReserveBlockCore.Nodes
                         Globals.BlockCasters.Add(caster);
                 }
             }
+
+            Globals.SyncKnownCastersFromBlockCasters();
+        }
+
+        /// <summary>Phase 2: request the same height from two casters; require matching hash when both respond.</summary>
+        /// <summary>
+        /// CASTER-SYNC-FIX: Enhanced block fetch — queries ALL reachable casters in parallel
+        /// and requires a supermajority to agree on the same block hash.
+        /// Previously only checked 2 casters, allowing split-brain when they disagreed.
+        /// </summary>
+        public static async Task<Block?> FetchBlockWithRedundantCasterAgreementAsync(long height, string winnerAddress)
+        {
+            var peers = Globals.BlockCasters.Where(x => !string.IsNullOrEmpty(x.PeerIP)).ToList();
+            if (peers.Count == 0)
+                return null;
+
+            // Fetch from ALL casters in parallel
+            var fetchTasks = peers.Select(async peer =>
+            {
+                try
+                {
+                    var block = await CasterBlockFetch.TryFetchBlockAsync(peer, height, winnerAddress);
+                    if (block != null && block.Validator == winnerAddress)
+                        return (block, peer.PeerIP);
+                }
+                catch { }
+                return ((Block?)null, peer.PeerIP);
+            }).ToList();
+
+            var results = await Task.WhenAll(fetchTasks);
+            var validResults = results.Where(r => r.Item1 != null).ToList();
+
+            if (validResults.Count == 0)
+                return null;
+
+            // Group by hash and find the supermajority
+            var requiredAgreement = Math.Max(2, peers.Count / 2 + 1);
+            var hashGroups = validResults
+                .GroupBy(r => r.Item1!.Hash)
+                .OrderByDescending(g => g.Count())
+                .ToList();
+
+            var bestGroup = hashGroups.First();
+            if (bestGroup.Count() >= requiredAgreement)
+            {
+                // Supermajority agrees on this hash
+                return bestGroup.First().Item1;
+            }
+
+            // If only one caster responded, accept it (better than nothing)
+            if (validResults.Count == 1)
+                return validResults[0].Item1;
+
+            // No supermajority — return null to signal disagreement
+            ConsoleWriterService.OutputVal($"[FetchBlock] No hash agreement at height {height}: {string.Join(", ", hashGroups.Select(g => $"{g.Key?[..Math.Min(8, g.Key?.Length ?? 0)]}={g.Count()}"))}");
+            return null;
         }
 
         #endregion
@@ -729,6 +795,13 @@ namespace ReserveBlockCore.Nodes
                 try
                 {
                     if (Globals.StopAllTimers && !Globals.IsChainSynced)
+                    {
+                        await delay;
+                        continue;
+                    }
+
+                    // Don't notify explorer if ports haven't been verified open
+                    if (!Globals.PortsOpened)
                     {
                         await delay;
                         continue;

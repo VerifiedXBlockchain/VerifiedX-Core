@@ -346,29 +346,28 @@ namespace ReserveBlockCore.Services
                     }
                 }
 
-                if (Globals.AdjudicateAccount == null)
-                {
-                    var now = DateTime.Now;
-                    var lastShutDown = settings.LastShutdown;
+                
+                var now = DateTime.Now;
+                var lastShutDown = settings.LastShutdown;
 
-                    if (lastShutDown != null && settings.CorrectShutdown && Globals.LastBlock.Height > 0)
+                if (lastShutDown != null && settings.CorrectShutdown && Globals.LastBlock.Height > 0)
+                {
+                    if (!Debugger.IsAttached && lastShutDown.Value.AddSeconds(20) > now)
                     {
-                        if (!Debugger.IsAttached && lastShutDown.Value.AddSeconds(20) > now)
-                        {
-                            var diff = Convert.ToInt32((lastShutDown.Value.AddSeconds(20) - now).TotalMilliseconds);
-                            Console.WriteLine("Wallet was restarted too fast. Startup will continue in a moment. Do not close wallet.");
-                            await Task.Delay(diff);//make the wallet wait if restart is too fast
-                        }
-                    }
-                    else
-                    {
-                        if (!Debugger.IsAttached && Globals.LastBlock.Height > 0)
-                        {
-                            Console.WriteLine("Wallet was restarted too fast or improperly closed. Startup will continue in a moment. Do not close wallet.");
-                            await Task.Delay(15000);
-                        }
+                        var diff = Convert.ToInt32((lastShutDown.Value.AddSeconds(20) - now).TotalMilliseconds);
+                        Console.WriteLine("Wallet was restarted too fast. Startup will continue in a moment. Do not close wallet.");
+                        await Task.Delay(diff);//make the wallet wait if restart is too fast
                     }
                 }
+                else
+                {
+                    if (!Debugger.IsAttached && Globals.LastBlock.Height > 0 && !skipStateSync)
+                    {
+                        Console.WriteLine("Wallet was restarted too fast or improperly closed. Startup will continue in a moment. Do not close wallet.");
+                        await Task.Delay(15000);
+                    }
+                }
+                
 
                 _ = Settings.InitiateStartupUpdate();
             }
@@ -733,6 +732,17 @@ namespace ReserveBlockCore.Services
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
             }
+
+            // Derive Base address if validator was found
+            if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.SetValidator()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
+            }
         }
 
         internal static async void SetConfigValidator()
@@ -746,6 +756,14 @@ namespace ReserveBlockCore.Services
                 var valResult = await ValidatorService.StartValidating(myAccount, uname, true);
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
+
+                // Derive Base address after config validator is set
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.SetConfigValidator()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
             }
         }
 
@@ -1414,6 +1432,14 @@ namespace ReserveBlockCore.Services
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
                 LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
+
+                // Derive Base address immediately after validator address is confirmed
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.DisplayValidatorAddress()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
             }
         }
 

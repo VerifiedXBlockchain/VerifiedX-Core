@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -13,6 +14,13 @@ namespace ReserveBlockCore.Utilities
         public static void LogQueue(string message, string location, string fileName, bool log)
         {
             if(!log)
+                return; // this disables the log queue
+            FileQueue.Enqueue((message, location, fileName, DateTime.Now));
+        }
+
+        private static async Task LogEnqueue(string message, string location, string fileName, bool log)
+        {
+            if (!log)
                 return; // this disables the log queue
             FileQueue.Enqueue((message, location, fileName, DateTime.Now));
         }
@@ -56,8 +64,16 @@ namespace ReserveBlockCore.Utilities
                 {
                     if(FileQueue.TryDequeue(out var content))
                     {
-                        var text = "[" + content.Time + "]" + " : " + "[" + content.Location + "]" + " : " + content.Message;
-                        await File.AppendAllTextAsync(path + content.FileName, Environment.NewLine + text);
+                        try
+                        {
+                            var text = "[" + content.Time + "]" + " : " + "[" + content.Location + "]" + " : " + content.Message;
+                            await File.AppendAllTextAsync(path + content.FileName, Environment.NewLine + text);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Don't let a single write failure kill the entire log loop
+                            Console.WriteLine($"[LogUtility.LogLoop] Failed to write log entry: {ex.Message}");
+                        }
                     }
                 }
 
@@ -105,13 +121,24 @@ namespace ReserveBlockCore.Utilities
                     await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + " ");
                 }
 
-
-                await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + text);
+                await LogEnqueue(message, location, "rbxlog.txt", true);
+                //await File.AppendAllTextAsync(path + "rbxlog.txt", Environment.NewLine + text);
                 VFXLogging.LogInfo(message, location);
             }
             catch (Exception ex)
             {
-
+                try
+                {
+                    // Synchronous fallback — async void swallows exceptions silently,
+                    // so we must not let the catch block itself rely on async infrastructure.
+                    var fallbackText = $"[{DateTime.Now}] [LogUtility.Log] Error Logging: {ex}{Environment.NewLine}Original message: [{location}] {message}";
+                    Console.WriteLine(fallbackText);
+                    LogEnqueue($"Error Logging: {ex}", "", "rbxlog.txt", true).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Last resort — prevent async void from crashing the process
+                }
             }
         }
 

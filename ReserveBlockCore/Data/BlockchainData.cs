@@ -725,6 +725,7 @@ namespace ReserveBlockCore.Data
                 {
                     //Update in memory block.
                     Globals.LastBlock = block;
+                    Globals.LastBlockProducedTick = Environment.TickCount64;
                     var currentTime = TimeUtil.GetTime();
                     Globals.BlockTimeDiff = currentTime - Globals.LastBlockAddedTimestamp;
                     Globals.LastBlockAddedTimestamp = currentTime;

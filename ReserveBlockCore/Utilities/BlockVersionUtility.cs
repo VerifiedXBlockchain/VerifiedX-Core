@@ -149,7 +149,10 @@ namespace ReserveBlockCore.Utilities
 
                 var _PublicKey = "04" + ByteToHex(publicKey.toString());
 
-                var isProofValid = await ProofUtility.VerifyProofAsync(_PublicKey, blockHeight, Globals.LastBlock.Hash, validatorProof);
+                // Fix: Use block.PrevHash instead of Globals.LastBlock.Hash to avoid race condition
+                // where another thread updates Globals.LastBlock between step 7-2 and 7-4.
+                // Step 7-2 already verified block.PrevHash == lastBlock.Hash, so this is safe.
+                var isProofValid = await ProofUtility.VerifyProofAsync(_PublicKey, blockHeight, block.PrevHash, validatorProof);
                 var result = isProofValid ? "" : "Proof Invalid.";
 
                 return (isProofValid, result);

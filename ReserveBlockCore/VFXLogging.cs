@@ -32,9 +32,7 @@ namespace ReserveBlockCore
         public static void LogEvent()
         {
             if (_errorLog == null)
-            {
-                throw new InvalidOperationException("Logger not initialized.");
-            }
+                return; // Logger not yet initialized — skip silently during startup
 
             var error = new Error(new Exception("Test error"));
             _errorLog.Log(error);
@@ -42,9 +40,7 @@ namespace ReserveBlockCore
         public static void LogInfo(string message, string loc, bool isSC = false, bool isVal = false)
         {
             if (_errorLog == null)
-            {
-                throw new InvalidOperationException("Logger not initialized.");
-            }
+                return; // Logger not yet initialized — skip silently during startup
 
             var error = new Error(new Exception("Info Logged"))
             {
@@ -62,9 +58,7 @@ namespace ReserveBlockCore
         public static void LogError(string message, string loc, bool isSC = false)
         {
             if (_errorLog == null)
-            {
-                throw new InvalidOperationException("Logger not initialized.");
-            }
+                return; // Logger not yet initialized — skip silently during startup
 
             var error = new Error(new Exception("Error Logged"))
             {

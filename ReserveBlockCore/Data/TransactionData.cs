@@ -328,7 +328,97 @@ namespace ReserveBlockCore.Data
         public static async Task AddToPool(Transaction transaction)
         {
             var TransactionPool = GetPool();
+
+            // ===== EXIT_TO_BTC MEMPOOL CONFLICT DETECTION =====
+            // Reject EXIT_TO_BTC transactions that overlap with existing mempool TXs
+            // on BaseBurnTxHash or LockId to prevent double-spend of FIFO allocations.
+            if (transaction.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+            {
+                try
+                {
+                    var existingExitTxs = TransactionPool.Find(x =>
+                        x.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                        x.Hash != transaction.Hash).ToList();
+
+                    if (existingExitTxs.Any())
+                    {
+                        var newBurnHash = ExtractBaseBurnTxHashFromExitTx(transaction);
+                        var newLockIds = ExtractLockIdsFromExitTx(transaction);
+
+                        foreach (var existing in existingExitTxs)
+                        {
+                            // Reject if same BaseBurnTxHash (duplicate burn handling)
+                            if (!string.IsNullOrEmpty(newBurnHash))
+                            {
+                                var existingBurnHash = ExtractBaseBurnTxHashFromExitTx(existing);
+                                if (newBurnHash == existingBurnHash)
+                                {
+                                    LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: duplicate BaseBurnTxHash {newBurnHash} already in mempool ({existing.Hash})",
+                                        "TransactionData.AddToPool()");
+                                    return;
+                                }
+                            }
+
+                            // Reject if overlapping lock IDs
+                            if (newLockIds.Any())
+                            {
+                                var existingLockIds = ExtractLockIdsFromExitTx(existing);
+                                if (newLockIds.Intersect(existingLockIds).Any())
+                                {
+                                    LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: overlapping lock IDs with mempool TX {existing.Hash}",
+                                        "TransactionData.AddToPool()");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"[Mempool] EXIT_TO_BTC conflict check error (allowing TX): {ex.Message}", "TransactionData.AddToPool()");
+                }
+            }
+
             await TransactionPool.InsertSafeAsync(transaction);
+        }
+
+        /// <summary>
+        /// Extract BaseBurnTxHash from an EXIT_TO_BTC transaction's Data field.
+        /// </summary>
+        private static string ExtractBaseBurnTxHashFromExitTx(Transaction tx)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(tx.Data)) return "";
+                var obj = JObject.Parse(tx.Data);
+                return obj["BaseBurnTxHash"]?.ToString() ?? "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>
+        /// Extract all LockIds from an EXIT_TO_BTC transaction's Allocations array.
+        /// </summary>
+        private static HashSet<string> ExtractLockIdsFromExitTx(Transaction tx)
+        {
+            var lockIds = new HashSet<string>();
+            try
+            {
+                if (string.IsNullOrEmpty(tx.Data)) return lockIds;
+                var obj = JObject.Parse(tx.Data);
+                var allocations = obj["Allocations"] as JArray;
+                if (allocations != null)
+                {
+                    foreach (var alloc in allocations)
+                    {
+                        var lockId = alloc["LockId"]?.ToString();
+                        if (!string.IsNullOrEmpty(lockId))
+                            lockIds.Add(lockId);
+                    }
+                }
+            }
+            catch { }
+            return lockIds;
         }
 
         /// <summary>Call when a transaction is removed from the mempool so private nullifier reservations can be cleared.</summary>
@@ -473,6 +563,10 @@ namespace ReserveBlockCore.Data
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
                                 tx.TransactionType != TransactionType.VFX_SHIELD &&
                                 tx.TransactionType != TransactionType.VFX_UNSHIELD &&
                                 tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
@@ -667,7 +761,7 @@ namespace ReserveBlockCore.Data
                                     // this TX hash, it means this TX was already processed into a block
                                     // but not yet cleaned from mempool — allow it through (it will be
                                     // filtered by HasTxBeenCraftedIntoBlock check later).
-                                    var existingVal = Bitcoin.Models.VBTCValidator.GetValidator(tx.FromAddress);
+                                    var existingVal = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
                                     if (existingVal != null && existingVal.IsActive 
                                         && existingVal.RegisterTransactionHash != tx.Hash)
                                     {
@@ -758,6 +852,65 @@ namespace ReserveBlockCore.Data
                                     }
                                 }
                                 catch { }
+                            }
+
+                            // ===== EXIT_TO_BTC STALE/DUPLICATE EVICTION =====
+                            // For EXIT_TO_BTC transactions, check if:
+                            // (a) BaseBurnTxHash already exists on-chain → stale, evict
+                            // (b) Another EXIT_TO_BTC with same BaseBurnTxHash already approved in this batch → first-wins
+                            // (c) Allocation lock IDs are no longer available on-chain → stale, evict
+                            if (!reject && tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+                            {
+                                try
+                                {
+                                    var burnHash = ExtractBaseBurnTxHashFromExitTx(tx);
+                                    if (!string.IsNullOrEmpty(burnHash))
+                                    {
+                                        // (a) Already on-chain?
+                                        var onChainExit = VBTCBridgeBtcExitState.GetByBurnHash(burnHash);
+                                        if (onChainExit != null)
+                                        {
+                                            reject = true;
+                                            LogUtility.Log($"[ProcessTxPool] Evicting stale EXIT_TO_BTC {tx.Hash}: BaseBurnTxHash {burnHash} already on-chain.",
+                                                "TransactionData.ProcessTxPool()");
+                                        }
+
+                                        // (b) Duplicate in this batch?
+                                        if (!reject)
+                                        {
+                                            var alreadyApproved = approvedMemPoolList.Any(a =>
+                                                a.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                                                ExtractBaseBurnTxHashFromExitTx(a) == burnHash);
+                                            if (alreadyApproved)
+                                            {
+                                                reject = true;
+                                                LogUtility.Log($"[ProcessTxPool] Evicting duplicate EXIT_TO_BTC {tx.Hash}: BaseBurnTxHash {burnHash} already in approved batch.",
+                                                    "TransactionData.ProcessTxPool()");
+                                            }
+                                        }
+                                    }
+
+                                    // (c) Allocation locks still available?
+                                    if (!reject)
+                                    {
+                                        var lockIds = ExtractLockIdsFromExitTx(tx);
+                                        foreach (var lockId in lockIds)
+                                        {
+                                            var lockState = VBTCBridgeLockState.GetByLockId(lockId);
+                                            if (lockState == null || lockState.RemainingAmount <= 0)
+                                            {
+                                                reject = true;
+                                                LogUtility.Log($"[ProcessTxPool] Evicting stale EXIT_TO_BTC {tx.Hash}: lock {lockId} no longer available.",
+                                                    "TransactionData.ProcessTxPool()");
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (Exception exitChkEx)
+                                {
+                                    ErrorLogUtility.LogError($"[ProcessTxPool] EXIT_TO_BTC stale check error: {exitChkEx.Message}", "TransactionData.ProcessTxPool()");
+                                }
                             }
 
                             if (reject == false)
@@ -1041,6 +1194,10 @@ namespace ReserveBlockCore.Data
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
                 tx.TransactionType != TransactionType.VFX_SHIELD &&
                 tx.TransactionType != TransactionType.VFX_UNSHIELD &&
                 tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&

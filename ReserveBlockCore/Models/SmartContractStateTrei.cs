@@ -89,6 +89,7 @@ namespace ReserveBlockCore.Models
 
         public static void SaveSmartContract(SmartContractStateTrei scMain)
         {
+
             var scs = GetSCST();
 
             var exist = scs.FindOne(x => x.SmartContractUID == scMain.SmartContractUID);

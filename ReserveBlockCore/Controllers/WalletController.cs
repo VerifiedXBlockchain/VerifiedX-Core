@@ -169,6 +169,87 @@ namespace ReserveBlockCore.Controllers
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
+        //  vBTC Bridge to Base Endpoints
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        [HttpGet("api/vbtc/bridge/preflight/{ownerAddress}/{scUID}")]
+        public async Task<IActionResult> VBTCBridgePreflight(string ownerAddress, string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(ownerAddress) || string.IsNullOrWhiteSpace(scUID))
+                    return BadRequest(new { success = false, message = "ownerAddress and scUID are required." });
+
+                var result = await WalletVbtcService.GetBridgePreflight(ownerAddress, scUID);
+                return Ok(result);
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpPost("api/vbtc/bridge/toBase")]
+        public async Task<IActionResult> VBTCBridgeToBase([FromBody] VBTCBridgeToBaseRequest req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.OwnerAddress) ||
+                    string.IsNullOrWhiteSpace(req.Amount) || string.IsNullOrWhiteSpace(req.EvmDestination))
+                    return BadRequest(new { success = false, message = "scUID, ownerAddress, amount, and evmDestination are required." });
+
+                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
+                    return BadRequest(new { success = false, message = "Invalid amount." });
+
+                var result = await WalletVbtcService.BridgeToBase(req.ScUID, req.OwnerAddress, amount, req.EvmDestination);
+                return Ok(result);
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpGet("api/vbtc/bridge/status/{lockId}")]
+        public IActionResult VBTCBridgeLockStatus(string lockId)
+        {
+            try { return Ok(WalletVbtcService.GetBridgeLockStatus(lockId)); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpPost("api/vbtc/bridge/submitMint/{lockId}")]
+        public async Task<IActionResult> VBTCSubmitMint(string lockId)
+        {
+            try
+            {
+                // Manual mint submission removed — user-driven model now handles this automatically.
+                // Use the retry endpoint instead if a bridge failed.
+                return Ok(new { success = false, message = "Manual caster mint removed. Use /api/vbtc/bridge/retry to retry a failed bridge." });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpPost("api/vbtc/bridge/retry/{lockId}/{ownerAddress}")]
+        public async Task<IActionResult> VBTCBridgeRetry(string lockId, string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(lockId) || string.IsNullOrWhiteSpace(ownerAddress))
+                    return BadRequest(new { success = false, message = "lockId and ownerAddress are required." });
+
+                var result = await WalletVbtcService.RetryBridgeMint(lockId, ownerAddress);
+                return Ok(result);
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpGet("api/vbtc/bridge/base-balance/{evmAddress}")]
+        public async Task<IActionResult> VBTCBaseBalance(string evmAddress)
+        {
+            try
+            {
+                var result = await Bitcoin.Services.BaseBridgeService.GetBaseBalance(evmAddress);
+                return Ok(new { success = result.Success, evmAddress, balance = result.Balance.ToString(System.Globalization.CultureInfo.InvariantCulture), message = result.Message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
         //  VFX Privacy / Shielded Endpoints
         // ═══════════════════════════════════════════════════════════════════════════
 
@@ -318,6 +399,31 @@ namespace ReserveBlockCore.Controllers
         public IActionResult GetVbtcShieldedPoolState(string scUID)
         {
             try { return Ok(WalletPrivacyVbtcService.GetVbtcShieldedPoolState(scUID)); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        //  Base Address Derivation
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Derives the deterministic Base (EVM) address for a given VFX address.
+        /// Uses the same key derivation as validators — Keccak256 of the secp256k1 private key.
+        /// </summary>
+        [HttpGet("api/base-address/{vfxAddress}")]
+        public IActionResult GetBaseAddress(string vfxAddress)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(vfxAddress))
+                    return BadRequest(new { success = false, message = "VFX address required." });
+
+                var baseAddress = Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromAccount(vfxAddress);
+                if (string.IsNullOrEmpty(baseAddress))
+                    return Ok(new { success = false, message = "Could not derive Base address. Account not found or key unavailable." });
+
+                return Ok(new { success = true, message = "Base address derived.", baseAddress = baseAddress, vfxAddress = vfxAddress });
+            }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
     }

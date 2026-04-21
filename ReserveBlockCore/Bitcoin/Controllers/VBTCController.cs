@@ -13,6 +13,7 @@ using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
+using FrostBlacklist = ReserveBlockCore.Bitcoin.Services.FrostContractBlacklist;
 using System.Collections.Concurrent;
 
 namespace ReserveBlockCore.Bitcoin.Controllers
@@ -226,14 +227,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 ceremony.ProgressPercentage = 5;
 
                 var currentBlock = Globals.LastBlock.Height;
-                var activeValidators = VBTCValidator.GetActiveValidatorsWithStalenessCheck(currentBlock, ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
-                var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                var totalRegisteredValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
 
                 if (activeValidators == null || !activeValidators.Any())
                 {
                     ceremony.Status = CeremonyStatus.Failed;
                     ceremony.ErrorMessage = $"No active validators available for vBTC V2 contract creation. Total registered: {totalRegisteredValidators}. " +
-                        $"Validators may be stale (no on-chain heartbeat within {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks).";
+                        $"No active validators found in recent blocks.";
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
@@ -242,13 +243,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (activeValidators.Count < requiredActiveValidators)
                 {
                     // Log details about each validator's staleness for debugging
-                    var allVals = VBTCValidator.GetAllValidators();
+                    var allVals = Services.VBTCValidatorRegistry.GetActiveValidators();
                     var valDetails = allVals != null
                         ? string.Join(", ", allVals.Select(v => $"{v.ValidatorAddress.Substring(0, 8)}...(Active:{v.IsActive}, HB:{v.LastHeartbeatBlock}, Gap:{currentBlock - v.LastHeartbeatBlock})"))
                         : "N/A";
                     ceremony.Status = CeremonyStatus.Failed;
                     ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}. " +
-                        $"Stale threshold: {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks. Validators: [{valDetails}]";
+                        $"Scan window: {Services.VBTCValidatorRegistry.SCAN_WINDOW} blocks. Validators: [{valDetails}]";
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
@@ -336,14 +337,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             try
             {
                 var validators = activeOnly
-                    ? VBTCValidator.GetActiveValidators()
-                    : VBTCValidator.GetAllValidators();
+                    ? Services.VBTCValidatorRegistry.GetActiveValidators()
+                    : Services.VBTCValidatorRegistry.GetActiveValidators();
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Validators retrieved",
-                    Validators = validators ?? new List<VBTCValidator>()
+                    Validators = validators
                 });
             }
             catch (Exception ex)
@@ -364,12 +365,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             try
             {
                 // Update validator's last heartbeat block
-                var validator = VBTCValidator.GetValidator(validatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
                 if (validator == null)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
                 }
-                VBTCValidator.UpdateHeartbeat(validatorAddress, Globals.LastBlock.Height);
+                // No DB update needed — VBTCValidatorRegistry derives state from block scanning
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -396,7 +397,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                var validator = VBTCValidator.GetValidator(validatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
                 if (validator == null)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
@@ -654,14 +655,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
             // Step 1: Get list of active validators (using blockchain-based staleness check)
             var currentBlock = Globals.LastBlock.Height;
-            var activeValidators = VBTCValidator.GetActiveValidatorsWithStalenessCheck(currentBlock, ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD);
-            var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+            var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+            var totalRegisteredValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
 
             if (activeValidators == null || !activeValidators.Any())
             {
                 ceremony.Status = CeremonyStatus.Failed;
                 ceremony.ErrorMessage = $"No active validators available for vBTC V2 contract creation. Total registered: {totalRegisteredValidators}. " +
-                    $"Validators may be stale (no on-chain heartbeat within {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks).";
+                    $"No active validators found in recent blocks.";
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
@@ -669,13 +670,13 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
             if (activeValidators.Count < requiredActiveValidators)
             {
-                var allVals = VBTCValidator.GetAllValidators();
+                var allVals = Services.VBTCValidatorRegistry.GetActiveValidators();
                 var valDetails = allVals != null
                     ? string.Join(", ", allVals.Select(v => $"{v.ValidatorAddress.Substring(0, 8)}...(Active:{v.IsActive}, HB:{v.LastHeartbeatBlock}, Gap:{currentBlock - v.LastHeartbeatBlock})"))
                     : "N/A";
                 ceremony.Status = CeremonyStatus.Failed;
                 ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}. " +
-                    $"Stale threshold: {ReserveBlockCore.Services.VBTCValidatorHeartbeatService.STALE_THRESHOLD} blocks. Validators: [{valDetails}]";
+                    $"Scan window: {Services.VBTCValidatorRegistry.SCAN_WINDOW} blocks. Validators: [{valDetails}]";
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
@@ -735,7 +736,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             ceremony.ProgressPercentage = 5;
 
             // Step 1: Discover active validators from the network
-            var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+            var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
             if (activeValidators == null || !activeValidators.Any())
             {
                 ceremony.Status = CeremonyStatus.Failed;
@@ -934,7 +935,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 }
 
                 // Discover active validators from the network
-                var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
+                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
                 if (activeValidators == null || !activeValidators.Any())
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available on the network. Cannot delegate withdrawal." });
@@ -1047,8 +1048,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                                         Timestamp = TimeUtil.GetTime(),
                                         FromAddress = fromAddress,
                                         ToAddress = fromAddress,
-                                        Amount = 0.0M,
-                                        Fee = 0.0M,
+                                        Amount = 0.00M,
+                                        Fee = 0.00M,
                                         Nonce = AccountStateTrei.GetNextNonce(fromAddress),
                                         TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
                                         Data = txData
@@ -1878,7 +1879,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "CancellationUID and ValidatorAddress are required" });
 
                 // Verify validator is active
-                var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
                 if (validator == null || !validator.IsActive)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
@@ -1907,7 +1908,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 // Refresh cancellation data after vote
                 cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
-                int totalValidators = VBTCValidator.GetActiveValidatorCount();
+                int totalValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
                 int votePercentage = totalValidators > 0 
                     ? VBTCWithdrawalCancellation.GetVotePercentage(payload.CancellationUID, totalValidators) 
                     : 0;
@@ -2108,7 +2109,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 }
 
                 // 3. Verify validator is active and eligible
-                var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
                 if (validator == null || !validator.IsActive)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
@@ -2582,6 +2583,183 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             }
         }
 
+        /// <summary>
+        /// Get the health status of a vBTC V2 contract by checking how many of the original
+        /// DKG validators are still online (heartbeating). Since 67% of original validators
+        /// must be available for FROST signing, this gives users visibility into whether
+        /// their contract can still process withdrawals.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>Validator health report with online/offline breakdown</returns>
+        [HttpGet("GetContractHealth/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetContractHealth(string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(scUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID is required" });
+
+                // Step 1: Resolve the ValidatorAddressesSnapshot from the contract.
+                // Try local DB first, fall back to State Trei + in-memory decompile (works on any node).
+                List<string>? originalValidators = null;
+                int requiredThreshold = 67;
+                long lastActivityBlock = 0;
+                string? depositAddress = null;
+
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract != null)
+                {
+                    lastActivityBlock = vbtcContract.LastValidatorActivityBlock;
+                    depositAddress = vbtcContract.DepositAddress;
+                    requiredThreshold = vbtcContract.RequiredThreshold;
+                }
+
+                // Get contract data from State Trei + decompile to extract ValidatorAddressesSnapshot
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
+                {
+                    try
+                    {
+                        var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                        if (scMainDecompile?.Features != null)
+                        {
+                            var tknzFeature = scMainDecompile.Features
+                                .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                .Select(x => x.FeatureFeatures)
+                                .FirstOrDefault();
+
+                            if (tknzFeature is TokenizationV2Feature tknz)
+                            {
+                                originalValidators = tknz.ValidatorAddressesSnapshot;
+                                if (requiredThreshold <= 0) requiredThreshold = tknz.RequiredThreshold;
+                                if (lastActivityBlock <= 0) lastActivityBlock = tknz.ProofBlockHeight;
+                                if (string.IsNullOrEmpty(depositAddress)) depositAddress = tknz.DepositAddress;
+                            }
+                        }
+                    }
+                    catch (Exception decompileEx)
+                    {
+                        ErrorLogUtility.LogError($"Failed to decompile contract {scUID} for health check: {decompileEx.Message}",
+                            "VBTCController.GetContractHealth()");
+                    }
+                }
+
+                if (originalValidators == null || !originalValidators.Any())
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Could not resolve the original validator snapshot for this contract. " +
+                                  "The contract may not exist or may not have a TokenizationV2 feature."
+                    });
+                }
+
+                // Step 2: Get currently active validators from block scanning
+                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                var activeAddressSet = new HashSet<string>(
+                    activeValidators?.Select(v => v.ValidatorAddress) ?? Enumerable.Empty<string>());
+
+                // Step 3: Cross-reference each original validator against the active set
+                var validatorDetails = new List<object>();
+                int onlineCount = 0;
+                int offlineCount = 0;
+
+                foreach (var addr in originalValidators)
+                {
+                    bool isOnline = activeAddressSet.Contains(addr);
+                    long? lastHeartbeat = null;
+
+                    if (isOnline)
+                    {
+                        onlineCount++;
+                        var activeVal = activeValidators!.FirstOrDefault(v => v.ValidatorAddress == addr);
+                        if (activeVal != null)
+                            lastHeartbeat = activeVal.LastHeartbeatBlock;
+                    }
+                    else
+                    {
+                        offlineCount++;
+                    }
+
+                    validatorDetails.Add(new
+                    {
+                        Address = addr,
+                        IsOnline = isOnline,
+                        LastHeartbeatBlock = lastHeartbeat
+                    });
+                }
+
+                // Step 4: Calculate health metrics
+                int totalOriginal = originalValidators.Count;
+                decimal onlinePercentage = totalOriginal > 0
+                    ? Math.Round(((decimal)onlineCount / totalOriginal) * 100m, 2)
+                    : 0m;
+
+                bool meetsThreshold = onlinePercentage >= requiredThreshold;
+                long currentBlock = Globals.LastBlock.Height;
+
+                // Use VBTCThresholdCalculator for adjusted threshold info
+                string thresholdExplanation;
+                int adjustedThreshold;
+                int requiredValidatorCount;
+                try
+                {
+                    adjustedThreshold = Services.VBTCThresholdCalculator.CalculateAdjustedThreshold(
+                        totalOriginal, onlineCount, lastActivityBlock, currentBlock);
+                    requiredValidatorCount = Services.VBTCThresholdCalculator.CalculateRequiredValidators(
+                        adjustedThreshold, onlineCount);
+                    thresholdExplanation = Services.VBTCThresholdCalculator.GetThresholdExplanation(
+                        totalOriginal, onlineCount, lastActivityBlock, currentBlock);
+                }
+                catch
+                {
+                    adjustedThreshold = requiredThreshold;
+                    requiredValidatorCount = (int)Math.Ceiling(onlineCount * (requiredThreshold / 100.0));
+                    thresholdExplanation = $"Original threshold: {requiredThreshold}%. Online: {onlineCount}/{totalOriginal} ({onlinePercentage}%).";
+                }
+
+                // Determine overall health status
+                string healthStatus;
+                if (onlinePercentage >= 80)
+                    healthStatus = "Excellent";
+                else if (onlinePercentage >= 67)
+                    healthStatus = "Healthy";
+                else if (onlinePercentage >= 50)
+                    healthStatus = "Degraded";
+                else if (onlinePercentage > 0)
+                    healthStatus = "Critical";
+                else
+                    healthStatus = "Offline";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Contract health retrieved",
+                    SmartContractUID = scUID,
+                    DepositAddress = depositAddress,
+                    HealthStatus = healthStatus,
+                    TotalOriginalValidators = totalOriginal,
+                    OnlineValidators = onlineCount,
+                    OfflineValidators = offlineCount,
+                    OnlinePercentage = onlinePercentage,
+                    RequiredThreshold = requiredThreshold,
+                    AdjustedThreshold = adjustedThreshold,
+                    RequiredValidatorCount = requiredValidatorCount,
+                    CanProcessWithdrawals = onlineCount >= requiredValidatorCount,
+                    IsHealthy = meetsThreshold,
+                    CurrentBlockHeight = currentBlock,
+                    ScanWindow = Services.VBTCValidatorRegistry.SCAN_WINDOW,
+                    ThresholdExplanation = thresholdExplanation,
+                    Validators = validatorDetails
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
         #endregion
 
         #region Utility
@@ -2912,39 +3090,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 LogUtility.Log($"[BaseBridge] VFX bridge lock broadcast. LockId: {lockId}, Tx: {vfxTxHash}, Amount: {payload.Amount} BTC, To: {payload.EvmDestination}",
                     "VBTCController.BridgeToBase");
 
-                string? baseTxHash = null;
-                string relayStatus;
-
-                if (payload.AutoRelay && VbtcBaseBridge.IsEnabled)
-                {
-                    var confirmed = await Services.VBTCService.WaitForBridgeLockInStateAsync(lockId, 120_000);
-                    if (!confirmed)
-                    {
-                        relayStatus = "VFX lock pending block confirmation; mint not sent. Retry RelayPendingBridgeLocks after the lock is included.";
-                    }
-                    else
-                    {
-                        var recordForMint = BridgeLockRecord.GetByLockId(lockId) ?? lockRecord;
-                        var mintResult = await VbtcBaseBridge.MintVBTCbOnBase(recordForMint);
-                        if (mintResult.Success)
-                        {
-                            baseTxHash = mintResult.Result;
-                            relayStatus = "Minted on Base";
-                        }
-                        else
-                        {
-                            relayStatus = $"Relay failed: {mintResult.Result}";
-                        }
-                    }
-                }
-                else if (!VbtcBaseBridge.IsEnabled)
-                {
-                    relayStatus = "VFX lock tx broadcast; configure Base relay (BASE_BRIDGE_*) then RelayPendingBridgeLocks after the lock confirms in a block";
-                }
+                string status;
+                if (VbtcBaseBridge.IsEnabled)
+                    status = "VFX lock broadcast. After the lock confirms on-chain, validators sign mint attestations and casters submit mintWithProof on Base.";
                 else
-                {
-                    relayStatus = "VFX lock tx broadcast; mint later via RelayPendingBridgeLocks (after block confirms)";
-                }
+                    status = "VFX lock broadcast. Configure BaseBridgeRpcUrl and BaseBridgeContract in config.txt for Base mint (VBTCb).";
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -2956,10 +3106,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     Amount = payload.Amount,
                     AmountSats = amountSats,
                     EvmDestination = payload.EvmDestination,
-                    BaseTxHash = baseTxHash,
-                    Status = relayStatus,
-                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
-                    AutoRelay = payload.AutoRelay
+                    Status = status,
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled
                 });
             }
             catch (Exception ex)
@@ -2991,6 +3139,52 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             catch (Exception ex)
             {
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Validator node: sign the VBTCb mint message for a confirmed VFX bridge lock.
+        /// Casters POST the same <see cref="MintAttestationRequest"/> body to each validator; response uses lowercase <c>success</c> / <c>signature</c> for collector compatibility.
+        /// </summary>
+        [HttpPost("SignMintAttestation")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SignMintAttestation([FromBody] MintAttestationRequest request)
+        {
+            try
+            {
+                if (request == null)
+                    return JsonConvert.SerializeObject(new { success = false, message = "Payload cannot be null" });
+
+                var (ok, sig, err) = await Services.BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                if (!ok)
+                    return JsonConvert.SerializeObject(new { success = false, message = err ?? "Signing failed" });
+
+                return JsonConvert.SerializeObject(new { success = true, signature = sig });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { success = false, message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Returns in-memory mint attestation progress for a lock ID on this node (caster-collected signatures).
+        /// </summary>
+        [HttpGet("GetMintAttestation/{lockId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetMintAttestation(string lockId)
+        {
+            try
+            {
+                var state = Services.BaseBridgeAttestationService.GetAttestationState(lockId);
+                if (state == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "No attestation state for this lock on this node" }));
+
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Attestation = state }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
             }
         }
 
@@ -3041,30 +3235,17 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Manually trigger relay of pending bridge locks to Base.
-        /// Processes all locks with status = Locked.
+        /// Deprecated: VBTCb does not use a relay-key queue. Mint uses validator attestations and caster-submitted mintWithProof.
         /// </summary>
         [HttpPost("RelayPendingBridgeLocks")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> RelayPendingBridgeLocks()
+        public Task<string> RelayPendingBridgeLocks()
         {
-            try
+            return Task.FromResult(JsonConvert.SerializeObject(new
             {
-                if (!VbtcBaseBridge.IsEnabled)
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Base bridge is not configured. Set BASE_BRIDGE_CONTRACT and BASE_BRIDGE_RELAY_KEY environment variables." });
-
-                var results = await VbtcBaseBridge.ProcessPendingLocks();
-                return JsonConvert.SerializeObject(new
-                {
-                    Success = true,
-                    Message = $"Processed {results.Count} pending bridge locks",
-                    Results = results.Select(r => new { r.LockId, r.Success, r.Result })
-                });
-            }
-            catch (Exception ex)
-            {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
-            }
+                Success = false,
+                Message = "VBTCb has no relay queue. Use SignMintAttestation on validators and caster flow for mintWithProof after the VFX lock confirms."
+            }));
         }
 
         /// <summary>
@@ -3103,7 +3284,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                var pendingCount = BridgeLockRecord.GetPendingRelays().Count;
+                var pendingAttestations = BridgeLockRecord.GetPendingV2Attestations().Count;
                 var totalSupply = VbtcBaseBridge.CanReadVbtcToken
                     ? await VbtcBaseBridge.GetBaseTotalSupply()
                     : (false, 0M, "Not configured");
@@ -3117,7 +3298,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     BaseRpcUrl = VbtcBaseBridge.BaseRpcUrl,
                     VBTCbContractAddress = VbtcBaseBridge.VBTCbContractAddress,
                     BaseChainId = VbtcBaseBridge.BaseChainId,
-                    PendingRelays = pendingCount,
+                    PendingV2Attestations = pendingAttestations,
                     BaseTotalSupply = totalSupply.Item2,
                     ExitPollLastScannedBlock = sync.LastScannedBlock,
                     Network = VbtcBaseBridge.BaseNetworkDisplayName
@@ -3127,6 +3308,24 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             {
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
             }
+        }
+
+        /// <summary>
+        /// Returns the contract address, chainId, and ABI needed by the frontend to call mintWithProof via MetaMask.
+        /// </summary>
+        [HttpGet("GetBridgeConfig")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string GetBridgeConfig()
+        {
+            return JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                IsEnabled = VbtcBaseBridge.IsEnabled,
+                ContractAddress = VbtcBaseBridge.ContractAddress,
+                ChainId = VbtcBaseBridge.BaseChainId,
+                Network = VbtcBaseBridge.BaseNetworkDisplayName,
+                Abi = Services.BaseBridgeService.CONTRACT_ABI
+            });
         }
 
         /// <summary>
@@ -3147,9 +3346,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 if (!string.IsNullOrEmpty(payload.VBTCbContractAddress))
                     VbtcBaseBridge.VBTCbContractAddress = payload.VBTCbContractAddress;
-
-                if (!string.IsNullOrEmpty(payload.RelayPrivateKey))
-                    VbtcBaseBridge.RelayPrivateKey = payload.RelayPrivateKey;
 
                 if (payload.BaseChainId > 0)
                     VbtcBaseBridge.BaseChainId = payload.BaseChainId;
@@ -3197,7 +3393,72 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             }
         }
 
+        /// <summary>
+        /// Reset the exit burn scan cursor to rescan from a specific Base block number.
+        /// Use this to re-detect missed burn events (e.g. VfxExitBurned, BTCExitBurned).
+        /// The background loop will automatically rescan from the specified block on its next tick.
+        /// </summary>
+        [HttpPost("RescanExitBurns/{fromBlock}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string RescanExitBurns(long fromBlock)
+        {
+            try
+            {
+                var result = VbtcBaseBridgeExit.RescanFromBlock(fromBlock);
+                return JsonConvert.SerializeObject(new
+                {
+                    result.Success,
+                    result.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
         #endregion
+
+        #endregion
+
+        #region FROST Contract Blacklist
+
+        /// <summary>
+        /// Manually blacklist a contract's FROST keys (e.g., contracts DKG'd before the participant ordering fix).
+        /// Blacklisted contracts are skipped during BTC exit contract selection.
+        /// </summary>
+        [HttpPost("InvalidateFrostContract/{scUID}")]
+        public IActionResult InvalidateFrostContract(string scUID)
+        {
+            if (string.IsNullOrWhiteSpace(scUID))
+                return BadRequest(new { Success = false, Message = "scUID is required" });
+
+            FrostBlacklist.Blacklist(scUID, "Manually invalidated via API");
+            return Ok(new { Success = true, Message = $"Contract {scUID} has been blacklisted for FROST signing (24h TTL)" });
+        }
+
+        /// <summary>
+        /// Remove a contract from the FROST blacklist (e.g., after successful re-DKG).
+        /// </summary>
+        [HttpPost("RemoveFrostBlacklist/{scUID}")]
+        public IActionResult RemoveFrostBlacklist(string scUID)
+        {
+            if (string.IsNullOrWhiteSpace(scUID))
+                return BadRequest(new { Success = false, Message = "scUID is required" });
+
+            var removed = FrostBlacklist.Remove(scUID);
+            return Ok(new { Success = true, Message = removed ? $"Contract {scUID} removed from blacklist" : $"Contract {scUID} was not in the blacklist" });
+        }
+
+        /// <summary>
+        /// List all currently blacklisted FROST contracts.
+        /// </summary>
+        [HttpGet("GetFrostBlacklist")]
+        public IActionResult GetFrostBlacklist()
+        {
+            var blacklist = FrostBlacklist.GetAll();
+            return Ok(new { Success = true, Blacklist = blacklist });
+        }
 
         #endregion
     }
@@ -3335,18 +3596,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public string OwnerAddress { get; set; } = string.Empty;
         public decimal Amount { get; set; }
         public string EvmDestination { get; set; } = string.Empty;
-        /// <summary>
-        /// If true and relay is configured, wait for the VFX lock to be included in a block then mint on Base.
-        /// If false, broadcast the VFX lock only — use RelayPendingBridgeLocks after confirmation.
-        /// </summary>
-        public bool AutoRelay { get; set; } = true;
     }
 
     public class VBTCBridgeConfigPayload
     {
         public string? BaseRpcUrl { get; set; }
         public string? VBTCbContractAddress { get; set; }
-        public string? RelayPrivateKey { get; set; }
         public int BaseChainId { get; set; } = 0;
     }
 

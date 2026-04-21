@@ -6,45 +6,64 @@ using Nethereum.Hex.HexTypes;
 using Newtonsoft.Json;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Utilities;
+using System.Net.Http;
 using System.Numerics;
+using System.Text;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
     /// <summary>
-    /// Bridges vBTC from VerifiedX to Base by calling mint() on the VBTCb ERC-20 contract.
-    /// For demo: the relay node is the contract owner and calls mint directly.
-    /// Production: would submit FROST-signed proofs to a CanonicalGateway contract.
+    /// Base bridge service for VBTCb (multi-sig mint on Base).
+    /// Validators sign attestations; users submit proofs to the contract. No relay key needed.
+    /// Configuration is loaded from config.txt via Config.ProcessConfig().
     /// </summary>
     public static class BaseBridgeService
     {
         // ── Configuration (set from config.txt via ProcessConfig) ──
         public static string BaseRpcUrl { get; set; } = "https://sepolia.base.org";
-        public static string VBTCbContractAddress { get; set; } = "";
-        public static string RelayPrivateKey { get; set; } = "";
+        public static string BaseRpcUrl2 { get; set; } = "";
+        public static string BaseRpcUrl3 { get; set; } = "";
+
+        private static string _contractAddress = "";
+        /// <summary>VBTCb proxy contract on Base (multi-sig mint). Set via BaseBridgeContract in config.txt.</summary>
+        public static string ContractAddress
+        {
+            get => _contractAddress;
+            set
+            {
+                _contractAddress = value?.Trim() ?? "";
+                ReserveBlockCore.Globals.VBTCbContractAddress = _contractAddress;
+            }
+        }
+
+        /// <summary>Alias kept for compatibility with code referencing VBTCbContractAddress.</summary>
+        public static string VBTCbContractAddress
+        {
+            get => ContractAddress;
+            set => ContractAddress = value;
+        }
+
         public static int BaseChainId { get; set; } = 84532; // default until LoadConfig
-        /// <summary>Contract + relay key — can submit mint txs.</summary>
-        public static bool IsEnabled => !string.IsNullOrEmpty(VBTCbContractAddress) && !string.IsNullOrEmpty(RelayPrivateKey);
-        /// <summary>RPC + token contract — can read vBTC.b balances (no relay key).</summary>
-        public static bool CanReadVbtcToken => !string.IsNullOrWhiteSpace(VBTCbContractAddress) && !string.IsNullOrWhiteSpace(BaseRpcUrl);
+
+        /// <summary>RPC + contract configured.</summary>
+        public static bool IsEnabled => IsBridgeConfigured && !string.IsNullOrWhiteSpace(BaseRpcUrl);
+
+        /// <summary>True when VBTCb contract is configured.</summary>
+        public static bool IsBridgeConfigured => !string.IsNullOrWhiteSpace(ContractAddress);
+        /// <summary>RPC + contract — can read vBTC.b balances.</summary>
+        public static bool CanReadVbtcToken =>
+            IsBridgeConfigured && !string.IsNullOrWhiteSpace(BaseRpcUrl);
         /// <summary>RPC available — can read native ETH balance on Base.</summary>
         public static bool CanReadEth => !string.IsNullOrWhiteSpace(BaseRpcUrl);
 
         /// <summary>Human-readable Base network name (follows Globals.IsTestNet).</summary>
         public static string BaseNetworkDisplayName => ReserveBlockCore.Globals.IsTestNet ? "Base Sepolia" : "Base Mainnet";
 
-        // ── Minimal ERC-20 + mint ABI ──
-        // function mint(address to, uint256 amount) external
-        private const string MINT_ABI = @"[
-            {
-                ""inputs"": [
-                    { ""internalType"": ""address"", ""name"": ""to"", ""type"": ""address"" },
-                    { ""internalType"": ""uint256"", ""name"": ""amount"", ""type"": ""uint256"" }
-                ],
-                ""name"": ""mint"",
-                ""outputs"": [],
-                ""stateMutability"": ""nonpayable"",
-                ""type"": ""function""
-            },
+        // ── Full VBTCb contract ABI ──
+        public const string CONTRACT_ABI = @"[{""inputs"":[{""internalType"":""address"",""name"":""target"",""type"":""address""}],""name"":""AddressEmptyCode"",""type"":""error""},{""inputs"":[],""name"":""ECDSAInvalidSignature"",""type"":""error""},{""inputs"":[{""internalType"":""uint256"",""name"":""length"",""type"":""uint256""}],""name"":""ECDSAInvalidSignatureLength"",""type"":""error""},{""inputs"":[{""internalType"":""bytes32"",""name"":""s"",""type"":""bytes32""}],""name"":""ECDSAInvalidSignatureS"",""type"":""error""},{""inputs"":[{""internalType"":""address"",""name"":""implementation"",""type"":""address""}],""name"":""ERC1967InvalidImplementation"",""type"":""error""},{""inputs"":[],""name"":""ERC1967NonPayable"",""type"":""error""},{""inputs"":[{""internalType"":""address"",""name"":""spender"",""type"":""address""},{""internalType"":""uint256"",""name"":""allowance"",""type"":""uint256""},{""internalType"":""uint256"",""name"":""needed"",""type"":""uint256""}],""name"":""ERC20InsufficientAllowance"",""type"":""error""},{""inputs"":[{""internalType"":""address"",""name"":""sender"",""type"":""address""},{""internalType"":""uint256"",""name"":""balance"",""type"":""uint256""},{""internalType"":""uint256"",""name"":""needed"",""type"":""uint256""}],""name"":""ERC20InsufficientBalance"",""type"":""error""},{""inputs"":[{""internalType"":""address"",""name"":""approver"",""type"":""address""}],""name"":""ERC20InvalidApprover"",""type"":""error""},{""inputs"":[{""internalType"":""address"",""name"":""receiver"",""type"":""address""}],""name"":""ERC20InvalidReceiver"",""type"":""error""},{""inputs"":[{""internalType"":""address"",""name"":""sender"",""type"":""address""}],""name"":""ERC20InvalidSender"",""type"":""error""},{""inputs"":[{""internalType"":""address"",""name"":""spender"",""type"":""address""}],""name"":""ERC20InvalidSpender"",""type"":""error""},{""inputs"":[],""name"":""FailedCall"",""type"":""error""},{""inputs"":[],""name"":""InvalidInitialization"",""type"":""error""},{""inputs"":[],""name"":""NotInitializing"",""type"":""error""},{""inputs"":[],""name"":""UUPSUnauthorizedCallContext"",""type"":""error""},{""inputs"":[{""internalType"":""bytes32"",""name"":""slot"",""type"":""bytes32""}],""name"":""UUPSUnsupportedProxiableUUID"",""type"":""error""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""owner"",""type"":""address""},{""indexed"":true,""internalType"":""address"",""name"":""spender"",""type"":""address""},{""indexed"":false,""internalType"":""uint256"",""name"":""value"",""type"":""uint256""}],""name"":""Approval"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""burner"",""type"":""address""},{""indexed"":false,""internalType"":""uint256"",""name"":""amount"",""type"":""uint256""},{""indexed"":false,""internalType"":""string"",""name"":""btcDestination"",""type"":""string""},{""indexed"":false,""internalType"":""uint256"",""name"":""chainId"",""type"":""uint256""}],""name"":""BTCExitBurned"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""newImplementation"",""type"":""address""},{""indexed"":false,""internalType"":""uint256"",""name"":""adminNonce"",""type"":""uint256""}],""name"":""ContractUpgraded"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":false,""internalType"":""uint64"",""name"":""version"",""type"":""uint64""}],""name"":""Initialized"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""to"",""type"":""address""},{""indexed"":false,""internalType"":""uint256"",""name"":""amount"",""type"":""uint256""},{""indexed"":false,""internalType"":""string"",""name"":""lockId"",""type"":""string""},{""indexed"":false,""internalType"":""uint256"",""name"":""nonce"",""type"":""uint256""}],""name"":""MintExecuted"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""from"",""type"":""address""},{""indexed"":true,""internalType"":""address"",""name"":""to"",""type"":""address""},{""indexed"":false,""internalType"":""uint256"",""name"":""value"",""type"":""uint256""}],""name"":""Transfer"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""implementation"",""type"":""address""}],""name"":""Upgraded"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""validator"",""type"":""address""},{""indexed"":false,""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""}],""name"":""ValidatorAdded"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":false,""internalType"":""address[]"",""name"":""validators"",""type"":""address[]""},{""indexed"":false,""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""}],""name"":""ValidatorBatchAdded"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":false,""internalType"":""address[]"",""name"":""validators"",""type"":""address[]""},{""indexed"":false,""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""}],""name"":""ValidatorBatchRemoved"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""validator"",""type"":""address""},{""indexed"":false,""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""}],""name"":""ValidatorRemoved"",""type"":""event""},{""anonymous"":false,""inputs"":[{""indexed"":true,""internalType"":""address"",""name"":""burner"",""type"":""address""},{""indexed"":false,""internalType"":""uint256"",""name"":""amount"",""type"":""uint256""},{""indexed"":false,""internalType"":""string"",""name"":""vfxDestinationAddress"",""type"":""string""},{""indexed"":false,""internalType"":""uint256"",""name"":""chainId"",""type"":""uint256""}],""name"":""VfxExitBurned"",""type"":""event""},{""inputs"":[],""name"":""MIN_REQUIRED_SIGNATURES"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[],""name"":""MIN_VALIDATORS_FOR_HIGH_THRESHOLD"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[],""name"":""UPGRADE_INTERFACE_VERSION"",""outputs"":[{""internalType"":""string"",""name"":"""",""type"":""string""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""newValidator"",""type"":""address""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""addValidator"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[{""internalType"":""address[]"",""name"":""newValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""addValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[],""name"":""adminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""owner"",""type"":""address""},{""internalType"":""address"",""name"":""spender"",""type"":""address""}],""name"":""allowance"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""spender"",""type"":""address""},{""internalType"":""uint256"",""name"":""value"",""type"":""uint256""}],""name"":""approve"",""outputs"":[{""internalType"":""bool"",""name"":"""",""type"":""bool""}],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""account"",""type"":""address""}],""name"":""balanceOf"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""uint256"",""name"":""amount"",""type"":""uint256""},{""internalType"":""string"",""name"":""btcDestination"",""type"":""string""}],""name"":""burnForBTCExit"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[{""internalType"":""uint256"",""name"":""amount"",""type"":""uint256""},{""internalType"":""string"",""name"":""vfxDestinationAddress"",""type"":""string""}],""name"":""burnForVfxExit"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[],""name"":""decimals"",""outputs"":[{""internalType"":""uint8"",""name"":"""",""type"":""uint8""}],""stateMutability"":""pure"",""type"":""function""},{""inputs"":[],""name"":""getAdminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[],""name"":""getValidators"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""string"",""name"":""name_"",""type"":""string""},{""internalType"":""string"",""name"":""symbol_"",""type"":""string""},{""internalType"":""address[]"",""name"":""initialValidators"",""type"":""address[]""}],""name"":""initialize"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[{""internalType"":""string"",""name"":""lockId"",""type"":""string""}],""name"":""isLockIdUsed"",""outputs"":[{""internalType"":""bool"",""name"":"""",""type"":""bool""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":"""",""type"":""address""}],""name"":""isValidator"",""outputs"":[{""internalType"":""bool"",""name"":"""",""type"":""bool""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""to"",""type"":""address""},{""internalType"":""uint256"",""name"":""amount"",""type"":""uint256""},{""internalType"":""string"",""name"":""lockId"",""type"":""string""},{""internalType"":""uint256"",""name"":""nonce"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""mintWithProof"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[],""name"":""name"",""outputs"":[{""internalType"":""string"",""name"":"""",""type"":""string""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[],""name"":""proxiableUUID"",""outputs"":[{""internalType"":""bytes32"",""name"":"""",""type"":""bytes32""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""oldValidator"",""type"":""address""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""removeValidator"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[{""internalType"":""address[]"",""name"":""oldValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""removeValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[],""name"":""requiredMintSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[],""name"":""requiredRemoveSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[],""name"":""symbol"",""outputs"":[{""internalType"":""string"",""name"":"""",""type"":""string""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[],""name"":""totalSupply"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""to"",""type"":""address""},{""internalType"":""uint256"",""name"":""value"",""type"":""uint256""}],""name"":""transfer"",""outputs"":[{""internalType"":""bool"",""name"":"""",""type"":""bool""}],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""from"",""type"":""address""},{""internalType"":""address"",""name"":""to"",""type"":""address""},{""internalType"":""uint256"",""name"":""value"",""type"":""uint256""}],""name"":""transferFrom"",""outputs"":[{""internalType"":""bool"",""name"":"""",""type"":""bool""}],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""newImplementation"",""type"":""address""},{""internalType"":""bytes"",""name"":""data"",""type"":""bytes""}],""name"":""upgradeToAndCall"",""outputs"":[],""stateMutability"":""payable"",""type"":""function""},{""inputs"":[{""internalType"":""address"",""name"":""newImplementation"",""type"":""address""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""upgradeWithValidatorApproval"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},{""inputs"":[{""internalType"":""bytes32"",""name"":"""",""type"":""bytes32""}],""name"":""usedLockIds"",""outputs"":[{""internalType"":""bool"",""name"":"""",""type"":""bool""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[],""name"":""validatorCount"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},{""inputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""name"":""validators"",""outputs"":[{""internalType"":""address"",""name"":"""",""type"":""address""}],""stateMutability"":""view"",""type"":""function""}]";
+
+        // ── Read-only balance ABI (subset used by GetBaseBalance / GetBaseTotalSupply) ──
+        private const string BALANCE_ABI = @"[
             {
                 ""inputs"": [{ ""internalType"": ""address"", ""name"": ""account"", ""type"": ""address"" }],
                 ""name"": ""balanceOf"",
@@ -69,118 +88,6 @@ namespace ReserveBlockCore.Bitcoin.Services
         ]";
 
         /// <summary>
-        /// Mint vBTC.b on Base Sepolia for a given bridge lock record.
-        /// Returns (success, txHash or error message).
-        /// </summary>
-        public static async Task<(bool Success, string Result)> MintVBTCbOnBase(BridgeLockRecord lockRecord)
-        {
-            try
-            {
-                if (!IsEnabled)
-                    return (false, "Base bridge is not configured. Set VBTCbContractAddress and RelayPrivateKey.");
-
-                if (string.IsNullOrEmpty(lockRecord.EvmDestination) || !lockRecord.EvmDestination.StartsWith("0x") || lockRecord.EvmDestination.Length != 42)
-                    return (false, $"Invalid EVM destination address: {lockRecord.EvmDestination}");
-
-                if (lockRecord.AmountSats <= 0)
-                    return (false, "Amount must be greater than zero");
-
-                LogUtility.Log($"[BaseBridge] Minting vBTC.b on Base. To: {lockRecord.EvmDestination}, Amount: {lockRecord.Amount} BTC ({lockRecord.AmountSats} sats), LockId: {lockRecord.LockId}",
-                    "BaseBridgeService.MintVBTCbOnBase");
-
-                // Create web3 instance with relay account
-                var account = new Account(RelayPrivateKey, BaseChainId);
-                var web3 = new Web3(account, BaseRpcUrl);
-                web3.TransactionManager.UseLegacyAsDefault = false;
-
-                // Get contract instance
-                var contract = web3.Eth.GetContract(MINT_ABI, VBTCbContractAddress);
-                var mintFunction = contract.GetFunction("mint");
-
-                // vBTC.b uses 8 decimals (same as BTC satoshis)
-                // AmountSats is already in satoshis, which maps directly to the token's smallest unit
-                var amountWei = new BigInteger(lockRecord.AmountSats);
-
-                // Update status to ProofSubmitted before sending
-                BridgeLockRecord.UpdateStatus(lockRecord.LockId, BridgeLockStatus.ProofSubmitted);
-
-                // Estimate gas
-                var gas = await mintFunction.EstimateGasAsync(
-                    account.Address,
-                    new HexBigInteger(300000),
-                    new HexBigInteger(0),
-                    lockRecord.EvmDestination,
-                    amountWei);
-
-                // Send transaction
-                var txHash = await mintFunction.SendTransactionAsync(
-                    account.Address,
-                    new HexBigInteger(gas.Value + 50000), // add buffer
-                    new HexBigInteger(0),
-                    lockRecord.EvmDestination,
-                    amountWei);
-
-                LogUtility.Log($"[BaseBridge] Mint TX submitted. Hash: {txHash}, LockId: {lockRecord.LockId}",
-                    "BaseBridgeService.MintVBTCbOnBase");
-
-                // Wait for receipt (up to 60 seconds)
-                var receipt = await WaitForReceipt(web3, txHash, 60);
-
-                if (receipt != null && receipt.Status?.Value == 1)
-                {
-                    BridgeLockRecord.UpdateStatus(lockRecord.LockId, BridgeLockStatus.Minted, baseTxHash: txHash);
-                    LogUtility.Log($"[BaseBridge] Mint CONFIRMED. TxHash: {txHash}, Block: {receipt.BlockNumber?.Value}",
-                        "BaseBridgeService.MintVBTCbOnBase");
-                    return (true, txHash);
-                }
-                else if (receipt != null)
-                {
-                    var err = "Transaction reverted on-chain";
-                    BridgeLockRecord.UpdateStatus(lockRecord.LockId, BridgeLockStatus.Failed, baseTxHash: txHash, errorMessage: err);
-                    return (false, $"Mint TX reverted. Hash: {txHash}");
-                }
-                else
-                {
-                    // Receipt not found within timeout - TX may still be pending
-                    BridgeLockRecord.UpdateStatus(lockRecord.LockId, BridgeLockStatus.ProofSubmitted, baseTxHash: txHash);
-                    return (true, $"TX submitted but not yet confirmed. Hash: {txHash}. Check Base Sepolia explorer.");
-                }
-            }
-            catch (Exception ex)
-            {
-                var errMsg = $"Mint failed: {ex.Message}";
-                BridgeLockRecord.UpdateStatus(lockRecord.LockId, BridgeLockStatus.Failed, errorMessage: errMsg);
-                LogUtility.Log($"[BaseBridge] ERROR: {errMsg}", "BaseBridgeService.MintVBTCbOnBase");
-                return (false, errMsg);
-            }
-        }
-
-        /// <summary>
-        /// Process all pending bridge lock records (status = Locked) by minting on Base.
-        /// Called by background worker or manually via API.
-        /// </summary>
-        public static async Task<List<(string LockId, bool Success, string Result)>> ProcessPendingLocks()
-        {
-            var results = new List<(string LockId, bool Success, string Result)>();
-
-            if (!IsEnabled)
-                return results;
-
-            var pending = BridgeLockRecord.GetPendingRelays();
-            foreach (var lock_ in pending)
-            {
-                var result = await MintVBTCbOnBase(lock_);
-                results.Add((lock_.LockId, result.Success, result.Result));
-
-                // Small delay between transactions to avoid nonce issues
-                if (pending.Count > 1)
-                    await Task.Delay(2000);
-            }
-
-            return results;
-        }
-
-        /// <summary>
         /// Query vBTC.b balance on Base for a given EVM address.
         /// </summary>
         public static async Task<(bool Success, decimal Balance, string Message)> GetBaseBalance(string evmAddress)
@@ -188,10 +95,10 @@ namespace ReserveBlockCore.Bitcoin.Services
             try
             {
                 if (!CanReadVbtcToken)
-                    return (false, 0, "Base vBTC.b read not configured (set BASE_BRIDGE_RPC_URL and BASE_BRIDGE_CONTRACT)");
+                    return (false, 0, "Base vBTC.b read not configured (set BaseBridgeRpcUrl and BaseBridgeContract in config.txt)");
 
                 var web3 = new Web3(BaseRpcUrl);
-                var contract = web3.Eth.GetContract(MINT_ABI, VBTCbContractAddress);
+                var contract = web3.Eth.GetContract(BALANCE_ABI, ContractAddress);
 
                 var balanceFunc = contract.GetFunction("balanceOf");
                 var balance = await balanceFunc.CallAsync<BigInteger>(evmAddress);
@@ -217,7 +124,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, 0, "Base vBTC.b read not configured");
 
                 var web3 = new Web3(BaseRpcUrl);
-                var contract = web3.Eth.GetContract(MINT_ABI, VBTCbContractAddress);
+                var contract = web3.Eth.GetContract(BALANCE_ABI, ContractAddress);
 
                 var supplyFunc = contract.GetFunction("totalSupply");
                 var supply = await supplyFunc.CallAsync<BigInteger>();
@@ -231,7 +138,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
         }
 
-        /// <summary>Native ETH balance on Base (read-only, no relay key).</summary>
+        /// <summary>Native ETH balance on Base (read-only).</summary>
         public static async Task<(bool Success, decimal BalanceEth, string Message)> GetEthBalanceAsync(string evmAddress)
         {
             try
@@ -258,15 +165,13 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// </summary>
         public static void LoadConfig()
         {
-            if (IsEnabled)
+            Globals.VBTCbContractAddress = ContractAddress.Trim();
+            if (BaseChainId == 0)
+                BaseChainId = (int)Globals.BaseEvmChainId;
+
+            if (IsBridgeConfigured)
             {
-                ReserveBlockCore.Globals.IsBaseBridgeRelayer = true;
-                LogUtility.Log($"[BaseBridge] Mint enabled. RPC: {BaseRpcUrl}, Contract: {VBTCbContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
-                    "BaseBridgeService.LoadConfig");
-            }
-            else if (CanReadVbtcToken)
-            {
-                LogUtility.Log($"[BaseBridge] Read-only (balances). RPC: {BaseRpcUrl}, Contract: {VBTCbContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
+                LogUtility.Log($"[BaseBridge] Bridge configured. RPC: {BaseRpcUrl}, Contract: {ContractAddress}, ChainId: {BaseChainId}, Network: {BaseNetworkDisplayName}",
                     "BaseBridgeService.LoadConfig");
             }
             else if (CanReadEth)
@@ -276,62 +181,54 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
             else
             {
-                LogUtility.Log("[BaseBridge] Not configured. Set BaseBridgeRpcUrl, BaseBridgeContract, and BaseBridgeRelayKey in config.txt.",
+                LogUtility.Log("[BaseBridge] Not configured. Set BaseBridgeRpcUrl and BaseBridgeContract in config.txt.",
                     "BaseBridgeService.LoadConfig");
             }
         }
 
-        /// <summary>
-        /// Background loop that mints pending bridge locks every 30 seconds (see <see cref="BridgeLockRecord.GetPendingRelays"/>:
-        /// VFX lock confirmed on-chain, status Locked, relay not yet completed).
-        /// </summary>
-        public static async Task BridgeMintRetryLoop()
+        public static IEnumerable<string> RpcUrlCandidates()
         {
-            // Wait for startup to complete
-            await Task.Delay(30_000);
-
-            while (!ReserveBlockCore.Globals.StopAllTimers)
-            {
-                try
-                {
-                    if (IsEnabled)
-                    {
-                        var pending = BridgeLockRecord.GetPendingRelays();
-                        if (pending.Any())
-                        {
-                            LogUtility.Log($"[BaseBridge] Retry loop: {pending.Count} pending lock(s) to mint.", "BaseBridgeService.BridgeMintRetryLoop");
-                            await ProcessPendingLocks();
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogUtility.Log($"[BaseBridge] Retry loop error: {ex.Message}", "BaseBridgeService.BridgeMintRetryLoop");
-                }
-
-                await Task.Delay(30_000);
-            }
+            if (!string.IsNullOrWhiteSpace(BaseRpcUrl)) yield return BaseRpcUrl;
+            if (!string.IsNullOrWhiteSpace(BaseRpcUrl2)) yield return BaseRpcUrl2;
+            if (!string.IsNullOrWhiteSpace(BaseRpcUrl3)) yield return BaseRpcUrl3;
         }
 
-        #region Helpers
-
-        private static async Task<Nethereum.RPC.Eth.DTOs.TransactionReceipt?> WaitForReceipt(Web3 web3, string txHash, int timeoutSeconds)
+        /// <summary>Reads <c>requiredMintSignatures</c> from the contract (defaults to 2 if RPC fails).</summary>
+        public static async Task<int> GetRequiredMintSignaturesFromChainAsync()
         {
-            var start = DateTime.UtcNow;
-            while ((DateTime.UtcNow - start).TotalSeconds < timeoutSeconds)
+            if (!IsBridgeConfigured) return 2;
+            foreach (var url in RpcUrlCandidates())
             {
                 try
                 {
-                    var receipt = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
-                    if (receipt != null)
-                        return receipt;
+                    var web3 = new Web3(url);
+                    var c = web3.Eth.GetContract(CONTRACT_ABI, ContractAddress);
+                    var fn = c.GetFunction("requiredMintSignatures");
+                    var v = await fn.CallAsync<BigInteger>();
+                    var i = (int)v;
+                    return i < 2 ? 2 : i;
                 }
                 catch { }
-                await Task.Delay(3000);
             }
-            return null;
+            return 2;
         }
 
-        #endregion
+        /// <summary>Best-effort: confirms a Base tx receipt exists and succeeded.</summary>
+        public static async Task<bool> HasSuccessfulReceiptAsync(string txHash)
+        {
+            if (string.IsNullOrWhiteSpace(txHash)) return false;
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var web3 = new Web3(url);
+                    var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+                    if (r != null && r.Status?.Value == 1)
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
     }
 }

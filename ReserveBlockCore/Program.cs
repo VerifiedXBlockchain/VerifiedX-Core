@@ -188,16 +188,6 @@ namespace ReserveBlockCore
                         Globals.StopConsoleOutput = true;
                         Globals.StopValConsoleOutput = true;
                     }
-
-                    if(argC.Contains("cFork"))
-                    {
-                        Globals.IsFork = true;
-                        var forkSplit = argC.Split(new char[] { '=' });
-                        if (string.IsNullOrEmpty(forkSplit[1]))
-                            await ForkConfiguration.RunForkedConfiguration();
-                        else
-                            await ForkConfiguration.RunForkedConfiguration(forkSplit[1]);
-                    }
                     if(argC == "version")
                     {
                         Console.WriteLine(Globals.CLIVersion);
@@ -337,6 +327,11 @@ namespace ReserveBlockCore
             var config = Config.Config.ReadConfigFile();
             Config.Config.ProcessConfig(config);
             Config.Config.ProcessABL();
+
+            _ = Task.Run(LogUtility.LogLoop);
+
+            // Run startup IP check (validates IP is configured; port checks happen later after servers start)
+            ValidatorPortCheckService.RunStartupIPCheck();
 
             LogUtility.Log(logCLIVer, "Main", true);
             LogUtility.Log($"VFX Wallet - {logCLIVer}", "Main");
@@ -525,8 +520,6 @@ namespace ReserveBlockCore
 
             await StartupService.SetSelfBeacon();
 
-            _ = Task.Run(LogUtility.LogLoop);
-
             //deprecate in v5.0.1 or greater
             _ = Task.Run(P2PClient.UpdateMethodCodes);
 
@@ -559,6 +552,16 @@ namespace ReserveBlockCore
 
             // Base Bridge: Load configuration from environment variables
             Bitcoin.Services.BaseBridgeService.LoadConfig();
+            Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+            if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+            {
+                LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "Program.Main()");
+                Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+            }
+            else
+            {
+                LogUtility.Log("[vBTC Bridge V2] No validator Base address derived (node may not be a validator).", "Program.Main()");
+            }
 
             // vBTC V2: Start deposit balance scan loop (scans owned contracts via Electrum)
             _ = Task.Run(Bitcoin.Services.VBTCService.VBTCV2BalanceScanLoop);
@@ -566,9 +569,15 @@ namespace ReserveBlockCore
             // Base bridge-back: poll ExitBurned logs (burnForExit) and unlock VFX bridge locks
             _ = Task.Run(Bitcoin.Services.BaseBridgeExitWatchService.BridgeExitScanLoop);
 
-            // Base bridge: retry pending mint operations (handles failed AutoRelay retries)
-            if (Globals.IsBaseBridgeRelayer)
-                _ = Task.Run(Bitcoin.Services.BaseBridgeService.BridgeMintRetryLoop);
+            // VBTCb: casters collect validator mint attestations over HTTP (validators expose SignMintAttestation)
+            // Caster attestation loop kept for backwards compatibility — but user nodes now handle minting directly via UserBridgeMintService.
+            _ = Task.Run(Bitcoin.Services.BaseBridgeAttestationService.ProcessPendingAttestationsLoop);
+
+            // V2 Bridge: Sync VFX validator set to Base contract
+            _ = Task.Run(() => Bitcoin.Services.BaseValidatorSyncService.ValidatorSyncLoop(CancellationToken.None));
+
+            // V2 Bridge: Caster consensus for burn exits
+            _ = Task.Run(() => Bitcoin.Services.BurnExitConsensusService.ConsensusLoop(CancellationToken.None));
 
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
@@ -702,6 +711,14 @@ namespace ReserveBlockCore
                     Globals.ValidatorPublicKey = myAccount.PublicKey;
                     Globals.GUIPasswordNeeded = false;
                     LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
+
+                    // Derive Base address now that ValidatorAddress is set
+                    Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                    if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                    {
+                        LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "Program.Main()");
+                        Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                    }
                 }
             }
 

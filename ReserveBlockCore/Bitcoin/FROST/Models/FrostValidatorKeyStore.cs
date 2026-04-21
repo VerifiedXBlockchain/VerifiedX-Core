@@ -30,6 +30,13 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         /// <summary>The aggregated group public key (32-byte x-only hex)</summary>
         public string GroupPublicKey { get; set; } = string.Empty;
         
+        /// <summary>
+        /// The sorted participant addresses used during DKG, serialized as JSON array.
+        /// This preserves the exact ordering that produced the FROST Identifiers baked into
+        /// the key packages, so signing ceremonies can reconstruct the same mapping.
+        /// </summary>
+        public string ParticipantOrderJson { get; set; } = string.Empty;
+        
         /// <summary>Timestamp when this key was created</summary>
         public long CreatedTimestamp { get; set; }
 
@@ -106,6 +113,71 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
             {
                 ErrorLogUtility.LogError($"Failed to get FROST pubkey package: {ex.Message}", "FrostValidatorKeyStore.GetPubkeyPackage");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Look up a validator's key package by GroupPublicKey (fallback when SCUID doesn't match
+        /// because the key store was saved under a DKG ceremony GUID instead of the real SCUID).
+        /// </summary>
+        public static FrostValidatorKeyStore? GetKeyPackageByGroupPublicKey(string groupPublicKey, string validatorAddress)
+        {
+            try
+            {
+                var db = GetDb();
+                return db.FindOne(x =>
+                    x.GroupPublicKey == groupPublicKey &&
+                    x.ValidatorAddress == validatorAddress);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to get FROST key package by GroupPublicKey: {ex.Message}", "FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Update the SmartContractUID on a key store record (used to fix ceremonyId → real SCUID).
+        /// </summary>
+        public static void UpdateSmartContractUID(long recordId, string newSmartContractUID)
+        {
+            try
+            {
+                var db = GetDb();
+                var record = db.FindById(recordId);
+                if (record != null)
+                {
+                    var oldUID = record.SmartContractUID;
+                    record.SmartContractUID = newSmartContractUID;
+                    db.UpdateSafe(record);
+                    LogUtility.Log($"[FROST KeyStore] Updated SCUID from {oldUID} → {newSmartContractUID} for validator {record.ValidatorAddress}",
+                        "FrostValidatorKeyStore.UpdateSmartContractUID");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to update FROST key store SCUID: {ex.Message}", "FrostValidatorKeyStore.UpdateSmartContractUID");
+            }
+        }
+
+        /// <summary>
+        /// Check if a contract has valid FROST keys with stored participant ordering.
+        /// Contracts DKG'd before the participant ordering fix will not have ParticipantOrderJson,
+        /// meaning their key packages may have inconsistent FROST Identifiers across validators.
+        /// </summary>
+        public static bool HasValidParticipantOrder(string smartContractUID)
+        {
+            try
+            {
+                var db = GetDb();
+                var record = db.FindOne(x => x.SmartContractUID == smartContractUID);
+                if (record == null) return false;
+                return !string.IsNullOrWhiteSpace(record.ParticipantOrderJson);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to check FROST participant order: {ex.Message}", "FrostValidatorKeyStore.HasValidParticipantOrder");
+                return false;
             }
         }
 
