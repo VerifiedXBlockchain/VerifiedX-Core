@@ -130,6 +130,42 @@ namespace ReserveBlockCore.Bitcoin.Services
             }
         }
 
+        /// <summary>
+        /// Ensures <see cref="Globals.ValidatorBaseAddress"/> is populated before sending
+        /// on-chain TXs that include the Base address. If it's still empty (e.g. due to a
+        /// startup timing issue), this retries the derivation from the validator's private key.
+        /// Call this from heartbeat / registration / reactivation TX builders.
+        /// </summary>
+        public static void EnsureBaseAddressInitialized()
+        {
+            if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                return;
+
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                return;
+
+            try
+            {
+                var derived = DeriveBaseAddressFromAccount(Globals.ValidatorAddress);
+                if (!string.IsNullOrEmpty(derived))
+                {
+                    Globals.ValidatorBaseAddress = derived;
+                    LogUtility.Log($"Lazy-initialized Validator Base Address: {derived}",
+                        "ValidatorEthKeyService.EnsureBaseAddressInitialized");
+                }
+                else
+                {
+                    LogUtility.Log("Validator Base Address derivation returned empty — private key may not be available yet",
+                        "ValidatorEthKeyService.EnsureBaseAddressInitialized");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to lazy-initialize Validator Base Address: {ex.Message}",
+                    "ValidatorEthKeyService.EnsureBaseAddressInitialized");
+            }
+        }
+
         private static byte[] LongToUint256BigEndian(long v)
         {
             unchecked

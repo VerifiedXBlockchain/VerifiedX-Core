@@ -329,6 +329,9 @@ namespace ReserveBlockCore.Services
                     return;
                 }
 
+                // Ensure Base address is derived before building the TX payload
+                Bitcoin.Services.ValidatorEthKeyService.EnsureBaseAddressInitialized();
+
                 var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
 
                 // Create VBTC_V2_VALIDATOR_REGISTER transaction
@@ -463,6 +466,9 @@ namespace ReserveBlockCore.Services
                         "ValidatorService.SendVBTCV2ReactivationTx()");
                     return;
                 }
+
+                // Ensure Base address is derived before building the TX payload
+                Bitcoin.Services.ValidatorEthKeyService.EnsureBaseAddressInitialized();
 
                 var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
 
@@ -794,10 +800,10 @@ namespace ReserveBlockCore.Services
                         Globals.IsValidatorAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.ValAPIPort);
                         Globals.IsFROSTAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.FrostValidatorPort);
 
-                        if (!Globals.IsFROSTAPIPortOpen || !Globals.IsValidatorAPIPortOpen || !Globals.IsValidatorPortOpen)
-                        {
-                            return $"Port Status: Main Port Open: {Globals.IsValidatorPortOpen} | Validator API Port Open: {!Globals.IsValidatorAPIPortOpen} | FROST Port Open: {Globals.IsFROSTAPIPortOpen}";
-                        }
+                        //if (!Globals.IsFROSTAPIPortOpen || !Globals.IsValidatorAPIPortOpen || !Globals.IsValidatorPortOpen)
+                        //{
+                        //    return $"Port Status: Main Port Open: {Globals.IsValidatorPortOpen} | Validator API Port Open: {Globals.IsValidatorAPIPortOpen} | FROST Port Open: {Globals.IsFROSTAPIPortOpen}";
+                        //}
 
                         //add total num of validators to block
                         validator.NodeIP = "SELF"; //this is as new as other users will fill this in once connected

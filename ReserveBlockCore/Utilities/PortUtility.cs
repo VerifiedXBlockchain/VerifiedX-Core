@@ -41,7 +41,7 @@ namespace ReserveBlockCore.Utilities
                 try
                 {
                     var result = tcpClient.BeginConnect(host, port, null, null);
-                    var success = result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(1));
+                    var success = result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(5));
                     if (!success)
                     {
                         throw new SocketException();

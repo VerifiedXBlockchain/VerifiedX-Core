@@ -202,6 +202,9 @@ namespace ReserveBlockCore.Services
                     return false;
                 }
 
+                // Ensure Base address is derived before building the TX payload
+                Bitcoin.Services.ValidatorEthKeyService.EnsureBaseAddressInitialized();
+
                 var existingValidator = VBTCValidatorRegistry.GetValidator(Globals.ValidatorAddress);
                 var previousIP = existingValidator?.IPAddress ?? "";
 
