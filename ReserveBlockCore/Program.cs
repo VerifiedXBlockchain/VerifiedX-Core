@@ -47,6 +47,9 @@ namespace ReserveBlockCore
             bool headlessMode = false;
 
             var argList = args.ToList();
+            // Exact "snapshot" = cold chain DB checkpoint + copy under the DB folder (excludes wallet DBs).
+            // Use "snapshot=0" / "snapshot=1" for the optional remote snapshot download flow.
+            bool coldChainSnapshot = argList.Exists(x => string.Equals(x?.Trim(), "snapshot", StringComparison.OrdinalIgnoreCase));
             //force culture info to US
             var culture = CultureInfo.GetCultureInfo("en-US");
             if (Thread.CurrentThread.CurrentCulture.Name != "en-US")
@@ -281,24 +284,24 @@ namespace ReserveBlockCore
                     {
                         signalrLog = true;
                     }
-                    if (argC.Contains("snapshot"))
+                    if (argC.StartsWith("snapshot=", StringComparison.OrdinalIgnoreCase))
                     {
-                        var snapshot = argC.Split(new char[] { '=' });
+                        var snapshot = argC.Split(new char[] { '=' }, 2);
+                        if (snapshot.Length < 2)
+                            return;
                         var response = snapshot[1];
-                        if(response == "0")
+                        if (response == "0")
                         {
-                            //download auto
                             await SnapshotService.RunSnapshot();
                         }
-                        if(response == "1")
+                        if (response == "1")
                         {
-                            //prompt cli commands here
                             AnsiConsole.MarkupLine($"You have added the snapshot param. Do you want to download snapshot? ([green]'y'[/] for [green]yes[/] and [red]'n'[/] for [red]no[/])");
                             AnsiConsole.MarkupLine($"[yellow]Please note this will completely wipe out your database folder. Please make sure you have your private keys backed up.[/])");
                             var snapshotResponse = Console.ReadLine();
-                            if(!string.IsNullOrEmpty(snapshotResponse))
+                            if (!string.IsNullOrEmpty(snapshotResponse))
                             {
-                                if(snapshotResponse == "y")
+                                if (snapshotResponse == "y")
                                 {
                                     await SnapshotService.RunSnapshot();
                                 }
@@ -345,6 +348,9 @@ namespace ReserveBlockCore
             APILogUtility.Log($"VFX API ver. - {logCLIVer}", "Main");
 
             StartupService.AnotherInstanceCheck(); //checks for another instance
+
+            if (coldChainSnapshot)
+                await LocalDbSnapshotService.CreateChainSnapshotAsync();
 
             StartupService.StartupDatabase();// initializes databases
 
