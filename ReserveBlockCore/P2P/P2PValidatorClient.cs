@@ -1054,6 +1054,10 @@ namespace ReserveBlockCore.P2P
                                 // HAL-11 Fix: Enhanced validation with rate limiting and cross-verification
                                 LogUtility.Log($"Processing {activeVals.Count} validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
 
+                                int addedCount = 0;
+                                int failedCount = 0;
+                                int skippedCount = 0;
+
                                 foreach (var val in activeVals)
                                 {
                                     try
@@ -1062,14 +1066,15 @@ namespace ReserveBlockCore.P2P
                                         if (string.IsNullOrEmpty(val.Address) || string.IsNullOrEmpty(val.IPAddress))
                                         {
                                             ErrorLogUtility.LogError($"Invalid validator entry from {advertisingPeerIP}: missing address or IP", "RequestActiveValidators");
+                                            skippedCount++;
                                             continue;
                                         }
 
-                                        // HAL-11 Fix: Set advertisement metadata if not present
-                                        if (val.AdvertisementTimestamp == 0)
-                                        {
-                                            val.AdvertisementTimestamp = TimeUtil.GetTime();
-                                        }
+                                        // FIX: Always refresh advertisement timestamp when receiving validator lists
+                                        // from peers. The original timestamp was set when the validator first registered
+                                        // and becomes stale (>300s) by the time new nodes request the list, causing
+                                        // AddValidatorToPool to reject them as "timestamp too old".
+                                        val.AdvertisementTimestamp = TimeUtil.GetTime();
 
                                         if (string.IsNullOrEmpty(val.AdvertisementNonce))
                                         {
@@ -1082,8 +1087,11 @@ namespace ReserveBlockCore.P2P
                                         if (!addResult)
                                         {
                                             ErrorLogUtility.LogError($"Failed to add validator {val.Address} from peer {advertisingPeerIP}", "RequestActiveValidators");
+                                            failedCount++;
                                             continue;
                                         }
+
+                                        addedCount++;
 
                                         // HAL-11 Fix: Only update peer database for fully trusted validators
                                         if (val.IsFullyTrusted)
@@ -1129,7 +1137,7 @@ namespace ReserveBlockCore.P2P
                                     }
                                 }
 
-                                LogUtility.Log($"Completed processing validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
+                                LogUtility.Log($"Completed processing validator advertisements from peer {advertisingPeerIP}: added={addedCount}, failed={failedCount}, skipped={skippedCount}, NetworkValidators.Count={Globals.NetworkValidators.Count}, BlockCasters.Count={Globals.BlockCasters.Count}", "RequestActiveValidators");
                             }
                         }
                     }

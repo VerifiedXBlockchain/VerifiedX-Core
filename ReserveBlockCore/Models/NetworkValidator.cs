@@ -67,6 +67,9 @@ namespace ReserveBlockCore.Models
                         ErrorLogUtility.LogError($"Validator advertisement timestamp too old for {validator.Address}. Diff: {timeDiff}s", "NetworkValidator.AddValidatorToPool");
                         return false;
                     }
+                    
+                    // DIAGNOSTIC: Log timestamp diff on success so we can verify freshness
+                    LogUtility.Log($"Validator {validator.Address} timestamp OK (diff={timeDiff}s) from peer {advertisingPeerIP}", "NetworkValidator.AddValidatorToPool");
                 }
 
                 // HAL-11 Fix: Rate limiting per advertising peer

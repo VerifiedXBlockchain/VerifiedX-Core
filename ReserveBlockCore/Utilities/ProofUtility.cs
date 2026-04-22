@@ -191,6 +191,21 @@ namespace ReserveBlockCore.Utilities
                 StringComparer.Ordinal);
             var list = all.Where(p => casterAddrs.Contains(p.Address)).ToList();
 
+            // DIAGNOSTIC: Log detail when casterProofs=0 but allProofs exist, to identify pool/caster mismatch
+            if (list.Count == 0 && all.Count > 0)
+            {
+                var allAddrs = string.Join(", ", all.Select(p => p.Address).Distinct().Take(10));
+                var casterAddrList = string.Join(", ", casterAddrs.Take(10));
+                var totalBlockCasters = Globals.BlockCasters.Count;
+                var castersWithAddr = Globals.BlockCasters.Count(c => !string.IsNullOrEmpty(c.ValidatorAddress));
+                var netValCount = Globals.NetworkValidators.Count;
+                CasterLogUtility.Log(
+                    $"casterProofs=0 DIAGNOSTIC: allProofs={all.Count} proofAddrs=[{allAddrs}] " +
+                    $"casterAddrs=[{casterAddrList}] BlockCasters.Total={totalBlockCasters} " +
+                    $"BlockCasters.WithAddr={castersWithAddr} NetworkValidators={netValCount}",
+                    "PROOFS-DIAG");
+            }
+
             // Snapshot / NetworkValidators often omit seed casters; build missing proofs from agreed BlockCasters (pubkey on peer).
             var blockHeight = Globals.LastBlock.Height + 1;
             var prevHash = Globals.LastBlock.Hash;

@@ -712,6 +712,15 @@ namespace ReserveBlockCore.P2P
             if (!vals.Any())
                 return "0";
 
+            // FIX: Refresh AdvertisementTimestamp before sending to prevent receivers
+            // from rejecting validators as "timestamp too old" (>300s stale).
+            var freshTime = TimeUtil.GetTime();
+            foreach (var v in vals)
+                v.AdvertisementTimestamp = freshTime;
+
+            var peerIPForLog = GetIP(Context);
+            LogUtility.Log($"SendActiveVals: sending {vals.Count} validators with refreshed timestamps to {peerIPForLog}", "P2PValidatorServer.SendActiveVals");
+
             // HAL-15 Security Fix: Limit validator list to maximum 2000 validators for broadcast
             var limitedVals = InputValidationHelper.LimitValidatorListForBroadcast(vals);
             
