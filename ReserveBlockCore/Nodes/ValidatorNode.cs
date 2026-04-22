@@ -88,7 +88,15 @@ namespace ReserveBlockCore.Nodes
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
-                if ((Globals.StopAllTimers || !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+                // FIX: Allow block generation even if Globals.Nodes is empty, as long as
+                // we have NetworkValidators or BlockCasters. The validator needs to keep
+                // NextValidatorBlock current so casters can fetch blocks via VerifyBlock.
+                if (Globals.StopAllTimers || !Globals.IsChainSynced)
+                {
+                    await delay;
+                    continue;
+                }
+                if (Globals.Nodes.Count == 0 && Globals.NetworkValidators.Count == 0 && Globals.BlockCasters.Count == 0)
                 {
                     await delay;
                     continue;

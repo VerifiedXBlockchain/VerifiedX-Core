@@ -980,37 +980,92 @@ namespace ReserveBlockCore.Nodes
                                         }
                                         else
                                         {
-                                            // FIX 4: Fetch block directly from each caster via RequestBlock endpoint.
-                                            // FetchBlockWithRedundantCasterAgreementAsync required supermajority agreement
-                                            // but non-winning casters don't have the block yet, causing it to always fail.
-                                            CasterRoundAudit.AddStep($"Requesting block from peer casters directly.", true);
-                                            foreach (var caster in Globals.BlockCasters.ToList())
+                                            // FIX: First try calling the winning VALIDATOR directly via VerifyBlock.
+                                            // This is the intended design: casters should always fetch blocks from validators.
+                                            // The winning validator pre-crafts blocks in GenerateValidBlock() and serves them
+                                            // via the VerifyBlock endpoint when a caster requests the matching height.
+                                            
+                                            // Find the winning validator's IP from proofs or NetworkValidators
+                                            string? winnerIP = null;
+                                            var winnerProof = proofs.FirstOrDefault(p => p.Address == terminalWinner);
+                                            if (winnerProof != null && !string.IsNullOrEmpty(winnerProof.IPAddress))
                                             {
+                                                winnerIP = winnerProof.IPAddress.Replace("::ffff:", "");
+                                            }
+                                            else if (Globals.NetworkValidators.TryGetValue(terminalWinner, out var nv) && !string.IsNullOrEmpty(nv.IPAddress))
+                                            {
+                                                winnerIP = nv.IPAddress.Replace("::ffff:", "");
+                                            }
+                                            
+                                            if (!string.IsNullOrEmpty(winnerIP))
+                                            {
+                                                CasterRoundAudit.AddStep($"Calling winning validator directly at {winnerIP} via VerifyBlock.", true);
+                                                CasterLogUtility.Log($"Direct validator fetch: calling {terminalWinner} at {winnerIP}", "BLOCKFETCH");
                                                 try
                                                 {
-                                                    block = await CasterBlockFetch.TryFetchBlockAsync(caster, finalizedWinner.BlockHeight, terminalWinner);
-                                                    if (block != null && block.Validator == terminalWinner)
+                                                    var verifyResult = await ProofUtility.VerifyValAvailability(winnerIP, terminalWinner, finalizedWinner.BlockHeight);
+                                                    if (verifyResult.Item1 && verifyResult.Item2 != null)
                                                     {
-                                                        failedToReachConsensus = false;
+                                                        block = verifyResult.Item2;
                                                         blockFound = true;
-
+                                                        failedToReachConsensus = false;
+                                                        
                                                         round = Globals.CasterRoundDict.GetOrAdd(block.Height, new CasterRound { BlockHeight = block.Height });
                                                         var compareRound = round;
                                                         round.Block = block;
                                                         round.Validator = block.Validator;
                                                         Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound);
-
-                                                        CasterRoundAudit.AddStep($"Block fetched from {caster.PeerIP}. Height: {block.Height} (staged; commit after hash agreement).", true);
-
-                                                        break;
+                                                        
+                                                        CasterRoundAudit.AddStep($"Block fetched directly from validator {winnerIP}. Height: {block.Height} (staged; commit after hash agreement).", true);
+                                                        CasterLogUtility.Log($"Direct validator fetch SUCCESS: block {block.Height} from {winnerIP}", "BLOCKFETCH");
                                                     }
                                                     else
                                                     {
-                                                        failedToReachConsensus = true;
+                                                        CasterLogUtility.Log($"Direct validator fetch FAILED: {terminalWinner} at {winnerIP} returned no block", "BLOCKFETCH");
                                                     }
                                                 }
-                                                catch { failedToReachConsensus = true; }
-                                                await Task.Delay(75);
+                                                catch (Exception ex)
+                                                {
+                                                    CasterLogUtility.Log($"Direct validator fetch ERROR: {terminalWinner} at {winnerIP}: {ex.Message}", "BLOCKFETCH");
+                                                }
+                                            }
+                                            else
+                                            {
+                                                CasterLogUtility.Log($"Direct validator fetch SKIPPED: no IP found for winner {terminalWinner}", "BLOCKFETCH");
+                                            }
+                                            
+                                            // Fallback: try peer casters if direct validator call failed
+                                            if (!blockFound)
+                                            {
+                                                CasterRoundAudit.AddStep($"Direct validator fetch failed. Trying peer casters as fallback.", true);
+                                                foreach (var caster in Globals.BlockCasters.ToList())
+                                                {
+                                                    try
+                                                    {
+                                                        block = await CasterBlockFetch.TryFetchBlockAsync(caster, finalizedWinner.BlockHeight, terminalWinner);
+                                                        if (block != null && block.Validator == terminalWinner)
+                                                        {
+                                                            failedToReachConsensus = false;
+                                                            blockFound = true;
+
+                                                            round = Globals.CasterRoundDict.GetOrAdd(block.Height, new CasterRound { BlockHeight = block.Height });
+                                                            var compareRound = round;
+                                                            round.Block = block;
+                                                            round.Validator = block.Validator;
+                                                            Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound);
+
+                                                            CasterRoundAudit.AddStep($"Block fetched from caster {caster.PeerIP}. Height: {block.Height} (staged; commit after hash agreement).", true);
+
+                                                            break;
+                                                        }
+                                                        else
+                                                        {
+                                                            failedToReachConsensus = true;
+                                                        }
+                                                    }
+                                                    catch { failedToReachConsensus = true; }
+                                                    await Task.Delay(75);
+                                                }
                                             }
                                         }
                                         /////////////////////////////////////
