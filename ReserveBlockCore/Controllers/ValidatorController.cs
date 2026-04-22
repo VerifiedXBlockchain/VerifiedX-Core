@@ -555,7 +555,7 @@ namespace ReserveBlockCore.Controllers
         [Route("CasterInvitation")]
         public ActionResult<string> CasterInvitation([FromBody] CasterRotationBroadcast? _)
         {
-            return Accepted("CasterInvitation reserved for signed rotation flow (plan §7.4).");
+            return Accepted("CasterInvitation reserved for signed rotation flow (plan Â§7.4).");
         }
 
         /// <summary>
@@ -570,7 +570,7 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
-        /// Caster readiness check — returns this caster's current height and ready status.
+        /// Caster readiness check â€” returns this caster's current height and ready status.
         /// Used by the startup readiness barrier so all casters sync before beginning consensus.
         /// </summary>
         [HttpGet]
@@ -658,6 +658,24 @@ namespace ReserveBlockCore.Controllers
                 if (!Globals.BlockCasters.Any(c => c.ValidatorAddress == notice.DepartingAddress))
                     return BadRequest("not a known caster");
                 await CasterDiscoveryService.HandleDeparture(notice);
+                return Ok();
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(ex.ToString());
+            }
+        }
+
+        /// <summary>Caster demotion notice (signed by a peer caster that detected the issue).</summary>
+        [HttpPost]
+        [Route("AnnounceCasterDemotion")]
+        public async Task<ActionResult<string>> AnnounceCasterDemotion([FromBody] CasterDemotionNotice? notice)
+        {
+            try
+            {
+                if (notice == null || string.IsNullOrEmpty(notice.DemotedAddress))
+                    return BadRequest("invalid");
+                await CasterDiscoveryService.HandleDemotion(notice);
                 return Ok();
             }
             catch (Exception ex)

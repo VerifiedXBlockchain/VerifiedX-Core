@@ -17,9 +17,25 @@ namespace ReserveBlockCore.Services
         public const int MaxCasters = 5;
         public const decimal MinCasterBalance = 5000M;
         public const int StallThresholdSeconds = 80;
+        /// <summary>Number of consecutive audit failures before a caster is demoted.</summary>
+        public const int AuditFailThreshold = 3;
 
         private static long _lastEvaluationHeight = long.MinValue;
         private static long _lastRefreshAtHeight = -1;
+
+        /// <summary>Tracks consecutive version-check failures per caster address for audit tolerance.</summary>
+        private static readonly ConcurrentDictionary<string, int> _auditFailCounts = new();
+
+        /// <summary>Result of a version check distinguishing connectivity failure from genuine version mismatch.</summary>
+        internal enum VersionCheckResult
+        {
+            /// <summary>Version is current.</summary>
+            Ok,
+            /// <summary>Got a response but version is outdated.</summary>
+            Outdated,
+            /// <summary>Could not reach the node (timeout, connection refused, etc.).</summary>
+            Unreachable
+        }
 
         /// <summary>Deterministic JSON for <see cref="CasterInfo"/> lists (must match on promoter and promoted node).</summary>
         internal static string GetCanonicalCasterListJson(IEnumerable<CasterInfo> list)
@@ -111,6 +127,10 @@ namespace ReserveBlockCore.Services
                     if (!await CheckCandidateVersion(ip, v.Address))
                         continue;
 
+                    // Health gate: reject candidates that are out of sync or have clock skew.
+                    if (!await CheckCandidateHealth(ip, v.Address))
+                        continue;
+
                     var newCaster = new Peers
                     {
                         PeerIP = ip,
@@ -139,10 +159,74 @@ namespace ReserveBlockCore.Services
         }
 
         /// <summary>
+        /// Checks a candidate's clock skew and validator pool health before promotion.
+        /// Returns true only if the candidate has acceptable clock sync and a healthy validator pool.
+        /// </summary>
+        internal static async Task<bool> CheckCandidateHealth(string ip, string address)
+        {
+            // Clock skew check: query the candidate's block height and compare timestamps
+            try
+            {
+                using var client = Globals.HttpClientFactory.CreateClient();
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+                // Use CasterReadyCheck which returns Height, Ready, Address
+                var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/CasterReadyCheck/{Globals.LastBlock.Height}";
+                var response = await client.GetAsync(uri, cts.Token);
+                if (response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync();
+                    if (!string.IsNullOrEmpty(body) && body != "0")
+                    {
+                        var status = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(body, new { Height = 0L, Ready = false, Address = "" });
+                        if (status != null)
+                        {
+                            // Height skew check: if the candidate is >5 blocks behind, reject
+                            var heightDiff = Math.Abs(Globals.LastBlock.Height - status.Height);
+                            if (heightDiff > 5)
+                            {
+                                ConsoleWriterService.OutputVal(
+                                    $"[CasterDiscovery] HealthCheck: Candidate {address} at {ip} is {heightDiff} blocks behind (theirs={status.Height}, ours={Globals.LastBlock.Height}). Skipping.");
+                                return false;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    ConsoleWriterService.OutputVal(
+                        $"[CasterDiscovery] HealthCheck: Candidate {address} at {ip} — CasterReadyCheck returned {response.StatusCode}. Skipping.");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                ConsoleWriterService.OutputVal(
+                    $"[CasterDiscovery] HealthCheck: Candidate {address} at {ip} — unreachable: {ex.Message}. Skipping.");
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>Minimum number of validators a node must know about to be a useful caster.</summary>
+        public const int MinValidatorPoolSize = 2;
+
+        /// <summary>
         /// Checks a candidate's wallet version via HTTP before promotion.
         /// Returns true if the candidate is on a compatible major version.
         /// </summary>
-        private static async Task<bool> CheckCandidateVersion(string ip, string address)
+        internal static async Task<bool> CheckCandidateVersion(string ip, string address)
+        {
+            var result = await CheckCandidateVersionDetailed(ip, address);
+            return result == VersionCheckResult.Ok;
+        }
+
+        /// <summary>
+        /// Checks a candidate's wallet version via HTTP, returning a detailed result
+        /// that distinguishes between connectivity failure and genuine version mismatch.
+        /// </summary>
+        internal static async Task<VersionCheckResult> CheckCandidateVersionDetailed(string ip, string address)
         {
             try
             {
@@ -154,28 +238,31 @@ namespace ReserveBlockCore.Services
                 {
                     ConsoleWriterService.OutputVal(
                         $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — GetWalletVersion returned {response?.StatusCode}. Skipping.");
-                    return false;
+                    // Got a response but it was an error — treat as unreachable (node might be starting up)
+                    return VersionCheckResult.Unreachable;
                 }
                 var peerVersion = await response.Content.ReadAsStringAsync();
                 if (string.IsNullOrEmpty(peerVersion) || !ProofUtility.IsMajorVersionCurrent(peerVersion))
                 {
                     ConsoleWriterService.OutputVal(
                         $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Skipping.");
-                    return false;
+                    return VersionCheckResult.Outdated;
                 }
-                return true;
+                return VersionCheckResult.Ok;
             }
             catch (Exception ex)
             {
                 ConsoleWriterService.OutputVal(
-                    $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — version check failed: {ex.Message}. Skipping.");
-                return false;
+                    $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — unreachable: {ex.Message}. Skipping.");
+                return VersionCheckResult.Unreachable;
             }
         }
 
         /// <summary>
         /// Periodically audits existing casters and removes any on outdated major versions.
         /// Called from MonitorCasters or EvaluateCasterPool to keep the pool clean.
+        /// Uses a retry-tolerant approach: connectivity failures must occur <see cref="AuditFailThreshold"/>
+        /// consecutive times before demotion. Genuine version mismatches demote immediately.
         /// </summary>
         public static async Task AuditExistingCasterVersions()
         {
@@ -184,6 +271,7 @@ namespace ReserveBlockCore.Services
 
             var casters = Globals.BlockCasters.ToList();
             var toRemove = new List<string>();
+            var removalReasons = new Dictionary<string, string>();
 
             foreach (var caster in casters)
             {
@@ -195,9 +283,39 @@ namespace ReserveBlockCore.Services
                     continue;
 
                 var ip = caster.PeerIP.Replace("::ffff:", "");
-                if (!await CheckCandidateVersion(ip, caster.ValidatorAddress))
+                var result = await CheckCandidateVersionDetailed(ip, caster.ValidatorAddress);
+
+                switch (result)
                 {
-                    toRemove.Add(caster.ValidatorAddress);
+                    case VersionCheckResult.Ok:
+                        // Reset failure counter on success
+                        _auditFailCounts.TryRemove(caster.ValidatorAddress, out _);
+                        break;
+
+                    case VersionCheckResult.Outdated:
+                        // Genuine version mismatch — demote immediately
+                        toRemove.Add(caster.ValidatorAddress);
+                        removalReasons[caster.ValidatorAddress] = "outdated version";
+                        _auditFailCounts.TryRemove(caster.ValidatorAddress, out _);
+                        break;
+
+                    case VersionCheckResult.Unreachable:
+                        // Connectivity failure — only demote after consecutive failures
+                        var failCount = _auditFailCounts.AddOrUpdate(
+                            caster.ValidatorAddress, 1, (_, c) => c + 1);
+
+                        if (failCount >= AuditFailThreshold)
+                        {
+                            toRemove.Add(caster.ValidatorAddress);
+                            removalReasons[caster.ValidatorAddress] = $"unreachable ({failCount} consecutive failures)";
+                            _auditFailCounts.TryRemove(caster.ValidatorAddress, out _);
+                        }
+                        else
+                        {
+                            ConsoleWriterService.OutputVal(
+                                $"[CasterDiscovery] VersionAudit: Caster {caster.ValidatorAddress} unreachable (attempt {failCount}/{AuditFailThreshold}). Not demoting yet.");
+                        }
+                        break;
                 }
             }
 
@@ -214,9 +332,13 @@ namespace ReserveBlockCore.Services
 
                 foreach (var addr in toRemove)
                 {
+                    var reason = removalReasons.GetValueOrDefault(addr, "unknown");
                     ConsoleWriterService.OutputVal(
-                        $"[CasterDiscovery] VersionAudit: Demoted caster {addr} — outdated version.");
+                        $"[CasterDiscovery] VersionAudit: Demoted caster {addr} — {reason}.");
                 }
+
+                // Broadcast demotion to all remaining casters so they remove the node too
+                await BroadcastDemotions(toRemove).ConfigureAwait(false);
 
                 // Re-evaluate to fill slots
                 _lastEvaluationHeight = long.MinValue;
@@ -277,6 +399,111 @@ namespace ReserveBlockCore.Services
             {
                 ErrorLogUtility.LogError($"NotifyPromotion to {peerIP} failed: {ex.Message}", "CasterDiscoveryService");
             }
+        }
+
+        /// <summary>
+        /// Broadcasts signed demotion notices to all peer casters so they remove the demoted node(s)
+        /// simultaneously. This prevents caster list inconsistency across the network.
+        /// </summary>
+        private static async Task BroadcastDemotions(List<string> demotedAddresses)
+        {
+            if (!Globals.IsBlockCaster || string.IsNullOrEmpty(Globals.ValidatorAddress))
+                return;
+
+            var account = AccountData.GetLocalValidator();
+            if (account == null)
+                return;
+            var privateKey = account.GetPrivKey;
+            if (privateKey == null || string.IsNullOrEmpty(account.PublicKey))
+                return;
+
+            var peers = Globals.BlockCasters.ToList()
+                .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress);
+
+            var blockHeight = Globals.LastBlock.Height;
+
+            foreach (var demotedAddr in demotedAddresses)
+            {
+                var canonicalMessage = $"DEMOTE|{demotedAddr}|{blockHeight}|{Globals.ValidatorAddress}";
+                var signature = SignatureService.CreateSignature(canonicalMessage, privateKey, account.PublicKey);
+                if (signature == "ERROR")
+                    continue;
+
+                var demotion = new CasterDemotionNotice
+                {
+                    DemotedAddress = demotedAddr,
+                    BlockHeight = blockHeight,
+                    DemoterAddress = Globals.ValidatorAddress,
+                    DemotionSignature = signature,
+                };
+
+                var json = JsonConvert.SerializeObject(demotion);
+
+                var tasks = peers.Select(async peer =>
+                {
+                    try
+                    {
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                        var ip = peer.PeerIP!.Replace("::ffff:", "");
+                        var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/AnnounceCasterDemotion";
+                        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+                        await client.PostAsync(uri, content, cts.Token).ConfigureAwait(false);
+                    }
+                    catch { /* best-effort */ }
+                });
+
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+            }
+
+            ConsoleWriterService.OutputVal($"[CasterDiscovery] Demotion notice broadcast for {demotedAddresses.Count} caster(s) to all peers.");
+        }
+
+        /// <summary>
+        /// Handles a demotion notice received from a peer caster.
+        /// Verifies the signature and removes the demoted caster from the local pool.
+        /// </summary>
+        public static async Task HandleDemotion(CasterDemotionNotice demotion)
+        {
+            if (string.IsNullOrEmpty(demotion.DemotedAddress) || string.IsNullOrEmpty(demotion.DemoterAddress))
+                return;
+
+            // Verify the demoter is a known caster
+            var isTrustedDemoter = Globals.BlockCasters.Any(c => c.ValidatorAddress == demotion.DemoterAddress)
+                || Globals.KnownCasters.Any(c => c.Address == demotion.DemoterAddress);
+            if (!isTrustedDemoter)
+            {
+                ErrorLogUtility.LogError($"Demotion from untrusted address {demotion.DemoterAddress} — not in our caster set", "CasterDiscoveryService");
+                return;
+            }
+
+            var canonicalMessage = $"DEMOTE|{demotion.DemotedAddress}|{demotion.BlockHeight}|{demotion.DemoterAddress}";
+            if (!SignatureService.VerifySignature(demotion.DemoterAddress, canonicalMessage, demotion.DemotionSignature))
+            {
+                ErrorLogUtility.LogError($"Invalid demotion signature from {demotion.DemoterAddress}", "CasterDiscoveryService");
+                return;
+            }
+
+            var casterList = Globals.BlockCasters.ToList();
+            if (!casterList.Any(c => c.ValidatorAddress == demotion.DemotedAddress))
+                return; // Already removed
+
+            ConsoleWriterService.OutputVal(
+                $"[CasterDiscovery] Received demotion notice for {demotion.DemotedAddress} from {demotion.DemoterAddress}. Removing...");
+
+            var nCasterList = casterList
+                .Where(c => c.ValidatorAddress != demotion.DemotedAddress)
+                .ToList();
+            var nBag = new ConcurrentBag<Peers>();
+            foreach (var x in nCasterList)
+                nBag.Add(x);
+            Globals.BlockCasters = nBag;
+            Globals.SyncKnownCastersFromBlockCasters();
+
+            // Clear audit failure counter for the demoted address
+            _auditFailCounts.TryRemove(demotion.DemotedAddress, out _);
+
+            await OnCasterRemoved(demotion.DemotedAddress).ConfigureAwait(false);
         }
 
         public static async Task OnCasterRemoved(string removedAddress)
@@ -395,6 +622,17 @@ namespace ReserveBlockCore.Services
             if (!SignatureService.VerifySignature(promotion.PromoterAddress, canonicalMessage, promotion.PromoterSignature))
             {
                 ErrorLogUtility.LogError($"Invalid promotion signature from {promotion.PromoterAddress}", "CasterDiscoveryService");
+                return Task.CompletedTask;
+            }
+
+            // Self-health check: reject promotion if our NetworkValidators pool is too small.
+            // Without validators we can't generate proofs, which inflates the quorum and halts consensus.
+            var validatorCount = Globals.NetworkValidators.Count;
+            if (validatorCount < MinValidatorPoolSize)
+            {
+                ConsoleWriterService.OutputVal(
+                    $"[CasterDiscovery] REJECTING promotion — our NetworkValidators pool has only {validatorCount} entries (need {MinValidatorPoolSize}+). " +
+                    "This node cannot produce proofs and would halt consensus.");
                 return Task.CompletedTask;
             }
 

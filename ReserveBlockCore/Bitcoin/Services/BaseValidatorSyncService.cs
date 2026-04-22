@@ -259,7 +259,24 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var privHex = account.GetKey;
                 if (string.IsNullOrEmpty(privHex)) return null;
 
-                var privBytes = Convert.FromHexString(privHex.StartsWith("0x") ? privHex[2..] : privHex);
+                // Strip 0x prefix if present
+                var cleanHex = privHex.StartsWith("0x") ? privHex[2..] : privHex;
+                // Pad odd-length hex strings (some VFX private keys have odd nibble counts)
+                if (cleanHex.Length % 2 != 0)
+                    cleanHex = "0" + cleanHex;
+
+                byte[] privBytes;
+                try
+                {
+                    privBytes = Convert.FromHexString(cleanHex);
+                }
+                catch (FormatException)
+                {
+                    ErrorLogUtility.LogError(
+                        $"[BaseValidatorSync] SignValidatorUpdateLocally: private key is not valid hex (length={cleanHex.Length}). Skipping.",
+                        "BaseValidatorSyncService");
+                    return null;
+                }
                 var chainId = BaseBridgeService.BaseChainId;
                 var contractAddr = BaseBridgeService.ContractAddress;
 

@@ -72,4 +72,18 @@ namespace ReserveBlockCore.Models
         /// <summary>Signature of DEPART|{DepartingAddress}|{BlockHeight}.</summary>
         public string DepartureSignature { get; set; } = "";
     }
+
+    /// <summary>
+    /// Broadcast when a caster is demoted (e.g., outdated version or persistent unreachability).
+    /// Signed by the demoter (an existing caster) so all peers can verify and remove the demoted node
+    /// simultaneously, preventing caster list inconsistency across the network.
+    /// </summary>
+    public class CasterDemotionNotice
+    {
+        public string DemotedAddress { get; set; } = "";
+        public long BlockHeight { get; set; }
+        public string DemoterAddress { get; set; } = "";
+        /// <summary>Signature of DEMOTE|{DemotedAddress}|{BlockHeight}|{DemoterAddress}.</summary>
+        public string DemotionSignature { get; set; } = "";
+    }
 }

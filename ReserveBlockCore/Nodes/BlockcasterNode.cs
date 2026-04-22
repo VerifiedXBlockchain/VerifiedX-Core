@@ -359,6 +359,19 @@ namespace ReserveBlockCore.Nodes
                         break;
                     }
 
+                    // Version gate: reject candidates on outdated major versions.
+                    // This was missing and allowed outdated nodes to become casters,
+                    // inflating the quorum while being unable to participate properly.
+                    if (!string.IsNullOrEmpty(nCaster.IPAddress))
+                    {
+                        var ip = nCaster.IPAddress.Replace("::ffff:", "");
+                        if (!await CasterDiscoveryService.CheckCandidateVersion(ip, nCaster.Address))
+                        {
+                            ConsoleWriterService.OutputVal($"[InitiateReplacement] Candidate {nCaster.Address} failed version check. Skipping.");
+                            break;
+                        }
+                    }
+
                     bool casterConsensusReached = false;
                     _currentRound.MyChosenCaster = nCaster;
 
