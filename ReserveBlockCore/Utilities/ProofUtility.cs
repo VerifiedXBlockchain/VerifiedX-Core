@@ -177,10 +177,59 @@ namespace ReserveBlockCore.Utilities
         public static async Task<List<Proof>> GenerateCasterProofs()
         {
             var all = await GetOrCreateAllProofsAsync();
-            
+
             // FIX: Filter BlockCasters to only include peers with current major wallet version.
             // This prevents phantom casters on outdated versions from inflating the proof count
             // and potentially winning VRF elections they can't fulfil.
+            //
+            // HYDRATE: Newly-promoted casters (see CasterDiscoveryService.HandlePromotion) may
+            // enter BlockCasters with an empty WalletVersion because the signed CasterInfo
+            // payload doesn't carry a version. Without this hydration they'd be silently
+            // filtered out here, producing casterProofs=0 and permanently blocking a newly
+            // promoted node from casting blocks.
+            //
+            // For our own entry we always know the version. For peers with an IP we do a
+            // best-effort HTTP fetch of /valapi/validator/GetWalletVersion (same endpoint
+            // used by CasterDiscoveryService.CheckCandidateVersionDetailed). On success the
+            // result is cached directly on the Peers object; on failure we skip this caster
+            // for this round and try again next tick.
+            foreach (var c in Globals.BlockCasters)
+            {
+                if (string.IsNullOrEmpty(c.ValidatorAddress))
+                    continue;
+                if (!string.IsNullOrEmpty(c.WalletVersion))
+                    continue;
+
+                if (c.ValidatorAddress == Globals.ValidatorAddress)
+                {
+                    c.WalletVersion = Globals.CLIVersion;
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(c.PeerIP))
+                    continue;
+
+                try
+                {
+                    using var verClient = Globals.HttpClientFactory.CreateClient();
+                    using var verCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    var verUri = $"http://{c.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                    var verResp = await verClient.GetAsync(verUri, verCts.Token);
+                    if (verResp.IsSuccessStatusCode)
+                    {
+                        var ver = await verResp.Content.ReadAsStringAsync();
+                        if (!string.IsNullOrEmpty(ver))
+                        {
+                            c.WalletVersion = ver.Trim();
+                            CasterLogUtility.Log(
+                                $"Hydrated WalletVersion for caster {c.ValidatorAddress} at {c.PeerIP}: '{c.WalletVersion}'",
+                                "PROOFS-HYDRATE");
+                        }
+                    }
+                }
+                catch { /* best-effort — will retry next proof generation cycle */ }
+            }
+
             var validCasters = Globals.BlockCasters
                 .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
                 .Where(c => IsMajorVersionCurrent(c.WalletVersion))

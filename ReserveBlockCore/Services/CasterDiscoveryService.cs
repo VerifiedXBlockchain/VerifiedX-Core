@@ -39,6 +39,24 @@ namespace ReserveBlockCore.Services
             Unreachable
         }
 
+        /// <summary>
+        /// Detailed version check result, including the discovered version string (if any).
+        /// Used by <see cref="EvaluateCasterPool"/> to stamp <see cref="Peers.WalletVersion"/>
+        /// on newly-promoted casters so they aren't silently filtered out of proof generation.
+        /// </summary>
+        internal readonly struct VersionCheckInfo
+        {
+            public VersionCheckResult Status { get; }
+            public string Version { get; }
+
+            public VersionCheckInfo(VersionCheckResult status, string version)
+            {
+                Status = status;
+                Version = version ?? "";
+            }
+        }
+
+
         /// <summary>Deterministic JSON for <see cref="CasterInfo"/> lists (must match on promoter and promoted node).</summary>
         internal static string GetCanonicalCasterListJson(IEnumerable<CasterInfo> list)
         {
@@ -135,7 +153,11 @@ namespace ReserveBlockCore.Services
 
                     // Version gate: reject candidates on outdated major versions.
                     // This prevents nodes that can't produce valid proofs from inflating the quorum.
-                    if (!await CheckCandidateVersion(ip, v.Address))
+                    // Capture the version string so we can stamp it on the new Peers entry —
+                    // GenerateCasterProofs filters BlockCasters by WalletVersion, and an empty
+                    // version silently excludes the caster from proof generation.
+                    var candidateVersionResult = await CheckCandidateVersionDetailed(ip, v.Address);
+                    if (candidateVersionResult.Status != VersionCheckResult.Ok)
                         continue;
 
                     // Health gate: reject candidates that are out of sync or have clock skew.
@@ -152,6 +174,7 @@ namespace ReserveBlockCore.Services
                         ValidatorAddress = v.Address,
                         ValidatorPublicKey = v.PublicKey,
                         FailCount = 0,
+                        WalletVersion = candidateVersionResult.Version,
                     };
 
                     // Send promotion notification FIRST and wait for acceptance.
@@ -240,14 +263,15 @@ namespace ReserveBlockCore.Services
         internal static async Task<bool> CheckCandidateVersion(string ip, string address)
         {
             var result = await CheckCandidateVersionDetailed(ip, address);
-            return result == VersionCheckResult.Ok;
+            return result.Status == VersionCheckResult.Ok;
         }
 
         /// <summary>
         /// Checks a candidate's wallet version via HTTP, returning a detailed result
-        /// that distinguishes between connectivity failure and genuine version mismatch.
+        /// that distinguishes between connectivity failure and genuine version mismatch,
+        /// and includes the discovered version string when reachable.
         /// </summary>
-        internal static async Task<VersionCheckResult> CheckCandidateVersionDetailed(string ip, string address)
+        internal static async Task<VersionCheckInfo> CheckCandidateVersionDetailed(string ip, string address)
         {
             try
             {
@@ -260,24 +284,25 @@ namespace ReserveBlockCore.Services
                     ConsoleWriterService.OutputVal(
                         $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — GetWalletVersion returned {response?.StatusCode}. Skipping.");
                     // Got a response but it was an error — treat as unreachable (node might be starting up)
-                    return VersionCheckResult.Unreachable;
+                    return new VersionCheckInfo(VersionCheckResult.Unreachable, "");
                 }
                 var peerVersion = await response.Content.ReadAsStringAsync();
                 if (string.IsNullOrEmpty(peerVersion) || !ProofUtility.IsMajorVersionCurrent(peerVersion))
                 {
                     ConsoleWriterService.OutputVal(
                         $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Skipping.");
-                    return VersionCheckResult.Outdated;
+                    return new VersionCheckInfo(VersionCheckResult.Outdated, peerVersion ?? "");
                 }
-                return VersionCheckResult.Ok;
+                return new VersionCheckInfo(VersionCheckResult.Ok, peerVersion);
             }
             catch (Exception ex)
             {
                 ConsoleWriterService.OutputVal(
                     $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — unreachable: {ex.Message}. Skipping.");
-                return VersionCheckResult.Unreachable;
+                return new VersionCheckInfo(VersionCheckResult.Unreachable, "");
             }
         }
+
 
         /// <summary>
         /// Periodically audits existing casters and removes any on outdated major versions.
@@ -306,8 +331,20 @@ namespace ReserveBlockCore.Services
                 var ip = caster.PeerIP.Replace("::ffff:", "");
                 var result = await CheckCandidateVersionDetailed(ip, caster.ValidatorAddress);
 
-                switch (result)
+                // If the audit succeeded and we got a non-empty version string back,
+                // opportunistically hydrate the cached Peers.WalletVersion so
+                // ProofUtility.GenerateCasterProofs can keep trusting this caster
+                // after a fresh promotion/restart cycle.
+                if (result.Status == VersionCheckResult.Ok
+                    && !string.IsNullOrEmpty(result.Version)
+                    && string.IsNullOrEmpty(caster.WalletVersion))
                 {
+                    caster.WalletVersion = result.Version;
+                }
+
+                switch (result.Status)
+                {
+
                     case VersionCheckResult.Ok:
                         // Reset failure counter on success
                         _auditFailCounts.TryRemove(caster.ValidatorAddress, out _);
@@ -731,9 +768,29 @@ namespace ReserveBlockCore.Services
             ConsoleWriterService.OutputVal(
                 $"[CasterDiscovery] THIS NODE has been promoted to caster by {promotion.PromoterAddress} at height {promotion.BlockHeight}!");
 
+            // Pre-populate WalletVersion so the newly installed BlockCasters are eligible for
+            // proof generation on the very first consensus round after promotion.
+            // - For our own entry we know our version (Globals.CLIVersion).
+            // - For peers already in BlockCasters we preserve any previously-known version.
+            // - For unknown peers we leave it empty; ProofUtility.GenerateCasterProofs will
+            //   hydrate it via an HTTP fallback on the next tick.
+            var previousVersions = Globals.BlockCasters.ToList()
+                .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress) && !string.IsNullOrEmpty(c.WalletVersion))
+                .GroupBy(c => c.ValidatorAddress!)
+                .ToDictionary(g => g.Key, g => g.First().WalletVersion!);
+
             var newBag = new ConcurrentBag<Peers>();
             foreach (var ci in promotion.CasterList)
             {
+                string? walletVersion = null;
+                if (!string.IsNullOrEmpty(ci.Address))
+                {
+                    if (ci.Address == Globals.ValidatorAddress)
+                        walletVersion = Globals.CLIVersion;
+                    else if (previousVersions.TryGetValue(ci.Address, out var known))
+                        walletVersion = known;
+                }
+
                 newBag.Add(new Peers
                 {
                     PeerIP = ci.PeerIP,
@@ -741,9 +798,11 @@ namespace ReserveBlockCore.Services
                     ValidatorAddress = ci.Address,
                     ValidatorPublicKey = ci.PublicKey,
                     FailCount = 0,
+                    WalletVersion = walletVersion,
                 });
             }
             Globals.BlockCasters = newBag;
+
             Globals.SyncKnownCastersFromBlockCasters();
 
             // BlockcasterNode.StartCastingRounds already runs as IHostedService; it picks up caster status on next loop.
