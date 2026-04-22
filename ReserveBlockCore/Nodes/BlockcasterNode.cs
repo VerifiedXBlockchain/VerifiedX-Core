@@ -2245,6 +2245,13 @@ namespace ReserveBlockCore.Nodes
                     // DESYNC-FIX: Update last block accepted timestamp for desync recovery tracking
                     Interlocked.Exchange(ref _lastBlockAcceptedTick, Environment.TickCount64);
 
+                    // Auto-promote block producer to fully trusted — if this validator
+                    // produced a block that passed full validation, it is definitively legitimate.
+                    if (!string.IsNullOrEmpty(nextBlock.Validator))
+                    {
+                        NetworkValidator.PromoteBlockProducer(nextBlock.Validator);
+                    }
+
                     // FIX 3: Update CasterRoundDict with the COMMITTED block so GetBlockHash
                     // returns the correct hash instead of stale pre-agreement data.
                     if (Globals.CasterRoundDict.TryGetValue(nextBlock.Height, out var committedRound))

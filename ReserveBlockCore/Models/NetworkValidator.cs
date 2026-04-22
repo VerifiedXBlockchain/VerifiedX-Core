@@ -317,6 +317,65 @@ namespace ReserveBlockCore.Models
                 Globals.NetworkValidators[validatorAddress] = validator;
             }
         }
+
+        /// <summary>
+        /// Auto-promote a validator to fully trusted when it produces a committed block.
+        /// If the validator solved a block that passed full validation, it is definitively legitimate.
+        /// Also promotes from _pendingValidators if found there but not yet in NetworkValidators.
+        /// </summary>
+        public static void PromoteBlockProducer(string validatorAddress, string ipAddress = null)
+        {
+            if (string.IsNullOrEmpty(validatorAddress))
+                return;
+
+            var currentTime = TimeUtil.GetTime();
+
+            // Case 1: Already in NetworkValidators — just flip IsFullyTrusted
+            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existing))
+            {
+                if (!existing.IsFullyTrusted)
+                {
+                    existing.IsFullyTrusted = true;
+                    existing.LastSeen = currentTime;
+                    Globals.NetworkValidators[validatorAddress] = existing;
+                    LogUtility.Log($"Validator {validatorAddress} promoted to fully trusted via block production", "NetworkValidator.PromoteBlockProducer");
+                }
+                else
+                {
+                    // Already trusted, just update LastSeen
+                    existing.LastSeen = currentTime;
+                    Globals.NetworkValidators[validatorAddress] = existing;
+                }
+                return;
+            }
+
+            // Case 2: In pending validators — promote to NetworkValidators
+            if (_pendingValidators.TryRemove(validatorAddress, out var pending))
+            {
+                pending.IsFullyTrusted = true;
+                pending.LastSeen = currentTime;
+                pending.FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0;
+                Globals.NetworkValidators[validatorAddress] = pending;
+                LogUtility.Log($"Validator {validatorAddress} promoted from pending to fully trusted via block production", "NetworkValidator.PromoteBlockProducer");
+                return;
+            }
+
+            // Case 3: Not known at all — create a minimal entry so EvaluateCasterPool can find it later
+            // This happens when a block arrives from a validator we haven't seen advertise yet
+            if (!string.IsNullOrEmpty(ipAddress))
+            {
+                var newVal = new NetworkValidator
+                {
+                    Address = validatorAddress,
+                    IPAddress = ipAddress,
+                    IsFullyTrusted = true,
+                    LastSeen = currentTime,
+                    FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
+                };
+                Globals.NetworkValidators[validatorAddress] = newVal;
+                LogUtility.Log($"Validator {validatorAddress} added as fully trusted via block production (new entry, IP={ipAddress})", "NetworkValidator.PromoteBlockProducer");
+            }
+        }
     }
 
     // HAL-11 Fix: Track validator advertisements per peer
