@@ -220,6 +220,15 @@ namespace ReserveBlockCore.Nodes
 
             foreach (var caster in casterList)
             {
+                // Never ping ourselves. The loopback from our external PeerIP often fails
+                // due to NAT hairpin being disabled on home/NAT'd setups, which would
+                // falsely evict this node from its own BlockCasters list immediately after
+                // promotion. That flip-flops Globals.IsBlockCaster back to false in
+                // StartCastingRounds and breaks consensus participation until restart.
+                if (!string.IsNullOrEmpty(caster.ValidatorAddress)
+                    && caster.ValidatorAddress == Globals.ValidatorAddress)
+                    continue;
+
                 int retryCount = 0;
                 do
                 {
@@ -229,6 +238,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             
                             var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat";
+
 
                             var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
                             await Task.Delay(100);
@@ -556,10 +566,24 @@ namespace ReserveBlockCore.Nodes
                 }
 
                 var casterList = Globals.BlockCasters.ToList();
-                if (casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress))
-                    Globals.IsBlockCaster = true;
-                else
-                    Globals.IsBlockCaster = false;
+                var wasCaster = Globals.IsBlockCaster;
+                var selfInList = casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress);
+                Globals.IsBlockCaster = selfInList;
+
+                if (wasCaster && !selfInList)
+                {
+                    // Loud diagnostic: something evicted us from our own BlockCasters between
+                    // loop iterations. Historically this was PingCasters failing the self-loopback
+                    // HTTP on nodes behind NAT, which has since been fixed to skip self, but keeping
+                    // this log makes future regressions immediately obvious.
+                    CasterLogUtility.Log(
+                        $"IsBlockCaster flipped FALSE — self ({Globals.ValidatorAddress}) missing from BlockCasters. " +
+                        $"Count={casterList.Count} Addresses=[{string.Join(",", casterList.Select(c => c.ValidatorAddress))}]",
+                        "SELF-DEMOTE");
+                    ConsoleWriterService.OutputVal(
+                        $"[SELF-DEMOTE] This node was unexpectedly removed from its own BlockCasters list. " +
+                        $"Count={casterList.Count}. Will re-evaluate next cycle.");
+                }
 
                 if (!Globals.IsBlockCaster)
                 {
@@ -595,6 +619,7 @@ namespace ReserveBlockCore.Nodes
 
                     var roundSw = Stopwatch.StartNew(); // Track total round time
                     CasterLogUtility.Log($"--- ROUND START height={Height} lastBlock={Globals.LastBlock.Height} lastHash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]} ---", "ROUND");
+
 
                     if (Volatile.Read(ref _casterConsensusHalted) != 0)
                     {
