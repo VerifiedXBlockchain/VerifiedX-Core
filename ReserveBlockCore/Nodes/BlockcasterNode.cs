@@ -79,6 +79,12 @@ namespace ReserveBlockCore.Nodes
     const int BLOCK_FETCH_FAIL_HALT_THRESHOLD = 5;
     private static int _casterConsensusHalted; // 0 = running, 1 = halt until reconciliation
 
+    /// <summary>Tracks consecutive block-fetch failures per winner address at a given height.
+    /// After WINNER_SKIP_THRESHOLD consecutive failures for the same winner at the same height,
+    /// that winner is excluded from proof sorting so the next VRF candidate can be tried.</summary>
+    private static readonly ConcurrentDictionary<string, (long height, int failCount)> _winnerFetchFailures = new();
+    const int WINNER_SKIP_THRESHOLD = 3; // Skip winner after this many consecutive block-fetch failures at same height
+
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -639,8 +645,21 @@ namespace ReserveBlockCore.Nodes
                     proofGenSw.Stop();
                     CasterLogUtility.Log($"ProofGen: {proofGenSw.ElapsedMilliseconds}ms, casterProofs={casterProofs.Count}, allProofs={proofs.Count}", "PROOFS");
                     CasterRoundAudit.AddStep($"{proofs.Count()} Proofs Generated", true);
-                    //ConsoleWriterService.OutputVal($"\r\n{proofs.Count()} Proofs Generated");
-                    var winningCasterProof = await ProofUtility.SortProofs(casterProofs);
+
+                    // WINNER-SKIP: Filter out addresses that have failed block fetch too many times at this height
+                    var skippedAddresses = new HashSet<string>();
+                    foreach (var entry in _winnerFetchFailures)
+                    {
+                        if (entry.Value.height == Height && entry.Value.failCount >= WINNER_SKIP_THRESHOLD)
+                            skippedAddresses.Add(entry.Key);
+                    }
+                    var filteredCasterProofs = skippedAddresses.Count > 0
+                        ? casterProofs.Where(p => !skippedAddresses.Contains(p.Address)).ToList()
+                        : casterProofs;
+                    if (skippedAddresses.Count > 0)
+                        CasterLogUtility.Log($"WINNER-SKIP: Excluding {skippedAddresses.Count} address(es) from VRF: [{string.Join(", ", skippedAddresses)}]", "PROOFS");
+
+                    var winningCasterProof = await ProofUtility.SortProofs(filteredCasterProofs);
                     var winningProof = await ProofUtility.SortProofs(proofs);
                     CasterRoundAudit.AddStep($"Sorting Proofs", true);
                     //ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
@@ -1001,6 +1020,31 @@ namespace ReserveBlockCore.Nodes
                                     }
 
                                     CasterLogUtility.Log($"BlockFetch done: {swb.ElapsedMilliseconds}ms, found={blockFound}, failed={failedToReachConsensus}", "BLOCKFETCH");
+
+                                    // WINNER-SKIP: Track block-fetch failures per winner address at this height
+                                    if (!blockFound && !string.IsNullOrEmpty(terminalWinner))
+                                    {
+                                        _winnerFetchFailures.AddOrUpdate(
+                                            terminalWinner,
+                                            (Height, 1),
+                                            (key, existing) => existing.height == Height
+                                                ? (Height, existing.failCount + 1)
+                                                : (Height, 1));
+                                        var newCount = _winnerFetchFailures.TryGetValue(terminalWinner, out var fc) ? fc.failCount : 0;
+                                        CasterLogUtility.Log($"WINNER-SKIP: BlockFetch failed for {terminalWinner} at height {Height} (streak {newCount}/{WINNER_SKIP_THRESHOLD})", "BLOCKFETCH");
+                                    }
+                                    else if (blockFound)
+                                    {
+                                        // Success — clear failure tracking for this winner and all stale entries
+                                        if (!string.IsNullOrEmpty(terminalWinner))
+                                            _winnerFetchFailures.TryRemove(terminalWinner, out _);
+                                        // Clear entries from old heights
+                                        foreach (var key in _winnerFetchFailures.Keys.ToList())
+                                        {
+                                            if (_winnerFetchFailures.TryGetValue(key, out var val) && val.height < Height)
+                                                _winnerFetchFailures.TryRemove(key, out _);
+                                        }
+                                    }
 
                                     // CASTER-SYNC-FIX: Block hash agreement phase — verify all casters have the same block
                                     if (blockFound && block != null)
