@@ -205,7 +205,13 @@ namespace ReserveBlockCore.P2P
                     FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
                 };
 
-                Globals.NetworkValidators.TryAdd(address, netVal);
+                // CASTER-PROMOTE-FIX: Use upsert helper instead of TryAdd.
+                // TryAdd is a no-op if the address is already present, which could
+                // leave a stale IsFullyTrusted=false entry from a prior gossip path,
+                // silently blocking caster promotion. The helper forces trust on
+                // direct authenticated connections and preserves FirstSeenAtHeight.
+                NetworkValidator.UpsertTrustedOnDirectConnect(netVal);
+
 
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
 
@@ -345,6 +351,21 @@ namespace ReserveBlockCore.P2P
                                 // HAL-025 Fix: Removed weak .Contains() check - proper cryptographic verification is sufficient
                                 if(verifySig)
                                 {
+                                    // CASTER-PROMOTE-FIX: Never allow a gossiped record to demote a
+                                    // validator that is already trusted locally. A gossiped record
+                                    // from an untrusted peer typically carries IsFullyTrusted=false;
+                                    // blindly overwriting would silently flip our trusted entry to
+                                    // untrusted, removing it from caster-candidate eligibility.
+                                    // Preserve the more authoritative local trust + first-seen info.
+                                    if (networkValidatorVal.IsFullyTrusted)
+                                    {
+                                        networkValidator.IsFullyTrusted = true;
+                                    }
+                                    if (networkValidatorVal.FirstSeenAtHeight > 0)
+                                    {
+                                        networkValidator.FirstSeenAtHeight = networkValidatorVal.FirstSeenAtHeight;
+                                    }
+                                    networkValidator.LastSeen = TimeUtil.GetTime();
                                     Globals.NetworkValidators[networkValidator.Address] = networkValidator;
                                     processedCount++;
                                 }
@@ -353,6 +374,7 @@ namespace ReserveBlockCore.P2P
                                     rejectedCount++;
                                 }
                             }
+
                             else
                             {
                                 // HAL-15 Security Fix: Use secure validator addition method

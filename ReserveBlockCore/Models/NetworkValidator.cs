@@ -319,6 +319,63 @@ namespace ReserveBlockCore.Models
         }
 
         /// <summary>
+        /// CASTER-PROMOTE-FIX: Upsert a validator as fully trusted following a direct
+        /// authenticated SignalR connection (P2PValidatorServer / P2PBlockcasterServer).
+        ///
+        /// The previous direct-connect path used <c>Globals.NetworkValidators.TryAdd</c>,
+        /// which is a no-op when the key already exists. If the validator had previously
+        /// been placed in <c>NetworkValidators</c> via a gossip path with
+        /// <c>IsFullyTrusted=false</c>, or if a different code path had reset the trust
+        /// flag, the direct-connect would silently fail to promote it. The validator
+        /// would then never appear in <c>EvaluateCasterPool</c>'s candidate list
+        /// (because the candidate filter requires <c>IsFullyTrusted=true</c>) and
+        /// could never be promoted to a caster.
+        ///
+        /// This helper guarantees:
+        ///   1) The validator is present in <c>NetworkValidators</c>.
+        ///   2) <c>IsFullyTrusted = true</c> (a completed signature-authenticated
+        ///      SignalR handshake is stronger proof than any gossip vouch).
+        ///   3) The validator is no longer quarantined in <c>_pendingValidators</c>.
+        ///   4) <c>FirstSeenAtHeight</c> is preserved if already set (to avoid
+        ///      resetting the maturity-gate timer on reconnects), otherwise populated.
+        /// </summary>
+        public static void UpsertTrustedOnDirectConnect(NetworkValidator validator)
+        {
+            if (validator == null || string.IsNullOrEmpty(validator.Address))
+                return;
+
+            var currentTime = TimeUtil.GetTime();
+            validator.IsFullyTrusted = true;
+            if (validator.LastSeen == 0) validator.LastSeen = currentTime;
+            if (validator.FirstAdvertised == 0) validator.FirstAdvertised = currentTime;
+
+            // Preserve FirstSeenAtHeight across reconnects so the maturity gate
+            // doesn't reset every time the validator drops and reconnects.
+            if (Globals.NetworkValidators.TryGetValue(validator.Address, out var existing))
+            {
+                if (existing.FirstSeenAtHeight > 0)
+                    validator.FirstSeenAtHeight = existing.FirstSeenAtHeight;
+                else if (validator.FirstSeenAtHeight == 0)
+                    validator.FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0;
+            }
+            else if (validator.FirstSeenAtHeight == 0)
+            {
+                validator.FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0;
+            }
+
+            // Upsert into the trusted registry.
+            Globals.NetworkValidators[validator.Address] = validator;
+
+            // Clear any pending-quarantine entry so the duplicate doesn't linger.
+            _pendingValidators.TryRemove(validator.Address, out _);
+
+            LogUtility.Log(
+                $"Validator {validator.Address} upserted as fully trusted via direct connection (IP={validator.IPAddress})",
+                "NetworkValidator.UpsertTrustedOnDirectConnect");
+        }
+
+
+        /// <summary>
         /// Auto-promote a validator to fully trusted when it produces a committed block.
         /// If the validator solved a block that passed full validation, it is definitively legitimate.
         /// Also promotes from _pendingValidators if found there but not yet in NetworkValidators.

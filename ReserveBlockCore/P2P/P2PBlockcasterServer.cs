@@ -177,9 +177,16 @@ namespace ReserveBlockCore.P2P
                     // are immediately eligible for caster promotion.
                     IsFullyTrusted = true,
                     LastSeen = TimeUtil.GetTime(),
+                    FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
                 };
 
-                Globals.NetworkValidators.TryAdd(address, netVal);
+                // CASTER-PROMOTE-FIX: Use upsert helper instead of TryAdd.
+                // TryAdd is a no-op if the address is already present, which could
+                // leave a stale IsFullyTrusted=false entry from a prior gossip path,
+                // silently blocking caster promotion. The helper forces trust on
+                // direct authenticated connections and preserves FirstSeenAtHeight.
+                NetworkValidator.UpsertTrustedOnDirectConnect(netVal);
+
 
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
 
