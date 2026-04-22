@@ -21,6 +21,10 @@ namespace ReserveBlockCore.Models
         // HAL-26 Fix: TTL tracking for validator registry cleanup
         public long LastSeen { get; set; }
         
+        /// <summary>Block height at which this validator was first added to NetworkValidators.
+        /// Used for maturity gating — prevents premature caster promotion of freshly-connected nodes.</summary>
+        public long FirstSeenAtHeight { get; set; }
+        
         // HAL-11 Security enhancements
         public long AdvertisementTimestamp { get; set; }
         public string AdvertisementNonce { get; set; }

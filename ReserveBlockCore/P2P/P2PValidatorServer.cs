@@ -202,6 +202,7 @@ namespace ReserveBlockCore.P2P
                     // are immediately eligible for caster promotion.
                     IsFullyTrusted = true,
                     LastSeen = TimeUtil.GetTime(),
+                    FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
                 };
 
                 Globals.NetworkValidators.TryAdd(address, netVal);

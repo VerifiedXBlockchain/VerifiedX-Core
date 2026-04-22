@@ -626,7 +626,9 @@ namespace ReserveBlockCore.Controllers
             catch { return BadRequest("0"); }
         }
 
-        /// <summary>Receives a signed promotion to join the caster pool (dynamic discovery).</summary>
+        /// <summary>Receives a signed promotion to join the caster pool (dynamic discovery).
+        /// Returns "accepted" if the node accepts, or a rejection reason string.
+        /// The promoter waits for this response before adding the node to its caster list.</summary>
         [HttpPost]
         [Route("PromoteToCaster")]
         public async Task<ActionResult<string>> PromoteToCaster([FromBody] CasterPromotionRequest? req)
@@ -634,15 +636,15 @@ namespace ReserveBlockCore.Controllers
             try
             {
                 if (req == null || string.IsNullOrEmpty(req.PromotedAddress))
-                    return BadRequest("invalid");
+                    return BadRequest("rejected: invalid request");
                 if (req.PromotedAddress != Globals.ValidatorAddress)
-                    return BadRequest("not for us");
-                await CasterDiscoveryService.HandlePromotion(req);
-                return Ok("promoted");
+                    return BadRequest("rejected: not for us");
+                var result = await CasterDiscoveryService.HandlePromotion(req);
+                return Ok(result);
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest($"rejected: {ex.Message}");
             }
         }
 
