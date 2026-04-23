@@ -64,6 +64,23 @@ namespace ReserveBlockCore.Models
         public string PromoterSignature { get; set; } = "";
     }
 
+    /// <summary>FIX 5: Promotion proposal sent to peer casters for agreement before promoting a candidate.</summary>
+    public class PromotionProposalRequest
+    {
+        public string CandidateAddress { get; set; } = "";
+        public string CandidateIP { get; set; } = "";
+        public long BlockHeight { get; set; }
+        public string ProposerAddress { get; set; } = "";
+    }
+
+    /// <summary>FIX 5: Response to a promotion proposal — accept or reject with reason.</summary>
+    public class PromotionProposalResponse
+    {
+        public bool Accepted { get; set; }
+        public string Reason { get; set; } = "";
+        public string ResponderAddress { get; set; } = "";
+    }
+
     /// <summary>Graceful caster departure; MUST be signed by the departing caster.</summary>
     public class CasterDepartureNotice
     {
@@ -86,4 +103,5 @@ namespace ReserveBlockCore.Models
         /// <summary>Signature of DEMOTE|{DemotedAddress}|{BlockHeight}|{DemoterAddress}.</summary>
         public string DemotionSignature { get; set; } = "";
     }
+
 }

@@ -351,16 +351,35 @@ namespace ReserveBlockCore.Models
 
             // Preserve FirstSeenAtHeight across reconnects so the maturity gate
             // doesn't reset every time the validator drops and reconnects.
+            // FIX 1: But if the stored value is too stale (>1000 blocks behind tip),
+            // reset it to current height. This prevents a node that was seen 10,000
+            // blocks ago (e.g. from a prior process run with stale Peers DB) from
+            // instantly passing the maturity gate on restart.
+            var currentTip = Globals.LastBlock?.Height ?? 0;
             if (Globals.NetworkValidators.TryGetValue(validator.Address, out var existing))
             {
                 if (existing.FirstSeenAtHeight > 0)
-                    validator.FirstSeenAtHeight = existing.FirstSeenAtHeight;
+                {
+                    var staleDelta = currentTip - existing.FirstSeenAtHeight;
+                    if (staleDelta > 1000)
+                    {
+                        // Too stale — reset to current height so maturity gate restarts
+                        LogUtility.Log(
+                            $"Validator {validator.Address} FirstSeenAtHeight reset: was {existing.FirstSeenAtHeight} (delta={staleDelta}), now={currentTip}",
+                            "NetworkValidator.UpsertTrustedOnDirectConnect");
+                        validator.FirstSeenAtHeight = currentTip;
+                    }
+                    else
+                    {
+                        validator.FirstSeenAtHeight = existing.FirstSeenAtHeight;
+                    }
+                }
                 else if (validator.FirstSeenAtHeight == 0)
-                    validator.FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0;
+                    validator.FirstSeenAtHeight = currentTip;
             }
             else if (validator.FirstSeenAtHeight == 0)
             {
-                validator.FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0;
+                validator.FirstSeenAtHeight = currentTip;
             }
 
             // Upsert into the trusted registry.

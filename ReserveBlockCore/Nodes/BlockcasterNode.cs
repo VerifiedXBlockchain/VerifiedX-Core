@@ -138,11 +138,70 @@ namespace ReserveBlockCore.Nodes
 
                 if (!Globals.IsBlockCaster)
                 {
-                    CasterLogUtility.Log(
-                        $"MonitorTick SKIP promotion-related work — IsBlockCaster=false. Will retry in 30s.",
-                        "CasterFlow");
-                    await Task.Delay(new TimeSpan(0, 0, 30));
-                    continue;
+                    // FIX 4: Self-recovery heartbeat — poll a peer caster's /GetCasters endpoint.
+                    // If our address appears in their caster list, we were promoted but missed the notification.
+                    // Flip IsBlockCaster=true and merge the caster list so we can begin consensus.
+                    var selfRecovered = false;
+                    try
+                    {
+                        var peers = Globals.BlockCasters.ToList()
+                            .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
+                            .Take(2)
+                            .ToList();
+                        if (peers.Any())
+                        {
+                            using var hc = Globals.HttpClientFactory.CreateClient();
+                            hc.Timeout = TimeSpan.FromSeconds(5);
+                            foreach (var peer in peers)
+                            {
+                                try
+                                {
+                                    var ip = peer.PeerIP!.Replace("::ffff:", "");
+                                    var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetCasters";
+                                    var resp = await hc.GetStringAsync(url);
+                                    if (!string.IsNullOrEmpty(resp) && resp.Contains(Globals.ValidatorAddress!))
+                                    {
+                                        CasterLogUtility.Log(
+                                            $"SelfRecovery: peer {ip} reports us in caster list — flipping IsBlockCaster=true",
+                                            "CasterFlow");
+                                        Globals.IsBlockCaster = true;
+                                        selfRecovered = true;
+                                        // Merge peer's caster list into ours
+                                        var parsed = Newtonsoft.Json.JsonConvert.DeserializeObject<dynamic>(resp);
+                                        if (parsed?.Casters != null)
+                                        {
+                                            foreach (var c in parsed.Casters)
+                                            {
+                                                string addr = c.Address?.ToString() ?? "";
+                                                string pip = c.PeerIP?.ToString() ?? "";
+                                                string pk = c.PublicKey?.ToString() ?? "";
+                                                if (!string.IsNullOrEmpty(addr) && !Globals.BlockCasters.Any(x => x.ValidatorAddress == addr))
+                                                {
+                                                    Globals.BlockCasters.Add(new Peers { ValidatorAddress = addr, PeerIP = pip, ValidatorPublicKey = pk });
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                                catch { /* peer unreachable, try next */ }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        CasterLogUtility.Log($"SelfRecovery heartbeat error: {ex.Message}", "CasterFlow");
+                    }
+
+                    if (!selfRecovered)
+                    {
+                        CasterLogUtility.Log(
+                            $"MonitorTick SKIP promotion-related work — IsBlockCaster=false. Will retry in 30s.",
+                            "CasterFlow");
+                        await Task.Delay(new TimeSpan(0, 0, 30));
+                        continue;
+                    }
+                    // If self-recovered, fall through to normal caster work
                 }
 
 

@@ -955,5 +955,77 @@ namespace ReserveBlockCore.Controllers
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
             }
         }
+
+        #region FIX 4 + FIX 5 — GetCasters + ProposePromotion endpoints
+
+        /// <summary>
+        /// FIX 4: Returns the current BlockCasters list as JSON.
+        /// Used by non-casters for self-recovery heartbeat.
+        /// </summary>
+        [HttpGet]
+        [Route("GetCasters")]
+        public ActionResult<string> GetCasters()
+        {
+            try
+            {
+                var casters = Globals.BlockCasters.ToList()
+                    .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                    .Select(c => new CasterInfo
+                    {
+                        Address = c.ValidatorAddress!,
+                        PeerIP = (c.PeerIP ?? "").Replace("::ffff:", ""),
+                        PublicKey = c.ValidatorPublicKey ?? ""
+                    })
+                    .ToList();
+
+                return Ok(JsonConvert.SerializeObject(new
+                {
+                    Height = Globals.LastBlock?.Height ?? 0,
+                    Casters = casters
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Ok(JsonConvert.SerializeObject(new { Height = 0, Casters = new List<CasterInfo>(), Error = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// FIX 5: Receives a promotion proposal from a peer caster.
+        /// </summary>
+        [HttpPost]
+        [Route("ProposePromotion")]
+        public async Task<ActionResult<string>> ProposePromotion([FromBody] PromotionProposalRequest? proposal)
+        {
+            try
+            {
+                if (proposal == null || string.IsNullOrEmpty(proposal.CandidateAddress))
+                {
+                    return Ok(JsonConvert.SerializeObject(new PromotionProposalResponse
+                    {
+                        Accepted = false,
+                        Reason = "Invalid request",
+                        ResponderAddress = Globals.ValidatorAddress ?? ""
+                    }));
+                }
+
+                var result = await CasterDiscoveryService.EvaluatePromotionProposal(proposal);
+                CasterLogUtility.Log(
+                    $"HTTP /ProposePromotion from {HttpContext.Connection.RemoteIpAddress}: candidate={proposal.CandidateAddress} accepted={result.Accepted} reason={result.Reason}",
+                    "CasterFlow");
+                return Ok(JsonConvert.SerializeObject(result));
+            }
+            catch (Exception ex)
+            {
+                return Ok(JsonConvert.SerializeObject(new PromotionProposalResponse
+                {
+                    Accepted = false,
+                    Reason = $"Error: {ex.Message}",
+                    ResponderAddress = Globals.ValidatorAddress ?? ""
+                }));
+            }
+        }
+
+        #endregion
     }
 }

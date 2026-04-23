@@ -28,6 +28,12 @@ namespace ReserveBlockCore.Services
         /// <summary>Tracks consecutive version-check failures per caster address for audit tolerance.</summary>
         private static readonly ConcurrentDictionary<string, int> _auditFailCounts = new();
 
+        /// <summary>FIX 3: Tracks per-candidate API readiness — (firstSuccessUtcTicks, consecutiveSuccessCount).
+        /// A candidate must have ≥3 consecutive successful version checks AND ≥30s since first success before promotion.</summary>
+        private static readonly ConcurrentDictionary<string, (long FirstSuccessUtcTicks, int ConsecutiveSuccesses)> _valApiReadiness = new();
+        private const int RequiredReadinessChecks = 3;
+        private const int RequiredReadinessSeconds = 30;
+
         /// <summary>Result of a version check distinguishing connectivity failure from genuine version mismatch.</summary>
         internal enum VersionCheckResult
         {
@@ -241,10 +247,31 @@ namespace ReserveBlockCore.Services
                         CasterLogUtility.Log(
                             $"  <<  version={candidateVersionResult.Status} reported='{candidateVersionResult.Version}'",
                             "CasterFlow");
+                        // FIX 3: Reset readiness on failure
+                        _valApiReadiness.TryRemove(v.Address, out _);
                         continue;
                     }
                     CasterLogUtility.Log(
                         $"     version=PASS reported='{candidateVersionResult.Version}'",
+                        "CasterFlow");
+
+                    // FIX 3: HTTP-ready grace period — require ≥3 consecutive version check successes
+                    // AND ≥30s since first success before allowing promotion.
+                    var nowTicks = DateTime.UtcNow.Ticks;
+                    var readiness = _valApiReadiness.AddOrUpdate(
+                        v.Address,
+                        _ => (nowTicks, 1),
+                        (_, prev) => (prev.FirstSuccessUtcTicks, prev.ConsecutiveSuccesses + 1));
+                    var readinessElapsed = TimeSpan.FromTicks(nowTicks - readiness.FirstSuccessUtcTicks).TotalSeconds;
+                    if (readiness.ConsecutiveSuccesses < RequiredReadinessChecks || readinessElapsed < RequiredReadinessSeconds)
+                    {
+                        CasterLogUtility.Log(
+                            $"  <<  apiReady=FAIL checks={readiness.ConsecutiveSuccesses}/{RequiredReadinessChecks} elapsed={readinessElapsed:F0}s/{RequiredReadinessSeconds}s",
+                            "CasterFlow");
+                        continue;
+                    }
+                    CasterLogUtility.Log(
+                        $"     apiReady=PASS checks={readiness.ConsecutiveSuccesses}/{RequiredReadinessChecks} elapsed={readinessElapsed:F0}s/{RequiredReadinessSeconds}s",
                         "CasterFlow");
 
                     // Health gate: reject candidates that are out of sync or have clock skew.
@@ -270,6 +297,18 @@ namespace ReserveBlockCore.Services
                         FailCount = 0,
                         WalletVersion = candidateVersionResult.Version,
                     };
+
+                    // FIX 5: Promotion agreement — propose to peer casters before promoting.
+                    // All casters must agree on the same candidate to prevent segmented caster lists.
+                    var agreementReached = await ProposePromotionToPeers(v.Address, ip, currentHeight).ConfigureAwait(false);
+                    if (!agreementReached)
+                    {
+                        CasterLogUtility.Log($"  <<  promotionAgreement=FAIL — peer casters did not agree on candidate {v.Address}", "CasterFlow");
+                        ConsoleWriterService.OutputVal(
+                            $"[CasterDiscovery] Promotion agreement failed for {v.Address}. Skipping — will retry next height.");
+                        continue;
+                    }
+                    CasterLogUtility.Log($"     promotionAgreement=PASS", "CasterFlow");
 
                     // Send promotion notification FIRST and wait for acceptance.
                     // Only add to BlockCasters if the promoted node confirms.
@@ -1013,5 +1052,207 @@ namespace ReserveBlockCore.Services
 
             await OnCasterRemoved(departure.DepartingAddress).ConfigureAwait(false);
         }
+
+        #region FIX 2 — Validate inbound casters received via gossip/GetBlockcasters
+
+        /// <summary>
+        /// FIX 2: Quick validation gate for casters received from peers (via GetBlockcasters or AddCaster).
+        /// Runs port-open + version check to ensure the caster is actually reachable before accepting
+        /// it into our local BlockCasters list. This prevents blind acceptance of gossip-propagated
+        /// caster lists that may include unreachable nodes.
+        /// </summary>
+        public static async Task<bool> ValidateInboundCaster(string ip, string address)
+        {
+            try
+            {
+                var cleanIp = ip?.Replace("::ffff:", "") ?? "";
+                if (string.IsNullOrEmpty(cleanIp) || string.IsNullOrEmpty(address))
+                {
+                    CasterLogUtility.Log($"ValidateInboundCaster REJECT — empty ip or address. ip='{ip}' addr='{address}'", "CasterFlow");
+                    return false;
+                }
+
+                // Port check
+                if (!PortUtility.IsPortOpen(cleanIp, Globals.ValAPIPort))
+                {
+                    CasterLogUtility.Log($"ValidateInboundCaster REJECT — port closed {cleanIp}:{Globals.ValAPIPort} for {address}", "CasterFlow");
+                    return false;
+                }
+
+                // Version check
+                var versionResult = await CheckCandidateVersionDetailed(cleanIp, address);
+                if (versionResult.Status != VersionCheckResult.Ok)
+                {
+                    CasterLogUtility.Log($"ValidateInboundCaster REJECT — version={versionResult.Status} for {address} at {cleanIp}", "CasterFlow");
+                    return false;
+                }
+
+                CasterLogUtility.Log($"ValidateInboundCaster PASS — {address} at {cleanIp} version='{versionResult.Version}'", "CasterFlow");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"ValidateInboundCaster ERROR — {address}: {ex.Message}", "CasterFlow");
+                return false;
+            }
+        }
+
+        #endregion
+
+        #region FIX 5 — Promotion agreement protocol
+
+        /// <summary>
+        /// FIX 5: Propose a candidate promotion to all peer casters and collect accept/reject votes.
+        /// Returns true only if a majority of casters agree on the candidate.
+        /// </summary>
+        private static async Task<bool> ProposePromotionToPeers(string candidateAddress, string candidateIp, long blockHeight)
+        {
+            var currentCasters = Globals.BlockCasters.ToList();
+            var peerCasters = currentCasters
+                .Where(c => c.ValidatorAddress != Globals.ValidatorAddress && !string.IsNullOrEmpty(c.PeerIP))
+                .ToList();
+
+            if (peerCasters.Count == 0)
+            {
+                // Solo caster — auto-agree
+                CasterLogUtility.Log($"ProposePromotion — solo caster, auto-agree for {candidateAddress}", "CasterFlow");
+                return true;
+            }
+
+            var proposal = new PromotionProposalRequest
+            {
+                CandidateAddress = candidateAddress,
+                CandidateIP = candidateIp,
+                BlockHeight = blockHeight,
+                ProposerAddress = Globals.ValidatorAddress
+            };
+
+            int acceptCount = 1; // self-vote = accept (we already passed all gates)
+            int totalVoters = peerCasters.Count + 1; // peers + self
+            int needed = (totalVoters / 2) + 1; // simple majority
+
+            CasterLogUtility.Log(
+                $"ProposePromotion — candidate={candidateAddress} height={blockHeight} peers={peerCasters.Count} needed={needed}/{totalVoters}",
+                "CasterFlow");
+
+            var tasks = peerCasters.Select(async peer =>
+            {
+                try
+                {
+                    var peerIp = peer.PeerIP.Replace("::ffff:", "");
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    var json = JsonConvert.SerializeObject(proposal);
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var uri = $"http://{peerIp}:{Globals.ValAPIPort}/valapi/validator/ProposePromotion";
+                    var response = await client.PostAsync(uri, content, cts.Token);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var body = await response.Content.ReadAsStringAsync();
+                        var result = JsonConvert.DeserializeObject<PromotionProposalResponse>(body);
+                        if (result?.Accepted == true)
+                        {
+                            CasterLogUtility.Log($"ProposePromotion — ACCEPT from {peer.ValidatorAddress} for {candidateAddress}", "CasterFlow");
+                            return true;
+                        }
+                        CasterLogUtility.Log($"ProposePromotion — REJECT from {peer.ValidatorAddress}: {result?.Reason}", "CasterFlow");
+                        return false;
+                    }
+                    CasterLogUtility.Log($"ProposePromotion — HTTP {response.StatusCode} from {peer.ValidatorAddress}", "CasterFlow");
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    CasterLogUtility.Log($"ProposePromotion — ERROR from {peer.ValidatorAddress}: {ex.Message}", "CasterFlow");
+                    return false;
+                }
+            }).ToList();
+
+            var results = await Task.WhenAll(tasks);
+            acceptCount += results.Count(r => r);
+
+            CasterLogUtility.Log(
+                $"ProposePromotion — result: accepts={acceptCount}/{totalVoters} needed={needed} candidate={candidateAddress}",
+                "CasterFlow");
+
+            return acceptCount >= needed;
+        }
+
+        /// <summary>
+        /// FIX 5: Evaluate a promotion proposal received from a peer caster.
+        /// Runs the same gates locally (balance, maturity, port, version) and returns accept/reject.
+        /// Called from ValidatorController.ProposePromotion endpoint.
+        /// </summary>
+        public static async Task<PromotionProposalResponse> EvaluatePromotionProposal(PromotionProposalRequest proposal)
+        {
+            var response = new PromotionProposalResponse { ResponderAddress = Globals.ValidatorAddress };
+
+            try
+            {
+                if (!Globals.IsBlockCaster)
+                {
+                    response.Reason = "Not a block caster";
+                    return response;
+                }
+
+                // Check if candidate is already a caster
+                if (Globals.BlockCasters.Any(c => c.ValidatorAddress == proposal.CandidateAddress))
+                {
+                    response.Accepted = true;
+                    response.Reason = "Already in caster list";
+                    return response;
+                }
+
+                // Check if we have the candidate in NetworkValidators
+                if (!Globals.NetworkValidators.TryGetValue(proposal.CandidateAddress, out var validator))
+                {
+                    response.Reason = "Candidate not in NetworkValidators";
+                    return response;
+                }
+
+                // Balance gate
+                var balance = AccountStateTrei.GetAccountBalance(proposal.CandidateAddress);
+                if (balance < MinCasterBalance)
+                {
+                    response.Reason = $"Balance {balance} < {MinCasterBalance}";
+                    return response;
+                }
+
+                // Maturity gate
+                var currentHeight = Globals.LastBlock?.Height ?? 0;
+                if (validator.FirstSeenAtHeight > 0 && currentHeight - validator.FirstSeenAtHeight < MaturityBlocks)
+                {
+                    response.Reason = $"Maturity {currentHeight - validator.FirstSeenAtHeight}/{MaturityBlocks}";
+                    return response;
+                }
+
+                // Port check
+                var cleanIp = (proposal.CandidateIP ?? "").Replace("::ffff:", "");
+                if (!PortUtility.IsPortOpen(cleanIp, Globals.ValAPIPort))
+                {
+                    response.Reason = $"Port closed {cleanIp}:{Globals.ValAPIPort}";
+                    return response;
+                }
+
+                // Version check
+                var versionResult = await CheckCandidateVersionDetailed(cleanIp, proposal.CandidateAddress);
+                if (versionResult.Status != VersionCheckResult.Ok)
+                {
+                    response.Reason = $"Version={versionResult.Status}";
+                    return response;
+                }
+
+                response.Accepted = true;
+                response.Reason = "All gates passed";
+                return response;
+            }
+            catch (Exception ex)
+            {
+                response.Reason = $"Error: {ex.Message}";
+                return response;
+            }
+        }
+
+        #endregion
     }
 }
