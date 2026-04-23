@@ -633,20 +633,46 @@ namespace ReserveBlockCore.Controllers
         [Route("PromoteToCaster")]
         public async Task<ActionResult<string>> PromoteToCaster([FromBody] CasterPromotionRequest? req)
         {
+            var remoteIp = HttpContext?.Connection?.RemoteIpAddress?.ToString() ?? "?";
             try
             {
                 if (req == null || string.IsNullOrEmpty(req.PromotedAddress))
+                {
+                    CasterLogUtility.Log(
+                        $"HTTP /PromoteToCaster from {remoteIp}: REJECT invalid request (null or missing PromotedAddress)",
+                        "CasterFlow");
                     return BadRequest("rejected: invalid request");
+                }
+
+                CasterLogUtility.Log(
+                    $"HTTP /PromoteToCaster from {remoteIp} | promoter={req.PromoterAddress} promoted={req.PromotedAddress} " +
+                    $"height={req.BlockHeight} casterListCount={(req.CasterList?.Count ?? 0)} self={Globals.ValidatorAddress}",
+                    "CasterFlow");
+                ConsoleWriterService.OutputVal(
+                    $"[CasterFlow] HTTP /PromoteToCaster inbound from {remoteIp} (promoter={req.PromoterAddress})");
+
                 if (req.PromotedAddress != Globals.ValidatorAddress)
+                {
+                    CasterLogUtility.Log(
+                        $"HTTP /PromoteToCaster from {remoteIp}: REJECT — PromotedAddress='{req.PromotedAddress}' does not match self='{Globals.ValidatorAddress}'",
+                        "CasterFlow");
                     return BadRequest("rejected: not for us");
+                }
                 var result = await CasterDiscoveryService.HandlePromotion(req);
+                CasterLogUtility.Log(
+                    $"HTTP /PromoteToCaster from {remoteIp}: returning '{result}' | IsBlockCaster(now)={Globals.IsBlockCaster} BlockCasters.Count(now)={Globals.BlockCasters.Count}",
+                    "CasterFlow");
                 return Ok(result);
             }
             catch (Exception ex)
             {
+                CasterLogUtility.Log(
+                    $"HTTP /PromoteToCaster from {remoteIp}: EXCEPTION {ex.GetType().Name}: {ex.Message}",
+                    "CasterFlow");
                 return BadRequest($"rejected: {ex.Message}");
             }
         }
+
 
         /// <summary>Graceful caster departure notice (signed by departing caster).</summary>
         [HttpPost]

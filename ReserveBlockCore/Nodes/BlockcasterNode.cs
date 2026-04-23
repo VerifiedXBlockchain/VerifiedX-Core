@@ -115,16 +115,36 @@ namespace ReserveBlockCore.Nodes
 
                 if (!Globals.BlockCasters.Any())
                 {
+                    CasterLogUtility.Log(
+                        $"MonitorTick BlockCasters empty → calling GetBlockcasters(). Self={Globals.ValidatorAddress} IsBlockCaster={Globals.IsBlockCaster}",
+                        "CasterFlow");
                     await ValidatorNode.GetBlockcasters();
                     await delay;
                     continue;
                 }
 
+                // Per-tick snapshot so we can always see the caster pool state the monitor
+                // is reasoning about. Critical for diagnosing "stuck as validator, never promoted"
+                // and "promoted but never solving blocks" scenarios.
+                {
+                    var addrs = string.Join(",", Globals.BlockCasters.Select(c => c.ValidatorAddress ?? "?"));
+                    var selfInList = Globals.BlockCasters.Any(c => c.ValidatorAddress == Globals.ValidatorAddress);
+                    CasterLogUtility.Log(
+                        $"MonitorTick | Self={Globals.ValidatorAddress} | IsBlockCaster={Globals.IsBlockCaster} | " +
+                        $"self-in-BlockCasters={selfInList} | BlockCasters.Count={Globals.BlockCasters.Count} addrs=[{addrs}] | " +
+                        $"NetworkValidators.Count={Globals.NetworkValidators.Count} | IsBootstrapMode={Globals.IsBootstrapMode} | height={Globals.LastBlock.Height}",
+                        "CasterFlow");
+                }
+
                 if (!Globals.IsBlockCaster)
                 {
+                    CasterLogUtility.Log(
+                        $"MonitorTick SKIP promotion-related work — IsBlockCaster=false. Will retry in 30s.",
+                        "CasterFlow");
                     await Task.Delay(new TimeSpan(0, 0, 30));
                     continue;
                 }
+
 
                 if (!Globals.IsBootstrapMode)
                     await PingCasters();
@@ -209,6 +229,9 @@ namespace ReserveBlockCore.Nodes
         #endregion
 
         #region Ping Casters
+        /// <summary>Throttle the "PingCasters start/end" summary logs to roughly one per 30s so we don't flood the log.</summary>
+        private static long _lastPingCastersLogTick;
+
         public static async Task PingCasters()
         {
             var casterList = Globals.BlockCasters.ToList();
@@ -216,7 +239,18 @@ namespace ReserveBlockCore.Nodes
             if (!casterList.Any())
                 return;
 
+            var shouldLog = (Environment.TickCount64 - _lastPingCastersLogTick) > 30_000;
+            if (shouldLog)
+            {
+                _lastPingCastersLogTick = Environment.TickCount64;
+                CasterLogUtility.Log(
+                    $"PingCasters start — {casterList.Count} peers in list (self skipped). " +
+                    $"Self={Globals.ValidatorAddress} addrs=[{string.Join(",", casterList.Select(c => c.ValidatorAddress ?? "?"))}]",
+                    "CasterFlow");
+            }
+
             HashSet<string> removeList = new HashSet<string>();
+
 
             foreach (var caster in casterList)
             {
@@ -277,6 +311,11 @@ namespace ReserveBlockCore.Nodes
                 Globals.BlockCasters = nBag;
                 Globals.SyncKnownCastersFromBlockCasters();
 
+                CasterLogUtility.Log(
+                    $"PingCasters EVICTED {removeList.Count} offline peer(s): [{string.Join(",", removeList)}]. " +
+                    $"BlockCasters.Count now {Globals.BlockCasters.Count}",
+                    "CasterFlow");
+
                 foreach (var removedIP in removeList)
                 {
                     var removedCaster = casterList.FirstOrDefault(c => c.PeerIP == removedIP);
@@ -285,7 +324,12 @@ namespace ReserveBlockCore.Nodes
                     _ = CasterDiscoveryService.OnCasterRemoved(removedAddr);
                 }
             }
+            else if (shouldLog)
+            {
+                CasterLogUtility.Log($"PingCasters end — no evictions", "CasterFlow");
+            }
         }
+
 
         #endregion
 
@@ -587,11 +631,27 @@ namespace ReserveBlockCore.Nodes
 
                 if (!Globals.IsBlockCaster)
                 {
+                    // Throttled diagnostic: this is the path validators take while they're waiting
+                    // to be promoted by a caster. Logging each 30s tick makes it obvious whether:
+                    //   (a) the node is being skipped entirely (wrong ValidatorAddress / not fully trusted)
+                    //   (b) the caster pool is full (no slots for promotion)
+                    //   (c) the promotion request came in but was rejected (see HandlePromotion logs)
+                    var addrs = string.Join(",", casterList.Select(c => c.ValidatorAddress ?? "?"));
+                    CasterLogUtility.Log(
+                        $"ConsensusLoop WAITING (not a caster). Self={Globals.ValidatorAddress} " +
+                        $"self-in-BlockCasters=false | BlockCasters.Count={casterList.Count} addrs=[{addrs}] | " +
+                        $"NetworkValidators.Count={Globals.NetworkValidators.Count} | Retrying in 30s…",
+                        "CasterFlow");
                     await Task.Delay(new TimeSpan(0, 0, 30));
                     continue;
                 }
 
                 ConsoleWriterService.OutputVal("Top of consensus loop");
+                CasterLogUtility.Log(
+                    $"ConsensusLoop RUNNING as caster. Self={Globals.ValidatorAddress} " +
+                    $"BlockCasters.Count={casterList.Count} height={Globals.LastBlock.Height}",
+                    "CasterFlow");
+
 
                 Block? block = null;
 

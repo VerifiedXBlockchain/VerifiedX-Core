@@ -83,9 +83,15 @@ namespace ReserveBlockCore.Services
         public static async Task EvaluateCasterPool()
         {
             if (!Globals.IsBlockCaster)
+            {
+                CasterLogUtility.Log($"EvalTick SKIP — IsBlockCaster=false. Self={Globals.ValidatorAddress}", "CasterFlow");
                 return;
+            }
             if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                CasterLogUtility.Log("EvalTick SKIP — ValidatorAddress is empty", "CasterFlow");
                 return;
+            }
 
             var currentHeight = Globals.LastBlock.Height;
             if (currentHeight < 0)
@@ -97,12 +103,28 @@ namespace ReserveBlockCore.Services
             try
             {
                 var currentCasters = Globals.BlockCasters.ToList();
+                var currentCasterAddrs = currentCasters.Select(c => c.ValidatorAddress ?? "?").ToList();
+                var netValCount = Globals.NetworkValidators.Count;
+                CasterLogUtility.Log(
+                    $"EvalTick height={currentHeight} | Self={Globals.ValidatorAddress} | IsBlockCaster=true | " +
+                    $"BlockCasters.Count={currentCasters.Count}/{MaxCasters} addrs=[{string.Join(",", currentCasterAddrs)}] | " +
+                    $"NetworkValidators.Count={netValCount}",
+                    "CasterFlow");
+                ConsoleWriterService.OutputVal(
+                    $"[CasterFlow] EvalTick height={currentHeight} casters={currentCasters.Count}/{MaxCasters} vals={netValCount}");
+
                 if (currentCasters.Count >= MaxCasters)
+                {
+                    CasterLogUtility.Log($"EvalTick SKIP — caster pool full ({currentCasters.Count}/{MaxCasters})", "CasterFlow");
                     return;
+                }
 
                 var validators = Globals.NetworkValidators.Values.ToList();
                 if (!validators.Any())
+                {
+                    CasterLogUtility.Log("EvalTick SKIP — NetworkValidators is empty", "CasterFlow");
                     return;
+                }
 
                 var currentCasterAddresses = currentCasters
                     .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
@@ -118,38 +140,95 @@ namespace ReserveBlockCore.Services
                              && v.IsFullyTrusted)
                     .ToList();
 
+                // Emit per-validator filter diagnostics so it's obvious why a validator isn't in the candidate pool.
+                foreach (var v in validators)
+                {
+                    if (currentCasterAddresses.Contains(v.Address ?? ""))
+                        continue; // already a caster — not interesting
+                    var reasons = new List<string>();
+                    if (string.IsNullOrEmpty(v.Address)) reasons.Add("no-address");
+                    if (string.IsNullOrEmpty(v.IPAddress)) reasons.Add("no-ip");
+                    if (string.IsNullOrEmpty(v.PublicKey)) reasons.Add("no-pubkey");
+                    if (v.CheckFailCount >= 10) reasons.Add($"checkFailCount={v.CheckFailCount}");
+                    if (!v.IsFullyTrusted) reasons.Add("!IsFullyTrusted");
+                    if (reasons.Count > 0)
+                    {
+                        CasterLogUtility.Log(
+                            $"  filter-out val={v.Address ?? "?"} ip={v.IPAddress ?? "?"} reasons=[{string.Join(",", reasons)}]",
+                            "CasterFlow");
+                    }
+                }
+
                 if (!candidates.Any())
+                {
+                    CasterLogUtility.Log($"EvalTick END — 0 eligible candidates (of {validators.Count} validators, {currentCasterAddresses.Count} already casters)", "CasterFlow");
                     return;
+                }
+
+                CasterLogUtility.Log($"EvalTick — {candidates.Count} eligible candidate(s): [{string.Join(",", candidates.Select(c => c.Address))}]", "CasterFlow");
+
 
                 var rankedCandidates = candidates
                     .Select(v => new { Validator = v, Balance = AccountStateTrei.GetAccountBalance(v.Address) })
+                    .ToList();
+
+                // Emit balance-gate diagnostics for each eligible candidate.
+                foreach (var c in rankedCandidates)
+                {
+                    if (c.Balance < MinCasterBalance)
+                    {
+                        CasterLogUtility.Log(
+                            $"  balance-gate FAIL val={c.Validator.Address} balance={c.Balance} < min={MinCasterBalance}",
+                            "CasterFlow");
+                    }
+                    else
+                    {
+                        CasterLogUtility.Log(
+                            $"  balance-gate PASS val={c.Validator.Address} balance={c.Balance}",
+                            "CasterFlow");
+                    }
+                }
+
+                rankedCandidates = rankedCandidates
                     .Where(x => x.Balance >= MinCasterBalance)
                     .OrderByDescending(x => x.Balance)
                     .ToList();
 
                 int slotsAvailable = MaxCasters - currentCasters.Count;
                 var toPromote = rankedCandidates.Take(slotsAvailable).ToList();
+                CasterLogUtility.Log(
+                    $"EvalTick — slotsAvailable={slotsAvailable}, attempting promotion of {toPromote.Count} candidate(s): [{string.Join(",", toPromote.Select(p => p.Validator.Address))}]",
+                    "CasterFlow");
 
                 foreach (var candidate in toPromote)
                 {
                     var v = candidate.Validator;
                     var ip = v.IPAddress.Replace("::ffff:", "");
 
+                    CasterLogUtility.Log(
+                        $"  >> Candidate {v.Address} ip={ip} balance={candidate.Balance} firstSeen={v.FirstSeenAtHeight} now={currentHeight} maturityΔ={(v.FirstSeenAtHeight > 0 ? currentHeight - v.FirstSeenAtHeight : -1)}/{MaturityBlocks}",
+                        "CasterFlow");
+                    ConsoleWriterService.OutputVal($"[CasterFlow] Promoting candidate {v.Address} ({ip})…");
+
                     // Maturity gate: don't promote validators that just connected.
                     // They need time to sync their own NetworkValidators pool.
                     if (v.FirstSeenAtHeight > 0 && currentHeight - v.FirstSeenAtHeight < MaturityBlocks)
                     {
+                        CasterLogUtility.Log($"  <<  maturity=FAIL ({currentHeight - v.FirstSeenAtHeight}/{MaturityBlocks})", "CasterFlow");
                         ConsoleWriterService.OutputVal(
                             $"[CasterDiscovery] Candidate {v.Address} not mature enough (seen at height {v.FirstSeenAtHeight}, current {currentHeight}, need {MaturityBlocks} blocks). Skipping.");
                         continue;
                     }
+                    CasterLogUtility.Log($"     maturity=PASS", "CasterFlow");
 
                     if (!PortUtility.IsPortOpen(ip, Globals.ValAPIPort))
                     {
+                        CasterLogUtility.Log($"  <<  portOpen=FAIL {ip}:{Globals.ValAPIPort}", "CasterFlow");
                         ConsoleWriterService.OutputVal(
                             $"[CasterDiscovery] Candidate {v.Address} port check failed on {ip}:{Globals.ValAPIPort}");
                         continue;
                     }
+                    CasterLogUtility.Log($"     portOpen=PASS {ip}:{Globals.ValAPIPort}", "CasterFlow");
 
                     // Version gate: reject candidates on outdated major versions.
                     // This prevents nodes that can't produce valid proofs from inflating the quorum.
@@ -158,14 +237,29 @@ namespace ReserveBlockCore.Services
                     // version silently excludes the caster from proof generation.
                     var candidateVersionResult = await CheckCandidateVersionDetailed(ip, v.Address);
                     if (candidateVersionResult.Status != VersionCheckResult.Ok)
+                    {
+                        CasterLogUtility.Log(
+                            $"  <<  version={candidateVersionResult.Status} reported='{candidateVersionResult.Version}'",
+                            "CasterFlow");
                         continue;
+                    }
+                    CasterLogUtility.Log(
+                        $"     version=PASS reported='{candidateVersionResult.Version}'",
+                        "CasterFlow");
 
                     // Health gate: reject candidates that are out of sync or have clock skew.
                     if (!await CheckCandidateHealth(ip, v.Address))
+                    {
+                        CasterLogUtility.Log($"  <<  health=FAIL", "CasterFlow");
                         continue;
+                    }
+                    CasterLogUtility.Log($"     health=PASS", "CasterFlow");
 
                     if (Globals.BlockCasters.Any(c => c.ValidatorAddress == v.Address))
+                    {
+                        CasterLogUtility.Log($"  <<  race-condition: already in BlockCasters (another thread promoted first)", "CasterFlow");
                         continue;
+                    }
 
                     var newCaster = new Peers
                     {
@@ -181,9 +275,12 @@ namespace ReserveBlockCore.Services
                     // Only add to BlockCasters if the promoted node confirms.
                     // This prevents "zombie casters" where the promoter's caster list
                     // includes a node that rejected the promotion, breaking quorum.
+                    CasterLogUtility.Log($"     sending PromoteToCaster HTTP to {ip}…", "CasterFlow");
+                    ConsoleWriterService.OutputVal($"[CasterFlow] → POST PromoteToCaster {ip}");
                     var accepted = await NotifyPromotionAndAwaitAcceptance(ip, v.Address, newCaster).ConfigureAwait(false);
                     if (!accepted)
                     {
+                        CasterLogUtility.Log($"  <<  promotion REJECTED/failed by candidate", "CasterFlow");
                         ConsoleWriterService.OutputVal(
                             $"[CasterDiscovery] Candidate {v.Address} at {ip} did not accept promotion. Not adding to caster pool.");
                         continue;
@@ -192,9 +289,13 @@ namespace ReserveBlockCore.Services
                     Globals.BlockCasters.Add(newCaster);
                     Globals.SyncKnownCastersFromBlockCasters();
 
+                    CasterLogUtility.Log(
+                        $"  ✓ PROMOTED val={v.Address} ip={ip}. BlockCasters.Count now {Globals.BlockCasters.Count}/{MaxCasters}",
+                        "CasterFlow");
                     ConsoleWriterService.OutputVal(
                         $"[CasterDiscovery] Promoted {v.Address} (balance: {candidate.Balance}) to caster. Pool: {Globals.BlockCasters.Count}/{MaxCasters}");
                 }
+
             }
             catch (Exception ex)
             {
@@ -465,10 +566,17 @@ namespace ReserveBlockCore.Services
                 var json = JsonConvert.SerializeObject(promotion);
                 using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
+                CasterLogUtility.Log(
+                    $"NotifyPromotion → POST {uri} | promotedAddr={address} promoterAddr={promoterAddress} height={blockHeight} casterListSize={existingCasters.Count} bodyBytes={json.Length}",
+                    "CasterFlow");
+
                 var response = await client.PostAsync(uri, content, cts.Token).ConfigureAwait(false);
                 if (response.IsSuccessStatusCode)
                 {
                     var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    CasterLogUtility.Log(
+                        $"NotifyPromotion ← {response.StatusCode} body='{body}' (peer={peerIP})",
+                        "CasterFlow");
                     // The PromoteToCaster endpoint returns "accepted" if the node accepted the promotion
                     if (!string.IsNullOrEmpty(body) && body.Contains("accepted", StringComparison.OrdinalIgnoreCase))
                     {
@@ -485,6 +593,11 @@ namespace ReserveBlockCore.Services
                 }
                 else
                 {
+                    string errBody = "";
+                    try { errBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false); } catch { }
+                    CasterLogUtility.Log(
+                        $"NotifyPromotion ← HTTP ERROR {response.StatusCode} body='{errBody}' (peer={peerIP})",
+                        "CasterFlow");
                     ConsoleWriterService.OutputVal(
                         $"[CasterDiscovery] Candidate {address} at {peerIP} promotion request failed: {response.StatusCode}");
                     return false;
@@ -492,10 +605,12 @@ namespace ReserveBlockCore.Services
             }
             catch (Exception ex)
             {
+                CasterLogUtility.Log($"NotifyPromotion EXCEPTION peer={peerIP}: {ex.GetType().Name}: {ex.Message}", "CasterFlow");
                 ErrorLogUtility.LogError($"NotifyPromotionAndAwaitAcceptance to {peerIP} failed: {ex.Message}", "CasterDiscoveryService");
                 return false;
             }
         }
+
 
         /// <summary>
         /// Broadcasts signed demotion notices to all peer casters so they remove the demoted node(s)
@@ -719,15 +834,40 @@ namespace ReserveBlockCore.Services
         /// </summary>
         public static Task<string> HandlePromotion(CasterPromotionRequest promotion)
         {
-            if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                return Task.FromResult("rejected: no validator address");
-            if (promotion.PromotedAddress != Globals.ValidatorAddress)
-                return Task.FromResult("rejected: not for this node");
+            var listSummary = promotion.CasterList == null
+                ? "<null>"
+                : string.Join(",", promotion.CasterList.Select(c => c.Address ?? "?"));
+            CasterLogUtility.Log(
+                $"HandlePromotion ENTER | Self={Globals.ValidatorAddress} | promoter={promotion.PromoterAddress} " +
+                $"promoted={promotion.PromotedAddress} height={promotion.BlockHeight} " +
+                $"list=[{listSummary}] | BlockCasters.Count(before)={Globals.BlockCasters.Count} IsBlockCaster(before)={Globals.IsBlockCaster}",
+                "CasterFlow");
+            ConsoleWriterService.OutputVal(
+                $"[CasterFlow] HandlePromotion inbound from {promotion.PromoterAddress} at height {promotion.BlockHeight}");
 
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                CasterLogUtility.Log("HandlePromotion REJECT: no validator address on this node", "CasterFlow");
+                return Task.FromResult("rejected: no validator address");
+            }
+            if (promotion.PromotedAddress != Globals.ValidatorAddress)
+            {
+                CasterLogUtility.Log(
+                    $"HandlePromotion REJECT: not for this node. promoted='{promotion.PromotedAddress}' self='{Globals.ValidatorAddress}'",
+                    "CasterFlow");
+                return Task.FromResult("rejected: not for this node");
+            }
+
+            var knownCastersAddrs = string.Join(",", Globals.KnownCasters.Select(c => c.Address ?? "?"));
+            var blockCastersAddrs = string.Join(",", Globals.BlockCasters.Select(c => c.ValidatorAddress ?? "?"));
             var isTrustedPromoter = Globals.BlockCasters.Any(c => c.ValidatorAddress == promotion.PromoterAddress)
                 || Globals.KnownCasters.Any(c => c.Address == promotion.PromoterAddress);
             if (!isTrustedPromoter)
             {
+                CasterLogUtility.Log(
+                    $"HandlePromotion REJECT: untrusted promoter '{promotion.PromoterAddress}'. " +
+                    $"BlockCasters=[{blockCastersAddrs}] KnownCasters=[{knownCastersAddrs}]",
+                    "CasterFlow");
                 ErrorLogUtility.LogError($"Promotion from untrusted address {promotion.PromoterAddress} — not in our caster set", "CasterDiscoveryService");
                 return Task.FromResult("rejected: untrusted promoter");
             }
@@ -735,12 +875,18 @@ namespace ReserveBlockCore.Services
             if (promotion.CasterList == null
                 || !promotion.CasterList.Any(c => c.Address == promotion.PromoterAddress))
             {
+                CasterLogUtility.Log(
+                    $"HandlePromotion REJECT: promoter '{promotion.PromoterAddress}' is NOT in signed CasterList=[{listSummary}]",
+                    "CasterFlow");
                 ErrorLogUtility.LogError($"Promotion from {promotion.PromoterAddress} — promoter not in CasterList", "CasterDiscoveryService");
                 return Task.FromResult("rejected: promoter not in caster list");
             }
 
             if (!promotion.CasterList.Any(c => c.Address == Globals.ValidatorAddress))
             {
+                CasterLogUtility.Log(
+                    $"HandlePromotion REJECT: our address '{Globals.ValidatorAddress}' missing from signed CasterList=[{listSummary}]",
+                    "CasterFlow");
                 ErrorLogUtility.LogError("Promotion rejected: promoted address missing from signed CasterList", "CasterDiscoveryService");
                 return Task.FromResult("rejected: our address missing from caster list");
             }
@@ -750,23 +896,38 @@ namespace ReserveBlockCore.Services
             var canonicalMessage = $"PROMOTE|{promotion.PromotedAddress}|{promotion.BlockHeight}|{promotion.PromoterAddress}|{casterListHashHex}";
             if (!SignatureService.VerifySignature(promotion.PromoterAddress, canonicalMessage, promotion.PromoterSignature))
             {
+                var sigSnippet = (promotion.PromoterSignature ?? "").Length > 20
+                    ? promotion.PromoterSignature!.Substring(0, 20) + "…"
+                    : (promotion.PromoterSignature ?? "<null>");
+                CasterLogUtility.Log(
+                    $"HandlePromotion REJECT: signature verification failed. canonicalMsg='{canonicalMessage}' sig='{sigSnippet}'",
+                    "CasterFlow");
                 ErrorLogUtility.LogError($"Invalid promotion signature from {promotion.PromoterAddress}", "CasterDiscoveryService");
                 return Task.FromResult("rejected: invalid signature");
             }
+            CasterLogUtility.Log("HandlePromotion: signature verified OK", "CasterFlow");
 
             // Self-health check: reject promotion if our NetworkValidators pool is too small.
             // Without validators we can't generate proofs, which inflates the quorum and halts consensus.
             var validatorCount = Globals.NetworkValidators.Count;
             if (validatorCount < MinValidatorPoolSize)
             {
+                var netValAddrs = string.Join(",", Globals.NetworkValidators.Values.Select(v => v.Address ?? "?"));
+                CasterLogUtility.Log(
+                    $"HandlePromotion REJECT: self-health — NetworkValidators.Count={validatorCount} < min={MinValidatorPoolSize}. addrs=[{netValAddrs}]",
+                    "CasterFlow");
                 ConsoleWriterService.OutputVal(
                     $"[CasterDiscovery] REJECTING promotion — our NetworkValidators pool has only {validatorCount} entries (need {MinValidatorPoolSize}+). " +
                     "This node cannot produce proofs and would halt consensus.");
                 return Task.FromResult($"rejected: only {validatorCount} validators in pool (need {MinValidatorPoolSize}+)");
             }
 
+            CasterLogUtility.Log(
+                $"HandlePromotion: self-health OK (NetworkValidators.Count={validatorCount}). Applying promotion…",
+                "CasterFlow");
             ConsoleWriterService.OutputVal(
                 $"[CasterDiscovery] THIS NODE has been promoted to caster by {promotion.PromoterAddress} at height {promotion.BlockHeight}!");
+
 
             // Pre-populate WalletVersion so the newly installed BlockCasters are eligible for
             // proof generation on the very first consensus round after promotion.
@@ -805,13 +966,22 @@ namespace ReserveBlockCore.Services
 
             Globals.SyncKnownCastersFromBlockCasters();
 
+            var wasBlockCaster = Globals.IsBlockCaster;
             // BlockcasterNode.StartCastingRounds already runs as IHostedService; it picks up caster status on next loop.
             if (!Globals.IsBlockCaster)
                 Globals.IsBlockCaster = true;
 
+            var afterAddrs = string.Join(",", Globals.BlockCasters.Select(c => c.ValidatorAddress ?? "?"));
+            CasterLogUtility.Log(
+                $"HandlePromotion SUCCESS | BlockCasters.Count(after)={Globals.BlockCasters.Count} addrs=[{afterAddrs}] | " +
+                $"IsBlockCaster: {wasBlockCaster} → {Globals.IsBlockCaster}",
+                "CasterFlow");
+            ConsoleWriterService.OutputVal(
+                $"[CasterFlow] HandlePromotion ACCEPTED. BlockCasters now {Globals.BlockCasters.Count}: [{afterAddrs}]. IsBlockCaster={Globals.IsBlockCaster}");
             ConsoleWriterService.OutputVal("[CasterDiscovery] Caster list updated. Consensus loop will continue as caster.");
             return Task.FromResult("accepted");
         }
+
 
         public static async Task HandleDeparture(CasterDepartureNotice departure)
         {
