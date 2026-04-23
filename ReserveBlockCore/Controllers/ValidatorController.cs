@@ -333,6 +333,32 @@ namespace ReserveBlockCore.Controllers
                     return Unauthorized();
                 }
 
+                // FIX C: If the requested height is close to our tip (within 2 blocks),
+                // spin-wait up to 2 seconds for CasterRoundDict to populate instead of
+                // returning "0" immediately. This handles the timing skew where a newly-joined
+                // caster generates proofs before peers have entered the same round.
+                const int PROOF_WAIT_MS = 2000;
+                const int PROOF_WAIT_POLL_MS = 100;
+                var myHeight = Globals.LastBlock.Height;
+                var heightDelta = blockHeight - myHeight;
+
+                if (heightDelta >= 0 && heightDelta <= 2)
+                {
+                    var waitSw = System.Diagnostics.Stopwatch.StartNew();
+                    while (waitSw.ElapsedMilliseconds < PROOF_WAIT_MS)
+                    {
+                        if (Globals.CasterRoundDict.TryGetValue(blockHeight, out var waitRound)
+                            && waitRound?.Proof != null)
+                        {
+                            CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=proof addr={waitRound.Proof.Address} VRF={waitRound.Proof.VRFNumber} (after {waitSw.ElapsedMilliseconds}ms wait)", "PROOFDIAG");
+                            return Ok(JsonConvert.SerializeObject(waitRound.Proof));
+                        }
+                        await Task.Delay(PROOF_WAIT_POLL_MS);
+                    }
+                    CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=0 (wait expired after {PROOF_WAIT_MS}ms, myHeight={myHeight})", "PROOFDIAG");
+                    return Ok("0");
+                }
+
                 if (Globals.CasterRoundDict.ContainsKey(blockHeight))
                 {
                     var round = Globals.CasterRoundDict[blockHeight];
@@ -351,7 +377,7 @@ namespace ReserveBlockCore.Controllers
                     return Ok(JsonConvert.SerializeObject(round.Proof));
                 }
 
-                CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=0 (no CasterRoundDict entry, myHeight={Globals.LastBlock.Height})", "PROOFDIAG");
+                CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=0 (no CasterRoundDict entry, myHeight={myHeight}, delta={heightDelta})", "PROOFDIAG");
                 return Ok("0");
             }
             catch (Exception ex)

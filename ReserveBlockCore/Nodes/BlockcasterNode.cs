@@ -32,7 +32,7 @@ namespace ReserveBlockCore.Nodes
         private readonly IHubContext<P2PBlockcasterServer> _hubContext;
         private readonly IHostApplicationLifetime _appLifetime;
         private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
-        const int PROOF_COLLECTION_TIME = 3000; // 3 seconds — sync barrier for caster proof exchange (was 4s)
+        const int PROOF_COLLECTION_TIME = 6000; // 6 seconds — sync barrier for caster proof exchange (was 3s; increased to handle newly-joined caster timing skew)
         const int APPROVAL_WINDOW = 4000;       // 4 seconds (was 8s) — reduced because VRF is deterministic
         const int CASTER_VOTE_WINDOW = 3000;    // 3 seconds per-caster HTTP timeout (was 4s)
         const int GET_APPROVAL_HTTP_TIMEOUT_MS = 2000; // per-caster HTTP; parallelized
@@ -196,9 +196,9 @@ namespace ReserveBlockCore.Nodes
                     if (!selfRecovered)
                     {
                         CasterLogUtility.Log(
-                            $"MonitorTick SKIP promotion-related work — IsBlockCaster=false. Will retry in 30s.",
+                            $"MonitorTick SKIP promotion-related work — IsBlockCaster=false. Will retry in 10s.",
                             "CasterFlow");
-                        await Task.Delay(new TimeSpan(0, 0, 30));
+                        await Task.Delay(new TimeSpan(0, 0, 10));
                         continue;
                     }
                     // If self-recovered, fall through to normal caster work
@@ -699,9 +699,9 @@ namespace ReserveBlockCore.Nodes
                     CasterLogUtility.Log(
                         $"ConsensusLoop WAITING (not a caster). Self={Globals.ValidatorAddress} " +
                         $"self-in-BlockCasters=false | BlockCasters.Count={casterList.Count} addrs=[{addrs}] | " +
-                        $"NetworkValidators.Count={Globals.NetworkValidators.Count} | Retrying in 30s…",
+                        $"NetworkValidators.Count={Globals.NetworkValidators.Count} | Retrying in 10s…",
                         "CasterFlow");
-                    await Task.Delay(new TimeSpan(0, 0, 30));
+                    await Task.Delay(new TimeSpan(0, 0, 10));
                     continue;
                 }
 
