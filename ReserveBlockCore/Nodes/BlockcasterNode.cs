@@ -3021,27 +3021,48 @@ namespace ReserveBlockCore.Nodes
                 // Parallel fetch from all casters simultaneously
                 var tasks = validators.Select(async validator =>
                 {
+                    // Skip self — we already self-injected our own proof
+                    if (validator.ValidatorAddress == Globals.ValidatorAddress)
+                        return;
+
+                    // Skip if we already have this peer's proof
+                    if (Globals.CasterProofDict.ContainsKey(validator.PeerIP))
+                        return;
+
                     try
                     {
                         using var client = Globals.HttpClientFactory.CreateClient();
                         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(CASTER_VOTE_WINDOW));
-                        var uri = $"http://{validator.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/SendWinningProof/{proof.BlockHeight}";
+                        var cleanIP = validator.PeerIP.Replace("::ffff:", "");
+                        var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/SendWinningProof/{proof.BlockHeight}";
+                        CasterLogUtility.Log($"ProofFetch → {cleanIP} height={proof.BlockHeight}", "PROOFDIAG");
                         var response = await client.GetAsync(uri, cts.Token);
+                        var responseJson = await response.Content.ReadAsStringAsync();
+                        CasterLogUtility.Log($"ProofFetch ← {cleanIP} status={response.StatusCode} body={responseJson?.Substring(0, Math.Min(responseJson?.Length ?? 0, 120))}", "PROOFDIAG");
                         if (response.IsSuccessStatusCode)
                         {
-                            var responseJson = await response.Content.ReadAsStringAsync();
-                            if (responseJson != null && responseJson != "0")
+                            if (responseJson != null && responseJson != "0" && responseJson != "\"0\"")
                             {
                                 var remoteCasterProof = JsonConvert.DeserializeObject<Proof>(responseJson);
                                 if (remoteCasterProof != null && remoteCasterProof.VerifyProof())
                                 {
                                     Globals.CasterProofDict.TryAdd(validator.PeerIP, remoteCasterProof);
+                                    CasterLogUtility.Log($"ProofFetch ACCEPTED from {cleanIP} addr={remoteCasterProof.Address} VRF={remoteCasterProof.VRFNumber}", "PROOFDIAG");
+                                }
+                                else
+                                {
+                                    CasterLogUtility.Log($"ProofFetch VERIFY-FAIL from {cleanIP}", "PROOFDIAG");
                                 }
                             }
                         }
                     }
+                    catch (TaskCanceledException)
+                    {
+                        CasterLogUtility.Log($"ProofFetch TIMEOUT from {validator.PeerIP.Replace("::ffff:", "")} after {CASTER_VOTE_WINDOW}ms", "PROOFDIAG");
+                    }
                     catch (Exception ex)
                     {
+                        CasterLogUtility.Log($"ProofFetch ERROR from {validator.PeerIP.Replace("::ffff:", "")}: {ex.Message}", "PROOFDIAG");
                         if (Globals.OptionalLogging)
                             ErrorLogUtility.LogError($"Error getting proof from {validator.PeerIP}: {ex.Message}", "BlockcasterNode.GetWinningProof()");
                     }

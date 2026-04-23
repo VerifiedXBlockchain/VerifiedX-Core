@@ -329,6 +329,7 @@ namespace ReserveBlockCore.Controllers
 
                 if (!string.IsNullOrEmpty(peerIP) && Globals.BannedIPs.ContainsKey(peerIP))
                 {
+                    CasterLogUtility.Log($"SendWinningProof REJECTED — banned IP {peerIP} height={blockHeight}", "PROOFDIAG");
                     return Unauthorized();
                 }
 
@@ -336,13 +337,21 @@ namespace ReserveBlockCore.Controllers
                 {
                     var round = Globals.CasterRoundDict[blockHeight];
                     if (round == null)
+                    {
+                        CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=0 (round null)", "PROOFDIAG");
                         return Ok("0");
+                    }
                     if (round.Proof == null)
+                    {
+                        CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=0 (proof null, validator={round.Validator ?? "?"})", "PROOFDIAG");
                         return Ok("0");
+                    }
 
+                    CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=proof addr={round.Proof.Address} VRF={round.Proof.VRFNumber}", "PROOFDIAG");
                     return Ok(JsonConvert.SerializeObject(round.Proof));
                 }
 
+                CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=0 (no CasterRoundDict entry, myHeight={Globals.LastBlock.Height})", "PROOFDIAG");
                 return Ok("0");
             }
             catch (Exception ex)
