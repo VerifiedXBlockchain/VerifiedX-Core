@@ -1008,7 +1008,9 @@ namespace ReserveBlockCore.Services
             var wasBlockCaster = Globals.IsBlockCaster;
             // BlockcasterNode.StartCastingRounds already runs as IHostedService; it picks up caster status on next loop.
             if (!Globals.IsBlockCaster)
+            {
                 Globals.IsBlockCaster = true;
+            }
 
             var afterAddrs = string.Join(",", Globals.BlockCasters.Select(c => c.ValidatorAddress ?? "?"));
             CasterLogUtility.Log(

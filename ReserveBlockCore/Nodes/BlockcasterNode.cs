@@ -2341,14 +2341,20 @@ namespace ReserveBlockCore.Nodes
                     ConsoleWriterService.OutputVal($"[Desync Recovery] Stuck for {timeSinceLastBlock}ms — bypassing consensus gate for block {nextBlock.Height} from {nextBlock.Validator}");
                 }
 
-                // Supermajority hash is registered in VerifyBlockHashAgreementAsync as soon as it is known (before local commit).
-                // Block casters must not accept message-7 for the next height without that gate (brief spin covers races with local agreement).
+                // ── Agreed-hash gate (4-case logic) ──────────────────────────────
+                // Case 1: Agreed hash exists AND matches → accept (fall through)
+                // Case 2: Agreed hash exists AND differs → reject (actual fork)
+                // Case 3: No agreed hash + no CasterRoundDict entry → accept (we haven't started consensus for this height)
+                // Case 4: No agreed hash + CasterRoundDict entry exists → spin-wait briefly, then accept (mid-round)
                 string? agreedHashForGate = null;
                 Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
 
+                bool hasCasterRoundEntry = Globals.CasterRoundDict.ContainsKey(nextBlock.Height);
+
                 if (!desyncRecoveryMode && Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
-                    && string.IsNullOrEmpty(agreedHashForGate))
+                    && string.IsNullOrEmpty(agreedHashForGate) && hasCasterRoundEntry)
                 {
+                    // Case 4: We're mid-round for this height — spin-wait briefly for the agreement to land
                     var spin = Stopwatch.StartNew();
                     while (spin.ElapsedMilliseconds < RECEIVE_AGREED_HASH_SPIN_MS && string.IsNullOrEmpty(agreedHashForGate))
                     {
@@ -2359,22 +2365,26 @@ namespace ReserveBlockCore.Nodes
                         }
                         await Task.Delay(10);
                     }
+                    if (string.IsNullOrEmpty(agreedHashForGate))
+                    {
+                        ConsoleWriterService.OutputVal($"[Consensus Gate] Mid-round accept: height {nextBlock.Height} — CasterRoundDict entry exists but agreement not yet resolved after {spin.ElapsedMilliseconds}ms spin.");
+                    }
                 }
-
-                if (!desyncRecoveryMode && Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
-                    && string.IsNullOrEmpty(agreedHashForGate))
+                else if (!desyncRecoveryMode && Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                    && string.IsNullOrEmpty(agreedHashForGate) && !hasCasterRoundEntry)
                 {
-                    ConsoleWriterService.OutputVal($"[Consensus Gate] Rejecting height {nextBlock.Height} — no caster-agreed hash yet (message 7 before agreement or wrong fork).");
-                    Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
-                    return;
+                    // Case 3: No CasterRoundDict entry — we haven't started consensus for this height, trust peer broadcast
+                    ConsoleWriterService.OutputVal($"[Consensus Gate] No-round accept: height {nextBlock.Height} — no CasterRoundDict entry, trusting peer broadcast.");
                 }
 
+                // Case 2: Agreed hash exists but doesn't match → reject (actual fork)
                 if (!desyncRecoveryMode && !string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
                 {
                     ConsoleWriterService.OutputVal($"[Consensus Gate] Block at height {nextBlock.Height} hash mismatch — expected {agreedHashForGate[..Math.Min(12, agreedHashForGate.Length)]}… got {nextBlock.Hash?[..Math.Min(12, nextBlock.Hash?.Length ?? 0)]}…");
                     Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
                     return;
                 }
+                // Case 1: Agreed hash matches (or no hash at all after cases 3/4) → fall through to accept
 
                 if (nextBlock.Height != Globals.LastBlock.Height + 1)
                 {
