@@ -946,7 +946,6 @@ namespace ReserveBlockCore.Services
             //Disconnect from adj
             try
             {
-                await P2PClient.DisconnectAdjudicators();
                 //Do a block check to ensure all blocks are present.
                 await BlockDownloadService.GetAllBlocks();
                 await Task.Delay(500);
