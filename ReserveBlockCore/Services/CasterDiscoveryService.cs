@@ -28,6 +28,15 @@ namespace ReserveBlockCore.Services
         /// <summary>Tracks consecutive version-check failures per caster address for audit tolerance.</summary>
         private static readonly ConcurrentDictionary<string, int> _auditFailCounts = new();
 
+        /// <summary>Tracks promotion cooldown per candidate address after repeated version/port failures.
+        /// After <see cref="CooldownFailThreshold"/> consecutive Unreachable failures, the candidate is
+        /// put on cooldown for <see cref="CooldownBaseBlocks"/> blocks, doubling each subsequent failure,
+        /// capped at <see cref="CooldownMaxBlocks"/>.</summary>
+        private static readonly ConcurrentDictionary<string, (int FailCount, long CooldownUntilHeight)> _promotionCooldowns = new();
+        private const int CooldownFailThreshold = 3;
+        private const int CooldownBaseBlocks = 100;
+        private const int CooldownMaxBlocks = 1000;
+
         /// <summary>FIX 3: Tracks per-candidate API readiness — (firstSuccessUtcTicks, consecutiveSuccessCount).
         /// A candidate must have ≥3 consecutive successful version checks AND ≥30s since first success before promotion.</summary>
         private static readonly ConcurrentDictionary<string, (long FirstSuccessUtcTicks, int ConsecutiveSuccesses)> _valApiReadiness = new();
@@ -216,6 +225,16 @@ namespace ReserveBlockCore.Services
                         "CasterFlow");
                     ConsoleWriterService.OutputVal($"[CasterFlow] Promoting candidate {v.Address} ({ip})…");
 
+                    // Promotion cooldown: skip candidates with repeated version/port failures
+                    if (_promotionCooldowns.TryGetValue(v.Address, out var cooldown)
+                        && cooldown.CooldownUntilHeight > currentHeight)
+                    {
+                        CasterLogUtility.Log(
+                            $"  <<  SKIP — promotion cooldown until height {cooldown.CooldownUntilHeight} (fails={cooldown.FailCount})",
+                            "CasterFlow");
+                        continue;
+                    }
+
                     // Maturity gate: don't promote validators that just connected.
                     // They need time to sync their own NetworkValidators pool.
                     if (v.FirstSeenAtHeight > 0 && currentHeight - v.FirstSeenAtHeight < MaturityBlocks)
@@ -232,6 +251,7 @@ namespace ReserveBlockCore.Services
                         CasterLogUtility.Log($"  <<  portOpen=FAIL {ip}:{Globals.ValAPIPort}", "CasterFlow");
                         ConsoleWriterService.OutputVal(
                             $"[CasterDiscovery] Candidate {v.Address} port check failed on {ip}:{Globals.ValAPIPort}");
+                        TrackPromotionCooldown(v.Address, currentHeight);
                         continue;
                     }
                     CasterLogUtility.Log($"     portOpen=PASS {ip}:{Globals.ValAPIPort}", "CasterFlow");
@@ -249,11 +269,16 @@ namespace ReserveBlockCore.Services
                             "CasterFlow");
                         // FIX 3: Reset readiness on failure
                         _valApiReadiness.TryRemove(v.Address, out _);
+                        // Track cooldown for unreachable nodes (outdated is a permanent problem until they upgrade)
+                        if (candidateVersionResult.Status == VersionCheckResult.Unreachable)
+                            TrackPromotionCooldown(v.Address, currentHeight);
                         continue;
                     }
                     CasterLogUtility.Log(
                         $"     version=PASS reported='{candidateVersionResult.Version}'",
                         "CasterFlow");
+                    // Clear any promotion cooldown on success
+                    _promotionCooldowns.TryRemove(v.Address, out _);
 
                     // FIX 3: HTTP-ready grace period — require ≥3 consecutive version check successes
                     // AND ≥30s since first success before allowing promotion.
@@ -443,6 +468,29 @@ namespace ReserveBlockCore.Services
             }
         }
 
+
+        /// <summary>
+        /// Increments the promotion failure counter for a candidate and sets an exponential
+        /// cooldown once the threshold is reached. Called on port-check and version-check failures.
+        /// </summary>
+        private static void TrackPromotionCooldown(string address, long currentHeight)
+        {
+            var updated = _promotionCooldowns.AddOrUpdate(
+                address,
+                _ => (1, 0L),
+                (_, prev) => (prev.FailCount + 1, prev.CooldownUntilHeight));
+
+            if (updated.FailCount >= CooldownFailThreshold)
+            {
+                var exponent = Math.Min(updated.FailCount - CooldownFailThreshold, 10);
+                var cooldownBlocks = Math.Min(CooldownBaseBlocks * (1 << exponent), CooldownMaxBlocks);
+                var cooldownUntil = currentHeight + cooldownBlocks;
+                _promotionCooldowns[address] = (updated.FailCount, cooldownUntil);
+                CasterLogUtility.Log(
+                    $"  cooldown SET for {address}: {cooldownBlocks} blocks (until height {cooldownUntil}, fails={updated.FailCount})",
+                    "CasterFlow");
+            }
+        }
 
         /// <summary>
         /// Periodically audits existing casters and removes any on outdated major versions.
