@@ -83,28 +83,31 @@ namespace ReserveBlockCore.Models
         private void Output()
         {
             // Clear the console to make it look like the output is updating
+            if (!Globals.CasterLogEnabled)
+                return;
+
             Console.SetCursorPosition(0, 0);
 
 
             // Print the basic info of the current audit
-            ConsoleWriterService.Output($"Block Height: {BlockHeight}");
-            ConsoleWriterService.Output($"Elapsed Time: {TimeRunning.Elapsed}");
-            ConsoleWriterService.Output($"Cycles: {Cycles}");
+            ConsoleWriterService.OutputValCaster($"Block Height: {BlockHeight}");
+            ConsoleWriterService.OutputValCaster($"Elapsed Time: {TimeRunning.Elapsed}");
+            ConsoleWriterService.OutputValCaster($"Cycles: {Cycles}");
 
             // Print the current step and message
-            ConsoleWriterService.Output($"Current Step: {Step}");
-            ConsoleWriterService.Output($"Step Message: {StepMessage}");
-            ConsoleWriterService.Output("\r\n");
+            ConsoleWriterService.OutputValCaster($"Current Step: {Step}");
+            ConsoleWriterService.OutputValCaster($"Step Message: {StepMessage}");
+            ConsoleWriterService.OutputValCaster("\r\n");
 
             // Print each step message
-            ConsoleWriterService.Output("Step History:");
+            ConsoleWriterService.OutputValCaster("Step History:");
             if(StepMessages.Any())
             {
-                ConsoleWriterService.Output($"Total Step Messages: {StepMessages.Count()}");
+                ConsoleWriterService.OutputValCaster($"Total Step Messages: {StepMessages.Count()}");
             }
             else
             {
-                ConsoleWriterService.Output("No History.");
+                ConsoleWriterService.OutputValCaster("No History.");
             }
             
         }
