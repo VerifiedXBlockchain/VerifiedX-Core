@@ -329,6 +329,8 @@ namespace ReserveBlockCore
             Config.Config.EstablishABLFile();
             var config = Config.Config.ReadConfigFile();
             Config.Config.ProcessConfig(config);
+            if (argList.Any(x => string.Equals(x?.Trim(), "casterlog", StringComparison.OrdinalIgnoreCase)))
+                Globals.CasterLogEnabled = true;
             Config.Config.ProcessABL();
 
             _ = Task.Run(LogUtility.LogLoop);

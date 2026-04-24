@@ -382,7 +382,7 @@ namespace ReserveBlockCore.Nodes
                 {
                     var removedCaster = casterList.FirstOrDefault(c => c.PeerIP == removedIP);
                     var removedAddr = removedCaster?.ValidatorAddress ?? "unknown";
-                    ConsoleWriterService.OutputVal($"[PingCasters] Removed offline caster {removedAddr} ({removedIP})");
+                    ConsoleWriterService.OutputValCaster($"[PingCasters] Removed offline caster {removedAddr} ({removedIP})");
                     _ = CasterDiscoveryService.OnCasterRemoved(removedAddr);
                 }
             }
@@ -468,7 +468,7 @@ namespace ReserveBlockCore.Nodes
 
                     if (availableValidators.Count == 0)
                     {
-                        ConsoleWriterService.OutputVal("No available validators to select from.");
+                        ConsoleWriterService.OutputValCaster("No available validators to select from.");
                         break;
                     }
 
@@ -477,7 +477,7 @@ namespace ReserveBlockCore.Nodes
 
                     if(nCaster == null)
                     {
-                        ConsoleWriterService.OutputVal("Peers available, but nCaster was null.");
+                        ConsoleWriterService.OutputValCaster("Peers available, but nCaster was null.");
                         break;
                     }
 
@@ -489,7 +489,7 @@ namespace ReserveBlockCore.Nodes
                         var ip = nCaster.IPAddress.Replace("::ffff:", "");
                         if (!await CasterDiscoveryService.CheckCandidateVersion(ip, nCaster.Address))
                         {
-                            ConsoleWriterService.OutputVal($"[InitiateReplacement] Candidate {nCaster.Address} failed version check. Skipping.");
+                            ConsoleWriterService.OutputValCaster($"[InitiateReplacement] Candidate {nCaster.Address} failed version check. Skipping.");
                             break;
                         }
                     }
@@ -661,7 +661,7 @@ namespace ReserveBlockCore.Nodes
             // Using CompletedTask caused the new caster's first round to fire ~1.5s after join while bootstrap
             // casters were still mid-round with full block-time delays, creating a permanent phase offset.
             var BlockDelay = ComputeInitialBlockDelay();
-            ConsoleWriterService.OutputVal("Booting up consensus loop");
+            ConsoleWriterService.OutputValCaster("Booting up consensus loop");
             CasterLogUtility.Clear();
             CasterLogUtility.Log($"=== Consensus loop starting. Validator={Globals.ValidatorAddress} ===", "BOOT");
 
@@ -689,7 +689,7 @@ namespace ReserveBlockCore.Nodes
                         $"IsBlockCaster flipped FALSE — self ({Globals.ValidatorAddress}) missing from BlockCasters. " +
                         $"Count={casterList.Count} Addresses=[{string.Join(",", casterList.Select(c => c.ValidatorAddress))}]",
                         "SELF-DEMOTE");
-                    ConsoleWriterService.OutputVal(
+                    ConsoleWriterService.OutputValCaster(
                         $"[SELF-DEMOTE] This node was unexpectedly removed from its own BlockCasters list. " +
                         $"Count={casterList.Count}. Will re-evaluate next cycle.");
                 }
@@ -711,7 +711,7 @@ namespace ReserveBlockCore.Nodes
                     continue;
                 }
 
-                ConsoleWriterService.OutputVal("Top of consensus loop");
+                ConsoleWriterService.OutputValCaster("Top of consensus loop");
                 CasterLogUtility.Log(
                     $"ConsensusLoop RUNNING as caster. Self={Globals.ValidatorAddress} " +
                     $"BlockCasters.Count={casterList.Count} height={Globals.LastBlock.Height}",
@@ -1298,7 +1298,7 @@ namespace ReserveBlockCore.Nodes
 
                     if (Environment.TickCount64 - _lastStartingOverLogTicks >= 15_000)
                     {
-                        ConsoleWriterService.OutputVal("\r\nStarting over.");
+                        ConsoleWriterService.OutputValCaster("\r\nStarting over.");
                         _lastStartingOverLogTicks = Environment.TickCount64;
                     }
                     Globals.Proofs.Clear();
@@ -1518,7 +1518,7 @@ namespace ReserveBlockCore.Nodes
                 // If we're behind, fetch and apply missing blocks
                 if (maxPeerHeight > myHeight && bestPeerIP != null)
                 {
-                    ConsoleWriterService.OutputVal($"\r\n[HeightSync] Behind by {maxPeerHeight - myHeight} block(s). Catching up from {bestPeerIP}...");
+                    ConsoleWriterService.OutputValCaster($"\r\n[HeightSync] Behind by {maxPeerHeight - myHeight} block(s). Catching up from {bestPeerIP}...");
                     for (long h = myHeight + 1; h <= maxPeerHeight; h++)
                     {
                         try
@@ -1538,11 +1538,11 @@ namespace ReserveBlockCore.Nodes
                                         var result = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
                                         if (result)
                                         {
-                                            ConsoleWriterService.OutputVal($"[HeightSync] Applied block {h}.");
+                                            ConsoleWriterService.OutputValCaster($"[HeightSync] Applied block {h}.");
                                         }
                                         else
                                         {
-                                            ConsoleWriterService.OutputVal($"[HeightSync] Block {h} validation failed. Stopping catch-up.");
+                                            ConsoleWriterService.OutputValCaster($"[HeightSync] Block {h} validation failed. Stopping catch-up.");
                                             break;
                                         }
                                     }
@@ -1551,7 +1551,7 @@ namespace ReserveBlockCore.Nodes
                         }
                         catch (Exception ex)
                         {
-                            ConsoleWriterService.OutputVal($"[HeightSync] Error fetching block {h}: {ex.Message}");
+                            ConsoleWriterService.OutputValCaster($"[HeightSync] Error fetching block {h}: {ex.Message}");
                             break;
                         }
                     }
@@ -1569,7 +1569,7 @@ namespace ReserveBlockCore.Nodes
             var delay = Task.Delay(new TimeSpan(0, 0, 5));
             var PreviousHeight = -1L;
             var BlockDelay = Task.CompletedTask;
-            ConsoleWriterService.OutputVal("Booting up consensus loop");
+            ConsoleWriterService.OutputValCaster("Booting up consensus loop");
 
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
@@ -1592,7 +1592,7 @@ namespace ReserveBlockCore.Nodes
                     continue;
                 }
 
-                ConsoleWriterService.OutputVal("Top of consensus loop");
+                ConsoleWriterService.OutputValCaster("Top of consensus loop");
 
                 Block? block = null;
 
@@ -1934,7 +1934,7 @@ namespace ReserveBlockCore.Nodes
                                                 break;
                                             }
                                             if (Globals.OptionalLogging)
-                                                ConsoleWriterService.OutputVal("\r\n Bag failed. No Result was found.");
+                                                ConsoleWriterService.OutputValCaster("\r\n Bag failed. No Result was found.");
                                             await Task.Delay(200);
                                         }
                                     }
@@ -2174,7 +2174,7 @@ namespace ReserveBlockCore.Nodes
 
                     if (Environment.TickCount64 - _lastStartingOverLogTicks >= 15_000)
                     {
-                        ConsoleWriterService.OutputVal("\r\nStarting over.");
+                        ConsoleWriterService.OutputValCaster("\r\nStarting over.");
                         _lastStartingOverLogTicks = Environment.TickCount64;
                     }
                     Globals.Proofs.Clear();
@@ -2349,7 +2349,7 @@ namespace ReserveBlockCore.Nodes
                         if (lastLoggedHeight < nextBlock.Height)
                         {
                             _rejectionLogTracker[logKey] = nextBlock.Height;
-                            ConsoleWriterService.OutputVal($"[Consensus Gate] Block at height {nextBlock.Height} from {nextBlock.Validator} rejected — consensus chose {consensusRound.Validator}");
+                            ConsoleWriterService.OutputValCaster($"[Consensus Gate] Block at height {nextBlock.Height} from {nextBlock.Validator} rejected — consensus chose {consensusRound.Validator}");
                         }
                         // Reset _acceptedHeight so the correct block can be processed
                         Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
@@ -2358,7 +2358,7 @@ namespace ReserveBlockCore.Nodes
                 }
                 else if (desyncRecoveryMode)
                 {
-                    ConsoleWriterService.OutputVal($"[Desync Recovery] Stuck for {timeSinceLastBlock}ms — bypassing consensus gate for block {nextBlock.Height} from {nextBlock.Validator}");
+                    ConsoleWriterService.OutputValCaster($"[Desync Recovery] Stuck for {timeSinceLastBlock}ms — bypassing consensus gate for block {nextBlock.Height} from {nextBlock.Validator}");
                 }
 
                 // ── Agreed-hash gate (4-case logic) ──────────────────────────────
@@ -2387,20 +2387,20 @@ namespace ReserveBlockCore.Nodes
                     }
                     if (string.IsNullOrEmpty(agreedHashForGate))
                     {
-                        ConsoleWriterService.OutputVal($"[Consensus Gate] Mid-round accept: height {nextBlock.Height} — CasterRoundDict entry exists but agreement not yet resolved after {spin.ElapsedMilliseconds}ms spin.");
+                        ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round accept: height {nextBlock.Height} — CasterRoundDict entry exists but agreement not yet resolved after {spin.ElapsedMilliseconds}ms spin.");
                     }
                 }
                 else if (!desyncRecoveryMode && Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
                     && string.IsNullOrEmpty(agreedHashForGate) && !hasCasterRoundEntry)
                 {
                     // Case 3: No CasterRoundDict entry — we haven't started consensus for this height, trust peer broadcast
-                    ConsoleWriterService.OutputVal($"[Consensus Gate] No-round accept: height {nextBlock.Height} — no CasterRoundDict entry, trusting peer broadcast.");
+                    ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round accept: height {nextBlock.Height} — no CasterRoundDict entry, trusting peer broadcast.");
                 }
 
                 // Case 2: Agreed hash exists but doesn't match → reject (actual fork)
                 if (!desyncRecoveryMode && !string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
                 {
-                    ConsoleWriterService.OutputVal($"[Consensus Gate] Block at height {nextBlock.Height} hash mismatch — expected {agreedHashForGate[..Math.Min(12, agreedHashForGate.Length)]}… got {nextBlock.Hash?[..Math.Min(12, nextBlock.Hash?.Length ?? 0)]}…");
+                    ConsoleWriterService.OutputValCaster($"[Consensus Gate] Block at height {nextBlock.Height} hash mismatch — expected {agreedHashForGate[..Math.Min(12, agreedHashForGate.Length)]}… got {nextBlock.Hash?[..Math.Min(12, nextBlock.Hash?.Length ?? 0)]}…");
                     Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
                     return;
                 }
@@ -2408,7 +2408,7 @@ namespace ReserveBlockCore.Nodes
 
                 if (nextBlock.Height != Globals.LastBlock.Height + 1)
                 {
-                    ConsoleWriterService.OutputVal($"[Consensus Gate] Rejecting height {nextBlock.Height} — next expected is {Globals.LastBlock.Height + 1}.");
+                    ConsoleWriterService.OutputValCaster($"[Consensus Gate] Rejecting height {nextBlock.Height} — next expected is {Globals.LastBlock.Height + 1}.");
                     Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
                     return;
                 }
@@ -2594,7 +2594,7 @@ namespace ReserveBlockCore.Nodes
         /// </summary>
         private static async Task WaitForCasterReadiness()
         {
-            ConsoleWriterService.OutputVal("[ReadinessBarrier] Waiting for peer casters to be ready...");
+            ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Waiting for peer casters to be ready...");
             var sw = Stopwatch.StartNew();
 
             while (sw.ElapsedMilliseconds < READINESS_MAX_WAIT_MS)
@@ -2606,7 +2606,7 @@ namespace ReserveBlockCore.Nodes
                 var casters = Globals.BlockCasters.ToList();
                 if (casters.Count <= 1)
                 {
-                    ConsoleWriterService.OutputVal("[ReadinessBarrier] Only 1 caster (self); proceeding.");
+                    ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Only 1 caster (self); proceeding.");
                     break;
                 }
 
@@ -2647,11 +2647,11 @@ namespace ReserveBlockCore.Nodes
                     if (r.height == myHeight) matchingHeightCount++;
                 }
 
-                ConsoleWriterService.OutputVal($"[ReadinessBarrier] Ready: {readyCount}/{casters.Count}, Height-matched: {matchingHeightCount}/{casters.Count} (need {requiredReady})");
+                ConsoleWriterService.OutputValCaster($"[ReadinessBarrier] Ready: {readyCount}/{casters.Count}, Height-matched: {matchingHeightCount}/{casters.Count} (need {requiredReady})");
 
                 if (readyCount >= requiredReady && matchingHeightCount >= requiredReady)
                 {
-                    ConsoleWriterService.OutputVal("[ReadinessBarrier] Supermajority of casters ready and height-synced. Starting consensus.");
+                    ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Supermajority of casters ready and height-synced. Starting consensus.");
                     break;
                 }
 
@@ -2660,7 +2660,7 @@ namespace ReserveBlockCore.Nodes
 
             if (sw.ElapsedMilliseconds >= READINESS_MAX_WAIT_MS)
             {
-                ConsoleWriterService.OutputVal("[ReadinessBarrier] WARNING: Timed out waiting for peer readiness. Proceeding anyway — peers may be unavailable.");
+                ConsoleWriterService.OutputValCaster("[ReadinessBarrier] WARNING: Timed out waiting for peer readiness. Proceeding anyway — peers may be unavailable.");
             }
         }
 
@@ -2911,7 +2911,7 @@ namespace ReserveBlockCore.Nodes
             if (Interlocked.Exchange(ref _casterConsensusHalted, 1) != 0)
                 return;
             CasterRoundAudit?.AddStep($"[BlockFetch] Majority block fetch failures ≥{BLOCK_FETCH_FAIL_HALT_THRESHOLD} — halting caster commit path and reconciling.", false);
-            ConsoleWriterService.OutputVal($"[CasterConsensus] Halted due to repeated majority block fetch failures; syncing with peers.");
+            ConsoleWriterService.OutputValCaster($"[CasterConsensus] Halted due to repeated majority block fetch failures; syncing with peers.");
             await SyncBlockHashWithPeersAsync();
             await SyncHeightWithPeersAsync();
             try { await BlockDownloadService.GetAllBlocks(); } catch { }
@@ -3022,7 +3022,7 @@ namespace ReserveBlockCore.Nodes
             }
 
             // Our hash differs from majority — fetch the correct block from a peer that has it
-            ConsoleWriterService.OutputVal($"[BlockHashAgreement] Our block hash differs from majority. Fetching correct block from peer.");
+            ConsoleWriterService.OutputValCaster($"[BlockHashAgreement] Our block hash differs from majority. Fetching correct block from peer.");
             if (hashToSource.TryGetValue(majorityHash, out var sourceIP))
             {
                 var peerBlock = await CasterBlockFetch.TryFetchBlockAsync(
@@ -3215,7 +3215,7 @@ namespace ReserveBlockCore.Nodes
                 // Log if removal consistently fails
                 if (retryCount >= 5)
                 {
-                    ConsoleWriterService.OutputVal($"Warning: Could not remove block {block.Key} from CasterApprovedBlockHashDict");
+                    ConsoleWriterService.OutputValCaster($"Warning: Could not remove block {block.Key} from CasterApprovedBlockHashDict");
                 }
             }
 
@@ -3232,7 +3232,7 @@ namespace ReserveBlockCore.Nodes
                 // Log if removal consistently fails
                 if (retryCount >= 5)
                 {
-                    ConsoleWriterService.OutputVal($"Warning: Could not remove round {round.Key} from CasterRoundDict");
+                    ConsoleWriterService.OutputValCaster($"Warning: Could not remove round {round.Key} from CasterRoundDict");
                 }
             }
         }

@@ -18,6 +18,9 @@ namespace ReserveBlockCore.Utilities
         /// <summary>Log a message with automatic timestamp (ms since startup) and caller tag.</summary>
         public static void Log(string message, string phase = "")
         {
+            if (!Globals.CasterLogEnabled)
+                return;
+
             var ts = _uptime.ElapsedMilliseconds;
             var tag = string.IsNullOrEmpty(phase) ? "" : $"[{phase}] ";
             var line = $"[{DateTime.Now:HH:mm:ss.fff}] +{ts}ms {tag}{message}";
@@ -37,6 +40,12 @@ namespace ReserveBlockCore.Utilities
             {
                 try
                 {
+                    if (!Globals.CasterLogEnabled)
+                    {
+                        while (_queue.TryDequeue(out _)) { }
+                        return;
+                    }
+
                     var path = GetLogPath();
                     var lines = new List<string>();
                     while (_queue.TryDequeue(out var line))
@@ -52,6 +61,9 @@ namespace ReserveBlockCore.Utilities
         /// <summary>Clear the log file for a fresh run.</summary>
         public static void Clear()
         {
+            if (!Globals.CasterLogEnabled)
+                return;
+
             try
             {
                 var path = GetLogPath();

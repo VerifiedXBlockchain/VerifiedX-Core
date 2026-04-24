@@ -683,7 +683,7 @@ namespace ReserveBlockCore.Controllers
                     $"HTTP /PromoteToCaster from {remoteIp} | promoter={req.PromoterAddress} promoted={req.PromotedAddress} " +
                     $"height={req.BlockHeight} casterListCount={(req.CasterList?.Count ?? 0)} self={Globals.ValidatorAddress}",
                     "CasterFlow");
-                ConsoleWriterService.OutputVal(
+                ConsoleWriterService.OutputValCaster(
                     $"[CasterFlow] HTTP /PromoteToCaster inbound from {remoteIp} (promoter={req.PromoterAddress})");
 
                 if (req.PromotedAddress != Globals.ValidatorAddress)

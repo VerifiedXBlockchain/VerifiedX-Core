@@ -125,7 +125,7 @@ namespace ReserveBlockCore.Services
                     $"BlockCasters.Count={currentCasters.Count}/{MaxCasters} addrs=[{string.Join(",", currentCasterAddrs)}] | " +
                     $"NetworkValidators.Count={netValCount}",
                     "CasterFlow");
-                ConsoleWriterService.OutputVal(
+                ConsoleWriterService.OutputValCaster(
                     $"[CasterFlow] EvalTick height={currentHeight} casters={currentCasters.Count}/{MaxCasters} vals={netValCount}");
 
                 if (currentCasters.Count >= MaxCasters)
@@ -223,7 +223,7 @@ namespace ReserveBlockCore.Services
                     CasterLogUtility.Log(
                         $"  >> Candidate {v.Address} ip={ip} balance={candidate.Balance} firstSeen={v.FirstSeenAtHeight} now={currentHeight} maturityΔ={(v.FirstSeenAtHeight > 0 ? currentHeight - v.FirstSeenAtHeight : -1)}/{MaturityBlocks}",
                         "CasterFlow");
-                    ConsoleWriterService.OutputVal($"[CasterFlow] Promoting candidate {v.Address} ({ip})…");
+                    ConsoleWriterService.OutputValCaster($"[CasterFlow] Promoting candidate {v.Address} ({ip})…");
 
                     // Promotion cooldown: skip candidates with repeated version/port failures
                     if (_promotionCooldowns.TryGetValue(v.Address, out var cooldown)
@@ -240,7 +240,7 @@ namespace ReserveBlockCore.Services
                     if (v.FirstSeenAtHeight > 0 && currentHeight - v.FirstSeenAtHeight < MaturityBlocks)
                     {
                         CasterLogUtility.Log($"  <<  maturity=FAIL ({currentHeight - v.FirstSeenAtHeight}/{MaturityBlocks})", "CasterFlow");
-                        ConsoleWriterService.OutputVal(
+                        ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {v.Address} not mature enough (seen at height {v.FirstSeenAtHeight}, current {currentHeight}, need {MaturityBlocks} blocks). Skipping.");
                         continue;
                     }
@@ -249,7 +249,7 @@ namespace ReserveBlockCore.Services
                     if (!PortUtility.IsPortOpen(ip, Globals.ValAPIPort))
                     {
                         CasterLogUtility.Log($"  <<  portOpen=FAIL {ip}:{Globals.ValAPIPort}", "CasterFlow");
-                        ConsoleWriterService.OutputVal(
+                        ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {v.Address} port check failed on {ip}:{Globals.ValAPIPort}");
                         TrackPromotionCooldown(v.Address, currentHeight);
                         continue;
@@ -329,7 +329,7 @@ namespace ReserveBlockCore.Services
                     if (!agreementReached)
                     {
                         CasterLogUtility.Log($"  <<  promotionAgreement=FAIL — peer casters did not agree on candidate {v.Address}", "CasterFlow");
-                        ConsoleWriterService.OutputVal(
+                        ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Promotion agreement failed for {v.Address}. Skipping — will retry next height.");
                         continue;
                     }
@@ -340,12 +340,12 @@ namespace ReserveBlockCore.Services
                     // This prevents "zombie casters" where the promoter's caster list
                     // includes a node that rejected the promotion, breaking quorum.
                     CasterLogUtility.Log($"     sending PromoteToCaster HTTP to {ip}…", "CasterFlow");
-                    ConsoleWriterService.OutputVal($"[CasterFlow] → POST PromoteToCaster {ip}");
+                    ConsoleWriterService.OutputValCaster($"[CasterFlow] → POST PromoteToCaster {ip}");
                     var accepted = await NotifyPromotionAndAwaitAcceptance(ip, v.Address, newCaster).ConfigureAwait(false);
                     if (!accepted)
                     {
                         CasterLogUtility.Log($"  <<  promotion REJECTED/failed by candidate", "CasterFlow");
-                        ConsoleWriterService.OutputVal(
+                        ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {v.Address} at {ip} did not accept promotion. Not adding to caster pool.");
                         continue;
                     }
@@ -356,7 +356,7 @@ namespace ReserveBlockCore.Services
                     CasterLogUtility.Log(
                         $"  ✓ PROMOTED val={v.Address} ip={ip}. BlockCasters.Count now {Globals.BlockCasters.Count}/{MaxCasters}",
                         "CasterFlow");
-                    ConsoleWriterService.OutputVal(
+                    ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] Promoted {v.Address} (balance: {candidate.Balance}) to caster. Pool: {Globals.BlockCasters.Count}/{MaxCasters}");
                 }
 
@@ -394,7 +394,7 @@ namespace ReserveBlockCore.Services
                             var heightDiff = Math.Abs(Globals.LastBlock.Height - status.Height);
                             if (heightDiff > 5)
                             {
-                                ConsoleWriterService.OutputVal(
+                                ConsoleWriterService.OutputValCaster(
                                     $"[CasterDiscovery] HealthCheck: Candidate {address} at {ip} is {heightDiff} blocks behind (theirs={status.Height}, ours={Globals.LastBlock.Height}). Skipping.");
                                 return false;
                             }
@@ -403,14 +403,14 @@ namespace ReserveBlockCore.Services
                 }
                 else
                 {
-                    ConsoleWriterService.OutputVal(
+                    ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] HealthCheck: Candidate {address} at {ip} — CasterReadyCheck returned {response.StatusCode}. Skipping.");
                     return false;
                 }
             }
             catch (Exception ex)
             {
-                ConsoleWriterService.OutputVal(
+                ConsoleWriterService.OutputValCaster(
                     $"[CasterDiscovery] HealthCheck: Candidate {address} at {ip} — unreachable: {ex.Message}. Skipping.");
                 return false;
             }
@@ -446,7 +446,7 @@ namespace ReserveBlockCore.Services
                 var response = await client.GetAsync(uri, cts.Token);
                 if (response == null || !response.IsSuccessStatusCode)
                 {
-                    ConsoleWriterService.OutputVal(
+                    ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — GetWalletVersion returned {response?.StatusCode}. Skipping.");
                     // Got a response but it was an error — treat as unreachable (node might be starting up)
                     return new VersionCheckInfo(VersionCheckResult.Unreachable, "");
@@ -454,7 +454,7 @@ namespace ReserveBlockCore.Services
                 var peerVersion = await response.Content.ReadAsStringAsync();
                 if (string.IsNullOrEmpty(peerVersion) || !ProofUtility.IsMajorVersionCurrent(peerVersion))
                 {
-                    ConsoleWriterService.OutputVal(
+                    ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Skipping.");
                     return new VersionCheckInfo(VersionCheckResult.Outdated, peerVersion ?? "");
                 }
@@ -462,7 +462,7 @@ namespace ReserveBlockCore.Services
             }
             catch (Exception ex)
             {
-                ConsoleWriterService.OutputVal(
+                ConsoleWriterService.OutputValCaster(
                     $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — unreachable: {ex.Message}. Skipping.");
                 return new VersionCheckInfo(VersionCheckResult.Unreachable, "");
             }
@@ -558,7 +558,7 @@ namespace ReserveBlockCore.Services
                         }
                         else
                         {
-                            ConsoleWriterService.OutputVal(
+                            ConsoleWriterService.OutputValCaster(
                                 $"[CasterDiscovery] VersionAudit: Caster {caster.ValidatorAddress} unreachable (attempt {failCount}/{AuditFailThreshold}). Not demoting yet.");
                         }
                         break;
@@ -579,7 +579,7 @@ namespace ReserveBlockCore.Services
                 foreach (var addr in toRemove)
                 {
                     var reason = removalReasons.GetValueOrDefault(addr, "unknown");
-                    ConsoleWriterService.OutputVal(
+                    ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] VersionAudit: Demoted caster {addr} — {reason}.");
                 }
 
@@ -667,13 +667,13 @@ namespace ReserveBlockCore.Services
                     // The PromoteToCaster endpoint returns "accepted" if the node accepted the promotion
                     if (!string.IsNullOrEmpty(body) && body.Contains("accepted", StringComparison.OrdinalIgnoreCase))
                     {
-                        ConsoleWriterService.OutputVal(
+                        ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {address} at {peerIP} ACCEPTED promotion.");
                         return true;
                     }
                     else
                     {
-                        ConsoleWriterService.OutputVal(
+                        ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {address} at {peerIP} REJECTED promotion. Response: {body}");
                         return false;
                     }
@@ -685,7 +685,7 @@ namespace ReserveBlockCore.Services
                     CasterLogUtility.Log(
                         $"NotifyPromotion ← HTTP ERROR {response.StatusCode} body='{errBody}' (peer={peerIP})",
                         "CasterFlow");
-                    ConsoleWriterService.OutputVal(
+                    ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] Candidate {address} at {peerIP} promotion request failed: {response.StatusCode}");
                     return false;
                 }
@@ -754,7 +754,7 @@ namespace ReserveBlockCore.Services
                 await Task.WhenAll(tasks).ConfigureAwait(false);
             }
 
-            ConsoleWriterService.OutputVal($"[CasterDiscovery] Demotion notice broadcast for {demotedAddresses.Count} caster(s) to all peers.");
+            ConsoleWriterService.OutputValCaster($"[CasterDiscovery] Demotion notice broadcast for {demotedAddresses.Count} caster(s) to all peers.");
         }
 
         /// <summary>
@@ -786,7 +786,7 @@ namespace ReserveBlockCore.Services
             if (!casterList.Any(c => c.ValidatorAddress == demotion.DemotedAddress))
                 return; // Already removed
 
-            ConsoleWriterService.OutputVal(
+            ConsoleWriterService.OutputValCaster(
                 $"[CasterDiscovery] Received demotion notice for {demotion.DemotedAddress} from {demotion.DemoterAddress}. Removing...");
 
             var nCasterList = casterList
@@ -806,7 +806,7 @@ namespace ReserveBlockCore.Services
 
         public static async Task OnCasterRemoved(string removedAddress)
         {
-            ConsoleWriterService.OutputVal(
+            ConsoleWriterService.OutputValCaster(
                 $"[CasterDiscovery] Caster {removedAddress} removed. Evaluating pool for replacement...");
 
             _lastEvaluationHeight = long.MinValue;
@@ -858,7 +858,7 @@ namespace ReserveBlockCore.Services
             });
 
             await Task.WhenAll(tasks).ConfigureAwait(false);
-            ConsoleWriterService.OutputVal("[CasterDiscovery] Departure notice broadcast to all peers.");
+            ConsoleWriterService.OutputValCaster("[CasterDiscovery] Departure notice broadcast to all peers.");
         }
 
         /// <summary>
@@ -885,7 +885,7 @@ namespace ReserveBlockCore.Services
             foreach (var addr in toRemove)
             {
                 Globals.NetworkValidators.TryRemove(addr, out _);
-                ConsoleWriterService.OutputVal(
+                ConsoleWriterService.OutputValCaster(
                     $"[CasterDiscovery] Purged stale validator {addr} from NetworkValidators (high fail count + not seen recently).");
             }
         }
@@ -906,7 +906,7 @@ namespace ReserveBlockCore.Services
             if (elapsed < StallThresholdSeconds)
                 return;
 
-            ConsoleWriterService.OutputVal(
+            ConsoleWriterService.OutputValCaster(
                 $"[CasterDiscovery] STALL DETECTED: No block for {elapsed}s. Running emergency caster health check...");
 
             await BlockcasterNode.PingCasters().ConfigureAwait(false);
@@ -929,7 +929,7 @@ namespace ReserveBlockCore.Services
                 $"promoted={promotion.PromotedAddress} height={promotion.BlockHeight} " +
                 $"list=[{listSummary}] | BlockCasters.Count(before)={Globals.BlockCasters.Count} IsBlockCaster(before)={Globals.IsBlockCaster}",
                 "CasterFlow");
-            ConsoleWriterService.OutputVal(
+            ConsoleWriterService.OutputValCaster(
                 $"[CasterFlow] HandlePromotion inbound from {promotion.PromoterAddress} at height {promotion.BlockHeight}");
 
             if (string.IsNullOrEmpty(Globals.ValidatorAddress))
@@ -1003,7 +1003,7 @@ namespace ReserveBlockCore.Services
                 CasterLogUtility.Log(
                     $"HandlePromotion REJECT: self-health — NetworkValidators.Count={validatorCount} < min={MinValidatorPoolSize}. addrs=[{netValAddrs}]",
                     "CasterFlow");
-                ConsoleWriterService.OutputVal(
+                ConsoleWriterService.OutputValCaster(
                     $"[CasterDiscovery] REJECTING promotion — our NetworkValidators pool has only {validatorCount} entries (need {MinValidatorPoolSize}+). " +
                     "This node cannot produce proofs and would halt consensus.");
                 return Task.FromResult($"rejected: only {validatorCount} validators in pool (need {MinValidatorPoolSize}+)");
@@ -1012,7 +1012,7 @@ namespace ReserveBlockCore.Services
             CasterLogUtility.Log(
                 $"HandlePromotion: self-health OK (NetworkValidators.Count={validatorCount}). Applying promotion…",
                 "CasterFlow");
-            ConsoleWriterService.OutputVal(
+            ConsoleWriterService.OutputValCaster(
                 $"[CasterDiscovery] THIS NODE has been promoted to caster by {promotion.PromoterAddress} at height {promotion.BlockHeight}!");
 
 
@@ -1065,9 +1065,9 @@ namespace ReserveBlockCore.Services
                 $"HandlePromotion SUCCESS | BlockCasters.Count(after)={Globals.BlockCasters.Count} addrs=[{afterAddrs}] | " +
                 $"IsBlockCaster: {wasBlockCaster} → {Globals.IsBlockCaster}",
                 "CasterFlow");
-            ConsoleWriterService.OutputVal(
+            ConsoleWriterService.OutputValCaster(
                 $"[CasterFlow] HandlePromotion ACCEPTED. BlockCasters now {Globals.BlockCasters.Count}: [{afterAddrs}]. IsBlockCaster={Globals.IsBlockCaster}");
-            ConsoleWriterService.OutputVal("[CasterDiscovery] Caster list updated. Consensus loop will continue as caster.");
+            ConsoleWriterService.OutputValCaster("[CasterDiscovery] Caster list updated. Consensus loop will continue as caster.");
             return Task.FromResult("accepted");
         }
 
@@ -1088,7 +1088,7 @@ namespace ReserveBlockCore.Services
             if (!casterList.Any(c => c.ValidatorAddress == departure.DepartingAddress))
                 return;
 
-            ConsoleWriterService.OutputVal(
+            ConsoleWriterService.OutputValCaster(
                 $"[CasterDiscovery] Caster {departure.DepartingAddress} announced departure. Removing...");
 
             var nCasterList = casterList

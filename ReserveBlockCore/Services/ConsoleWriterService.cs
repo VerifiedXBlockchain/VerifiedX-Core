@@ -47,6 +47,18 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        /// <summary>Validator console lines for caster/consensus diagnostics. Gated by <see cref="Globals.CasterLogEnabled"/> (not <see cref="Globals.StopValConsoleOutput"/>).</summary>
+        public static void OutputValCaster(string text)
+        {
+            if (!Globals.CasterLogEnabled || Globals.StopConsoleOutput)
+                return;
+
+            int consoleWidth = Console.WindowWidth;
+            string dashes = new string('-', consoleWidth - 1);
+            Console.WriteLine(dashes);
+            Console.WriteLine(text);
+        }
+
         public static void OutputValSameLine(string text)
         {
             if (Globals.StopValConsoleOutput != true)

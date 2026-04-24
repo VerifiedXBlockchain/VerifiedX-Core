@@ -216,6 +216,8 @@ namespace ReserveBlockCore
         public static bool AlwaysRequireAPIPassword = false;
         public static bool StopConsoleOutput = false;
         public static bool StopValConsoleOutput = false;
+        /// <summary>When true, caster diagnostic file log (casterlog.txt) and caster-scoped validator console lines are emitted. Default off; set CasterLog=true in config.txt or pass the casterlog CLI flag.</summary>
+        public static bool CasterLogEnabled = false;
         public static int AdjudicateLock = 0;        
         public static Account AdjudicateAccount;
         public static PrivateKey AdjudicatePrivateKey;

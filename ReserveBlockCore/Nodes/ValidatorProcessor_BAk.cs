@@ -211,19 +211,19 @@ namespace ReserveBlockCore.Nodes
                 if (Globals.IsBlockCaster && nextBlock.Height == lastBlock.Height + 1
                     && string.IsNullOrEmpty(agreedHashForGate))
                 {
-                    ConsoleWriterService.OutputVal($"[Consensus] Rejecting height {nextBlock.Height}: no caster-agreed hash yet.");
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting height {nextBlock.Height}: no caster-agreed hash yet.");
                     return;
                 }
 
                 if (!string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
                 {
-                    ConsoleWriterService.OutputVal($"[Consensus] Rejecting block {nextBlock.Height}: hash does not match caster-agreed value.");
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting block {nextBlock.Height}: hash does not match caster-agreed value.");
                     return;
                 }
 
                 if (nextBlock.Height != Globals.LastBlock.Height + 1)
                 {
-                    ConsoleWriterService.OutputVal($"[Consensus] Rejecting height {nextBlock.Height}: expected next height {Globals.LastBlock.Height + 1}.");
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting height {nextBlock.Height}: expected next height {Globals.LastBlock.Height + 1}.");
                     return;
                 }
 

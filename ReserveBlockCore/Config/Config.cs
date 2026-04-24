@@ -72,6 +72,9 @@ namespace ReserveBlockCore.Config
         public string? BaseBridgeContract { get; set; }
         public int BaseBridgeChainId { get; set; }
 
+        /// <summary>When true, enables casterlog.txt and caster-scoped validator console diagnostics.</summary>
+        public bool CasterLog { get; set; }
+
         public static Config ReadConfigFile()
         {
             var path = GetPathUtility.GetConfigPath();
@@ -179,6 +182,8 @@ namespace ReserveBlockCore.Config
                     config.BaseBridgeContract = null;
                 config.BaseBridgeChainId = dict.ContainsKey("BaseBridgeChainId") ? Convert.ToInt32(dict["BaseBridgeChainId"]) : 0;
 
+                config.CasterLog = dict.ContainsKey("CasterLog") ? Convert.ToBoolean(dict["CasterLog"]) : false;
+
                 config.MotherAddress = dict.ContainsKey("MotherAddress") ? dict["MotherAddress"] : null;
                 config.MotherPassword = dict.ContainsKey("MotherPassword") ? dict["MotherPassword"] : null;
 
@@ -239,6 +244,7 @@ namespace ReserveBlockCore.Config
 			Globals.SelfSTUNServer = config.SelfSTUNServer;
 			Globals.LogMemory = config.LogMemory;
 			Globals.BlockSeedCalls = config.BlockSeedCalls;
+			Globals.CasterLogEnabled = config.CasterLog;
             Globals.BTCNetwork = NBitcoin.Network.Main;
 			Globals.SegwitP2SHStartPrefix = "3";
 			Globals.SegwitTaprootStartPrefix = "bc1";
