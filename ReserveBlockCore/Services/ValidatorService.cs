@@ -1119,7 +1119,6 @@ namespace ReserveBlockCore.Services
                     Globals.ValidatorAddress = "";
                     Globals.ValidatorPublicKey = "";
 
-                    await P2PClient.DisconnectAdjudicators();
                 }
 
             }
