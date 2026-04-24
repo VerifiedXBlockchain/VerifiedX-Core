@@ -57,6 +57,9 @@ namespace ReserveBlockCore.Nodes
     private static long ReferenceHeight = -1;
     private static long ReferenceTime = -1;
 
+    /// <summary>Tracks BlockCasters.Count from the previous round to detect when a new caster joins.</summary>
+    private static int _previousCasterCount = -1;
+
     // Readiness barrier constants
     const int READINESS_CHECK_INTERVAL_MS = 2000;
     const int READINESS_MAX_WAIT_MS = 60000; // 60 seconds max wait for peers
@@ -654,7 +657,10 @@ namespace ReserveBlockCore.Nodes
             //start consensus run here.  
             var delay = Task.Delay(new TimeSpan(0, 0, 5));
             var PreviousHeight = -1L;
-            var BlockDelay = Task.CompletedTask;
+            // ROUND-SYNC-FIX: Compute initial BlockDelay from last block timestamp instead of Task.CompletedTask.
+            // Using CompletedTask caused the new caster's first round to fire ~1.5s after join while bootstrap
+            // casters were still mid-round with full block-time delays, creating a permanent phase offset.
+            var BlockDelay = ComputeInitialBlockDelay();
             ConsoleWriterService.OutputVal("Booting up consensus loop");
             CasterLogUtility.Clear();
             CasterLogUtility.Log($"=== Consensus loop starting. Validator={Globals.ValidatorAddress} ===", "BOOT");
@@ -711,6 +717,19 @@ namespace ReserveBlockCore.Nodes
                     $"BlockCasters.Count={casterList.Count} height={Globals.LastBlock.Height}",
                     "CasterFlow");
 
+                // ROUND-SYNC-FIX: Detect when caster pool changes (new caster joined or one was evicted).
+                // When this happens, re-sync height with peers and reset timing references so all casters
+                // start the next round from a common baseline.
+                if (_previousCasterCount != -1 && _previousCasterCount != casterList.Count)
+                {
+                    CasterLogUtility.Log(
+                        $"CASTER-POOL-CHANGE: count {_previousCasterCount}→{casterList.Count}. Re-syncing height and resetting timing.",
+                        "ROUND-SYNC");
+                    await SyncHeightWithPeersAsync();
+                    ResetRoundTiming(Globals.LastBlock.Height);
+                }
+                _previousCasterCount = casterList.Count;
+
 
                 Block? block = null;
 
@@ -737,7 +756,7 @@ namespace ReserveBlockCore.Nodes
                     }
 
                     var roundSw = Stopwatch.StartNew(); // Track total round time
-                    CasterLogUtility.Log($"--- ROUND START height={Height} lastBlock={Globals.LastBlock.Height} lastHash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]} ---", "ROUND");
+                    CasterLogUtility.Log($"--- ROUND START height={Height} lastBlock={Globals.LastBlock.Height} lastHash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]} refH={ReferenceHeight} refT={ReferenceTime} casters={casterList.Count} ---", "ROUND");
 
 
                     if (Volatile.Read(ref _casterConsensusHalted) != 0)
@@ -783,6 +802,7 @@ namespace ReserveBlockCore.Nodes
                     //Generate Proofs for ALL vals
                     CasterRoundAudit.AddStep($"Generating Proofs for height: {Height}.", true);
                     //ConsoleWriterService.OutputVal($"\r\nGenerating Proofs for height: {Height}.");
+                    CasterLogUtility.Log($"[PHASE] PROOF-GEN entering at +{roundSw.ElapsedMilliseconds}ms", "PHASE");
                     var proofGenSw = Stopwatch.StartNew();
                     var casterProofs = await ProofUtility.GenerateCasterProofs();
                     var proofs = await ProofUtility.GenerateProofs();
@@ -951,7 +971,7 @@ namespace ReserveBlockCore.Nodes
                             .Count();
                         var effectiveCasterCount = Math.Max(uniqueCasterAddresses, 1);
                         var requiredProofs = Math.Max(2, effectiveCasterCount / 2 + 1); // majority quorum
-                        CasterLogUtility.Log($"ProofExchange: need {requiredProofs}/{casterList.Count} proofs, have {Globals.CasterProofDict.Count()} (self-injected)", "EXCHANGE");
+                        CasterLogUtility.Log($"[PHASE] PROOF-EXCHANGE entering at +{roundSw.ElapsedMilliseconds}ms, need {requiredProofs}/{casterList.Count} proofs, have {Globals.CasterProofDict.Count()} (self-injected)", "PHASE");
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
                         {
@@ -1000,7 +1020,7 @@ namespace ReserveBlockCore.Nodes
                             var finalizedWinner = finalizedWinnerGroup.FirstOrDefault();
                             if (finalizedWinner != null)
                             {
-                                CasterLogUtility.Log($"Finalized winner: {finalizedWinner.Address} VRF={finalizedWinner.VRFNumber} proofCount={proofSnapshot.Count}", "WINNER");
+                                CasterLogUtility.Log($"[PHASE] WINNER-AGREEMENT entering at +{roundSw.ElapsedMilliseconds}ms, candidate={finalizedWinner.Address} VRF={finalizedWinner.VRFNumber} proofCount={proofSnapshot.Count}", "PHASE");
                                 CasterRoundAudit.AddStep($"Finalized winner : {finalizedWinner.Address}", true);
 
                                 // CASTER-CONSENSUS-FIX: Mandatory winner agreement phase.
@@ -1033,7 +1053,7 @@ namespace ReserveBlockCore.Nodes
                                 CasterLogUtility.Log($"Winner AGREED: {terminalWinner} (local candidate was {finalizedWinner.Address})", "AGREEMENT");
                                 CasterRoundAudit.AddStep($"Winner agreed: {terminalWinner}", true);
 
-                                CasterLogUtility.Log($"Block fetch phase: iAmWinner={terminalWinner == Globals.ValidatorAddress}, winner={terminalWinner}", "BLOCKFETCH");
+                                CasterLogUtility.Log($"[PHASE] BLOCK-FETCH entering at +{roundSw.ElapsedMilliseconds}ms, iAmWinner={terminalWinner == Globals.ValidatorAddress}, winner={terminalWinner}", "PHASE");
                                 if (Globals.LastBlock.Height < finalizedWinner.BlockHeight && approved)
                                 {
                                     bool blockFound = false;
@@ -1273,7 +1293,7 @@ namespace ReserveBlockCore.Nodes
                         continue;
                     }
 
-                    CasterLogUtility.Log($"--- ROUND END height={Height} totalTime={roundSw.ElapsedMilliseconds}ms lastBlock={Globals.LastBlock.Height} ---", "ROUND");
+                    CasterLogUtility.Log($"--- ROUND END height={Height} totalTime={roundSw.ElapsedMilliseconds}ms lastBlock={Globals.LastBlock.Height} refH={ReferenceHeight} ---", "ROUND");
                     CasterLogUtility.Flush();
 
                     if (Environment.TickCount64 - _lastStartingOverLogTicks >= 15_000)
@@ -2399,6 +2419,12 @@ namespace ReserveBlockCore.Nodes
                     // DESYNC-FIX: Update last block accepted timestamp for desync recovery tracking
                     Interlocked.Exchange(ref _lastBlockAcceptedTick, Environment.TickCount64);
 
+                    // ROUND-SYNC-FIX: Reset timing references when a block is committed via message-7.
+                    // This anchors all casters' round timing to the same event (block commit), preventing
+                    // the new caster from racing ahead when it receives the broadcast before the producers
+                    // have finished their own commit.
+                    ResetRoundTiming(nextBlock.Height);
+
                     // Auto-promote block producer to fully trusted — if this validator
                     // produced a block that passed full validation, it is definitively legitimate.
                     if (!string.IsNullOrEmpty(nextBlock.Validator))
@@ -2849,6 +2875,10 @@ namespace ReserveBlockCore.Nodes
 
             _consecutiveBlockHashAgreementFailures = 0;
             _consecutiveMajorityBlockFetchFailures = 0;
+            // ROUND-SYNC-FIX: Reset timing after local block commit so this caster's
+            // next round starts from the same baseline as peers who receive the broadcast.
+            ResetRoundTiming(block.Height);
+
             Interlocked.Exchange(ref _casterConsensusHalted, 0);
         }
 
@@ -3205,6 +3235,53 @@ namespace ReserveBlockCore.Nodes
                     ConsoleWriterService.OutputVal($"Warning: Could not remove round {round.Key} from CasterRoundDict");
                 }
             }
+        }
+
+        #endregion
+
+        #region Round Timing Helpers
+
+        /// <summary>
+        /// ROUND-SYNC-FIX: Resets the adaptive timing reference points so all casters
+        /// that commit the same block at roughly the same time will compute similar
+        /// BlockDelay values for the next round. Called on block commit (both local
+        /// crafting via CommitCasterBlockPostAgreementAsync and remote receipt via
+        /// ReceiveConfirmedBlock message-7).
+        /// </summary>
+        private static void ResetRoundTiming(long committedHeight)
+        {
+            ReferenceHeight = committedHeight;
+            ReferenceTime = TimeUtil.GetMillisecondTime();
+            CasterLogUtility.Log(
+                $"ROUND-SYNC: Reset timing references — refH={ReferenceHeight} refT={ReferenceTime}",
+                "ROUND-SYNC");
+        }
+
+        /// <summary>
+        /// ROUND-SYNC-FIX: Computes an initial BlockDelay based on the last block's
+        /// timestamp instead of returning Task.CompletedTask. This prevents a newly-joined
+        /// caster from racing ahead on its first round while existing casters are still
+        /// mid-round with full block-time delays.
+        /// </summary>
+        private static Task ComputeInitialBlockDelay()
+        {
+            var currentTime = TimeUtil.GetMillisecondTime();
+            var lastBlockTime = Globals.LastBlock.Timestamp;
+            var elapsed = currentTime - lastBlockTime;
+            var remaining = Globals.BlockTime - elapsed;
+
+            if (remaining > 0)
+            {
+                CasterLogUtility.Log(
+                    $"ROUND-SYNC: Initial BlockDelay={remaining}ms (elapsed={elapsed}ms since last block)",
+                    "ROUND-SYNC");
+                return Task.Delay((int)Math.Min(remaining, Globals.BlockTimeMax));
+            }
+
+            CasterLogUtility.Log(
+                $"ROUND-SYNC: Initial BlockDelay=0ms (elapsed={elapsed}ms >= BlockTime={Globals.BlockTime}ms)",
+                "ROUND-SYNC");
+            return Task.CompletedTask;
         }
 
         #endregion

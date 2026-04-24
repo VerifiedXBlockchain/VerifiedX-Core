@@ -489,6 +489,7 @@ namespace ReserveBlockCore.Utilities
                 }
                 catch (Exception ex)
                 {
+                    CasterLogUtility.Log($"[VERIFY] VerifyWinnerAvailability failed for {winningProof.Address}: {ex.Message}", "CONSENSUS");
                 }
             }
 
