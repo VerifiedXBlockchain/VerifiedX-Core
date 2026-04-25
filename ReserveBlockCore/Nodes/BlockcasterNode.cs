@@ -699,6 +699,30 @@ namespace ReserveBlockCore.Nodes
                         "BOOT");
                     ConsoleWriterService.OutputValCaster(
                         $"[FRESH-STARTUP] Cleared {staleCount} stale validators. Last block age: {lastBlockAge}s.");
+
+                    // FIX D1b: Re-seed bootstrap casters (including self) into NetworkValidators
+                    // so they can generate proofs for themselves and be selected as winners.
+                    foreach (var caster in Globals.BlockCasters.ToList())
+                    {
+                        if (!string.IsNullOrEmpty(caster.ValidatorAddress) && !string.IsNullOrEmpty(caster.PeerIP))
+                        {
+                            var nv = new NetworkValidator
+                            {
+                                Address = caster.ValidatorAddress,
+                                IPAddress = caster.PeerIP,
+                                PublicKey = caster.ValidatorPublicKey ?? "",
+                                Balance = 5000M, // Bootstrap casters meet minimum requirement
+                                LastSeen = TimeUtil.GetTime(),
+                                FirstSeen = Globals.LastBlock.Height,
+                                FailCount = 0,
+                                CheckFailCount = 0,
+                            };
+                            Globals.NetworkValidators.TryAdd(caster.ValidatorAddress, nv);
+                        }
+                    }
+                    CasterLogUtility.Log(
+                        $"FRESH-STARTUP: Re-seeded {Globals.NetworkValidators.Count} bootstrap casters into NetworkValidators.",
+                        "BOOT");
                 }
                 else
                 {
@@ -874,6 +898,14 @@ namespace ReserveBlockCore.Nodes
                         : proofs;
                     if (skippedAddresses.Count > 0)
                         CasterLogUtility.Log($"WINNER-SKIP: Excluding {skippedAddresses.Count} address(es) from VRF: [{string.Join(", ", skippedAddresses)}]", "PROOFS");
+
+                    // FIX D4: If all validator proofs were filtered out (e.g., all offline/outdated),
+                    // fall back to caster proofs so bootstrap casters can still produce blocks.
+                    if (filteredProofs.Count == 0 && casterProofs.Count > 0)
+                    {
+                        CasterLogUtility.Log($"FALLBACK: All {proofs.Count} validator proofs filtered out. Falling back to {casterProofs.Count} caster proofs.", "PROOFS");
+                        filteredProofs = casterProofs;
+                    }
 
                     var winningCasterProof = await ProofUtility.SortProofs(filteredProofs);
                     var winningProof = await ProofUtility.SortProofs(proofs);
