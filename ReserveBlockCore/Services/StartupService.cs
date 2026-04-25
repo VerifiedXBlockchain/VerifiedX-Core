@@ -1078,6 +1078,20 @@ namespace ReserveBlockCore.Services
                 {                    
                     Globals.StopAllTimers = false;
                     Globals.IsChainSynced = true;
+
+                    // POST-SYNC LIVENESS SWEEP: After sync completes, verify all NetworkValidators
+                    // are actually online and running a compatible version. Remove offline/outdated ones.
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await NetworkValidator.RunPostSyncLivenessSweep();
+                        }
+                        catch (Exception sweepEx)
+                        {
+                            LogUtility.Log($"Post-sync liveness sweep failed: {sweepEx.Message}", "StartupService.DownloadBlocksOnStartup");
+                        }
+                    });
                 }
                 download = false; //exit the while.
             }

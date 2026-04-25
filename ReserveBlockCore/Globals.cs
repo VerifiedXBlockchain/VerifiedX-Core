@@ -239,6 +239,10 @@ namespace ReserveBlockCore
         public static bool DatabaseCorruptionDetected = false;
         public static bool RemoteCraftLock = false;
         public static bool IsChainSynced = false;
+        /// <summary>Height at which the post-sync validator liveness sweep was run. PromoteBlockProducer ignores blocks below this height for new validator additions.</summary>
+        public static long ValidatorListSyncedHeight = 0;
+        /// <summary>Set to true after the post-sync liveness sweep completes. Gates PromoteBlockProducer and P2P gossip additions.</summary>
+        public static bool ValidatorLivenessSweepComplete = false;
         public static bool OptionalLogging = false;
         public static bool AdjPoolCheckLock = false;
         public static bool GUI = false;

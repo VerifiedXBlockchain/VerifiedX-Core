@@ -168,6 +168,20 @@ namespace ReserveBlockCore.Models
                         validator.ConfirmingSources.Add(advertisingPeerIP);
                     }
 
+                    // POST-SYNC LIVENESS GATE: After the liveness sweep completes,
+                    // new validators from gossip must pass a liveness + version check
+                    // before being added. This prevents P2P gossip from re-adding
+                    // offline/outdated validators that were just swept.
+                    if (Globals.ValidatorLivenessSweepComplete && !string.IsNullOrEmpty(validator.IPAddress))
+                    {
+                        var isLive = await CheckValidatorLiveness(validator.IPAddress);
+                        if (!isLive)
+                        {
+                            LogUtility.Log($"Validator {validator.Address} at {validator.IPAddress} REJECTED by post-sweep liveness gate (unreachable or outdated version)", "NetworkValidator.AddValidatorToPool");
+                            return false;
+                        }
+                    }
+
                     // HAL-11 Fix: Only add directly to main pool if from trusted bootstrap sources
                     if (IsTrustedBootstrapSource(advertisingPeerIP))
                     {
@@ -395,6 +409,128 @@ namespace ReserveBlockCore.Models
 
 
         /// <summary>
+        /// Post-sync liveness sweep: after chain sync completes, loop through all NetworkValidators,
+        /// call GetWalletVersion on each one. Remove any that don't respond within 1.5s or that
+        /// report an outdated major version. Records the synced height as a watermark.
+        /// </summary>
+        public static async Task RunPostSyncLivenessSweep()
+        {
+            var syncedHeight = Globals.LastBlock?.Height ?? 0;
+            Globals.ValidatorListSyncedHeight = syncedHeight;
+
+            var validators = Globals.NetworkValidators.ToArray();
+            var toRemove = new List<string>();
+            var checkedCount = 0;
+
+            LogUtility.Log($"POST-SYNC LIVENESS SWEEP: Starting. Checking {validators.Length} validators at synced height {syncedHeight}", "NetworkValidator.RunPostSyncLivenessSweep");
+
+            using var client = new HttpClient();
+            client.Timeout = TimeSpan.FromSeconds(3);
+
+            foreach (var kvp in validators)
+            {
+                // Skip self
+                if (kvp.Key == Globals.ValidatorAddress)
+                    continue;
+
+                var ip = kvp.Value.IPAddress?.Replace("::ffff:", "");
+                if (string.IsNullOrEmpty(ip))
+                {
+                    toRemove.Add(kvp.Key);
+                    continue;
+                }
+
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
+                    var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                    var resp = await client.GetAsync(uri, cts.Token);
+
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        toRemove.Add(kvp.Key);
+                        LogUtility.Log($"LIVENESS-SWEEP: {kvp.Key} at {ip} — HTTP {resp.StatusCode}. Removing.", "NetworkValidator.RunPostSyncLivenessSweep");
+                        continue;
+                    }
+
+                    // Version check — reject outdated major versions
+                    var peerVersion = await resp.Content.ReadAsStringAsync();
+                    if (!string.IsNullOrEmpty(peerVersion))
+                    {
+                        var cleanVersion = peerVersion.Trim().Trim('"');
+                        var parts = cleanVersion.Split('.');
+                        if (parts.Length > 0 && int.TryParse(parts[0], out var major))
+                        {
+                            if (major < Globals.MajorVer)
+                            {
+                                toRemove.Add(kvp.Key);
+                                LogUtility.Log($"LIVENESS-SWEEP: {kvp.Key} at {ip} — version '{cleanVersion}' outdated (need major >= {Globals.MajorVer}). Removing.", "NetworkValidator.RunPostSyncLivenessSweep");
+                                continue;
+                            }
+                        }
+                    }
+
+                    checkedCount++;
+                }
+                catch (Exception ex)
+                {
+                    toRemove.Add(kvp.Key);
+                    LogUtility.Log($"LIVENESS-SWEEP: {kvp.Key} at {ip} — unreachable: {ex.Message}. Removing.", "NetworkValidator.RunPostSyncLivenessSweep");
+                }
+            }
+
+            foreach (var addr in toRemove)
+                Globals.NetworkValidators.TryRemove(addr, out _);
+
+            Globals.ValidatorLivenessSweepComplete = true;
+
+            LogUtility.Log(
+                $"POST-SYNC LIVENESS SWEEP COMPLETE: checked {validators.Length}, passed {checkedCount}, removed {toRemove.Count}, remaining {Globals.NetworkValidators.Count}. Watermark height={syncedHeight}",
+                "NetworkValidator.RunPostSyncLivenessSweep");
+        }
+
+        /// <summary>
+        /// Perform a single-validator liveness + version check. Returns true if the validator
+        /// is reachable and running a compatible version. Used by P2P gossip to gate new additions.
+        /// </summary>
+        public static async Task<bool> CheckValidatorLiveness(string ipAddress)
+        {
+            var ip = ipAddress?.Replace("::ffff:", "");
+            if (string.IsNullOrEmpty(ip))
+                return false;
+
+            try
+            {
+                using var client = new HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(3);
+                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
+                var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                var resp = await client.GetAsync(uri, cts.Token);
+
+                if (!resp.IsSuccessStatusCode)
+                    return false;
+
+                var peerVersion = await resp.Content.ReadAsStringAsync();
+                if (!string.IsNullOrEmpty(peerVersion))
+                {
+                    var cleanVersion = peerVersion.Trim().Trim('"');
+                    var parts = cleanVersion.Split('.');
+                    if (parts.Length > 0 && int.TryParse(parts[0], out var major))
+                    {
+                        if (major < Globals.MajorVer)
+                            return false;
+                    }
+                }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Auto-promote a validator to fully trusted when it produces a committed block.
         /// If the validator solved a block that passed full validation, it is definitively legitimate.
         /// Also promotes from _pendingValidators if found there but not yet in NetworkValidators.
@@ -423,6 +559,19 @@ namespace ReserveBlockCore.Models
                     Globals.NetworkValidators[validatorAddress] = existing;
                 }
                 return;
+            }
+
+            // WATERMARK GATE: After the liveness sweep completes, do NOT create new
+            // NetworkValidator entries from historical blocks that are below the watermark.
+            // This prevents offline validators from being resurrected during block processing.
+            if (Globals.ValidatorLivenessSweepComplete)
+            {
+                var currentBlockHeight = Globals.LastBlock?.Height ?? 0;
+                if (currentBlockHeight <= Globals.ValidatorListSyncedHeight)
+                {
+                    // This block is from before/at the sync watermark — skip creating new entries
+                    return;
+                }
             }
 
             // Case 2: In pending validators — promote to NetworkValidators
