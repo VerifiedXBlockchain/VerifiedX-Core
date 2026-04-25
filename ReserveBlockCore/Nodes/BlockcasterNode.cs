@@ -88,6 +88,23 @@ namespace ReserveBlockCore.Nodes
     private static readonly ConcurrentDictionary<string, (long height, int failCount)> _winnerFetchFailures = new();
     const int WINNER_SKIP_THRESHOLD = 3; // Skip winner after this many consecutive block-fetch failures at same height
 
+    /// <summary>FIX D2: Tracks cumulative winner verification failures across rounds.
+    /// (totalFails, excludeUntilHeight). Escalating exclusion: 3-5→10 blocks, 6-9→50 blocks, 10+→evict from NetworkValidators.</summary>
+    private static readonly ConcurrentDictionary<string, (int totalFails, long excludeUntilHeight)> _winnerCumulativeFailures = new();
+    /// <summary>FIX D1: Whether fresh startup detection has run (once per process lifetime).</summary>
+    private static bool _freshStartupChecked = false;
+    const long FRESH_STARTUP_THRESHOLD_SECONDS = 300; // 5 minutes
+
+    /// <summary>FIX D3: Clears all winner failure tracking for a given address.
+    /// Called when a heartbeat TX is detected, indicating the validator restarted.</summary>
+    public static void ClearWinnerFailures(string address)
+    {
+        if (string.IsNullOrEmpty(address)) return;
+        _winnerFetchFailures.TryRemove(address, out _);
+        _winnerCumulativeFailures.TryRemove(address, out _);
+        CasterLogUtility.Log($"ClearWinnerFailures: cleared all failure tracking for {address} (heartbeat/block success)", "PROOFS");
+    }
+
 
         public BlockcasterNode(IHubContext<P2PBlockcasterServer> hubContext, IHostApplicationLifetime appLifetime)
         {
@@ -665,6 +682,33 @@ namespace ReserveBlockCore.Nodes
             CasterLogUtility.Clear();
             CasterLogUtility.Log($"=== Consensus loop starting. Validator={Globals.ValidatorAddress} ===", "BOOT");
 
+            // FIX D1: Fresh startup detection — if the last block is older than 5 minutes,
+            // clear NetworkValidators so bootstrap casters start with only themselves.
+            // New validators will populate as they connect via P2P.
+            if (!_freshStartupChecked)
+            {
+                _freshStartupChecked = true;
+                var lastBlockAge = TimeUtil.GetTime() - Globals.LastBlock.Timestamp;
+                if (lastBlockAge > FRESH_STARTUP_THRESHOLD_SECONDS)
+                {
+                    var staleCount = Globals.NetworkValidators.Count;
+                    Globals.NetworkValidators.Clear();
+                    CasterLogUtility.Log(
+                        $"FRESH-STARTUP: Last block is {lastBlockAge}s old (>{FRESH_STARTUP_THRESHOLD_SECONDS}s). " +
+                        $"Cleared {staleCount} stale NetworkValidators. Validators will repopulate via P2P.",
+                        "BOOT");
+                    ConsoleWriterService.OutputValCaster(
+                        $"[FRESH-STARTUP] Cleared {staleCount} stale validators. Last block age: {lastBlockAge}s.");
+                }
+                else
+                {
+                    CasterLogUtility.Log(
+                        $"FRESH-STARTUP: Last block is {lastBlockAge}s old (<={FRESH_STARTUP_THRESHOLD_SECONDS}s). " +
+                        $"Keeping {Globals.NetworkValidators.Count} NetworkValidators.",
+                        "BOOT");
+                }
+            }
+
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 if (!Globals.BlockCasters.Any())
@@ -815,6 +859,12 @@ namespace ReserveBlockCore.Nodes
                     foreach (var entry in _winnerFetchFailures)
                     {
                         if (entry.Value.height == Height && entry.Value.failCount >= WINNER_SKIP_THRESHOLD)
+                            skippedAddresses.Add(entry.Key);
+                    }
+                    // FIX D2: Also filter out addresses with cumulative failure exclusions
+                    foreach (var entry in _winnerCumulativeFailures)
+                    {
+                        if (entry.Value.excludeUntilHeight > Height)
                             skippedAddresses.Add(entry.Key);
                     }
                     // FIX B: Use ALL validator proofs for winner selection (not just caster proofs).
@@ -1252,12 +1302,43 @@ namespace ReserveBlockCore.Nodes
                                                 : (Height, 1));
                                         var newCount = _winnerFetchFailures.TryGetValue(terminalWinner, out var fc) ? fc.failCount : 0;
                                         CasterLogUtility.Log($"WINNER-SKIP: BlockFetch failed for {terminalWinner} at height {Height} (streak {newCount}/{WINNER_SKIP_THRESHOLD})", "BLOCKFETCH");
+
+                                        // FIX D2: Track cumulative failures across rounds with escalating exclusion
+                                        var cumulative = _winnerCumulativeFailures.AddOrUpdate(
+                                            terminalWinner,
+                                            (1, 0L),
+                                            (_, prev) => (prev.totalFails + 1, prev.excludeUntilHeight));
+                                        int totalFails = cumulative.totalFails;
+                                        long excludeUntil = 0;
+                                        if (totalFails >= 10)
+                                        {
+                                            // Evict from NetworkValidators entirely
+                                            Globals.NetworkValidators.TryRemove(terminalWinner, out _);
+                                            _winnerCumulativeFailures.TryRemove(terminalWinner, out _);
+                                            CasterLogUtility.Log($"WINNER-EVICT: {terminalWinner} evicted from NetworkValidators after {totalFails} cumulative failures", "PROOFS");
+                                        }
+                                        else if (totalFails >= 6)
+                                        {
+                                            excludeUntil = Height + 50;
+                                            _winnerCumulativeFailures[terminalWinner] = (totalFails, excludeUntil);
+                                            CasterLogUtility.Log($"WINNER-EXCLUDE: {terminalWinner} excluded for 50 blocks (until {excludeUntil}, fails={totalFails})", "PROOFS");
+                                        }
+                                        else if (totalFails >= 3)
+                                        {
+                                            excludeUntil = Height + 10;
+                                            _winnerCumulativeFailures[terminalWinner] = (totalFails, excludeUntil);
+                                            CasterLogUtility.Log($"WINNER-EXCLUDE: {terminalWinner} excluded for 10 blocks (until {excludeUntil}, fails={totalFails})", "PROOFS");
+                                        }
                                     }
                                     else if (blockFound)
                                     {
                                         // Success — clear failure tracking for this winner and all stale entries
                                         if (!string.IsNullOrEmpty(terminalWinner))
+                                        {
                                             _winnerFetchFailures.TryRemove(terminalWinner, out _);
+                                            // FIX D2: Clear cumulative failures on success
+                                            ClearWinnerFailures(terminalWinner);
+                                        }
                                         // Clear entries from old heights
                                         foreach (var key in _winnerFetchFailures.Keys.ToList())
                                         {
