@@ -844,7 +844,7 @@ namespace ReserveBlockCore.Nodes
                     if (PreviousHeight != Height)
                     {
                         PreviousHeight = Height;
-                        await Task.WhenAll(BlockDelay, Task.Delay(1500));
+                        await Task.WhenAll(BlockDelay, Task.Delay(1000));
                         
                         // Adaptive timing: correct for drift so blocks stay near target interval
                         if (ReferenceHeight == -1)
@@ -1772,7 +1772,7 @@ namespace ReserveBlockCore.Nodes
                     if (PreviousHeight != Height)
                     {
                         PreviousHeight = Height;
-                        await Task.WhenAll(BlockDelay, Task.Delay(1500));
+                        await Task.WhenAll(BlockDelay, Task.Delay(1000));
                         
                         // Initialize reference point on first run
                         if (ReferenceHeight == -1)

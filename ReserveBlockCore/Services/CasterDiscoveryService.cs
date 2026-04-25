@@ -281,6 +281,15 @@ namespace ReserveBlockCore.Services
                         // Track cooldown for unreachable nodes (outdated is a permanent problem until they upgrade)
                         if (candidateVersionResult.Status == VersionCheckResult.Unreachable)
                             TrackPromotionCooldown(v.Address, currentHeight);
+                        // FIX: Confirmed-outdated validators should be excluded from future proof generation
+                        // and promotion evaluation. Bump CheckFailCount past the filter thresholds so they
+                        // stop appearing in EvalTick candidates and in GenerateProofsFromNetworkValidatorsLegacy.
+                        // If they upgrade and reconnect, P2P gossip will re-add them with CheckFailCount=0.
+                        if (candidateVersionResult.Status == VersionCheckResult.Outdated)
+                        {
+                            if (Globals.NetworkValidators.TryGetValue(v.Address, out var nvOutdated))
+                                nvOutdated.CheckFailCount = 10;
+                        }
                         continue;
                     }
                     CasterLogUtility.Log(

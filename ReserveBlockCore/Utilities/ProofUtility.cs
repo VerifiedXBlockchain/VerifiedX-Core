@@ -474,7 +474,20 @@ namespace ReserveBlockCore.Utilities
 
                     // FIX B: Version gate — reject validators on outdated versions.
                     // Old nodes won't have the GetWalletVersion endpoint → 404 → rejected.
-                    try
+                    // OPTIMIZATION: Skip the HTTP version gate if the winner is already a known
+                    // BlockCaster with a validated WalletVersion. GenerateCasterProofs already
+                    // filters by IsMajorVersionCurrent, so reaching here means the version was
+                    // already confirmed. This saves ~200ms per round.
+                    var skipVersionGate = Globals.BlockCasters.Any(c =>
+                        c.ValidatorAddress == winningProof.Address &&
+                        !string.IsNullOrEmpty(c.WalletVersion) &&
+                        IsMajorVersionCurrent(c.WalletVersion));
+
+                    if (skipVersionGate)
+                    {
+                        // Version already confirmed by GenerateCasterProofs — skip HTTP call
+                    }
+                    else try
                     {
                         var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
                         var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
