@@ -710,11 +710,9 @@ namespace ReserveBlockCore.Nodes
                             {
                                 Address = caster.ValidatorAddress,
                                 IPAddress = caster.PeerIP,
-                                PublicKey = caster.ValidatorPublicKey ?? "",
-                                Balance = 5000M, // Bootstrap casters meet minimum requirement
+                                IsFullyTrusted = true,
                                 LastSeen = TimeUtil.GetTime(),
-                                FirstSeen = Globals.LastBlock.Height,
-                                FailCount = 0,
+                                FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
                                 CheckFailCount = 0,
                             };
                             Globals.NetworkValidators.TryAdd(caster.ValidatorAddress, nv);
