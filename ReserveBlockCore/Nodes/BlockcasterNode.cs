@@ -907,6 +907,35 @@ namespace ReserveBlockCore.Nodes
                         filteredProofs = casterProofs;
                     }
 
+                    // FIX G: In bootstrap mode, only casters can produce blocks because the chain is
+                    // stalled and non-caster validators have no way to craft blocks. Filter VRF
+                    // candidates to caster addresses only to prevent electing unreachable winners.
+                    if (Globals.IsBootstrapMode)
+                    {
+                        var casterAddresses = casterList
+                            .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                            .Select(c => c.ValidatorAddress)
+                            .ToHashSet();
+                        var bootstrapFiltered = filteredProofs
+                            .Where(p => casterAddresses.Contains(p.Address))
+                            .ToList();
+                        if (bootstrapFiltered.Count > 0)
+                        {
+                            CasterLogUtility.Log(
+                                $"BOOTSTRAP-FILTER: Restricted {filteredProofs.Count} proofs to {bootstrapFiltered.Count} caster-only proofs " +
+                                $"(casters: [{string.Join(",", casterAddresses)}])", "PROOFS");
+                            filteredProofs = bootstrapFiltered;
+                        }
+                        else
+                        {
+                            CasterLogUtility.Log(
+                                $"BOOTSTRAP-FILTER: No caster proofs found in {filteredProofs.Count} filtered proofs. " +
+                                $"Falling back to casterProofs ({casterProofs.Count}).", "PROOFS");
+                            if (casterProofs.Count > 0)
+                                filteredProofs = casterProofs;
+                        }
+                    }
+
                     var winningCasterProof = await ProofUtility.SortProofs(filteredProofs);
                     var winningProof = await ProofUtility.SortProofs(proofs);
                     CasterRoundAudit.AddStep($"Sorting Proofs", true);
