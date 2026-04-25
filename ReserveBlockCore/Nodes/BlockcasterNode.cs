@@ -53,9 +53,10 @@ namespace ReserveBlockCore.Nodes
         /// <summary>Throttle for "block rejected" log messages — tracks last logged height per validator to prevent spam.</summary>
         private static readonly ConcurrentDictionary<string, long> _rejectionLogTracker = new();
 
-    // Dynamic reference points for block delay calculation — reset after each block
+    // Dynamic reference points for block delay calculation — epoch-based (reset every N blocks)
     private static long ReferenceHeight = -1;
     private static long ReferenceTime = -1;
+    const int EPOCH_SIZE = 10; // Reset timing reference every N blocks; allows drift correction to accumulate
 
     /// <summary>Tracks BlockCasters.Count from the previous round to detect when a new caster joins.</summary>
     private static int _previousCasterCount = -1;
@@ -794,7 +795,7 @@ namespace ReserveBlockCore.Nodes
                         $"CASTER-POOL-CHANGE: count {_previousCasterCount}→{casterList.Count}. Re-syncing height and resetting timing.",
                         "ROUND-SYNC");
                     await SyncHeightWithPeersAsync();
-                    ResetRoundTiming(Globals.LastBlock.Height);
+                    ResetRoundTiming(Globals.LastBlock.Height, force: true);
                 }
                 _previousCasterCount = casterList.Count;
 
@@ -3400,12 +3401,25 @@ namespace ReserveBlockCore.Nodes
         /// crafting via CommitCasterBlockPostAgreementAsync and remote receipt via
         /// ReceiveConfirmedBlock message-7).
         /// </summary>
-        private static void ResetRoundTiming(long committedHeight)
+        private static void ResetRoundTiming(long committedHeight, bool force = false)
         {
+            // EPOCH-TIMING: Only reset the reference point at epoch boundaries (every EPOCH_SIZE blocks)
+            // or when forced (caster pool changes, desync recovery). This lets the adaptive timing
+            // accumulate drift corrections across multiple blocks instead of losing them every block.
+            // Example: if block N took 15s (3s over), the correction for block N+1 will be -3s,
+            // shortening its delay to compensate. Over an epoch, the average converges to BlockTime.
+            if (!force && ReferenceHeight != -1 && (committedHeight - ReferenceHeight) < EPOCH_SIZE)
+            {
+                CasterLogUtility.Log(
+                    $"ROUND-SYNC: Epoch hold — refH={ReferenceHeight} committed={committedHeight} (epoch resets at {ReferenceHeight + EPOCH_SIZE})",
+                    "ROUND-SYNC");
+                return;
+            }
+
             ReferenceHeight = committedHeight;
             ReferenceTime = TimeUtil.GetMillisecondTime();
             CasterLogUtility.Log(
-                $"ROUND-SYNC: Reset timing references — refH={ReferenceHeight} refT={ReferenceTime}",
+                $"ROUND-SYNC: Epoch RESET timing references — refH={ReferenceHeight} refT={ReferenceTime} force={force}",
                 "ROUND-SYNC");
         }
 
