@@ -817,13 +817,15 @@ namespace ReserveBlockCore.Nodes
                         if (entry.Value.height == Height && entry.Value.failCount >= WINNER_SKIP_THRESHOLD)
                             skippedAddresses.Add(entry.Key);
                     }
-                    var filteredCasterProofs = skippedAddresses.Count > 0
-                        ? casterProofs.Where(p => !skippedAddresses.Contains(p.Address)).ToList()
-                        : casterProofs;
+                    // FIX B: Use ALL validator proofs for winner selection (not just caster proofs).
+                    // Any validator can win blocks, not just casters. Casters vote on who wins.
+                    var filteredProofs = skippedAddresses.Count > 0
+                        ? proofs.Where(p => !skippedAddresses.Contains(p.Address)).ToList()
+                        : proofs;
                     if (skippedAddresses.Count > 0)
                         CasterLogUtility.Log($"WINNER-SKIP: Excluding {skippedAddresses.Count} address(es) from VRF: [{string.Join(", ", skippedAddresses)}]", "PROOFS");
 
-                    var winningCasterProof = await ProofUtility.SortProofs(filteredCasterProofs);
+                    var winningCasterProof = await ProofUtility.SortProofs(filteredProofs);
                     var winningProof = await ProofUtility.SortProofs(proofs);
                     CasterRoundAudit.AddStep($"Sorting Proofs", true);
                     //ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
@@ -851,10 +853,10 @@ namespace ReserveBlockCore.Nodes
                         }
                     }
 
-                    if (winningCasterProof != null && casterProofs.Count() > 0)
+                    if (winningCasterProof != null && filteredProofs.Count > 0)
                     {
                         CasterLogUtility.Log($"Winner candidate: {winningCasterProof.Address} VRF={winningCasterProof.VRFNumber}", "VERIFY");
-                        CasterRoundAudit.AddStep($"Attempting Proof on Address: {winningCasterProof.Address} (casterProofs: {casterProofs.Count()})", true);
+                        CasterRoundAudit.AddStep($"Attempting Proof on Address: {winningCasterProof.Address} (allProofs: {filteredProofs.Count})", true);
                         var verificationResult = false;
                         List<string> ExcludeValList = new List<string>();
                         var verifySw = Stopwatch.StartNew();
@@ -889,10 +891,9 @@ namespace ReserveBlockCore.Nodes
                                         }
                                     }
                                     ExcludeValList.Add(winningCasterProof.Address);
-                                    winningCasterProof = await ProofUtility.SortProofs(casterProofs
+                                    // FIX B: Re-select from all validator proofs, not just caster proofs
+                                    winningCasterProof = await ProofUtility.SortProofs(filteredProofs
                                         .Where(x => !ExcludeValList.Contains(x.Address)).ToList()
-                                    //winningProof = await ProofUtility.SortProofs(
-                                    //    proofs.Where(x => !ExcludeValList.Contains(x.Address)).ToList()
                                     );
 
                                     if (winningCasterProof == null)

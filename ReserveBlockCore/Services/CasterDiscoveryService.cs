@@ -210,13 +210,22 @@ namespace ReserveBlockCore.Services
                     .ToList();
 
                 int slotsAvailable = MaxCasters - currentCasters.Count;
-                var toPromote = rankedCandidates.Take(slotsAvailable).ToList();
+                // FIX A: Iterate ALL ranked candidates (not .Take(slotsAvailable)) so that
+                // cooldown-blocked candidates don't waste promotion slots. We promote up to
+                // slotsAvailable and skip any that fail checks.
                 CasterLogUtility.Log(
-                    $"EvalTick — slotsAvailable={slotsAvailable}, attempting promotion of {toPromote.Count} candidate(s): [{string.Join(",", toPromote.Select(p => p.Validator.Address))}]",
+                    $"EvalTick — slotsAvailable={slotsAvailable}, attempting promotion of {rankedCandidates.Count} candidate(s): [{string.Join(",", rankedCandidates.Select(p => p.Validator.Address))}]",
                     "CasterFlow");
 
-                foreach (var candidate in toPromote)
+                int promoted = 0;
+                foreach (var candidate in rankedCandidates)
                 {
+                    if (promoted >= slotsAvailable)
+                    {
+                        CasterLogUtility.Log($"  <<  STOP — all {slotsAvailable} slot(s) filled", "CasterFlow");
+                        break;
+                    }
+
                     var v = candidate.Validator;
                     var ip = v.IPAddress.Replace("::ffff:", "");
 
@@ -358,6 +367,7 @@ namespace ReserveBlockCore.Services
                         "CasterFlow");
                     ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] Promoted {v.Address} (balance: {candidate.Balance}) to caster. Pool: {Globals.BlockCasters.Count}/{MaxCasters}");
+                    promoted++;
                 }
 
             }
@@ -446,10 +456,15 @@ namespace ReserveBlockCore.Services
                 var response = await client.GetAsync(uri, cts.Token);
                 if (response == null || !response.IsSuccessStatusCode)
                 {
+                    // FIX C: Distinguish HTTP 404 (endpoint doesn't exist — incompatible software)
+                    // from other errors (timeout, 500, etc. — possibly transient).
+                    // 404 means the node fundamentally can't participate → treat as Outdated (permanent).
+                    var statusCode = response?.StatusCode;
+                    var isNotFound = statusCode == System.Net.HttpStatusCode.NotFound;
+                    var classification = isNotFound ? VersionCheckResult.Outdated : VersionCheckResult.Unreachable;
                     ConsoleWriterService.OutputValCaster(
-                        $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — GetWalletVersion returned {response?.StatusCode}. Skipping.");
-                    // Got a response but it was an error — treat as unreachable (node might be starting up)
-                    return new VersionCheckInfo(VersionCheckResult.Unreachable, "");
+                        $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — GetWalletVersion returned {statusCode} → {classification}. Skipping.");
+                    return new VersionCheckInfo(classification, "");
                 }
                 var peerVersion = await response.Content.ReadAsStringAsync();
                 if (string.IsNullOrEmpty(peerVersion) || !ProofUtility.IsMajorVersionCurrent(peerVersion))
