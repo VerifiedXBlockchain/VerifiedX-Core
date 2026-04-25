@@ -48,7 +48,10 @@ namespace ReserveBlockCore.Utilities
             }
 
             List<Proof> proofs;
-            if (Globals.IsBootstrapMode)
+            // FIX: Use legacy (NetworkValidators) path until liveness sweep confirms which validators
+            // are actually reachable. The snapshot path reads from VBTCValidatorRegistry which contains
+            // ALL historical validators including offline ones — we must not use it until we've verified liveness.
+            if (Globals.IsBootstrapMode || !Globals.ValidatorLivenessSweepComplete)
                 proofs = await GenerateProofsFromNetworkValidatorsLegacy();
             else
             {
@@ -139,9 +142,19 @@ namespace ReserveBlockCore.Utilities
             var prevHash = Globals.LastBlock.Hash;
             var snapshot = ValidatorSnapshotService.GetSnapshotForHeight(blockHeight);
 
+            // FIX: After liveness sweep, filter snapshot entries against NetworkValidators.
+            // The snapshot reads from VBTCValidatorRegistry (all historical validators),
+            // but NetworkValidators has been cleaned by the liveness sweep to contain only
+            // confirmed-reachable validators. Use it as an allowlist.
+            var useNetworkFilter = Globals.ValidatorLivenessSweepComplete && Globals.NetworkValidators.Count > 0;
+
             foreach (var entry in snapshot)
             {
                 if (string.IsNullOrEmpty(entry.PublicKey))
+                    continue;
+
+                // Skip validators not confirmed reachable by liveness sweep
+                if (useNetworkFilter && !Globals.NetworkValidators.ContainsKey(entry.Address))
                     continue;
 
                 var proof = await CreateProof(entry.Address, entry.PublicKey, blockHeight, prevHash);
@@ -468,18 +481,25 @@ namespace ReserveBlockCore.Utilities
                         if (versionResp == null || !versionResp.IsSuccessStatusCode)
                         {
                             CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — GetWalletVersion returned {versionResp?.StatusCode}. Rejecting.", "VERSIONGATE");
+                            // FIX: Immediately exclude from future proof generation by bumping CheckFailCount past the <= 3 threshold
+                            if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail1))
+                                nvFail1.CheckFailCount = 4;
                             return (false, null);
                         }
                         var peerVersion = await versionResp.Content.ReadAsStringAsync();
                         if (string.IsNullOrEmpty(peerVersion) || !IsMajorVersionCurrent(peerVersion))
                         {
                             CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Rejecting.", "VERSIONGATE");
+                            if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail2))
+                                nvFail2.CheckFailCount = 4;
                             return (false, null);
                         }
                     }
                     catch (Exception vex)
                     {
                         CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — version check failed: {vex.Message}. Rejecting.", "VERSIONGATE");
+                        if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail3))
+                            nvFail3.CheckFailCount = 4;
                         return (false, null);
                     }
 
