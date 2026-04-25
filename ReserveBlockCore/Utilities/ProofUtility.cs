@@ -80,7 +80,14 @@ namespace ReserveBlockCore.Utilities
             var blockHeight = Globals.LastBlock.Height + 1;
             var prevHash = Globals.LastBlock.Hash;
 
-            var newPeers = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount <= 3).ToList();
+            // FIX A: Don't generate proofs for validators that can't be reached.
+            // Filter by CheckFailCount AND require either IsFullyTrusted or recent LastSeen (< 5 min).
+            // This prevents wasting time generating VRF proofs for offline/stale validators.
+            var now = TimeUtil.GetTime();
+            var newPeers = Globals.NetworkValidators.Values
+                .Where(x => x.CheckFailCount <= 3 && 
+                       (x.IsFullyTrusted || (x.LastSeen > 0 && (now - x.LastSeen) < 300)))
+                .ToList();
 
             List<string> CompletedIPs = new List<string>();
             List<string> CompletedAddresses = new List<string>();
@@ -457,7 +464,7 @@ namespace ReserveBlockCore.Utilities
                     try
                     {
                         var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
-                        var versionResp = await client.GetAsync(versionUri).WaitAsync(new TimeSpan(0, 0, 3));
+                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
                         if (versionResp == null || !versionResp.IsSuccessStatusCode)
                         {
                             CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — GetWalletVersion returned {versionResp?.StatusCode}. Rejecting.", "VERSIONGATE");
@@ -514,7 +521,7 @@ namespace ReserveBlockCore.Utilities
                     try
                     {
                         var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
-                        var versionResp = await client.GetAsync(versionUri).WaitAsync(new TimeSpan(0, 0, 3));
+                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
                         if (versionResp == null || !versionResp.IsSuccessStatusCode)
                             return (false, null);
                         var peerVersion = await versionResp.Content.ReadAsStringAsync();

@@ -377,6 +377,14 @@ namespace ReserveBlockCore.P2P
 
                             else
                             {
+                                // FIX E: During gossip cooldown after fresh startup, don't add NEW validators.
+                                // This prevents peers from immediately repopulating stale offline validators
+                                // that were just cleared by the fresh-startup detection.
+                                if (TimeUtil.GetTime() < Globals.GossipCooldownUntil)
+                                {
+                                    rejectedCount++;
+                                    continue;
+                                }
                                 // HAL-15 Security Fix: Use secure validator addition method
                                 var added = await NetworkValidator.AddValidatorToPool(networkValidator, peerIP);
                                 if (added)

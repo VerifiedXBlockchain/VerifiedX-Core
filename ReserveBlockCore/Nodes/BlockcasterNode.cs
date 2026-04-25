@@ -718,8 +718,10 @@ namespace ReserveBlockCore.Nodes
                             Globals.NetworkValidators.TryAdd(caster.ValidatorAddress, nv);
                         }
                     }
+                    // FIX E: Set gossip cooldown to prevent P2P gossip from re-adding stale validators
+                    Globals.GossipCooldownUntil = TimeUtil.GetTime() + 60;
                     CasterLogUtility.Log(
-                        $"FRESH-STARTUP: Re-seeded {Globals.NetworkValidators.Count} bootstrap casters into NetworkValidators.",
+                        $"FRESH-STARTUP: Re-seeded {Globals.NetworkValidators.Count} bootstrap casters into NetworkValidators. Gossip cooldown until {Globals.GossipCooldownUntil}.",
                         "BOOT");
                 }
                 else
@@ -958,7 +960,9 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     if (validator != null)
                                     {
-                                        validator.CheckFailCount++;
+                                        // FIX F: Bump by 3 instead of 1 so the CheckFailCount <= 3 filter
+                                        // in proof generation kicks in after just ONE VersionGate timeout.
+                                        validator.CheckFailCount += 3;
                                         validator.Latency = sw.ElapsedMilliseconds;
                                         if (validator.CheckFailCount <= 3)
                                         {
@@ -1076,6 +1080,7 @@ namespace ReserveBlockCore.Nodes
                                 CasterRoundAudit.AddStep($"Caster P2P proofs {Globals.CasterProofDict.Count()}/{requiredProofs}; retrying…", false);
                             CasterLogUtility.Log($"ROUND FAILED: insufficient proofs after {roundSw.ElapsedMilliseconds}ms", "ROUND");
                             CasterLogUtility.Flush();
+                            ProofUtility.ClearProofGenerationCache();
                             await Task.Delay(RETRY_DELAY_MS);
                             continue;
                         }
@@ -1085,7 +1090,11 @@ namespace ReserveBlockCore.Nodes
                             Globals.Proofs.Add(proofItem.Value);
                         }
 
-                        var proofSnapshot = Globals.Proofs.Where(x => x.BlockHeight == Height).ToList();
+                        // FIX B: Apply winner exclusions to proofSnapshot — prevents peer proofs
+                        // from overriding local exclusions during winner agreement.
+                        var proofSnapshot = Globals.Proofs
+                            .Where(x => x.BlockHeight == Height && !skippedAddresses.Contains(x.Address))
+                            .ToList();
 
                         CasterRoundAudit.AddStep($"Total Proofs Collection: {proofSnapshot.Count()}", true);
 
@@ -1114,6 +1123,7 @@ namespace ReserveBlockCore.Nodes
                                     CasterRoundAudit?.AddStep($"Winner agreement FAILED — no supermajority. Retrying round.", false);
                                     CasterLogUtility.Log($"ROUND FAILED: winner agreement failed after {roundSw.ElapsedMilliseconds}ms", "ROUND");
                                     CasterLogUtility.Flush();
+                                    ProofUtility.ClearProofGenerationCache();
                                     await Task.Delay(RETRY_DELAY_MS);
                                     continue;
                                 }
@@ -1801,7 +1811,8 @@ namespace ReserveBlockCore.Nodes
                                 {
                                     if (validator != null)
                                     {
-                                        validator.CheckFailCount++;
+                                        // FIX F: Bump by 3 instead of 1 (legacy path)
+                                        validator.CheckFailCount += 3;
                                         validator.Latency = sw.ElapsedMilliseconds;
                                         if (validator.CheckFailCount <= 3)
                                         {

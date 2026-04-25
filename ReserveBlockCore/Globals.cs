@@ -386,6 +386,9 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<string, int> SkipPeers = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, int> SkipValPeers = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, NetworkValidator> NetworkValidators = new ConcurrentDictionary<string, NetworkValidator>(); //key = vfx address
+        /// <summary>FIX E: Unix timestamp until which P2P gossip should NOT re-add new validators.
+        /// Set after fresh-startup clears stale NetworkValidators to prevent peers from immediately repopulating them.</summary>
+        public static long GossipCooldownUntil = 0;
         public static ConcurrentDictionary<string, Peers> ValidatorPool = new ConcurrentDictionary<string, Peers>();
         public static ConcurrentDictionary<string, NodeInfo> ValidatorNodes = new ConcurrentDictionary<string, NodeInfo>(); //key = ipaddress
         public static ConcurrentDictionary<string, NodeInfo> BlockCasterNodes = new ConcurrentDictionary<string, NodeInfo>(); //key = ipaddress
