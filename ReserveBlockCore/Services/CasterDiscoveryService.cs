@@ -371,6 +371,19 @@ namespace ReserveBlockCore.Services
                     Globals.BlockCasters.Add(newCaster);
                     Globals.SyncKnownCastersFromBlockCasters();
 
+                    // FIX: Push the last few blocks to the newly promoted caster so it can
+                    // immediately participate in consensus. Without this, a newly promoted node
+                    // that is 1-2 blocks behind will return body=0 for proof fetches, fail to
+                    // generate proofs, and fail block fetch — creating a cascading failure cycle.
+                    _ = Task.Run(async () =>
+                    {
+                        try { await PushRecentBlocksToPeer(ip, 3).ConfigureAwait(false); }
+                        catch (Exception pushEx)
+                        {
+                            CasterLogUtility.Log($"  block-push to {ip} failed: {pushEx.Message}", "CasterFlow");
+                        }
+                    });
+
                     CasterLogUtility.Log(
                         $"  ✓ PROMOTED val={v.Address} ip={ip}. BlockCasters.Count now {Globals.BlockCasters.Count}/{MaxCasters}",
                         "CasterFlow");
@@ -1325,6 +1338,61 @@ namespace ReserveBlockCore.Services
                 response.Reason = $"Error: {ex.Message}";
                 return response;
             }
+        }
+
+        #endregion
+
+        #region Block catch-up helpers
+
+        /// <summary>
+        /// Pushes the last N blocks to a peer via HTTP POST to their ReceiveBlock endpoint.
+        /// Used after promotion to ensure the newly promoted caster is synced to the current
+        /// chain tip before it needs to participate in consensus (generate proofs, serve blocks).
+        /// Fire-and-forget — failures are logged but don't affect promotion status.
+        /// </summary>
+        internal static async Task PushRecentBlocksToPeer(string peerIp, int blockCount = 3)
+        {
+            var lastBlock = Globals.LastBlock;
+            if (lastBlock == null || lastBlock.Height <= 0)
+                return;
+
+            var startHeight = Math.Max(1, lastBlock.Height - blockCount + 1);
+            var pushed = 0;
+
+            for (long h = startHeight; h <= lastBlock.Height; h++)
+            {
+                try
+                {
+                    var block = BlockchainData.GetBlockByHeight(h);
+                    if (block == null)
+                        continue;
+
+                    var blockJson = JsonConvert.SerializeObject(block);
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    var uri = $"http://{peerIp}:{Globals.ValAPIPort}/valapi/validator/ReceiveCatchUpBlock";
+                    using var content = new StringContent(blockJson, Encoding.UTF8, "application/json");
+                    var response = await client.PostAsync(uri, content, cts.Token).ConfigureAwait(false);
+                    
+                    if (response.IsSuccessStatusCode)
+                        pushed++;
+                    else
+                        CasterLogUtility.Log(
+                            $"PushRecentBlocks: block {h} to {peerIp} returned {response.StatusCode}",
+                            "CasterFlow");
+                }
+                catch (Exception ex)
+                {
+                    CasterLogUtility.Log(
+                        $"PushRecentBlocks: block {h} to {peerIp} failed: {ex.Message}",
+                        "CasterFlow");
+                }
+            }
+
+            if (pushed > 0)
+                CasterLogUtility.Log(
+                    $"PushRecentBlocks: pushed {pushed}/{blockCount} blocks (heights {startHeight}–{lastBlock.Height}) to {peerIp}",
+                    "CasterFlow");
         }
 
         #endregion

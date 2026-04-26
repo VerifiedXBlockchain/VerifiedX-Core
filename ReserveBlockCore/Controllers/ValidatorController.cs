@@ -425,6 +425,92 @@ namespace ReserveBlockCore.Controllers
             return Ok("0");
         }
 
+        /// <summary>
+        /// Receives a catch-up block pushed by an existing caster after promotion.
+        /// Only accepts blocks that are ahead of our current chain tip and validates
+        /// basic block structure before appending. This prevents newly promoted casters
+        /// from lagging behind and failing proof generation on their first rounds.
+        /// </summary>
+        [HttpPost]
+        [Route("ReceiveCatchUpBlock")]
+        public async Task<ActionResult<string>> ReceiveCatchUpBlock([FromBody] Block? block)
+        {
+            try
+            {
+                var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString()?.Replace("::ffff:", "") ?? "unknown";
+
+                if (block == null || block.Height <= 0 || string.IsNullOrEmpty(block.Hash))
+                    return BadRequest("Invalid block");
+
+                // Only accept from known casters
+                var isCaster = Globals.BlockCasters.Any(c =>
+                    !string.IsNullOrEmpty(c.PeerIP) &&
+                    c.PeerIP.Replace("::ffff:", "") == remoteIp);
+                if (!isCaster)
+                {
+                    CasterLogUtility.Log(
+                        $"ReceiveCatchUpBlock REJECT: block {block.Height} from non-caster {remoteIp}",
+                        "CATCHUP");
+                    return Unauthorized();
+                }
+
+                var lastBlock = Globals.LastBlock;
+                if (lastBlock == null)
+                    return BadRequest("No local chain");
+
+                // Only accept blocks we don't have yet (ahead of our tip)
+                if (block.Height <= lastBlock.Height)
+                {
+                    CasterLogUtility.Log(
+                        $"ReceiveCatchUpBlock SKIP: block {block.Height} ≤ our tip {lastBlock.Height} from {remoteIp}",
+                        "CATCHUP");
+                    return Ok("already have");
+                }
+
+                // Only accept the very next block (no gaps)
+                if (block.Height != lastBlock.Height + 1)
+                {
+                    CasterLogUtility.Log(
+                        $"ReceiveCatchUpBlock SKIP: block {block.Height} != expected {lastBlock.Height + 1} from {remoteIp}",
+                        "CATCHUP");
+                    return Ok("gap");
+                }
+
+                // Validate prev hash chain continuity
+                if (block.PrevHash != lastBlock.Hash)
+                {
+                    CasterLogUtility.Log(
+                        $"ReceiveCatchUpBlock REJECT: block {block.Height} prevHash mismatch from {remoteIp}",
+                        "CATCHUP");
+                    return BadRequest("prevHash mismatch");
+                }
+
+                // Accept and commit the block
+                var result = await BlockValidatorService.ValidateBlock(block, ignoreAdjSignatures: false, blockDownloads: true);
+                if (result)
+                {
+                    CasterLogUtility.Log(
+                        $"ReceiveCatchUpBlock ACCEPTED: block {block.Height} from {remoteIp}",
+                        "CATCHUP");
+                    return Ok("accepted");
+                }
+                else
+                {
+                    CasterLogUtility.Log(
+                        $"ReceiveCatchUpBlock REJECT: block {block.Height} validation failed from {remoteIp}",
+                        "CATCHUP");
+                    return BadRequest("validation failed");
+                }
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log(
+                    $"ReceiveCatchUpBlock ERROR: {ex.Message}",
+                    "CATCHUP");
+                return BadRequest(ex.Message);
+            }
+        }
+
         static bool IsCasterParticipantAddress(string? address)
         {
             if (string.IsNullOrEmpty(address))

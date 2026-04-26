@@ -483,18 +483,35 @@ namespace ReserveBlockCore.Utilities
                         !string.IsNullOrEmpty(c.WalletVersion) &&
                         IsMajorVersionCurrent(c.WalletVersion));
 
+                    // FIX: Also skip VersionGate for recently-seen NetworkValidators (seen within 120s).
+                    // These validators just passed discovery checks recently and the HTTP call is
+                    // redundant — avoids timeout-induced exclusion for nodes under transient load.
+                    if (!skipVersionGate)
+                    {
+                        var now = TimeUtil.GetTime();
+                        skipVersionGate = Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvRecent)
+                            && nvRecent.CheckFailCount <= 3
+                            && nvRecent.LastSeen > 0
+                            && (now - nvRecent.LastSeen) < 120;
+                        if (skipVersionGate)
+                            CasterLogUtility.Log($"VersionGate: Skipping for {winningProof.Address} — recently seen ({now - nvRecent!.LastSeen}s ago).", "VERSIONGATE");
+                    }
+
                     if (skipVersionGate)
                     {
-                        // Version already confirmed by GenerateCasterProofs — skip HTTP call
+                        // Version already confirmed by GenerateCasterProofs or recent liveness — skip HTTP call
                     }
                     else try
                     {
                         var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
-                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
+                        // FIX: Increased timeout from 1500ms to 3000ms — 1.5s was too aggressive for
+                        // validators with 50ms+ latency that are under load or slightly behind on blocks.
+                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(3000));
                         if (versionResp == null || !versionResp.IsSuccessStatusCode)
                         {
                             CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — GetWalletVersion returned {versionResp?.StatusCode}. Rejecting.", "VERSIONGATE");
-                            // FIX: Immediately exclude from future proof generation by bumping CheckFailCount past the <= 3 threshold
+                            // FIX: Hard-set CheckFailCount=4 for definitive HTTP failures (404, 500, etc.)
+                            // These indicate a genuine version mismatch, not a transient issue.
                             if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail1))
                                 nvFail1.CheckFailCount = 4;
                             return (false, null);
@@ -510,9 +527,25 @@ namespace ReserveBlockCore.Utilities
                     }
                     catch (Exception vex)
                     {
-                        CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — version check failed: {vex.Message}. Rejecting.", "VERSIONGATE");
+                        // FIX: For timeout/network exceptions, increment CheckFailCount gradually instead
+                        // of hard-setting to 4. This gives validators 3 strikes before exclusion,
+                        // preventing permanent exclusion from a single transient timeout.
+                        var isTimeout = vex is TimeoutException || vex is TaskCanceledException || vex is OperationCanceledException;
+                        CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — version check failed: {vex.Message}. Rejecting (timeout={isTimeout}).", "VERSIONGATE");
                         if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail3))
-                            nvFail3.CheckFailCount = 4;
+                        {
+                            if (isTimeout)
+                            {
+                                // Gradual increment — allows 3 timeouts before exclusion from proof generation
+                                nvFail3.CheckFailCount = Math.Min(nvFail3.CheckFailCount + 1, 4);
+                                CasterLogUtility.Log($"VersionGate: {winningProof.Address} CheckFailCount incremented to {nvFail3.CheckFailCount}/4.", "VERSIONGATE");
+                            }
+                            else
+                            {
+                                // Definitive failure (DNS, connection refused, etc.) — exclude immediately
+                                nvFail3.CheckFailCount = 4;
+                            }
+                        }
                         return (false, null);
                     }
 
