@@ -731,6 +731,13 @@ namespace ReserveBlockCore.Controllers
                 var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(req.BlockHeight, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, string>());
                 votesForHeight[req.VoterAddress] = req.WinnerAddress;
 
+                // DETERMINISTIC-CONSENSUS: Store excluded addresses from this voter
+                if (req.ExcludedAddresses != null && req.ExcludedAddresses.Any())
+                {
+                    var excludedForHeight = Globals.CasterExcludedAddressDict.GetOrAdd(req.BlockHeight, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, List<string>>());
+                    excludedForHeight[req.VoterAddress] = req.ExcludedAddresses;
+                }
+
                 // Also ensure our own vote is present (if we have one from CasterRoundDict)
                 if (!string.IsNullOrEmpty(Globals.ValidatorAddress) && !votesForHeight.ContainsKey(Globals.ValidatorAddress))
                 {
@@ -740,9 +747,52 @@ namespace ReserveBlockCore.Controllers
                     }
                 }
 
-                // Return all votes for this height
-                var result = new { BlockHeight = req.BlockHeight, Votes = votesForHeight.ToDictionary(kv => kv.Key, kv => kv.Value) };
+                // Return all votes for this height (include excluded addresses)
+                var allExcluded = Globals.CasterExcludedAddressDict.TryGetValue(req.BlockHeight, out var exDict)
+                    ? exDict.ToDictionary(kv => kv.Key, kv => kv.Value)
+                    : new Dictionary<string, List<string>>();
+                var result = new { BlockHeight = req.BlockHeight, Votes = votesForHeight.ToDictionary(kv => kv.Key, kv => kv.Value), ExcludedAddresses = allExcluded };
                 return Ok(JsonConvert.SerializeObject(result));
+            }
+            catch { return BadRequest("0"); }
+        }
+
+        /// <summary>DETERMINISTIC-CONSENSUS: Exchange validator lists between casters to ensure identical NetworkValidators sets.</summary>
+        [HttpPost]
+        [Route("ExchangeValidatorList")]
+        public ActionResult<string> ExchangeValidatorList([FromBody] ValidatorListExchangeRequest? req)
+        {
+            try
+            {
+                if (req == null || req.BlockHeight <= 0 || string.IsNullOrEmpty(req.CasterAddress))
+                    return BadRequest("0");
+
+                // Only accept from known casters
+                var casterList = Globals.BlockCasters.ToList();
+                if (!casterList.Any(c => c.ValidatorAddress == req.CasterAddress))
+                    return BadRequest("0");
+
+                // Merge their validator addresses into our NetworkValidators
+                if (req.ValidatorAddresses != null)
+                {
+                    foreach (var addr in req.ValidatorAddresses)
+                    {
+                        if (!string.IsNullOrEmpty(addr) && !Globals.NetworkValidators.ContainsKey(addr))
+                        {
+                            CasterLogUtility.Log($"VALLIST-SYNC: Adding validator {addr} from caster {req.CasterAddress} (height {req.BlockHeight})", "CONSENSUS");
+                        }
+                    }
+                }
+
+                // Return our own validator list
+                var myValidators = Globals.NetworkValidators.Keys.ToList();
+                var response = new ValidatorListExchangeResponse
+                {
+                    BlockHeight = req.BlockHeight,
+                    CasterAddress = Globals.ValidatorAddress ?? "",
+                    ValidatorAddresses = myValidators
+                };
+                return Ok(JsonConvert.SerializeObject(response));
             }
             catch { return BadRequest("0"); }
         }

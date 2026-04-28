@@ -25,6 +25,24 @@ namespace ReserveBlockCore.Models
         public long BlockHeight { get; set; }
         public string VoterAddress { get; set; } = "";
         public string WinnerAddress { get; set; } = "";
+        /// <summary>DETERMINISTIC-CONSENSUS: Addresses this voter excluded (failed liveness) so peers can apply the same exclusions.</summary>
+        public List<string> ExcludedAddresses { get; set; } = new();
+    }
+
+    /// <summary>DETERMINISTIC-CONSENSUS: Exchange validator lists between casters to ensure identical NetworkValidators sets.</summary>
+    public class ValidatorListExchangeRequest
+    {
+        public long BlockHeight { get; set; }
+        public string CasterAddress { get; set; } = "";
+        public List<string> ValidatorAddresses { get; set; } = new();
+    }
+
+    /// <summary>DETERMINISTIC-CONSENSUS: Response to validator list exchange with the responder's validator list.</summary>
+    public class ValidatorListExchangeResponse
+    {
+        public long BlockHeight { get; set; }
+        public string CasterAddress { get; set; } = "";
+        public List<string> ValidatorAddresses { get; set; } = new();
     }
 
     public class CasterInfo

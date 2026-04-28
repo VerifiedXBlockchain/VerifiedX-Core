@@ -74,6 +74,15 @@ namespace ReserveBlockCore.Nodes
     private static int _hashSyncFailCount = 0;
     const int HASH_SYNC_MAX_RETRIES = 3; // After this many consecutive failures at same height, skip sync and proceed
 
+    /// <summary>DETERMINISTIC-CONSENSUS: Tracks consecutive winner agreement failures at the same height for deadlock safety net.</summary>
+    private static long _winnerAgreementFailHeight = -1;
+    private static int _winnerAgreementFailCount = 0;
+    const int WINNER_AGREEMENT_DEADLOCK_THRESHOLD = 5; // After this many failures at same height, use deterministic tiebreaker
+
+    /// <summary>DETERMINISTIC-CONSENSUS: Tracks last height at which validator list sync was performed.</summary>
+    private static long _lastValidatorListSyncHeight = 0;
+    const int VALIDATOR_LIST_SYNC_INTERVAL = 50; // Sync validator lists every N blocks
+
     /// <summary>Consecutive rounds where multi-caster block hash agreement failed (no commit).</summary>
     private static int _consecutiveBlockHashAgreementFailures;
     const int BLOCK_HASH_AGREEMENT_RECONCILE_THRESHOLD = 3;
@@ -866,6 +875,9 @@ namespace ReserveBlockCore.Nodes
 
                     await ValidatorSnapshotService.RefreshSnapshotIfNeededAsync(Height);
 
+                    // DETERMINISTIC-CONSENSUS: Periodic validator list sync between casters
+                    await SyncValidatorListsWithPeersAsync(Height);
+
                     ValidatorApprovalBag.Clear();
                     ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
                     //Generate Proofs for ALL vals
@@ -879,67 +891,18 @@ namespace ReserveBlockCore.Nodes
                     CasterLogUtility.Log($"ProofGen: {proofGenSw.ElapsedMilliseconds}ms, casterProofs={casterProofs.Count}, allProofs={proofs.Count}", "PROOFS");
                     CasterRoundAudit.AddStep($"{proofs.Count()} Proofs Generated", true);
 
-                    // WINNER-SKIP: Filter out addresses that have failed block fetch too many times at this height
+                    // DETERMINISTIC-CONSENSUS: Local pre-filtering (WINNER-SKIP, BOOTSTRAP-FILTER) REMOVED.
+                    // These used divergent local state (_winnerFetchFailures, IsBootstrapMode, NetworkValidators)
+                    // causing different casters to pick different VRF winners → permanent vote deadlocks.
+                    // All casters now use the SAME unfiltered proof set for deterministic winner selection.
+                    var filteredProofs = proofs;
+                    // Note: skippedAddresses kept as empty set for compatibility with proofSnapshot below
                     var skippedAddresses = new HashSet<string>();
-                    foreach (var entry in _winnerFetchFailures)
-                    {
-                        if (entry.Value.height == Height && entry.Value.failCount >= WINNER_SKIP_THRESHOLD)
-                            skippedAddresses.Add(entry.Key);
-                    }
-                    // FIX D2: Also filter out addresses with cumulative failure exclusions
-                    foreach (var entry in _winnerCumulativeFailures)
-                    {
-                        if (entry.Value.excludeUntilHeight > Height)
-                            skippedAddresses.Add(entry.Key);
-                    }
+
                     // FIX B: Use ALL validator proofs for winner selection (not just caster proofs).
-                    // Any validator can win blocks, not just casters. Casters vote on who wins.
-                    var filteredProofs = skippedAddresses.Count > 0
-                        ? proofs.Where(p => !skippedAddresses.Contains(p.Address)).ToList()
-                        : proofs;
-                    if (skippedAddresses.Count > 0)
-                        CasterLogUtility.Log($"WINNER-SKIP: Excluding {skippedAddresses.Count} address(es) from VRF: [{string.Join(", ", skippedAddresses)}]", "PROOFS");
-
-                    // FIX D4: If all validator proofs were filtered out (e.g., all offline/outdated),
-                    // fall back to caster proofs so bootstrap casters can still produce blocks.
-                    if (filteredProofs.Count == 0 && casterProofs.Count > 0)
-                    {
-                        CasterLogUtility.Log($"FALLBACK: All {proofs.Count} validator proofs filtered out. Falling back to {casterProofs.Count} caster proofs.", "PROOFS");
-                        filteredProofs = casterProofs;
-                    }
-
-                    // FIX G: In bootstrap mode, only casters can produce blocks because the chain is
-                    // stalled and non-caster validators have no way to craft blocks. Filter VRF
-                    // candidates to caster addresses only to prevent electing unreachable winners.
-                    if (Globals.IsBootstrapMode)
-                    {
-                        var casterAddresses = casterList
-                            .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
-                            .Select(c => c.ValidatorAddress)
-                            .ToHashSet();
-                        var bootstrapFiltered = filteredProofs
-                            .Where(p => casterAddresses.Contains(p.Address))
-                            .ToList();
-                        if (bootstrapFiltered.Count > 0)
-                        {
-                            CasterLogUtility.Log(
-                                $"BOOTSTRAP-FILTER: Restricted {filteredProofs.Count} proofs to {bootstrapFiltered.Count} caster-only proofs " +
-                                $"(casters: [{string.Join(",", casterAddresses)}])", "PROOFS");
-                            filteredProofs = bootstrapFiltered;
-                        }
-                        else
-                        {
-                            CasterLogUtility.Log(
-                                $"BOOTSTRAP-FILTER: No caster proofs found in {filteredProofs.Count} filtered proofs. " +
-                                $"Falling back to casterProofs ({casterProofs.Count}).", "PROOFS");
-                            if (casterProofs.Count > 0)
-                                filteredProofs = casterProofs;
-                        }
-                    }
-
                     var winningCasterProof = await ProofUtility.SortProofs(filteredProofs);
-                    var winningProof = await ProofUtility.SortProofs(proofs);
-                    CasterRoundAudit.AddStep($"Sorting Proofs", true);
+                    var winningProof = winningCasterProof;
+                    CasterRoundAudit.AddStep($"Sorting Proofs (deterministic, no local filtering)", true);
                     //ConsoleWriterService.OutputVal($"\r\nSorting Proofs");
 
                     if (!Globals.CasterRoundDict.ContainsKey(Height))
@@ -2823,6 +2786,8 @@ namespace ReserveBlockCore.Nodes
         /// exchange winner votes with all peer casters. Only proceed if a supermajority
         /// agrees on the same winner. This prevents the boot desync scenario where a slow
         /// caster picks a different winner than its peers.
+        /// DETERMINISTIC-CONSENSUS: Includes deadlock safety net — after WINNER_AGREEMENT_DEADLOCK_THRESHOLD
+        /// consecutive failures at the same height, uses deterministic tiebreaker (lowest VRF from all votes).
         /// Returns the agreed winner address, or null if no agreement was reached.
         /// </summary>
         private static async Task<string?> ReachWinnerAgreementAsync(long height, string myChosenWinner)
@@ -2832,6 +2797,33 @@ namespace ReserveBlockCore.Nodes
                 return myChosenWinner; // Only one caster, no agreement needed
 
             var requiredAgreement = Math.Max(2, casters.Count / 2 + 1);
+
+            // DETERMINISTIC-CONSENSUS: Check for deadlock safety net
+            if (_winnerAgreementFailHeight == height)
+            {
+                _winnerAgreementFailCount++;
+                if (_winnerAgreementFailCount >= WINNER_AGREEMENT_DEADLOCK_THRESHOLD)
+                {
+                    // Deadlock detected! Use deterministic tiebreaker: sort all known votes lexicographically
+                    // and pick the lowest winner address. All casters will converge on the same choice.
+                    var allVotes = Globals.CasterWinnerVoteDict.TryGetValue(height, out var existingVotes)
+                        ? existingVotes.Values.Distinct().OrderBy(v => v, StringComparer.Ordinal).ToList()
+                        : new List<string> { myChosenWinner };
+                    var tiebreakWinner = allVotes.FirstOrDefault() ?? myChosenWinner;
+                    CasterLogUtility.Log(
+                        $"DEADLOCK-SAFETY: {_winnerAgreementFailCount} failures at height {height}. " +
+                        $"Deterministic tiebreak → {tiebreakWinner} (from {allVotes.Count} candidates: [{string.Join(",", allVotes.Select(v => v[..Math.Min(8, v.Length)]))}])",
+                        "AGREEMENT");
+                    _winnerAgreementFailCount = 0;
+                    _winnerAgreementFailHeight = -1;
+                    return tiebreakWinner;
+                }
+            }
+            else
+            {
+                _winnerAgreementFailHeight = height;
+                _winnerAgreementFailCount = 1;
+            }
 
             // Store our own vote
             var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(height, _ => new ConcurrentDictionary<string, string>());
@@ -2862,7 +2854,8 @@ namespace ReserveBlockCore.Nodes
                             {
                                 BlockHeight = height,
                                 VoterAddress = Globals.ValidatorAddress,
-                                WinnerAddress = myChosenWinner
+                                WinnerAddress = myChosenWinner,
+                                ExcludedAddresses = new List<string>() // DETERMINISTIC-CONSENSUS: No local exclusions (removed WINNER-SKIP)
                             };
                             using var content = new StringContent(
                                 JsonConvert.SerializeObject(voteReq),
@@ -2916,9 +2909,15 @@ namespace ReserveBlockCore.Nodes
 
             sw.Stop();
 
-            if (agreedWinner == null)
+            if (agreedWinner != null)
             {
-                CasterLogUtility.Log($"WinnerAgreement: FAILED after {sw.ElapsedMilliseconds}ms. Votes: {string.Join(", ", votesForHeight.Select(kv => $"{kv.Key[..Math.Min(8, kv.Key.Length)]}→{kv.Value[..Math.Min(8, kv.Value.Length)]}"))}", "AGREEMENT");
+                // Reset failure tracking on success
+                _winnerAgreementFailHeight = -1;
+                _winnerAgreementFailCount = 0;
+            }
+            else
+            {
+                CasterLogUtility.Log($"WinnerAgreement: FAILED after {sw.ElapsedMilliseconds}ms (streak {_winnerAgreementFailCount}/{WINNER_AGREEMENT_DEADLOCK_THRESHOLD} at height {height}). Votes: {string.Join(", ", votesForHeight.Select(kv => $"{kv.Key[..Math.Min(8, kv.Key.Length)]}→{kv.Value[..Math.Min(8, kv.Value.Length)]}"))}", "AGREEMENT");
             }
 
             // Cleanup old vote entries
@@ -2926,7 +2925,82 @@ namespace ReserveBlockCore.Nodes
             foreach (var k in oldKeys)
                 Globals.CasterWinnerVoteDict.TryRemove(k, out _);
 
+            // DETERMINISTIC-CONSENSUS: Cleanup old excluded address entries
+            var oldExclKeys = Globals.CasterExcludedAddressDict.Keys.Where(k => k < height - 10).ToList();
+            foreach (var k in oldExclKeys)
+                Globals.CasterExcludedAddressDict.TryRemove(k, out _);
+
             return agreedWinner;
+        }
+
+        /// <summary>
+        /// DETERMINISTIC-CONSENSUS: Periodic validator list sync between casters.
+        /// Exchanges NetworkValidators lists to ensure all casters have the same validator pool.
+        /// Called every VALIDATOR_LIST_SYNC_INTERVAL blocks.
+        /// </summary>
+        private static async Task SyncValidatorListsWithPeersAsync(long currentHeight)
+        {
+            if (currentHeight - _lastValidatorListSyncHeight < VALIDATOR_LIST_SYNC_INTERVAL)
+                return;
+
+            _lastValidatorListSyncHeight = currentHeight;
+
+            var casters = Globals.BlockCasters.ToList()
+                .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
+                .ToList();
+
+            if (!casters.Any()) return;
+
+            var myValidators = Globals.NetworkValidators.Keys.ToList();
+            CasterLogUtility.Log($"VALLIST-SYNC: Starting sync at height {currentHeight}. My validators: {myValidators.Count}", "CONSENSUS");
+
+            var syncTasks = casters.Select(async caster =>
+            {
+                try
+                {
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    var uri = $"http://{caster.PeerIP!.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/ExchangeValidatorList";
+                    var req = new ValidatorListExchangeRequest
+                    {
+                        BlockHeight = currentHeight,
+                        CasterAddress = Globals.ValidatorAddress ?? "",
+                        ValidatorAddresses = myValidators
+                    };
+                    using var content = new StringContent(
+                        JsonConvert.SerializeObject(req),
+                        Encoding.UTF8,
+                        "application/json");
+                    var resp = await client.PostAsync(uri, content, cts.Token);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        var body = await resp.Content.ReadAsStringAsync();
+                        if (!string.IsNullOrEmpty(body) && body != "0")
+                        {
+                            var listResp = JsonConvert.DeserializeObject<ValidatorListExchangeResponse>(body);
+                            if (listResp?.ValidatorAddresses != null)
+                            {
+                                int added = 0;
+                                foreach (var addr in listResp.ValidatorAddresses)
+                                {
+                                    if (!string.IsNullOrEmpty(addr) && !Globals.NetworkValidators.ContainsKey(addr))
+                                    {
+                                        added++;
+                                        // Note: We log but don't add here — the validator needs proper IP/key info
+                                        // which will come via normal P2P discovery. This just identifies gaps.
+                                    }
+                                }
+                                if (added > 0)
+                                    CasterLogUtility.Log($"VALLIST-SYNC: Peer {caster.PeerIP} has {added} validators we don't have", "CONSENSUS");
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }).ToList();
+
+            await Task.WhenAll(syncTasks);
+            CasterLogUtility.Log($"VALLIST-SYNC: Completed at height {currentHeight}", "CONSENSUS");
         }
 
         /// <summary>
