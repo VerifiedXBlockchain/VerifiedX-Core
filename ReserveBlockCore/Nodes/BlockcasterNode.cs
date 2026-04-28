@@ -108,7 +108,13 @@ namespace ReserveBlockCore.Nodes
 
     /// <summary>DETERMINISTIC-CONSENSUS: Tracks last height at which validator list sync was performed.</summary>
     private static long _lastValidatorListSyncHeight = 0;
-    const int VALIDATOR_LIST_SYNC_INTERVAL = 50; // Sync validator lists every N blocks
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #4): Tightened from 50 → 10 blocks. With 30+ validators we can't afford to
+    /// wait ~5 minutes for two casters' NetworkValidators sets to converge. The sync is cheap
+    /// (one tiny POST per peer) so amortized cost is negligible at 10-block cadence.
+    /// </summary>
+    const int VALIDATOR_LIST_SYNC_INTERVAL = 10;
+
 
     /// <summary>Consecutive rounds where multi-caster block hash agreement failed (no commit).</summary>
     private static int _consecutiveBlockHashAgreementFailures;
@@ -1115,6 +1121,50 @@ namespace ReserveBlockCore.Nodes
                         var proofSnapshot = Globals.Proofs
                             .Where(x => x.BlockHeight == Height && !skippedAddresses.Contains(x.Address))
                             .ToList();
+
+                        // CONSENSUS-V2 (Fix #5): Proof-set commitment exchange.
+                        // After proofs converge across casters, broadcast a hash over the sorted
+                        // proof-address list and wait briefly for supermajority agreement on the
+                        // commitment hash. If reached, restrict the winner-selection input to the
+                        // agreed address set so all casters sort and pick from the SAME proofs —
+                        // even if their local proof bags differ at the margins (a major source of
+                        // proof-set divergence under load).  No agreement (timeout / minority) →
+                        // we keep the local snapshot unchanged so the existing fallbacks
+                        // (ReachWinnerAgreementAsync + size-tiered tiebreak) still drive convergence.
+                        try
+                        {
+                            var localCommit = BuildLocalProofSetCommitment(Height, proofSnapshot);
+                            var agreedAddresses = await ReachProofSetAgreementAsync(Height, localCommit);
+                            if (agreedAddresses != null && agreedAddresses.Count > 0)
+                            {
+                                var agreedSet = new HashSet<string>(agreedAddresses, StringComparer.Ordinal);
+                                var beforeCount = proofSnapshot.Count;
+                                var filtered = proofSnapshot
+                                    .Where(p => p != null && p.Address != null && agreedSet.Contains(p.Address))
+                                    .ToList();
+                                // Only adopt the filtered set if it preserves enough signal to pick a winner;
+                                // an unexpected empty intersection means our local proof bag has diverged badly
+                                // from the agreed set — better to fall back to the local snapshot than to crash.
+                                if (filtered.Count > 0)
+                                {
+                                    proofSnapshot = filtered;
+                                    CasterLogUtility.Log(
+                                        $"[CONSENSUS-V2] ProofSetAgreement applied: filtered {beforeCount}→{proofSnapshot.Count} (agreed set size={agreedSet.Count})",
+                                        "AGREEMENT");
+                                }
+                                else
+                                {
+                                    CasterLogUtility.Log(
+                                        $"[CONSENSUS-V2] ProofSetAgreement: agreed set ({agreedSet.Count}) had no overlap with local proofs ({beforeCount}) — keeping local snapshot",
+                                        "AGREEMENT");
+                                }
+                            }
+                        }
+                        catch (Exception psEx)
+                        {
+                            // Never let agreement crash the round — log and proceed with the local snapshot.
+                            CasterLogUtility.Log($"[CONSENSUS-V2] ProofSetAgreement EXCEPTION: {psEx.Message} — falling back to local snapshot", "AGREEMENT");
+                        }
 
                         CasterRoundAudit.AddStep($"Total Proofs Collection: {proofSnapshot.Count()}", true);
 
@@ -2963,14 +3013,200 @@ namespace ReserveBlockCore.Nodes
             return agreedWinner;
         }
 
+        #region CONSENSUS-V2 Fix #5 — Proof-set commitment exchange
+
+        /// <summary>How long to wait for proof-set commitment supermajority before falling through.</summary>
+        const int PROOF_SET_AGREEMENT_TIMEOUT_MS = 3000;
+
         /// <summary>
-        /// DETERMINISTIC-CONSENSUS: Periodic validator list sync between casters.
-        /// Exchanges NetworkValidators lists to ensure all casters have the same validator pool.
-        /// Called every VALIDATOR_LIST_SYNC_INTERVAL blocks.
+        /// CONSENSUS-V2 (Fix #5): Computes the canonical commitment hash over a sorted list
+        /// of proof addresses. Lower-case hex SHA-256 of <c>"|".Join(addresses)</c>.
+        /// Public+static so the controller endpoint and tests can re-compute it.
         /// </summary>
-        private static async Task SyncValidatorListsWithPeersAsync(long currentHeight)
+        public static string ComputeProofSetCommitmentHash(IEnumerable<string> sortedAddresses)
         {
-            if (currentHeight - _lastValidatorListSyncHeight < VALIDATOR_LIST_SYNC_INTERVAL)
+            var joined = string.Join("|", sortedAddresses ?? Enumerable.Empty<string>());
+            using var sha = SHA256.Create();
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(joined));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #5): Builds a <see cref="ProofSetCommitment"/> from this caster's
+        /// local proof set for the given height. Addresses are de-duplicated and sorted with
+        /// <see cref="StringComparer.Ordinal"/> so every caster computes the same commitment
+        /// when their proof inputs match.
+        /// </summary>
+        public static Models.ProofSetCommitment BuildLocalProofSetCommitment(long height, IEnumerable<Proof> proofs)
+        {
+            var sortedAddresses = (proofs ?? Enumerable.Empty<Proof>())
+                .Where(p => p != null && p.BlockHeight == height && !string.IsNullOrEmpty(p.Address))
+                .Select(p => p.Address!)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(a => a, StringComparer.Ordinal)
+                .ToList();
+            return new Models.ProofSetCommitment
+            {
+                BlockHeight = height,
+                CasterAddress = Globals.ValidatorAddress ?? "",
+                ProofAddressesSorted = sortedAddresses,
+                CommitmentHash = ComputeProofSetCommitmentHash(sortedAddresses),
+            };
+        }
+
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #5): Reach supermajority agreement on the proof-set hash for a
+        /// given block height. Each caster broadcasts its <see cref="ProofSetCommitment"/>;
+        /// receivers tally by <see cref="ProofSetCommitment.CommitmentHash"/>. If a single
+        /// hash group has supermajority count, we adopt that group's sorted address list as
+        /// the canonical proof-address set. If no supermajority emerges before the timeout,
+        /// returns <see langword="null"/> and the caller falls back to local-snapshot semantics
+        /// (preserves current behavior so a Phase-2 regression cannot deadlock production).
+        /// </summary>
+        public static async Task<List<string>?> ReachProofSetAgreementAsync(
+            long height,
+            Models.ProofSetCommitment myCommitment)
+        {
+            if (myCommitment == null)
+                return null;
+
+            var casters = Globals.BlockCasters.ToList();
+            if (casters.Count <= 1)
+                return myCommitment.ProofAddressesSorted; // single caster — trivially in agreement
+
+            var requiredAgreement = Math.Max(2, casters.Count / 2 + 1);
+
+            var commitsForHeight = Globals.CasterProofSetCommitDict
+                .GetOrAdd(height, _ => new ConcurrentDictionary<string, Models.ProofSetCommitment>());
+            commitsForHeight[Globals.ValidatorAddress ?? ""] = myCommitment;
+
+            var sw = Stopwatch.StartNew();
+            // Cache hash → sorted address list so we don't have to track group-membership
+            // separately when picking the winning hash.
+            var hashToAddresses = new Dictionary<string, List<string>>(StringComparer.Ordinal)
+            {
+                [myCommitment.CommitmentHash] = myCommitment.ProofAddressesSorted ?? new List<string>()
+            };
+
+            string? winningHash = null;
+            int winningCount = 0;
+
+            while (sw.ElapsedMilliseconds < PROOF_SET_AGREEMENT_TIMEOUT_MS)
+            {
+                var peerTasks = casters
+                    .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
+                    .Select(async caster =>
+                    {
+                        try
+                        {
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                            var uri = $"http://{caster.PeerIP!.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/ExchangeProofSet";
+                            using var content = new StringContent(
+                                JsonConvert.SerializeObject(myCommitment),
+                                Encoding.UTF8,
+                                "application/json");
+                            var resp = await client.PostAsync(uri, content, cts.Token).ConfigureAwait(false);
+                            if (!resp.IsSuccessStatusCode) return;
+                            var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            if (string.IsNullOrEmpty(body) || body == "0") return;
+                            var psResp = JsonConvert.DeserializeObject<Models.ProofSetExchangeResponse>(body);
+                            if (psResp?.Commitments == null) return;
+                            foreach (var kv in psResp.Commitments)
+                            {
+                                if (kv.Value == null) continue;
+                                if (kv.Value.BlockHeight != height) continue;
+                                if (string.IsNullOrEmpty(kv.Value.CasterAddress)) continue;
+                                // Re-verify the commitment hash so a bad peer can't poison our tally.
+                                var recomputed = ComputeProofSetCommitmentHash(kv.Value.ProofAddressesSorted ?? new List<string>());
+                                if (!string.Equals(recomputed, kv.Value.CommitmentHash, StringComparison.Ordinal))
+                                    continue;
+                                commitsForHeight[kv.Value.CasterAddress] = kv.Value;
+                            }
+                        }
+                        catch { /* best-effort */ }
+                    })
+                    .ToList();
+
+                await Task.WhenAll(peerTasks).ConfigureAwait(false);
+
+                hashToAddresses[myCommitment.CommitmentHash] = myCommitment.ProofAddressesSorted ?? new List<string>();
+                foreach (var c in commitsForHeight.Values)
+                {
+                    if (c == null || string.IsNullOrEmpty(c.CommitmentHash)) continue;
+                    if (!hashToAddresses.ContainsKey(c.CommitmentHash))
+                        hashToAddresses[c.CommitmentHash] = c.ProofAddressesSorted ?? new List<string>();
+                }
+
+                var byHash = commitsForHeight.Values
+                    .Where(c => c != null && !string.IsNullOrEmpty(c.CommitmentHash))
+                    .GroupBy(c => c.CommitmentHash, StringComparer.Ordinal)
+                    .OrderByDescending(g => g.Count())
+                    .ToList();
+
+                if (byHash.Count > 0)
+                {
+                    var best = byHash.First();
+                    winningHash = best.Key;
+                    winningCount = best.Count();
+
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] ProofSetAgreement: votes={commitsForHeight.Count}/{casters.Count} bestHash={winningHash[..Math.Min(10, winningHash.Length)]}… count={winningCount} need={requiredAgreement}",
+                        "AGREEMENT");
+
+                    if (winningCount >= requiredAgreement)
+                        break;
+                }
+
+                await Task.Delay(250).ConfigureAwait(false);
+            }
+
+            // Cleanup older heights regardless of outcome.
+            var oldKeys = Globals.CasterProofSetCommitDict.Keys.Where(k => k < height - 10).ToList();
+            foreach (var k in oldKeys)
+                Globals.CasterProofSetCommitDict.TryRemove(k, out _);
+
+            if (winningHash == null || winningCount < requiredAgreement)
+            {
+                CasterLogUtility.Log(
+                    $"[CONSENSUS-V2] ProofSetAgreement: TIMEOUT after {sw.ElapsedMilliseconds}ms — no supermajority. " +
+                    $"Falling back to local snapshot (votes={commitsForHeight.Count}, need={requiredAgreement}).",
+                    "AGREEMENT");
+                return null;
+            }
+
+            if (hashToAddresses.TryGetValue(winningHash, out var winningAddresses))
+            {
+                CasterLogUtility.Log(
+                    $"[CONSENSUS-V2] ProofSetAgreement: AGREED hash={winningHash[..Math.Min(10, winningHash.Length)]}… size={winningAddresses.Count} ({winningCount}/{casters.Count})",
+                    "AGREEMENT");
+                return winningAddresses;
+            }
+            return null;
+        }
+
+        #endregion
+
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #4): Periodic validator list sync between casters.
+        /// Exchanges full <see cref="ValidatorListEntry"/> records (Address + IP + PublicKey + FirstSeenAtHeight + LastSeen)
+        /// so peers can actually materialize a fully-formed <see cref="NetworkValidator"/> for any
+        /// missing entry — not just identify gaps. Each merged entry is liveness-gated and version-checked
+        /// before joining <see cref="Globals.NetworkValidators"/> as fully trusted.
+        /// Public so the post-promotion path can trigger an out-of-band sync immediately after a successful
+        /// caster promotion (Fix #4 also tightens cadence from 50→10 blocks for steady-state convergence).
+        /// </summary>
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #4): Maximum number of new validator entries this node will merge
+        /// in a single sync round across ALL peer responses. Prevents an HTTP storm of liveness
+        /// checks if a freshly-joined caster receives a 100-validator list from every peer at
+        /// once. Excess entries are silently deferred to the next 10-block sync tick.
+        /// </summary>
+        const int VALIDATOR_LIST_SYNC_MERGE_CAP = 25;
+
+        public static async Task SyncValidatorListsWithPeersAsync(long currentHeight, bool force = false)
+        {
+            if (!force && currentHeight - _lastValidatorListSyncHeight < VALIDATOR_LIST_SYNC_INTERVAL)
                 return;
 
             _lastValidatorListSyncHeight = currentHeight;
@@ -2981,8 +3217,30 @@ namespace ReserveBlockCore.Nodes
 
             if (!casters.Any()) return;
 
-            var myValidators = Globals.NetworkValidators.Keys.ToList();
-            CasterLogUtility.Log($"VALLIST-SYNC: Starting sync at height {currentHeight}. My validators: {myValidators.Count}", "CONSENSUS");
+            // Build full per-validator entries from our local registry — only IsFullyTrusted entries
+            // with a non-empty IP, since those are the only ones a peer can usefully merge.
+            var myEntries = Globals.NetworkValidators.Values
+                .Where(v => v != null
+                            && v.IsFullyTrusted
+                            && !string.IsNullOrEmpty(v.Address)
+                            && !string.IsNullOrEmpty(v.IPAddress))
+                .Select(v => new ValidatorListEntry
+                {
+                    Address = v.Address,
+                    IPAddress = v.IPAddress,
+                    PublicKey = v.PublicKey ?? "",
+                    FirstSeenAtHeight = v.FirstSeenAtHeight,
+                    LastSeen = v.LastSeen
+                })
+                .ToList();
+
+            CasterLogUtility.Log(
+                $"VALLIST-SYNC: Starting sync at height {currentHeight} (force={force}). My trusted validators: {myEntries.Count} / total {Globals.NetworkValidators.Count}",
+                "CONSENSUS");
+
+            int totalMerged = 0;
+            int totalRejected = 0;
+            int totalDeferred = 0;
 
             var syncTasks = casters.Select(async caster =>
             {
@@ -2995,43 +3253,112 @@ namespace ReserveBlockCore.Nodes
                     {
                         BlockHeight = currentHeight,
                         CasterAddress = Globals.ValidatorAddress ?? "",
-                        ValidatorAddresses = myValidators
+                        Validators = myEntries
                     };
                     using var content = new StringContent(
                         JsonConvert.SerializeObject(req),
                         Encoding.UTF8,
                         "application/json");
                     var resp = await client.PostAsync(uri, content, cts.Token);
-                    if (resp.IsSuccessStatusCode)
+                    if (!resp.IsSuccessStatusCode)
+                        return;
+
+                    var body = await resp.Content.ReadAsStringAsync();
+                    if (string.IsNullOrEmpty(body) || body == "0")
+                        return;
+
+                    var listResp = JsonConvert.DeserializeObject<ValidatorListExchangeResponse>(body);
+                    if (listResp?.Validators == null || listResp.Validators.Count == 0)
+                        return;
+
+                    int peerMerged = 0;
+                    int peerRejected = 0;
+                    int peerDeferred = 0;
+                    foreach (var entry in listResp.Validators)
                     {
-                        var body = await resp.Content.ReadAsStringAsync();
-                        if (!string.IsNullOrEmpty(body) && body != "0")
+                        if (entry == null
+                            || string.IsNullOrEmpty(entry.Address)
+                            || string.IsNullOrEmpty(entry.IPAddress))
+                            continue;
+
+                        // Skip self and anything already known.
+                        if (entry.Address == Globals.ValidatorAddress)
+                            continue;
+                        if (Globals.NetworkValidators.ContainsKey(entry.Address))
+                            continue;
+
+                        // CONSENSUS-V2 (Fix #4): Per-round merge cap. Once we've merged
+                        // VALIDATOR_LIST_SYNC_MERGE_CAP entries this round, defer the rest to the next
+                        // sync tick. We still drain the response (no early break) so the HTTP
+                        // socket closes cleanly and we get an accurate "deferred" count for logs.
+                        if (Volatile.Read(ref totalMerged) >= VALIDATOR_LIST_SYNC_MERGE_CAP)
                         {
-                            var listResp = JsonConvert.DeserializeObject<ValidatorListExchangeResponse>(body);
-                            if (listResp?.ValidatorAddresses != null)
-                            {
-                                int added = 0;
-                                foreach (var addr in listResp.ValidatorAddresses)
-                                {
-                                    if (!string.IsNullOrEmpty(addr) && !Globals.NetworkValidators.ContainsKey(addr))
-                                    {
-                                        added++;
-                                        // Note: We log but don't add here — the validator needs proper IP/key info
-                                        // which will come via normal P2P discovery. This just identifies gaps.
-                                    }
-                                }
-                                if (added > 0)
-                                    CasterLogUtility.Log($"VALLIST-SYNC: Peer {caster.PeerIP} has {added} validators we don't have", "CONSENSUS");
-                            }
+                            Interlocked.Increment(ref peerDeferred);
+                            continue;
+                        }
+
+                        // Liveness + version gate before merging — never trust a peer's word alone.
+                        bool live;
+                        try { live = await NetworkValidator.CheckValidatorLiveness(entry.IPAddress); }
+                        catch { live = false; }
+
+                        if (!live)
+                        {
+                            Interlocked.Increment(ref peerRejected);
+                            continue;
+                        }
+
+                        // Re-check the cap AFTER the (slow) liveness call — another peer task could
+                        // have crossed the threshold while we were awaiting.
+                        if (Volatile.Read(ref totalMerged) >= VALIDATOR_LIST_SYNC_MERGE_CAP)
+                        {
+                            Interlocked.Increment(ref peerDeferred);
+                            continue;
+                        }
+
+                        var nv = new NetworkValidator
+                        {
+                            Address = entry.Address,
+                            IPAddress = entry.IPAddress,
+                            PublicKey = entry.PublicKey ?? "",
+                            IsFullyTrusted = true,
+                            LastSeen = TimeUtil.GetTime(),
+                            FirstSeenAtHeight = entry.FirstSeenAtHeight > 0 ? entry.FirstSeenAtHeight : currentHeight,
+                            CheckFailCount = 0,
+                        };
+                        if (Globals.NetworkValidators.TryAdd(entry.Address, nv))
+                        {
+                            Interlocked.Increment(ref peerMerged);
+                            Interlocked.Increment(ref totalMerged);
                         }
                     }
+
+                    if (peerMerged > 0 || peerRejected > 0 || peerDeferred > 0)
+                        CasterLogUtility.Log(
+                            $"VALLIST-SYNC: Peer {caster.PeerIP} → merged={peerMerged} rejected={peerRejected} deferred={peerDeferred} (peer reported {listResp.Validators.Count} entries)",
+                            "CONSENSUS");
+
+                    Interlocked.Add(ref totalRejected, peerRejected);
+                    Interlocked.Add(ref totalDeferred, peerDeferred);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    CasterLogUtility.Log($"VALLIST-SYNC: Peer {caster.PeerIP} ERROR: {ex.Message}", "CONSENSUS");
+                }
             }).ToList();
 
             await Task.WhenAll(syncTasks);
-            CasterLogUtility.Log($"VALLIST-SYNC: Completed at height {currentHeight}", "CONSENSUS");
+
+            if (totalDeferred > 0)
+                CasterLogUtility.Log(
+                    $"[CONSENSUS-V2] VALLIST-SYNC capped at {VALIDATOR_LIST_SYNC_MERGE_CAP}/{totalMerged + totalDeferred} merged this round — {totalDeferred} entries deferred to next round",
+                    "CONSENSUS");
+
+            CasterLogUtility.Log(
+                $"VALLIST-SYNC: SUMMARY at height {currentHeight} → casters={casters.Count} merged={totalMerged} rejected={totalRejected} deferred={totalDeferred} myCount(after)={Globals.NetworkValidators.Count}",
+                "CONSENSUS");
         }
+
 
         /// <summary>
         /// Publishes the supermajority-agreed block hash as soon as it is known so <see cref="ReceiveConfirmedBlock"/>

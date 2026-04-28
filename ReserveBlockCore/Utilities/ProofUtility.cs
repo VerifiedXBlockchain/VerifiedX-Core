@@ -638,14 +638,30 @@ namespace ReserveBlockCore.Utilities
                 ).ToList();
 
                 // Sort deterministically by VRF number with tiebreaking
-                return validProofs
-                    .OrderBy(x => x.VRFNumber)  // Closest to zero wins
-                    .ThenBy(x => x.ProofHash)   // Tiebreak by proof hash
-                    .ThenBy(x => x.Address)     // Final tiebreak by address
-                    .FirstOrDefault();
+                return SelectWinnerByVrfOrdering(validProofs);
 
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Deterministic VRF-based winner selection. Pure ordering function — does NOT
+        /// re-verify proof signatures or filter by height/prev-hash. Callers (notably
+        /// <see cref="SortProofs"/>) are responsible for pre-filtering. Exposed so unit
+        /// tests can exercise the tiebreak logic without needing to mint cryptographically
+        /// valid <see cref="Proof.ProofHash"/> values for synthetic test fixtures.
+        ///
+        /// Order: lowest VRFNumber, then lowest ProofHash (ordinal), then lowest Address (ordinal).
+        /// Returns null when the input collection is empty.
+        /// </summary>
+        public static Proof? SelectWinnerByVrfOrdering(IEnumerable<Proof> validProofs)
+        {
+            if (validProofs == null) return null;
+            return validProofs
+                .OrderBy(x => x.VRFNumber)                                  // Closest to zero wins
+                .ThenBy(x => x.ProofHash, StringComparer.Ordinal)           // Tiebreak by proof hash
+                .ThenBy(x => x.Address, StringComparer.Ordinal)             // Final tiebreak by address
+                .FirstOrDefault();
         }
 
         public static void AddFailedProducer(string address)

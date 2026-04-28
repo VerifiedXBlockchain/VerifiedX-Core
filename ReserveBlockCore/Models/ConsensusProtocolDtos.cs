@@ -29,21 +29,46 @@ namespace ReserveBlockCore.Models
         public List<string> ExcludedAddresses { get; set; } = new();
     }
 
-    /// <summary>DETERMINISTIC-CONSENSUS: Exchange validator lists between casters to ensure identical NetworkValidators sets.</summary>
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #4): Full per-validator entry exchanged between casters during the
+    /// periodic validator-list sync. Carries enough information for the receiver to materialize
+    /// a fully-formed <see cref="NetworkValidator"/> entry without waiting for the much slower
+    /// P2P gossip path. Receivers MUST still gate each entry through
+    /// <see cref="NetworkValidator.CheckValidatorLiveness"/> before merging.
+    /// </summary>
+    public class ValidatorListEntry
+    {
+        public string Address { get; set; } = "";
+        public string IPAddress { get; set; } = "";
+        public string PublicKey { get; set; } = "";
+        public long FirstSeenAtHeight { get; set; }
+        public long LastSeen { get; set; }
+    }
+
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #4): Exchange validator lists between casters with full entries (Address +
+    /// IP + PublicKey + FirstSeenAtHeight + LastSeen) so the receiver can actually merge missing
+    /// validators into its own NetworkValidators dictionary.
+    /// BREAKING: replaces the prior <c>List&lt;string&gt; ValidatorAddresses</c> shape — testnet only.
+    /// </summary>
     public class ValidatorListExchangeRequest
     {
         public long BlockHeight { get; set; }
         public string CasterAddress { get; set; } = "";
-        public List<string> ValidatorAddresses { get; set; } = new();
+        public List<ValidatorListEntry> Validators { get; set; } = new();
     }
 
-    /// <summary>DETERMINISTIC-CONSENSUS: Response to validator list exchange with the responder's validator list.</summary>
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #4): Response to validator list exchange. Carries the responder's full
+    /// validator entries so the requesting caster can fill gaps in a single round-trip.
+    /// </summary>
     public class ValidatorListExchangeResponse
     {
         public long BlockHeight { get; set; }
         public string CasterAddress { get; set; } = "";
-        public List<string> ValidatorAddresses { get; set; } = new();
+        public List<ValidatorListEntry> Validators { get; set; } = new();
     }
+
 
     public class CasterInfo
     {
@@ -117,6 +142,38 @@ namespace ReserveBlockCore.Models
         /// <summary>Signature of PROMOTE-ANNOUNCE|{PromotedAddress}|{PromotedIP}|{BlockHeight}|{PromoterAddress}.</summary>
         public string PromoterSignature { get; set; } = "";
     }
+
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #5): Compact commitment to the local caster's view of the proof
+    /// set at a specific block height. We exchange only the sorted address list and a hash
+    /// over it — never the proof bodies themselves — so casters can converge on a common
+    /// VRF input set in one tiny round-trip per peer. Receivers group commitments by
+    /// <see cref="CommitmentHash"/>; if the largest group has supermajority size, every
+    /// caster in that group is guaranteed to sort the SAME address set deterministically
+    /// (regardless of how it locally received those proofs), eliminating a major class of
+    /// proof-set divergence at scale.
+    /// </summary>
+    public class ProofSetCommitment
+    {
+        public long BlockHeight { get; set; }
+        public string CasterAddress { get; set; } = "";
+        /// <summary>Distinct proof addresses for this height, ordered by ordinal ascending.</summary>
+        public List<string> ProofAddressesSorted { get; set; } = new();
+        /// <summary>SHA256 hex of <c>"|".Join(ProofAddressesSorted)</c>. Lower-case, no separators.</summary>
+        public string CommitmentHash { get; set; } = "";
+    }
+
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #5): Response to a <see cref="ProofSetCommitment"/> POST. Carries
+    /// every commitment the responder currently holds for the requested height (keyed by
+    /// caster address). The caller merges these into its local store and re-tallies.
+    /// </summary>
+    public class ProofSetExchangeResponse
+    {
+        public long BlockHeight { get; set; }
+        public Dictionary<string, ProofSetCommitment> Commitments { get; set; } = new();
+    }
+
 
     /// <summary>Graceful caster departure; MUST be signed by the departing caster.</summary>
     public class CasterDepartureNotice

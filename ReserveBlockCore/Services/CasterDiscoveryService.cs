@@ -495,9 +495,32 @@ namespace ReserveBlockCore.Services
                         }
                     });
 
+                    // CONSENSUS-V2 (Fix #4): Force an out-of-band validator-list sync on
+                    // every existing caster immediately. Without this, the new caster knows
+                    // only itself + bootstrap peers until the next 10-block cadence tick,
+                    // and proof generation runs against a divergent NetworkValidators set.
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await BlockcasterNode.SyncValidatorListsWithPeersAsync(currentHeight, force: true)
+                                .ConfigureAwait(false);
+                            CasterLogUtility.Log(
+                                $"  post-promotion VALLIST-SYNC fired for {v.Address} at height {currentHeight}",
+                                "CasterFlow");
+                        }
+                        catch (Exception svEx)
+                        {
+                            CasterLogUtility.Log(
+                                $"  post-promotion VALLIST-SYNC FAILED for {v.Address}: {svEx.Message}",
+                                "CasterFlow");
+                        }
+                    });
+
                     CasterLogUtility.Log(
                         $"  ✓ PROMOTED val={v.Address} ip={ip}. BlockCasters.Count now {Globals.BlockCasters.Count}/{MaxCasters}",
                         "CasterFlow");
+
                     ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] Promoted {v.Address} (balance: {candidate.Balance}) to caster. Pool: {Globals.BlockCasters.Count}/{MaxCasters}");
                     promoted++;
@@ -1661,6 +1684,28 @@ namespace ReserveBlockCore.Services
                 {
                     try { await BlockcasterNode.PingCasters().ConfigureAwait(false); }
                     catch { /* best-effort */ }
+                });
+
+                // CONSENSUS-V2 (Fix #4): force-sync this peer's validator list with the rest of
+                // the caster set immediately after accepting a promotion. Without this, the
+                // newly-promoted caster shows up here but its full validator inventory only
+                // arrives on the next 10-block VALLIST-SYNC tick, leaving us blind to ~2 minutes
+                // of new validators it can already see. Capped at 25 entries per round (see
+                // BlockcasterNode.VALIDATOR_LIST_SYNC_MERGE_CAP) so this can't HTTP-storm us.
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await BlockcasterNode
+                            .SyncValidatorListsWithPeersAsync(announce.BlockHeight, force: true)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        CasterLogUtility.Log(
+                            $"[CONSENSUS-V2] HandlePromoteAnnounce post-accept VALLIST-SYNC failed: {ex.Message}",
+                            "CasterFlow");
+                    }
                 });
 
                 CasterLogUtility.Log(

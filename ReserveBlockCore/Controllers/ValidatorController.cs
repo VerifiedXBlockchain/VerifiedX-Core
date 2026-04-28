@@ -757,10 +757,15 @@ namespace ReserveBlockCore.Controllers
             catch { return BadRequest("0"); }
         }
 
-        /// <summary>DETERMINISTIC-CONSENSUS: Exchange validator lists between casters to ensure identical NetworkValidators sets.</summary>
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #4): Exchange full validator list entries between casters.
+        /// On receipt we liveness-gate every unknown peer-supplied entry before merging into
+        /// <see cref="Globals.NetworkValidators"/> as fully trusted. We always echo back our own
+        /// trusted entries so the caller can fill its gaps in a single round-trip.
+        /// </summary>
         [HttpPost]
         [Route("ExchangeValidatorList")]
-        public ActionResult<string> ExchangeValidatorList([FromBody] ValidatorListExchangeRequest? req)
+        public async Task<ActionResult<string>> ExchangeValidatorList([FromBody] ValidatorListExchangeRequest? req)
         {
             try
             {
@@ -772,30 +777,133 @@ namespace ReserveBlockCore.Controllers
                 if (!casterList.Any(c => c.ValidatorAddress == req.CasterAddress))
                     return BadRequest("0");
 
-                // Merge their validator addresses into our NetworkValidators
-                if (req.ValidatorAddresses != null)
+                int merged = 0;
+                int rejected = 0;
+                if (req.Validators != null)
                 {
-                    foreach (var addr in req.ValidatorAddresses)
+                    foreach (var entry in req.Validators)
                     {
-                        if (!string.IsNullOrEmpty(addr) && !Globals.NetworkValidators.ContainsKey(addr))
+                        if (entry == null
+                            || string.IsNullOrEmpty(entry.Address)
+                            || string.IsNullOrEmpty(entry.IPAddress))
+                            continue;
+                        if (entry.Address == Globals.ValidatorAddress)
+                            continue;
+                        if (Globals.NetworkValidators.ContainsKey(entry.Address))
+                            continue;
+
+                        bool live;
+                        try { live = await NetworkValidator.CheckValidatorLiveness(entry.IPAddress); }
+                        catch { live = false; }
+
+                        if (!live)
                         {
-                            CasterLogUtility.Log($"VALLIST-SYNC: Adding validator {addr} from caster {req.CasterAddress} (height {req.BlockHeight})", "CONSENSUS");
+                            rejected++;
+                            continue;
                         }
+
+                        var nv = new NetworkValidator
+                        {
+                            Address = entry.Address,
+                            IPAddress = entry.IPAddress,
+                            PublicKey = entry.PublicKey ?? "",
+                            IsFullyTrusted = true,
+                            LastSeen = TimeUtil.GetTime(),
+                            FirstSeenAtHeight = entry.FirstSeenAtHeight > 0
+                                ? entry.FirstSeenAtHeight
+                                : (Globals.LastBlock?.Height ?? req.BlockHeight),
+                            CheckFailCount = 0,
+                        };
+                        if (Globals.NetworkValidators.TryAdd(entry.Address, nv))
+                            merged++;
                     }
                 }
 
-                // Return our own validator list
-                var myValidators = Globals.NetworkValidators.Keys.ToList();
+                if (merged > 0 || rejected > 0)
+                    CasterLogUtility.Log(
+                        $"VALLIST-SYNC: ExchangeValidatorList from {req.CasterAddress} h={req.BlockHeight} merged={merged} rejected={rejected} (peer reported {req.Validators?.Count ?? 0})",
+                        "CONSENSUS");
+
+                // Build response from our own trusted entries.
+                var myEntries = Globals.NetworkValidators.Values
+                    .Where(v => v != null
+                                && v.IsFullyTrusted
+                                && !string.IsNullOrEmpty(v.Address)
+                                && !string.IsNullOrEmpty(v.IPAddress))
+                    .Select(v => new ValidatorListEntry
+                    {
+                        Address = v.Address,
+                        IPAddress = v.IPAddress,
+                        PublicKey = v.PublicKey ?? "",
+                        FirstSeenAtHeight = v.FirstSeenAtHeight,
+                        LastSeen = v.LastSeen,
+                    })
+                    .ToList();
+
                 var response = new ValidatorListExchangeResponse
                 {
                     BlockHeight = req.BlockHeight,
                     CasterAddress = Globals.ValidatorAddress ?? "",
-                    ValidatorAddresses = myValidators
+                    Validators = myEntries
                 };
                 return Ok(JsonConvert.SerializeObject(response));
             }
             catch { return BadRequest("0"); }
         }
+
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #5): Receives a peer caster's <see cref="ProofSetCommitment"/>
+        /// for a given block height, stores it in <see cref="Globals.CasterProofSetCommitDict"/>
+        /// after re-verifying the commitment hash, and returns the full set of commitments this
+        /// node currently holds for that height. Pure exchange — no consensus decisions are made
+        /// here; the caller's <c>ReachProofSetAgreementAsync</c> tallies cross-peer responses.
+        /// </summary>
+        [HttpPost]
+        [Route("ExchangeProofSet")]
+        public ActionResult<string> ExchangeProofSet([FromBody] ProofSetCommitment? req)
+        {
+            try
+            {
+                if (req == null
+                    || req.BlockHeight <= 0
+                    || string.IsNullOrEmpty(req.CasterAddress)
+                    || string.IsNullOrEmpty(req.CommitmentHash))
+                    return BadRequest("0");
+
+                // Recompute hash to defend against a peer claiming a hash that doesn't match its own list.
+                var sortedAddrs = req.ProofAddressesSorted ?? new List<string>();
+                var recomputed = Nodes.BlockcasterNode.ComputeProofSetCommitmentHash(sortedAddrs);
+                if (!string.Equals(recomputed, req.CommitmentHash, System.StringComparison.Ordinal))
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] ExchangeProofSet REJECT from {req.CasterAddress} h={req.BlockHeight}: hash mismatch (peer={req.CommitmentHash[..System.Math.Min(10, req.CommitmentHash.Length)]} recomputed={recomputed[..System.Math.Min(10, recomputed.Length)]})",
+                        "CONSENSUS");
+                    return BadRequest("0");
+                }
+
+                var commitsForHeight = Globals.CasterProofSetCommitDict.GetOrAdd(
+                    req.BlockHeight,
+                    _ => new System.Collections.Concurrent.ConcurrentDictionary<string, ProofSetCommitment>());
+                commitsForHeight[req.CasterAddress] = req;
+
+                // Snapshot for the response so we don't expose the live ConcurrentDictionary.
+                var snapshot = new Dictionary<string, ProofSetCommitment>();
+                foreach (var kv in commitsForHeight)
+                    snapshot[kv.Key] = kv.Value;
+
+                var resp = new ProofSetExchangeResponse
+                {
+                    BlockHeight = req.BlockHeight,
+                    Commitments = snapshot,
+                };
+                return Ok(JsonConvert.SerializeObject(resp));
+            }
+            catch
+            {
+                return BadRequest("0");
+            }
+        }
+
 
         /// <summary>Receives a signed promotion to join the caster pool (dynamic discovery).
         /// Returns "accepted" if the node accepts, or a rejection reason string.

@@ -416,6 +416,14 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<long, ConcurrentDictionary<string, string>> CasterWinnerVoteDict = new ConcurrentDictionary<long, ConcurrentDictionary<string, string>>();
         /// <summary>DETERMINISTIC-CONSENSUS: Tracks excluded addresses per voter per height for shared exclusion during winner agreement.</summary>
         public static ConcurrentDictionary<long, ConcurrentDictionary<string, List<string>>> CasterExcludedAddressDict = new ConcurrentDictionary<long, ConcurrentDictionary<string, List<string>>>();
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #5): Per-height proof-set commitments exchanged between casters.
+        /// Outer key = block height; inner key = caster ValidatorAddress; value = the commitment
+        /// that caster broadcast for that height. Used by ReachProofSetAgreementAsync to converge
+        /// every caster on the same sorted proof-address set before winner sorting.
+        /// Cleaned up to height-10 each round.
+        /// </summary>
+        public static ConcurrentDictionary<long, ConcurrentDictionary<string, ProofSetCommitment>> CasterProofSetCommitDict = new ConcurrentDictionary<long, ConcurrentDictionary<string, ProofSetCommitment>>();
 
         /// <summary>Discovered / agreed caster set (synced from <see cref="BlockCasters"/> and discovery). Used with <see cref="BlockCasters"/> for certificate verification (plan §Appendix C).</summary>
         public static object KnownCastersLock = new object();
