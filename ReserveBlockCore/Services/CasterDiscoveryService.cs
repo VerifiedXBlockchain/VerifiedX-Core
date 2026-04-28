@@ -43,6 +43,55 @@ namespace ReserveBlockCore.Services
         private const int RequiredReadinessChecks = 3;
         private const int RequiredReadinessSeconds = 30;
 
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #2): Atomic slot reservation for caster promotions.
+        /// The window between the MaxCasters check at the top of EvaluateCasterPool and the
+        /// final BlockCasters.Add(...) is several seconds long (port + version + readiness +
+        /// propose + notify HTTP round-trips). Two concurrent EvaluateCasterPool tasks (or two
+        /// peer casters racing to promote different candidates) can both pass the count check
+        /// and both .Add(), exceeding MaxCasters. This lock + claim-slot serializes
+        /// promotion attempts on a single node and lets the helper AddBlockCasterIfRoomAndUnique
+        /// re-check capacity atomically just before mutating the bag.
+        /// </summary>
+        private static readonly object _promotionLock = new();
+        private static string? _inFlightPromotionAddress; // guarded by _promotionLock
+
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #2): Adds <paramref name="newCaster"/> to <see cref="Globals.BlockCasters"/>
+        /// only if (a) the pool isn't full and (b) no entry already exists for the same validator
+        /// address. Both checks happen under <see cref="_promotionLock"/> so they're atomic with
+        /// respect to other promotion attempts on this node. Returns true only when the caster
+        /// was actually added.
+        /// </summary>
+        internal static bool AddBlockCasterIfRoomAndUnique(Peers newCaster)
+        {
+            if (newCaster == null || string.IsNullOrEmpty(newCaster.ValidatorAddress))
+                return false;
+
+            lock (_promotionLock)
+            {
+                if (Globals.BlockCasters.Count >= MaxCasters)
+                {
+                    CasterLogUtility.Log(
+                        $"AddBlockCasterIfRoomAndUnique REJECT — pool full ({Globals.BlockCasters.Count}/{MaxCasters}). candidate={newCaster.ValidatorAddress}",
+                        "CasterFlow");
+                    return false;
+                }
+                if (Globals.BlockCasters.Any(c => c.ValidatorAddress == newCaster.ValidatorAddress))
+                {
+                    CasterLogUtility.Log(
+                        $"AddBlockCasterIfRoomAndUnique REJECT — duplicate. candidate={newCaster.ValidatorAddress}",
+                        "CasterFlow");
+                    return false;
+                }
+                Globals.BlockCasters.Add(newCaster);
+                CasterLogUtility.Log(
+                    $"AddBlockCasterIfRoomAndUnique OK — added {newCaster.ValidatorAddress} ({Globals.BlockCasters.Count}/{MaxCasters})",
+                    "CasterFlow");
+                return true;
+            }
+        }
+
         /// <summary>Result of a version check distinguishing connectivity failure from genuine version mismatch.</summary>
         internal enum VersionCheckResult
         {
@@ -204,9 +253,15 @@ namespace ReserveBlockCore.Services
                     }
                 }
 
+                // CONSENSUS-V2 (Fix #1): Deterministic candidate ordering. ConcurrentDictionary
+                // enumeration is non-deterministic; without a stable secondary sort key, two
+                // casters iterating the same NetworkValidators set could pick different "first"
+                // candidates when balances tie (very common at bootstrap). Lexicographic
+                // ordinal sort on the address breaks ties identically across all casters.
                 rankedCandidates = rankedCandidates
                     .Where(x => x.Balance >= MinCasterBalance)
                     .OrderByDescending(x => x.Balance)
+                    .ThenBy(x => x.Validator.Address ?? "", StringComparer.Ordinal)
                     .ToList();
 
                 int slotsAvailable = MaxCasters - currentCasters.Count;
@@ -228,6 +283,39 @@ namespace ReserveBlockCore.Services
 
                     var v = candidate.Validator;
                     var ip = v.IPAddress.Replace("::ffff:", "");
+
+                    // CONSENSUS-V2 (Fix #2): Atomic in-flight claim. Only one promotion per node may
+                    // be mid-flight at a time. This prevents a parallel EvaluateCasterPool task on
+                    // this same node from racing with us; it also bounds the window during which
+                    // BlockCasters.Count check can lie (since the long HTTP gates run inside the
+                    // claim and the final add re-checks under lock via AddBlockCasterIfRoomAndUnique).
+                    bool claimed;
+                    lock (_promotionLock)
+                    {
+                        if (Globals.BlockCasters.Count >= MaxCasters)
+                        {
+                            CasterLogUtility.Log($"  <<  ABORT — pool filled to {Globals.BlockCasters.Count}/{MaxCasters} during iteration", "CasterFlow");
+                            break;
+                        }
+                        if (_inFlightPromotionAddress != null)
+                        {
+                            CasterLogUtility.Log($"  <<  SKIP — another promotion in-flight ({_inFlightPromotionAddress})", "CasterFlow");
+                            // Skip this iteration; outer loop will move on (don't break — give
+                            // a different candidate a chance once the in-flight one finishes).
+                            claimed = false;
+                        }
+                        else
+                        {
+                            _inFlightPromotionAddress = v.Address;
+                            claimed = true;
+                        }
+                    }
+                    if (!claimed)
+                        continue;
+
+                    bool addedToPool = false;
+                    try
+                    {
 
                     CasterLogUtility.Log(
                         $"  >> Candidate {v.Address} ip={ip} balance={candidate.Balance} firstSeen={v.FirstSeenAtHeight} now={currentHeight} maturityΔ={(v.FirstSeenAtHeight > 0 ? currentHeight - v.FirstSeenAtHeight : -1)}/{MaturityBlocks}",
@@ -325,6 +413,7 @@ namespace ReserveBlockCore.Services
                     }
                     CasterLogUtility.Log($"     health=PASS", "CasterFlow");
 
+                    // CONSENSUS-V2 (Fix #2): Cheap pre-check (definitive add re-checks under lock).
                     if (Globals.BlockCasters.Any(c => c.ValidatorAddress == v.Address))
                     {
                         CasterLogUtility.Log($"  <<  race-condition: already in BlockCasters (another thread promoted first)", "CasterFlow");
@@ -368,7 +457,16 @@ namespace ReserveBlockCore.Services
                         continue;
                     }
 
-                    Globals.BlockCasters.Add(newCaster);
+                    // CONSENSUS-V2 (Fix #2): Atomic add via helper — re-checks Count<MaxCasters
+                    // and uniqueness under _promotionLock just before mutating the bag, so two
+                    // simultaneous promotion paths (e.g. local Eval + inbound promotion announce)
+                    // can't blow past MaxCasters even if both passed earlier checks.
+                    if (!AddBlockCasterIfRoomAndUnique(newCaster))
+                    {
+                        CasterLogUtility.Log($"  <<  Atomic add failed (pool full or duplicate). Skipping.", "CasterFlow");
+                        continue;
+                    }
+                    addedToPool = true;
                     Globals.SyncKnownCastersFromBlockCasters();
 
                     // FIX: Push the last few blocks to the newly promoted caster so it can
@@ -390,6 +488,17 @@ namespace ReserveBlockCore.Services
                     ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] Promoted {v.Address} (balance: {candidate.Balance}) to caster. Pool: {Globals.BlockCasters.Count}/{MaxCasters}");
                     promoted++;
+                    } // end inner try (Fix #2 in-flight scope)
+                    finally
+                    {
+                        // CONSENSUS-V2 (Fix #2): Always release the in-flight slot so the next
+                        // candidate iteration can claim it, even if any gate above threw or returned.
+                        lock (_promotionLock)
+                        {
+                            if (_inFlightPromotionAddress == v.Address)
+                                _inFlightPromotionAddress = null;
+                        }
+                    }
                 }
 
             }

@@ -79,6 +79,33 @@ namespace ReserveBlockCore.Nodes
     private static int _winnerAgreementFailCount = 0;
     const int WINNER_AGREEMENT_DEADLOCK_THRESHOLD = 5; // After this many failures at same height, use deterministic tiebreaker
 
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #6): Size-tiered deadlock thresholds. With only 2 casters,
+    /// supermajority requires both to agree — there is zero tolerance for a single
+    /// network hiccup. Waiting 5 rounds before tiebreaking on a 2-caster bootstrap
+    /// can stall block production for 30+ seconds. Tier the threshold by pool size:
+    ///   2 casters → 2 fails before tiebreak (≈10s stall ceiling)
+    ///   3-4 casters → 3 fails (still tight quorum)
+    ///   5+ casters → original 5 fails (resilient, prefer organic agreement)
+    /// </summary>
+    internal static int GetWinnerAgreementDeadlockThreshold(int casterCount)
+    {
+        if (casterCount <= 2) return 2;
+        if (casterCount <= 4) return 3;
+        return WINNER_AGREEMENT_DEADLOCK_THRESHOLD;
+    }
+
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #6): Same size-tiered scaling for forced chain reconciliation
+    /// after consecutive block-hash agreement failures. Bootstrap pools should reconcile
+    /// faster (any disagreement at 2 casters is total disagreement).
+    /// </summary>
+    internal static int GetBlockHashAgreementReconcileThreshold(int casterCount)
+    {
+        if (casterCount <= 2) return 2;
+        return BLOCK_HASH_AGREEMENT_RECONCILE_THRESHOLD;
+    }
+
     /// <summary>DETERMINISTIC-CONSENSUS: Tracks last height at which validator list sync was performed.</summary>
     private static long _lastValidatorListSyncHeight = 0;
     const int VALIDATOR_LIST_SYNC_INTERVAL = 50; // Sync validator lists every N blocks
@@ -2802,7 +2829,10 @@ namespace ReserveBlockCore.Nodes
             if (_winnerAgreementFailHeight == height)
             {
                 _winnerAgreementFailCount++;
-                if (_winnerAgreementFailCount >= WINNER_AGREEMENT_DEADLOCK_THRESHOLD)
+                // CONSENSUS-V2 (Fix #6): Use size-tiered threshold so 2-caster bootstrap
+                // doesn't have to wait 5 rounds (~30s) to tiebreak.
+                var winnerDeadlockThreshold = GetWinnerAgreementDeadlockThreshold(casters.Count);
+                if (_winnerAgreementFailCount >= winnerDeadlockThreshold)
                 {
                     // Deadlock detected! Use deterministic tiebreaker: sort all known votes lexicographically
                     // and pick the lowest winner address. All casters will converge on the same choice.
@@ -3123,7 +3153,9 @@ namespace ReserveBlockCore.Nodes
                 try { await BlockDownloadService.GetAllBlocks(); } catch { }
             }
 
-            if (_consecutiveBlockHashAgreementFailures >= BLOCK_HASH_AGREEMENT_RECONCILE_THRESHOLD)
+            // CONSENSUS-V2 (Fix #6): Size-tiered threshold (2 casters → reconcile after 2 fails).
+            var blockHashReconcileThreshold = GetBlockHashAgreementReconcileThreshold(Globals.BlockCasters.Count);
+            if (_consecutiveBlockHashAgreementFailures >= blockHashReconcileThreshold)
             {
                 _consecutiveBlockHashAgreementFailures = 0;
                 CasterRoundAudit?.AddStep($"[BlockHashAgreement] {BLOCK_HASH_AGREEMENT_RECONCILE_THRESHOLD}+ consecutive failures — forced chain reconciliation.", false);
