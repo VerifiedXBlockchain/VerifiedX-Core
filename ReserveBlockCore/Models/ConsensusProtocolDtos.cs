@@ -99,6 +99,25 @@ namespace ReserveBlockCore.Models
         public string ResponderAddress { get; set; } = "";
     }
 
+    /// <summary>
+    /// CONSENSUS-V2 (Fix #3): Sent by a promoter to all peer casters AFTER it has successfully promoted
+    /// a candidate (added it to its local BlockCasters bag). Peers verify the signature, run the same
+    /// port + version gate, and merge the new caster into their own BlockCasters via the atomic helper.
+    /// This eliminates the propagation gap where Caster A's pool grows but Caster B doesn't notice
+    /// until the next block sync, which segments the consensus pool for several seconds.
+    /// </summary>
+    public class CasterPromotionAnnouncement
+    {
+        public string PromotedAddress { get; set; } = "";
+        public string PromotedIP { get; set; } = "";
+        public string PromotedPublicKey { get; set; } = "";
+        public string PromotedWalletVersion { get; set; } = "";
+        public long BlockHeight { get; set; }
+        public string PromoterAddress { get; set; } = "";
+        /// <summary>Signature of PROMOTE-ANNOUNCE|{PromotedAddress}|{PromotedIP}|{BlockHeight}|{PromoterAddress}.</summary>
+        public string PromoterSignature { get; set; } = "";
+    }
+
     /// <summary>Graceful caster departure; MUST be signed by the departing caster.</summary>
     public class CasterDepartureNotice
     {

@@ -865,6 +865,41 @@ namespace ReserveBlockCore.Controllers
             }
         }
 
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #3): Inbound signed promotion announcement from a peer caster.
+        /// We re-run port + version gates locally and (if they pass) merge the new caster atomically.
+        /// </summary>
+        [HttpPost]
+        [Route("AnnounceCasterPromotion")]
+        public async Task<ActionResult<string>> AnnounceCasterPromotion([FromBody] CasterPromotionAnnouncement? announce)
+        {
+            var remoteIp = HttpContext?.Connection?.RemoteIpAddress?.ToString() ?? "?";
+            try
+            {
+                if (announce == null || string.IsNullOrEmpty(announce.PromotedAddress))
+                {
+                    CasterLogUtility.Log(
+                        $"HTTP /AnnounceCasterPromotion from {remoteIp}: REJECT invalid request",
+                        "CasterFlow");
+                    return BadRequest("rejected: invalid request");
+                }
+
+                CasterLogUtility.Log(
+                    $"HTTP /AnnounceCasterPromotion from {remoteIp} | promoter={announce.PromoterAddress} promoted={announce.PromotedAddress} h={announce.BlockHeight}",
+                    "CasterFlow");
+
+                var result = await CasterDiscoveryService.HandlePromotionAnnouncement(announce);
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log(
+                    $"HTTP /AnnounceCasterPromotion from {remoteIp}: EXCEPTION {ex.GetType().Name}: {ex.Message}",
+                    "CasterFlow");
+                return BadRequest($"rejected: {ex.Message}");
+            }
+        }
+
         /// <summary>Caster demotion notice (signed by a peer caster that detected the issue).</summary>
         [HttpPost]
         [Route("AnnounceCasterDemotion")]

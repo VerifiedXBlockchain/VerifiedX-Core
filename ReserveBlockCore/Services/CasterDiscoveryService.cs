@@ -469,6 +469,19 @@ namespace ReserveBlockCore.Services
                     addedToPool = true;
                     Globals.SyncKnownCastersFromBlockCasters();
 
+                    // CONSENSUS-V2 (Fix #3): Immediately broadcast the promotion to all peer casters
+                    // so they merge the new caster into their own BlockCasters bag. Without this,
+                    // peers only learn about the new caster on the next caster-list sync (up to 100
+                    // blocks later), which leaves the consensus pool segmented in the meantime.
+                    _ = Task.Run(async () =>
+                    {
+                        try { await BroadcastPromotionAnnouncement(newCaster, currentHeight).ConfigureAwait(false); }
+                        catch (Exception bcEx)
+                        {
+                            CasterLogUtility.Log($"  promotion-announce broadcast failed: {bcEx.Message}", "CasterFlow");
+                        }
+                    });
+
                     // FIX: Push the last few blocks to the newly promoted caster so it can
                     // immediately participate in consensus. Without this, a newly promoted node
                     // that is 1-2 blocks behind will return body=0 for proof fetches, fail to
@@ -1446,6 +1459,224 @@ namespace ReserveBlockCore.Services
             {
                 response.Reason = $"Error: {ex.Message}";
                 return response;
+            }
+        }
+
+        #endregion
+
+        #region CONSENSUS-V2 Fix #3 — Signed promotion broadcast to peer casters
+
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #3): After successfully promoting a candidate locally, broadcast a signed
+        /// announcement to all other casters so they merge the new caster into their own
+        /// <see cref="Globals.BlockCasters"/> immediately. This closes the propagation gap where the
+        /// promoter's pool grows but peers don't notice until the next caster-list sync (which can be
+        /// up to 100 blocks later — a long time at scale where the consensus pool is segmented).
+        ///
+        /// The peer side runs the same port + version gate, verifies the promoter signature against
+        /// a known caster, and uses the atomic <see cref="AddBlockCasterIfRoomAndUnique"/> helper
+        /// (Fix #2) to safely merge.
+        /// </summary>
+        internal static async Task BroadcastPromotionAnnouncement(Peers newCaster, long blockHeight)
+        {
+            if (newCaster == null || string.IsNullOrEmpty(newCaster.ValidatorAddress) || string.IsNullOrEmpty(newCaster.PeerIP))
+                return;
+            if (!Globals.IsBlockCaster || string.IsNullOrEmpty(Globals.ValidatorAddress))
+                return;
+
+            var account = AccountData.GetLocalValidator();
+            if (account == null) return;
+            var privateKey = account.GetPrivKey;
+            if (privateKey == null || string.IsNullOrEmpty(account.PublicKey)) return;
+
+            var promotedIp = (newCaster.PeerIP ?? "").Replace("::ffff:", "");
+            var canonicalMessage = $"PROMOTE-ANNOUNCE|{newCaster.ValidatorAddress}|{promotedIp}|{blockHeight}|{Globals.ValidatorAddress}";
+            var signature = SignatureService.CreateSignature(canonicalMessage, privateKey, account.PublicKey);
+            if (signature == "ERROR") return;
+
+            var announce = new CasterPromotionAnnouncement
+            {
+                PromotedAddress = newCaster.ValidatorAddress!,
+                PromotedIP = promotedIp,
+                PromotedPublicKey = newCaster.ValidatorPublicKey ?? "",
+                PromotedWalletVersion = newCaster.WalletVersion ?? Globals.CLIVersion ?? "",
+                BlockHeight = blockHeight,
+                PromoterAddress = Globals.ValidatorAddress!,
+                PromoterSignature = signature,
+            };
+
+            var json = JsonConvert.SerializeObject(announce);
+
+            // Send to every peer caster except (a) ourselves and (b) the promoted node
+            // (the promoted node already has the full list via PromoteToCaster).
+            var peers = Globals.BlockCasters.ToList()
+                .Where(c => !string.IsNullOrEmpty(c.PeerIP)
+                            && c.ValidatorAddress != Globals.ValidatorAddress
+                            && c.ValidatorAddress != newCaster.ValidatorAddress)
+                .ToList();
+
+            if (peers.Count == 0)
+            {
+                CasterLogUtility.Log(
+                    $"[CONSENSUS-V2] PromoteAnnounce — no peer casters to notify (newCaster={newCaster.ValidatorAddress})",
+                    "CasterFlow");
+                return;
+            }
+
+            CasterLogUtility.Log(
+                $"[CONSENSUS-V2] PromoteAnnounce — broadcasting to {peers.Count} peer(s) for newCaster={newCaster.ValidatorAddress} h={blockHeight}",
+                "CasterFlow");
+
+            var tasks = peers.Select(async peer =>
+            {
+                try
+                {
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    var ip = peer.PeerIP!.Replace("::ffff:", "");
+                    var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/AnnounceCasterPromotion";
+                    using var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var resp = await client.PostAsync(uri, content, cts.Token).ConfigureAwait(false);
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] PromoteAnnounce → {ip} ({peer.ValidatorAddress}) status={resp.StatusCode}",
+                        "CasterFlow");
+                }
+                catch (Exception ex)
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] PromoteAnnounce ERROR to {peer.ValidatorAddress}: {ex.Message}",
+                        "CasterFlow");
+                }
+            });
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #3): Handle an inbound promotion announcement from a peer caster.
+        /// Steps:
+        ///  1. Verify the promoter is a known caster.
+        ///  2. Verify the promoter's signature.
+        ///  3. Reject ancient announcements (replay protection) — height must be within (current-100, current+5).
+        ///  4. Skip if already in our pool.
+        ///  5. Re-run port + version gates against the promoted IP (we don't trust the promoter blindly).
+        ///  6. Atomic add via <see cref="AddBlockCasterIfRoomAndUnique"/>.
+        ///  7. Sync KnownCasters and trigger an immediate <see cref="BlockcasterNode.PingCasters"/>.
+        /// </summary>
+        public static async Task<string> HandlePromotionAnnouncement(CasterPromotionAnnouncement announce)
+        {
+            try
+            {
+                if (announce == null || string.IsNullOrEmpty(announce.PromotedAddress) || string.IsNullOrEmpty(announce.PromoterAddress))
+                    return "rejected: invalid";
+
+                // (1) promoter must be a known caster
+                var isTrustedPromoter = Globals.BlockCasters.Any(c => c.ValidatorAddress == announce.PromoterAddress)
+                    || Globals.KnownCasters.Any(c => c.Address == announce.PromoterAddress);
+                if (!isTrustedPromoter)
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — untrusted promoter '{announce.PromoterAddress}' for promoted '{announce.PromotedAddress}'",
+                        "CasterFlow");
+                    return "rejected: untrusted promoter";
+                }
+
+                // (2) signature
+                var promotedIp = (announce.PromotedIP ?? "").Replace("::ffff:", "");
+                var canonicalMessage = $"PROMOTE-ANNOUNCE|{announce.PromotedAddress}|{promotedIp}|{announce.BlockHeight}|{announce.PromoterAddress}";
+                if (!SignatureService.VerifySignature(announce.PromoterAddress, canonicalMessage, announce.PromoterSignature))
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — bad signature from {announce.PromoterAddress}",
+                        "CasterFlow");
+                    return "rejected: bad signature";
+                }
+
+                // (3) replay protection
+                var currentHeight = Globals.LastBlock?.Height ?? 0;
+                if (announce.BlockHeight < currentHeight - 100 || announce.BlockHeight > currentHeight + 5)
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — height={announce.BlockHeight} out of window (current={currentHeight})",
+                        "CasterFlow");
+                    return "rejected: stale or future height";
+                }
+
+                // (4) already in pool — accept idempotently
+                if (Globals.BlockCasters.Any(c => c.ValidatorAddress == announce.PromotedAddress))
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] HandlePromoteAnnounce — {announce.PromotedAddress} already in pool. Idempotent OK.",
+                        "CasterFlow");
+                    return "accepted: already known";
+                }
+
+                if (string.IsNullOrEmpty(promotedIp))
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — no IP for {announce.PromotedAddress}",
+                        "CasterFlow");
+                    return "rejected: no ip";
+                }
+
+                // (5) gate: port + version (don't trust promoter blindly)
+                if (!PortUtility.IsPortOpen(promotedIp, Globals.ValAPIPort))
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — port closed {promotedIp}:{Globals.ValAPIPort} for {announce.PromotedAddress}",
+                        "CasterFlow");
+                    return "rejected: port closed";
+                }
+                var verResult = await CheckCandidateVersionDetailed(promotedIp, announce.PromotedAddress).ConfigureAwait(false);
+                if (verResult.Status != VersionCheckResult.Ok)
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — version={verResult.Status} for {announce.PromotedAddress}",
+                        "CasterFlow");
+                    return $"rejected: version={verResult.Status}";
+                }
+
+                // (6) atomic add
+                var newPeer = new Peers
+                {
+                    PeerIP = promotedIp,
+                    IsValidator = true,
+                    ValidatorAddress = announce.PromotedAddress,
+                    ValidatorPublicKey = announce.PromotedPublicKey ?? "",
+                    FailCount = 0,
+                    WalletVersion = !string.IsNullOrEmpty(verResult.Version) ? verResult.Version : announce.PromotedWalletVersion,
+                };
+                if (!AddBlockCasterIfRoomAndUnique(newPeer))
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — pool full or duplicate for {announce.PromotedAddress}",
+                        "CasterFlow");
+                    return "rejected: pool full or duplicate";
+                }
+
+                Globals.SyncKnownCastersFromBlockCasters();
+
+                // (7) immediate handshake so we can route consensus messages to the new caster
+                _ = Task.Run(async () =>
+                {
+                    try { await BlockcasterNode.PingCasters().ConfigureAwait(false); }
+                    catch { /* best-effort */ }
+                });
+
+                CasterLogUtility.Log(
+                    $"[CONSENSUS-V2] HandlePromoteAnnounce ACCEPT — added {announce.PromotedAddress} from promoter {announce.PromoterAddress}. " +
+                    $"BlockCasters.Count now {Globals.BlockCasters.Count}/{MaxCasters}",
+                    "CasterFlow");
+                ConsoleWriterService.OutputValCaster(
+                    $"[CasterDiscovery] [CONSENSUS-V2] Promotion announcement accepted: added {announce.PromotedAddress} (from {announce.PromoterAddress}).");
+                return "accepted";
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log(
+                    $"[CONSENSUS-V2] HandlePromoteAnnounce EXCEPTION: {ex.GetType().Name}: {ex.Message}",
+                    "CasterFlow");
+                return $"rejected: {ex.Message}";
             }
         }
 
