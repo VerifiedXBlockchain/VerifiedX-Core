@@ -446,7 +446,7 @@ namespace ReserveBlockCore.Services
                         Address = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
                         SigningAddress = "xPqVbS8X6X9ofeD5F2VsEV4KHBeMZoVawa",
                         Generation = 0,
-                        IPAddress = "66.94.124.2",
+                        IPAddress = "40.160.225.225",
                         StartOfService = 1715745443,
                         Title = "Arbiter1"
                     },
@@ -454,7 +454,7 @@ namespace ReserveBlockCore.Services
                         Address = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
                         SigningAddress = "",
                         Generation = 0,
-                        IPAddress = "144.126.156.102",
+                        IPAddress = "40.160.233.196",
                         StartOfService = 1715745443,
                         Title = "Arbiter2"
                     }
@@ -649,8 +649,8 @@ namespace ReserveBlockCore.Services
                     {
                         List<Beacons> beaconList = new List<Beacons>
                         {
-                            new Beacons { IPAddress = "66.94.124.2", Name = "Lily Beacon TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
-                            new Beacons { IPAddress = "144.126.156.102", Name = "Lotus Beacon V2 TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "40.160.225.225", Name = "Lily Beacon TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "40.160.233.196", Name = "Lotus Beacon V2 TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
                         };
 
                         foreach (var beacon in beaconList)

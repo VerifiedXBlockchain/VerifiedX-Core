@@ -263,7 +263,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "144.126.156.102",
+                            PeerIP = "40.160.233.196",
                             FailCount = 0,
                             IsValidator = true,
                             ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
@@ -273,7 +273,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "66.94.124.2",
+                            PeerIP = "40.160.225.225",
                             FailCount = 0,
                             IsValidator = true,
                             ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
@@ -283,7 +283,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "66.94.124.3",
+                            PeerIP = "40.160.239.46",
                             FailCount = 0,
                             IsValidator = true,
                             ValidatorAddress = "xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi",
@@ -995,7 +995,7 @@ namespace ReserveBlockCore.Nodes
 
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                SkipIPs.Add("66.94.124.2");
+                SkipIPs.Add("40.160.225.225");
             }
 
             var peerList = peerDB.Find(x => x.IsValidator).ToArray()

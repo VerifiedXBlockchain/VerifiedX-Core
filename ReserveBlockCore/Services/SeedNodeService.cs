@@ -318,7 +318,7 @@ namespace ReserveBlockCore.Services
                     {
                         IsIncoming = false,
                         IsOutgoing = true,
-                        PeerIP = "144.126.156.102",
+                        PeerIP = "40.160.233.196",
                         FailCount = 0,
                         IsValidator = true,
                         ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
@@ -329,7 +329,7 @@ namespace ReserveBlockCore.Services
                     {
                         IsIncoming = false,
                         IsOutgoing = true,
-                        PeerIP = "66.94.124.2",
+                        PeerIP = "40.160.225.225",
                         FailCount = 0,
                         IsValidator = true,
                         ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
@@ -422,10 +422,10 @@ namespace ReserveBlockCore.Services
                     //main adjs
                     List<AdjBench> mainList = new List<AdjBench>{
                         //retired
-                        new AdjBench { IPAddress = "144.126.156.102", PulledFromBench= true, RBXAddress= "RBxy1XGZ72f6YqktseaLJ1sJsE9u5DF3sp", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
+                        new AdjBench { IPAddress = "40.160.233.196", PulledFromBench= true, RBXAddress= "RBxy1XGZ72f6YqktseaLJ1sJsE9u5DF3sp", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
                         new AdjBench { IPAddress = "144.126.156.101", PulledFromBench = true, RBXAddress = "RBxkrs6snuTuHjAfzedXGzRixfeyvQfy7m", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
-                        new AdjBench { IPAddress = "66.94.124.3", PulledFromBench = true, RBXAddress = "RBxz1j5veSPrBg4RSyYD4CZ9BY6LPQ65gM", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
-                        new AdjBench { IPAddress = "66.94.124.2", PulledFromBench = true, RBXAddress = "RBx1FNEvjB97HRdreDg3zHCNCSSEvSyBTE", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
+                        new AdjBench { IPAddress = "40.160.239.46", PulledFromBench = true, RBXAddress = "RBxz1j5veSPrBg4RSyYD4CZ9BY6LPQ65gM", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
+                        new AdjBench { IPAddress = "40.160.225.225", PulledFromBench = true, RBXAddress = "RBx1FNEvjB97HRdreDg3zHCNCSSEvSyBTE", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
                         //Working - Active
                         new AdjBench { IPAddress = "66.175.236.113", PulledFromBench = true, RBXAddress = "RBxuRe1PorrpUCSbcmBk4JDHCxeADAkXyX", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },
                         new AdjBench { IPAddress = "15.204.9.117", PulledFromBench = true, RBXAddress = "RBxc2kz67W2zvb3yGxzACEQqgFiiBfYSTY", TimeEligibleForConsensus = 1674055875, TimeEntered = 1674055875, TopicUID = "Seed" },

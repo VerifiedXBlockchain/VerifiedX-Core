@@ -420,7 +420,7 @@ namespace ReserveBlockCore.P2P
 
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                SkipIPs.Add("66.94.124.2");
+                SkipIPs.Add("40.160.225.225");
             }
 
             Random rnd = new Random();
@@ -522,7 +522,7 @@ namespace ReserveBlockCore.P2P
 
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                SkipIPs.Add("66.94.124.2");
+                SkipIPs.Add("40.160.225.225");
             }
 
             Random rnd = new Random();

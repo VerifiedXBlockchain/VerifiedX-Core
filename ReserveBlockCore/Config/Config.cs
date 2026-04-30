@@ -470,7 +470,7 @@ namespace ReserveBlockCore.Config
                     }
                     else
                     {
-                        Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.156.102:{port}", Group = 1, IsNetwork = true });
+                        Globals.STUNServers.Add(new StunServer { ServerIPPort = $"40.160.233.196:{port}", Group = 1, IsNetwork = true });
                     }
                 }
             }
