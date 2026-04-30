@@ -745,17 +745,35 @@ namespace ReserveBlockCore.Nodes
 
                     // FIX D1b: Re-seed bootstrap casters (including self) into NetworkValidators
                     // so they can generate proofs for themselves and be selected as winners.
+                    //
+                    // CRITICAL: Must populate PublicKey from Peers.ValidatorPublicKey. The legacy proof
+                    // generation path (GenerateProofsFromNetworkValidatorsLegacy) requires PublicKey to be
+                    // non-null — without it the foreach skips the entry, allProofs comes back empty, and
+                    // the consensus loop falls through silently with no winner candidate ever produced.
+                    // FirstSeenAtHeight is set to 0 so genesis-trusted bootstrap casters bypass any
+                    // height-based maturity gate that compares against `LastBlock.Height`.
+                    int reseedSkippedNoPubKey = 0;
                     foreach (var caster in Globals.BlockCasters.ToList())
                     {
                         if (!string.IsNullOrEmpty(caster.ValidatorAddress) && !string.IsNullOrEmpty(caster.PeerIP))
                         {
+                            if (string.IsNullOrEmpty(caster.ValidatorPublicKey))
+                            {
+                                reseedSkippedNoPubKey++;
+                                CasterLogUtility.Log(
+                                    $"FRESH-STARTUP: skip re-seed for {caster.ValidatorAddress} @ {caster.PeerIP} — Peers entry has no ValidatorPublicKey",
+                                    "BOOT");
+                                continue;
+                            }
+
                             var nv = new NetworkValidator
                             {
                                 Address = caster.ValidatorAddress,
+                                PublicKey = caster.ValidatorPublicKey,
                                 IPAddress = caster.PeerIP,
                                 IsFullyTrusted = true,
                                 LastSeen = TimeUtil.GetTime(),
-                                FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
+                                FirstSeenAtHeight = 0,
                                 CheckFailCount = 0,
                             };
                             Globals.NetworkValidators.TryAdd(caster.ValidatorAddress, nv);
@@ -959,6 +977,25 @@ namespace ReserveBlockCore.Nodes
                             earlyRound.Proof = winningCasterProof;
                             while (!Globals.CasterRoundDict.TryUpdate(Height, earlyRound, compareEarlyRound)) ;
                         }
+                    }
+
+                    // FIX: Make the empty-proof-set fall-through explicit. Previously when allProofs was 0
+                    // (e.g. NetworkValidators re-seed missing PublicKey), the loop body silently fell through,
+                    // looped back to the next round, and the chain stalled with no diagnostic beyond the
+                    // ProofGen line. Log loud + skip-with-delay so operators see it within seconds.
+                    if (filteredProofs.Count == 0)
+                    {
+                        CasterLogUtility.Log(
+                            $"ROUND ABORT: empty proof set (allProofs=0, casterProofs={casterProofs.Count}, " +
+                            $"NetworkValidators={Globals.NetworkValidators.Count}, BlockCasters={Globals.BlockCasters.Count}). " +
+                            $"Likely a re-seed/PublicKey/state-balance issue — check PROOFS-DIAG and BOOT logs.",
+                            "ROUND");
+                        if (CasterRoundAudit != null)
+                            CasterRoundAudit.AddStep($"No validator proofs generated this round (allProofs=0). Retrying.", false);
+                        CasterLogUtility.Flush();
+                        ProofUtility.ClearProofGenerationCache();
+                        await Task.Delay(RETRY_DELAY_MS);
+                        continue;
                     }
 
                     if (winningCasterProof != null && filteredProofs.Count > 0)

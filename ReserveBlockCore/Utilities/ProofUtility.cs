@@ -88,47 +88,104 @@ namespace ReserveBlockCore.Utilities
             // This prevents wasting time generating VRF proofs for offline/stale validators.
             var now = TimeUtil.GetTime();
             var newPeers = Globals.NetworkValidators.Values
-                .Where(x => x.CheckFailCount <= 3 && 
+                .Where(x => x.CheckFailCount <= 3 &&
                        (x.IsFullyTrusted || (x.LastSeen > 0 && (now - x.LastSeen) < 300)))
                 .ToList();
 
             List<string> CompletedIPs = new List<string>();
             List<string> CompletedAddresses = new List<string>();
+            int skippedNoPubKey = 0;
+            int skippedNoState = 0;
+            int skippedLowBalance = 0;
+            int skippedDuplicate = 0;
+            int skippedExcluded = 0;
 
             foreach (var val in newPeers)
             {
-                if (val.Address != null && val.PublicKey != null)
+                if (val.Address == null)
+                    continue;
+
+                // FIX: Fallback — if the in-memory NetworkValidator entry has no PublicKey
+                // (common when the entry was created without it, e.g. an older re-seed path
+                // or a P2P advertisement that didn't include it), look it up from
+                // Globals.BlockCasters which carries the genesis-trusted bootstrap pubkeys.
+                // Without this fallback the legacy path silently drops the entry, allProofs
+                // comes back empty, and the consensus loop stalls with no diagnostic.
+                var pubKey = val.PublicKey;
+                if (string.IsNullOrEmpty(pubKey))
                 {
-                    if (CompletedIPs.Contains(val.IPAddress) ||
-                        CompletedAddresses.Contains(val.Address) ||
-                        IsProducerExcluded(val.Address))
-                        continue;
-
-                    CompletedIPs.Add(val.IPAddress);
-                    CompletedAddresses.Add(val.Address);
-
-                    var stateAddress = StateData.GetSpecificAccountStateTrei(val.Address);
-                    if (stateAddress == null)
-                        continue;
-
-                    if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
-                        continue;
-
-                    var proof = await CreateProof(val.Address, val.PublicKey, blockHeight, prevHash);
-                    if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
+                    var fromCasters = Globals.BlockCasters
+                        .FirstOrDefault(c => c.ValidatorAddress == val.Address && !string.IsNullOrEmpty(c.ValidatorPublicKey));
+                    if (fromCasters != null && !string.IsNullOrEmpty(fromCasters.ValidatorPublicKey))
                     {
-                        proofs.Add(new Proof
-                        {
-                            Address = val.Address,
-                            BlockHeight = blockHeight,
-                            PreviousBlockHash = prevHash,
-                            ProofHash = proof.Item2,
-                            PublicKey = val.PublicKey,
-                            VRFNumber = proof.Item1,
-                            IPAddress = val.IPAddress.Replace("::ffff:", "")
-                        });
+                        pubKey = fromCasters.ValidatorPublicKey;
+                        // Hydrate the NetworkValidator entry so future rounds don't take the slow path.
+                        val.PublicKey = pubKey;
+                        Globals.NetworkValidators[val.Address] = val;
                     }
                 }
+
+                if (string.IsNullOrEmpty(pubKey))
+                {
+                    skippedNoPubKey++;
+                    continue;
+                }
+
+                if (CompletedIPs.Contains(val.IPAddress) ||
+                    CompletedAddresses.Contains(val.Address))
+                {
+                    skippedDuplicate++;
+                    continue;
+                }
+                if (IsProducerExcluded(val.Address))
+                {
+                    skippedExcluded++;
+                    continue;
+                }
+
+                CompletedIPs.Add(val.IPAddress);
+                CompletedAddresses.Add(val.Address);
+
+                var stateAddress = StateData.GetSpecificAccountStateTrei(val.Address);
+                if (stateAddress == null)
+                {
+                    skippedNoState++;
+                    continue;
+                }
+
+                if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
+                {
+                    skippedLowBalance++;
+                    continue;
+                }
+
+                var proof = await CreateProof(val.Address, pubKey, blockHeight, prevHash);
+                if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
+                {
+                    proofs.Add(new Proof
+                    {
+                        Address = val.Address,
+                        BlockHeight = blockHeight,
+                        PreviousBlockHash = prevHash,
+                        ProofHash = proof.Item2,
+                        PublicKey = pubKey,
+                        VRFNumber = proof.Item1,
+                        IPAddress = (val.IPAddress ?? "").Replace("::ffff:", "")
+                    });
+                }
+            }
+
+            // DIAGNOSTIC: When we end up with zero proofs but had eligible peers, dump per-reason
+            // counts so the operator can see *why* (no PublicKey / no state / low balance / etc.).
+            // Without this the empty-set case in the consensus loop is otherwise invisible.
+            if (proofs.Count == 0 && newPeers.Count > 0)
+            {
+                CasterLogUtility.Log(
+                    $"PROOFS-DIAG (legacy): allProofs=0 peersConsidered={newPeers.Count} " +
+                    $"skippedNoPubKey={skippedNoPubKey} skippedNoState={skippedNoState} " +
+                    $"skippedLowBalance={skippedLowBalance} skippedDuplicate={skippedDuplicate} " +
+                    $"skippedExcluded={skippedExcluded} BlockCasters={Globals.BlockCasters.Count}",
+                    "PROOFS-DIAG");
             }
 
             return proofs;
