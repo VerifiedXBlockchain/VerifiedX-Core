@@ -398,7 +398,7 @@ namespace ReserveBlockCore
             Globals.BlockLock = Globals.IsTestNet ? 0 : Globals.BlockLock;
 
             //uncomment to create genesis block
-            await BlockchainData.InitializeChain();
+            //await BlockchainData.InitializeChain();
 
             StartupService.SetValidator();
             StartupService.ArbiterCheck();

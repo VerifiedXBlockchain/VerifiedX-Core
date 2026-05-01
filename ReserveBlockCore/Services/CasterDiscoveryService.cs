@@ -88,6 +88,51 @@ namespace ReserveBlockCore.Services
                 CasterLogUtility.Log(
                     $"AddBlockCasterIfRoomAndUnique OK — added {newCaster.ValidatorAddress} ({Globals.BlockCasters.Count}/{MaxCasters})",
                     "CasterFlow");
+
+                // FIX: Hydrate NetworkValidator entry immediately on caster promotion.
+                // Without this, a newly-promoted validator's NetworkValidator entry may have
+                // IsFullyTrusted=false or LastSeen=0, causing GenerateProofsFromNetworkValidatorsLegacy()
+                // to filter it out of allProofs. The validator would be unable to win blocks
+                // until the organic trust-building process completes (~40-60 minutes).
+                // Being promoted to caster is strong proof of liveness, so we set both flags now.
+                if (!string.IsNullOrEmpty(newCaster.ValidatorAddress))
+                {
+                    var now = TimeUtil.GetTime();
+                    if (Globals.NetworkValidators.TryGetValue(newCaster.ValidatorAddress, out var nv))
+                    {
+                        nv.IsFullyTrusted = true;
+                        nv.LastSeen = now;
+                        nv.CheckFailCount = 0;
+                        Globals.NetworkValidators[newCaster.ValidatorAddress] = nv;
+                        CasterLogUtility.Log(
+                            $"Hydrated NetworkValidator for promoted caster {newCaster.ValidatorAddress}: IsFullyTrusted=true LastSeen={now}",
+                            "CasterFlow");
+                    }
+                    else if (!string.IsNullOrEmpty(newCaster.PeerIP))
+                    {
+                        // Caster not yet in NetworkValidators — create a minimal trusted entry
+                        // so it immediately appears in allProofs for winner selection.
+                        var newNv = new Models.NetworkValidator
+                        {
+                            Address = newCaster.ValidatorAddress,
+                            IPAddress = (newCaster.PeerIP ?? "").Replace("::ffff:", ""),
+                            PublicKey = newCaster.ValidatorPublicKey ?? "",
+                            IsFullyTrusted = true,
+                            LastSeen = now,
+                            CheckFailCount = 0,
+                            FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
+                            FirstAdvertised = now,
+                        };
+                        Globals.NetworkValidators[newCaster.ValidatorAddress] = newNv;
+                        CasterLogUtility.Log(
+                            $"Created NetworkValidator for promoted caster {newCaster.ValidatorAddress} (IP={newNv.IPAddress}): IsFullyTrusted=true",
+                            "CasterFlow");
+                    }
+
+                    // Also clear the proof cache so the next proof generation picks up the new validator immediately
+                    Utilities.ProofUtility.ClearProofGenerationCache();
+                }
+
                 return true;
             }
         }
