@@ -138,6 +138,14 @@ namespace ReserveBlockCore.Nodes
     private static bool _freshStartupChecked = false;
     const long FRESH_STARTUP_THRESHOLD_SECONDS = 300; // 5 minutes
 
+    /// <summary>FORK-RECOVERY: Tracks consecutive rounds where lastBlock height did not advance.
+    /// When this exceeds FORK_RECOVERY_THRESHOLD and hash sync has already failed, triggers
+    /// automatic rollback + resync to heal a node stuck on a minority-fork block.</summary>
+    private static long _forkStuckHeight = -1;
+    private static int _forkStuckRounds = 0;
+    private static int _forkRecoveryInProgress; // 0 = idle, 1 = running (interlocked)
+    const int FORK_RECOVERY_THRESHOLD = 5; // After this many stuck rounds, trigger self-healing
+
     /// <summary>FIX D3: Clears all winner failure tracking for a given address.
     /// Called when a heartbeat TX is detected, indicating the validator restarted.</summary>
     public static void ClearWinnerFailures(string address)
@@ -244,6 +252,44 @@ namespace ReserveBlockCore.Nodes
                                                 }
                                             }
                                         }
+                                        // FIX: Hydrate NetworkValidator entries for ALL casters (including self)
+                                        // after SelfRecovery merges the caster list. Without this, the newly-
+                                        // promoted node's own entry (and any other freshly-discovered casters)
+                                        // may have IsFullyTrusted=false or LastSeen=0 in NetworkValidators,
+                                        // causing GenerateProofsFromNetworkValidatorsLegacy() to filter them
+                                        // out of allProofs — preventing them from ever winning blocks.
+                                        var srNow = TimeUtil.GetTime();
+                                        foreach (var caster in Globals.BlockCasters.ToList())
+                                        {
+                                            if (string.IsNullOrEmpty(caster.ValidatorAddress))
+                                                continue;
+                                            if (Globals.NetworkValidators.TryGetValue(caster.ValidatorAddress, out var nv))
+                                            {
+                                                nv.IsFullyTrusted = true;
+                                                nv.LastSeen = srNow;
+                                                nv.CheckFailCount = 0;
+                                                Globals.NetworkValidators[caster.ValidatorAddress] = nv;
+                                            }
+                                            else if (!string.IsNullOrEmpty(caster.PeerIP))
+                                            {
+                                                Globals.NetworkValidators[caster.ValidatorAddress] = new Models.NetworkValidator
+                                                {
+                                                    Address = caster.ValidatorAddress,
+                                                    IPAddress = (caster.PeerIP ?? "").Replace("::ffff:", ""),
+                                                    PublicKey = caster.ValidatorPublicKey ?? "",
+                                                    IsFullyTrusted = true,
+                                                    LastSeen = srNow,
+                                                    CheckFailCount = 0,
+                                                    FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
+                                                    FirstAdvertised = srNow,
+                                                };
+                                            }
+                                        }
+                                        Utilities.ProofUtility.ClearProofGenerationCache();
+                                        CasterLogUtility.Log(
+                                            $"SelfRecovery: hydrated {Globals.BlockCasters.Count} casters in NetworkValidators and cleared proof cache",
+                                            "CasterFlow");
+
                                         break;
                                     }
                                 }
@@ -1524,6 +1570,43 @@ namespace ReserveBlockCore.Nodes
 
                     CasterLogUtility.Log($"--- ROUND END height={Height} totalTime={roundSw.ElapsedMilliseconds}ms lastBlock={Globals.LastBlock.Height} refH={ReferenceHeight} ---", "ROUND");
                     CasterLogUtility.Flush();
+
+                    // FORK-RECOVERY: Track consecutive rounds where lastBlock height doesn't advance.
+                    // If we're stuck at the same height for FORK_RECOVERY_THRESHOLD rounds AND hash sync
+                    // has already given up (indicating we're on a minority fork), trigger automatic
+                    // rollback + resync to self-heal.
+                    {
+                        var currentLastBlockHeight = Globals.LastBlock.Height;
+                        if (_forkStuckHeight == currentLastBlockHeight)
+                        {
+                            _forkStuckRounds++;
+                            // Only trigger recovery if hash sync has also failed (confirming we're on a wrong block)
+                            bool hashSyncGaveUp = _hashSyncFailHeight == currentLastBlockHeight && _hashSyncFailCount >= HASH_SYNC_MAX_RETRIES;
+                            if (_forkStuckRounds >= FORK_RECOVERY_THRESHOLD && hashSyncGaveUp)
+                            {
+                                CasterLogUtility.Log(
+                                    $"FORK-RECOVERY: Detected {_forkStuckRounds} rounds stuck at height {currentLastBlockHeight} " +
+                                    $"with hash sync failed ({_hashSyncFailCount} failures). Triggering self-heal.",
+                                    "FORK-RECOVERY");
+                                await ForkRecoveryAsync(currentLastBlockHeight);
+                                // After recovery, continue to next round iteration
+                                continue;
+                            }
+                            else if (_forkStuckRounds % 5 == 0)
+                            {
+                                CasterLogUtility.Log(
+                                    $"FORK-STUCK: {_forkStuckRounds} rounds at height {currentLastBlockHeight}. " +
+                                    $"hashSyncGaveUp={hashSyncGaveUp} (failCount={_hashSyncFailCount}/{HASH_SYNC_MAX_RETRIES})",
+                                    "FORK-RECOVERY");
+                            }
+                        }
+                        else
+                        {
+                            // Height advanced — reset stuck tracking
+                            _forkStuckHeight = currentLastBlockHeight;
+                            _forkStuckRounds = 0;
+                        }
+                    }
 
                     if (Environment.TickCount64 - _lastStartingOverLogTicks >= 15_000)
                     {
@@ -3526,6 +3609,102 @@ namespace ReserveBlockCore.Nodes
                 await SyncBlockHashWithPeersAsync();
                 await SyncHeightWithPeersAsync();
                 try { await BlockDownloadService.GetAllBlocks(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// FORK-RECOVERY: Self-healing mechanism for nodes stuck on a minority-fork block.
+        /// When a node has been stuck at the same height for FORK_RECOVERY_THRESHOLD rounds
+        /// (and BlockHashSync has already failed), this method:
+        /// 1. Self-demotes from caster pool temporarily
+        /// 2. Rolls back the bad block using BlockRollbackUtility
+        /// 3. Re-downloads the correct block from peers
+        /// 4. Resets all failure counters
+        /// 5. Returns to normal consensus participation
+        /// This requires NO human intervention — the node heals itself automatically.
+        /// </summary>
+        private static async Task ForkRecoveryAsync(long stuckHeight)
+        {
+            // Prevent concurrent recovery attempts
+            if (Interlocked.CompareExchange(ref _forkRecoveryInProgress, 1, 0) != 0)
+                return;
+
+            try
+            {
+                CasterLogUtility.Log(
+                    $"FORK-RECOVERY: Initiating self-heal at height {stuckHeight}. " +
+                    $"Stuck for {_forkStuckRounds} rounds. Hash sync failed {_hashSyncFailCount} times.",
+                    "FORK-RECOVERY");
+                ConsoleWriterService.OutputValCaster(
+                    $"[FORK-RECOVERY] Detected {_forkStuckRounds} rounds stuck at height {stuckHeight}. " +
+                    $"Initiating automatic rollback + resync...");
+
+                // Step 1: Halt consensus so we don't keep poisoning the network
+                Interlocked.Exchange(ref _casterConsensusHalted, 1);
+
+                // Step 2: Roll back the bad block
+                CasterLogUtility.Log($"FORK-RECOVERY: Rolling back 1 block from height {stuckHeight}...", "FORK-RECOVERY");
+                var rollbackResult = await BlockRollbackUtility.RollbackBlocks(1);
+                if (rollbackResult)
+                {
+                    CasterLogUtility.Log(
+                        $"FORK-RECOVERY: Rollback succeeded. New lastBlock height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                        "FORK-RECOVERY");
+                }
+                else
+                {
+                    CasterLogUtility.Log($"FORK-RECOVERY: Rollback returned false — chain may need deeper repair.", "FORK-RECOVERY");
+                }
+
+                // Step 3: Sync height with peers and download the correct block
+                CasterLogUtility.Log($"FORK-RECOVERY: Syncing height with peers...", "FORK-RECOVERY");
+                await SyncHeightWithPeersAsync();
+
+                CasterLogUtility.Log($"FORK-RECOVERY: Downloading blocks from peers...", "FORK-RECOVERY");
+                try { await BlockDownloadService.GetAllBlocks(); } catch { }
+
+                // Step 4: Verify the chain hash now matches peers
+                CasterLogUtility.Log($"FORK-RECOVERY: Verifying chain hash after resync...", "FORK-RECOVERY");
+                await SyncBlockHashWithPeersAsync();
+
+                // Step 5: Reset ALL failure counters
+                _hashSyncFailHeight = -1;
+                _hashSyncFailCount = 0;
+                _forkStuckHeight = -1;
+                _forkStuckRounds = 0;
+                _consecutiveBlockHashAgreementFailures = 0;
+                _consecutiveMajorityBlockFetchFailures = 0;
+                _winnerFetchFailures.Clear();
+                _winnerCumulativeFailures.Clear();
+                _winnerAgreementFailHeight = -1;
+                _winnerAgreementFailCount = 0;
+
+                // Step 6: Reset timing references so consensus restarts cleanly
+                ResetRoundTiming(Globals.LastBlock.Height, force: true);
+
+                // Step 7: Clear the halt flag so consensus resumes
+                Interlocked.Exchange(ref _casterConsensusHalted, 0);
+
+                // Clear proof generation cache so stale data doesn't persist
+                ProofUtility.ClearProofGenerationCache();
+
+                CasterLogUtility.Log(
+                    $"FORK-RECOVERY: Self-heal COMPLETE. New lastBlock height={Globals.LastBlock.Height} " +
+                    $"hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}. " +
+                    $"Resuming normal consensus.",
+                    "FORK-RECOVERY");
+                ConsoleWriterService.OutputValCaster(
+                    $"[FORK-RECOVERY] Self-heal complete. Now at height {Globals.LastBlock.Height}. Resuming consensus.");
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"FORK-RECOVERY: Exception during recovery: {ex.Message}", "FORK-RECOVERY");
+                // Even on failure, reset the halt flag so the node doesn't stay permanently halted
+                Interlocked.Exchange(ref _casterConsensusHalted, 0);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _forkRecoveryInProgress, 0);
             }
         }
 

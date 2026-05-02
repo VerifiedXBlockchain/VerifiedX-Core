@@ -992,6 +992,18 @@ namespace ReserveBlockCore
                     else
                         P2PClient.UpdateMaxHeight(maxHeight);
 
+                    // FORK-RECOVERY: Check if this node is stuck at the same height while peers advance.
+                    // This catches validators (non-casters) that received a bad block and can't progress.
+                    // After VALIDATOR_STUCK_THRESHOLD consecutive cycles with no height change and peers ahead,
+                    // automatically rolls back the bad block and resyncs from peers.
+                    if (!Globals.IsResyncing && !ForkRecoveryUtility.IsRecoveryInProgress)
+                    {
+                        await ForkRecoveryUtility.CheckAndRecoverAsync(
+                            Globals.LastBlock.Height,
+                            maxHeight,
+                            "Program.BlockHeightCheck");
+                    }
+
                     var MaxHeight = P2PClient.MaxHeight();
                     foreach (var node in Globals.Nodes.Values)
                     {
