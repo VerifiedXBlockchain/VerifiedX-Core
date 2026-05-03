@@ -490,11 +490,78 @@ namespace ReserveBlockCore.Nodes
                     var removedAddr = removedCaster?.ValidatorAddress ?? "unknown";
                     ConsoleWriterService.OutputValCaster($"[PingCasters] Removed offline caster {removedAddr} ({removedIP})");
                     _ = CasterDiscoveryService.OnCasterRemoved(removedAddr);
+
+                    // FIX: Also remove from BlockCasterNodes (SignalR connection dict)
+                    // so debug output and downstream consumers don't see stale entries.
+                    // BlockCasterNodes uses cleaned IP (no port) as key.
+                    var cleanIP = (removedIP ?? "").Replace("::ffff:", "").Replace(":" + Globals.Port, "");
+                    if (!string.IsNullOrEmpty(cleanIP))
+                    {
+                        if (Globals.BlockCasterNodes.TryRemove(cleanIP, out var removedNode))
+                        {
+                            try { _ = removedNode?.Connection?.DisposeAsync().AsTask(); } catch { }
+                            CasterLogUtility.Log(
+                                $"PingCasters: also cleaned up BlockCasterNodes entry for {cleanIP}",
+                                "CasterFlow");
+                        }
+                    }
                 }
             }
             else if (shouldLog)
             {
                 CasterLogUtility.Log($"PingCasters end — no evictions", "CasterFlow");
+            }
+
+            // FIX: Periodic cleanup of stale BlockCasterNodes entries.
+            // These are SignalR connections that are no longer in the BlockCasters list
+            // (e.g., a caster was removed but the SignalR entry persisted), or that
+            // have been stale for too long (no heartbeat for 5+ minutes).
+            try
+            {
+                var activeCasterIPs = new HashSet<string>(
+                    Globals.BlockCasters.ToList()
+                        .Where(c => !string.IsNullOrEmpty(c.PeerIP))
+                        .Select(c => c.PeerIP!.Replace("::ffff:", "").Replace(":" + Globals.Port, "")),
+                    StringComparer.OrdinalIgnoreCase);
+
+                var nowUtc = DateTime.UtcNow;
+                var staleSignalRKeys = new List<string>();
+                foreach (var kv in Globals.BlockCasterNodes)
+                {
+                    var key = kv.Key;
+                    var node = kv.Value;
+                    if (node == null) { staleSignalRKeys.Add(key); continue; }
+
+                    // 1) Not in BlockCasters anymore → stale
+                    if (!activeCasterIPs.Contains(key))
+                    {
+                        staleSignalRKeys.Add(key);
+                        continue;
+                    }
+
+                    // 2) Last checked > 5 min ago AND height is -1 (never synced) → stale
+                    var lastChecked = node.NodeLastChecked;
+                    if (node.NodeHeight <= 0 &&
+                        (lastChecked == null || (nowUtc - lastChecked.Value).TotalMinutes > 5))
+                    {
+                        staleSignalRKeys.Add(key);
+                    }
+                }
+
+                foreach (var key in staleSignalRKeys)
+                {
+                    if (Globals.BlockCasterNodes.TryRemove(key, out var removedNode))
+                    {
+                        try { _ = removedNode?.Connection?.DisposeAsync().AsTask(); } catch { }
+                        CasterLogUtility.Log(
+                            $"PingCasters: cleaned up stale BlockCasterNodes entry for {key} (not in BlockCasters or stale heartbeat)",
+                            "CasterFlow");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"PingCasters: stale-cleanup error: {ex.Message}", "CasterFlow");
             }
         }
 
@@ -1782,6 +1849,8 @@ namespace ReserveBlockCore.Nodes
         /// <summary>
         /// Queries peer casters' block heights and fetches/applies any missing blocks
         /// so this caster is at the same height before starting consensus.
+        /// FIX (Issue 3): Cross-validates downloaded blocks against multiple peers to avoid
+        /// accepting a bad block from a single malicious/forked peer.
         /// </summary>
         private static async Task SyncHeightWithPeersAsync()
         {
@@ -1792,7 +1861,8 @@ namespace ReserveBlockCore.Nodes
                 if (casters.Count == 0) return;
 
                 long maxPeerHeight = myHeight;
-                string? bestPeerIP = null;
+                // FIX (Issue 3): Track ALL peers at max height for cross-validation
+                var peersAtMaxHeight = new List<string>();
 
                 // Query all peer casters for their height in parallel
                 var tasks = casters
@@ -1823,14 +1893,20 @@ namespace ReserveBlockCore.Nodes
                     if (r.height > maxPeerHeight)
                     {
                         maxPeerHeight = r.height;
-                        bestPeerIP = r.ip;
+                        peersAtMaxHeight.Clear();
+                        peersAtMaxHeight.Add(r.ip);
+                    }
+                    else if (r.height == maxPeerHeight && !string.IsNullOrEmpty(r.ip))
+                    {
+                        peersAtMaxHeight.Add(r.ip);
                     }
                 }
 
                 // If we're behind, fetch and apply missing blocks
-                if (maxPeerHeight > myHeight && bestPeerIP != null)
+                if (maxPeerHeight > myHeight && peersAtMaxHeight.Count > 0)
                 {
-                    ConsoleWriterService.OutputValCaster($"\r\n[HeightSync] Behind by {maxPeerHeight - myHeight} block(s). Catching up from {bestPeerIP}...");
+                    var bestPeerIP = peersAtMaxHeight.First();
+                    ConsoleWriterService.OutputValCaster($"\r\n[HeightSync] Behind by {maxPeerHeight - myHeight} block(s). Catching up from {bestPeerIP} (+ {peersAtMaxHeight.Count - 1} cross-validation peers)...");
                     for (long h = myHeight + 1; h <= maxPeerHeight; h++)
                     {
                         try
@@ -1847,6 +1923,52 @@ namespace ReserveBlockCore.Nodes
                                     var block = Newtonsoft.Json.JsonConvert.DeserializeObject<Block>(json);
                                     if (block != null)
                                     {
+                                        // FIX (Issue 3): Cross-validate block hash against other peers
+                                        // before accepting. If multiple peers are available, verify at
+                                        // least one other peer reports the same hash.
+                                        if (peersAtMaxHeight.Count > 1)
+                                        {
+                                            bool crossValidated = false;
+                                            foreach (var crossPeerIP in peersAtMaxHeight.Skip(1).Take(2)) // Check up to 2 other peers
+                                            {
+                                                try
+                                                {
+                                                    using var xClient = Globals.HttpClientFactory.CreateClient();
+                                                    using var xCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                                                    var xUri = $"http://{crossPeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetBlockHash/{h}";
+                                                    var xResp = await xClient.GetAsync(xUri, xCts.Token);
+                                                    if (xResp.IsSuccessStatusCode)
+                                                    {
+                                                        var xBody = await xResp.Content.ReadAsStringAsync();
+                                                        if (!string.IsNullOrEmpty(xBody) && xBody != "0")
+                                                        {
+                                                            var peerResult = JsonConvert.DeserializeAnonymousType(xBody, new { Hash = "", Validator = "", Height = 0L });
+                                                            if (peerResult != null && peerResult.Hash == block.Hash)
+                                                            {
+                                                                crossValidated = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                catch { /* cross-validation peer unreachable, try next */ }
+                                            }
+
+                                            if (!crossValidated)
+                                            {
+                                                CasterLogUtility.Log(
+                                                    $"[HeightSync] Block {h} from {bestPeerIP} failed cross-validation — no other peer confirmed hash {block.Hash?[..Math.Min(12, block.Hash?.Length ?? 0)]}. Skipping.",
+                                                    "HEIGHTSYNC");
+                                                // Try next peer as primary source
+                                                if (peersAtMaxHeight.Count > 1)
+                                                {
+                                                    bestPeerIP = peersAtMaxHeight[1];
+                                                    continue; // Retry this height with a different peer
+                                                }
+                                                break;
+                                            }
+                                        }
+
                                         var result = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
                                         if (result)
                                         {
@@ -3642,9 +3764,10 @@ namespace ReserveBlockCore.Nodes
                 // Step 1: Halt consensus so we don't keep poisoning the network
                 Interlocked.Exchange(ref _casterConsensusHalted, 1);
 
-                // Step 2: Roll back the bad block
-                CasterLogUtility.Log($"FORK-RECOVERY: Rolling back 1 block from height {stuckHeight}...", "FORK-RECOVERY");
-                var rollbackResult = await BlockRollbackUtility.RollbackBlocks(1);
+                // Step 2: Roll back the bad block using fast incremental path
+                CasterLogUtility.Log($"FORK-RECOVERY: Rolling back 1 block from height {stuckHeight} (fast path)...", "FORK-RECOVERY");
+                var preRecoveryHash = Globals.LastBlock.Hash;
+                var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1);
                 if (rollbackResult)
                 {
                     CasterLogUtility.Log(

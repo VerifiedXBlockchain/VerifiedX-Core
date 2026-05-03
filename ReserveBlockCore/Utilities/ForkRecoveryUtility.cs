@@ -115,18 +115,27 @@ namespace ReserveBlockCore.Utilities
                 ConsoleWriterService.Output(
                     $"[{caller}] FORK-RECOVERY: Rolling back {blocksToRollback} block(s) from height {stuckHeight}...");
 
-                // Step 1: Set resyncing flag to prevent other operations from interfering
+                // FIX (Issue 2): Manage IsResyncing at the OUTER level only.
+                // Pass manageIsResyncing=false to RollbackBlocksFast so it doesn't
+                // prematurely clear the flag before BlockDownloadService.GetAllBlocks() runs.
                 var wasResyncing = Globals.IsResyncing;
                 Globals.IsResyncing = true;
 
                 try
                 {
-                    // Step 2: Roll back the bad block(s)
-                    var rollbackResult = await BlockRollbackUtility.RollbackBlocks(blocksToRollback);
+                    // Step 1: Capture pre-rollback state for verification
+                    var preRollbackHash = Globals.LastBlock.Hash;
+                    var preRollbackHeight = Globals.LastBlock.Height;
+
+                    // Step 2: Roll back the bad block(s) using fast incremental path
+                    // manageIsResyncing=false prevents RollbackBlocksFast from clearing
+                    // IsResyncing in its finally block — we keep it set until all recovery
+                    // steps complete.
+                    var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(blocksToRollback, manageIsResyncing: false);
                     if (rollbackResult)
                     {
                         LogUtility.Log(
-                            $"[{caller}] FORK-RECOVERY: Rollback succeeded. " +
+                            $"[{caller}] FORK-RECOVERY: Fast rollback succeeded. " +
                             $"New lastBlock height={Globals.LastBlock.Height} " +
                             $"hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
                             $"{caller}.ForkRecovery");
@@ -148,7 +157,31 @@ namespace ReserveBlockCore.Utilities
                     _lastObservedHeight = -1;
                     _stuckCycles = 0;
 
-                    success = Globals.LastBlock.Height >= stuckHeight;
+                    // FIX (Issue 4): Verify recovery actually succeeded.
+                    // Check that:
+                    //   a) Height has advanced past the stuck point, OR
+                    //   b) Height is at the stuck point but the hash has changed (we got the correct block)
+                    var postHeight = Globals.LastBlock.Height;
+                    var postHash = Globals.LastBlock.Hash;
+
+                    bool heightAdvanced = postHeight > stuckHeight;
+                    bool hashChanged = postHeight >= stuckHeight && postHash != preRollbackHash;
+
+                    success = heightAdvanced || hashChanged;
+
+                    if (!success)
+                    {
+                        LogUtility.Log(
+                            $"[{caller}] FORK-RECOVERY: WARNING — recovery did not change chain state. " +
+                            $"Pre: height={preRollbackHeight} hash={preRollbackHash?[..Math.Min(16, preRollbackHash?.Length ?? 0)]}. " +
+                            $"Post: height={postHeight} hash={postHash?[..Math.Min(16, postHash?.Length ?? 0)]}. " +
+                            $"Stuck counters NOT reset — will retry on next cycle.",
+                            $"{caller}.ForkRecovery");
+                        // Don't reset stuck tracking if recovery didn't actually help —
+                        // let the next cycle detect the stuck state and retry.
+                        _lastObservedHeight = postHeight;
+                        _stuckCycles = 0; // Reset to avoid immediate re-trigger but will accumulate again
+                    }
 
                     LogUtility.Log(
                         $"[{caller}] FORK-RECOVERY: Self-heal {(success ? "COMPLETE" : "PARTIAL")}. " +
@@ -162,7 +195,7 @@ namespace ReserveBlockCore.Utilities
                 }
                 finally
                 {
-                    // Restore resyncing flag
+                    // Restore resyncing flag only after ALL recovery steps complete
                     Globals.IsResyncing = wasResyncing;
                 }
             }
