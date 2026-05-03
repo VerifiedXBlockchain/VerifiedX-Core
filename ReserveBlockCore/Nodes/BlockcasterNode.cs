@@ -1214,6 +1214,13 @@ namespace ReserveBlockCore.Nodes
                                 CasterRoundAudit.AddStep("Could not verify winning caster; retrying…", false);
                             CasterLogUtility.Log($"ROUND FAILED: no verified winner after {roundSw.ElapsedMilliseconds}ms", "ROUND");
                             CasterLogUtility.Flush();
+                            // STALL-HEAL: Track this round failure and trigger mass sweep if stalling
+                            ProofUtility.TrackRoundFailure(Height);
+                            if (ProofUtility.IsStalling)
+                            {
+                                CasterLogUtility.Log($"STALL-HEAL: {ProofUtility.StallRoundFailCount} consecutive failures at height {Height} — triggering mass liveness sweep", "STALL-HEAL");
+                                await ProofUtility.MassLivenessSweepAsync();
+                            }
                             await Task.Delay(RETRY_DELAY_MS);
                             continue;
                         }
@@ -1274,6 +1281,13 @@ namespace ReserveBlockCore.Nodes
                                 CasterRoundAudit.AddStep($"Caster P2P proofs {Globals.CasterProofDict.Count()}/{requiredProofs}; retrying…", false);
                             CasterLogUtility.Log($"ROUND FAILED: insufficient proofs after {roundSw.ElapsedMilliseconds}ms", "ROUND");
                             CasterLogUtility.Flush();
+                            // STALL-HEAL: Track this round failure and trigger mass sweep if stalling
+                            ProofUtility.TrackRoundFailure(Height);
+                            if (ProofUtility.IsStalling)
+                            {
+                                CasterLogUtility.Log($"STALL-HEAL: {ProofUtility.StallRoundFailCount} consecutive failures at height {Height} — triggering mass liveness sweep", "STALL-HEAL");
+                                await ProofUtility.MassLivenessSweepAsync();
+                            }
                             ProofUtility.ClearProofGenerationCache();
                             await Task.Delay(RETRY_DELAY_MS);
                             continue;
@@ -3719,6 +3733,8 @@ namespace ReserveBlockCore.Nodes
 
             _consecutiveBlockHashAgreementFailures = 0;
             _consecutiveMajorityBlockFetchFailures = 0;
+            // STALL-HEAL: Reset stall tracking on successful block commit
+            ProofUtility.ResetStallTracking();
             // ROUND-SYNC-FIX: Reset timing after local block commit so this caster's
             // next round starts from the same baseline as peers who receive the broadcast.
             ResetRoundTiming(block.Height);

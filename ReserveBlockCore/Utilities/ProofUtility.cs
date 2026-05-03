@@ -15,6 +15,140 @@ namespace ReserveBlockCore.Utilities
         private static long _proofCacheHeight = long.MinValue;
         private static List<Proof>? _allProofsCache;
 
+        /// <summary>STALL-HEAL: Consecutive round failures at the same height. Set by consensus loop, read by VersionGate.</summary>
+        public static volatile int StallRoundFailCount = 0;
+        /// <summary>STALL-HEAL: Height at which stall counting started.</summary>
+        public static long StallHeight = -1;
+        /// <summary>STALL-HEAL: Minimum consecutive failures before triggering mass liveness sweep.</summary>
+        public const int STALL_SWEEP_THRESHOLD = 3;
+        /// <summary>STALL-HEAL: Timestamp of last mass sweep to prevent running it every round.</summary>
+        private static long _lastMassSweepTick = 0;
+        /// <summary>STALL-HEAL: Minimum interval between mass sweeps (30 seconds).</summary>
+        private const long MASS_SWEEP_COOLDOWN_MS = 30_000;
+
+        /// <summary>
+        /// STALL-HEAL: Called by the consensus loop to track consecutive round failures.
+        /// When failures exceed STALL_SWEEP_THRESHOLD, triggers a mass liveness sweep.
+        /// </summary>
+        public static void TrackRoundFailure(long height)
+        {
+            if (Interlocked.Read(ref StallHeight) == height)
+            {
+                StallRoundFailCount++;
+            }
+            else
+            {
+                Interlocked.Exchange(ref StallHeight, height);
+                StallRoundFailCount = 1;
+            }
+        }
+
+        /// <summary>
+        /// STALL-HEAL: Reset stall tracking when a block is successfully produced.
+        /// </summary>
+        public static void ResetStallTracking()
+        {
+            StallRoundFailCount = 0;
+            Interlocked.Exchange(ref StallHeight, -1);
+        }
+
+        /// <summary>
+        /// STALL-HEAL: Whether the network is currently in a stall condition
+        /// (multiple consecutive round failures at the same height).
+        /// </summary>
+        public static bool IsStalling => StallRoundFailCount >= STALL_SWEEP_THRESHOLD;
+
+        /// <summary>
+        /// STALL-HEAL: Performs a parallel HTTP liveness check on ALL non-caster NetworkValidators.
+        /// Any validator that fails the check gets CheckFailCount=4, immediately removing it from
+        /// future proof generation. After the sweep, clears the proof cache so the next round uses
+        /// the pruned list. This is the nuclear option — only triggered after STALL_SWEEP_THRESHOLD
+        /// consecutive round failures at the same height.
+        /// </summary>
+        public static async Task MassLivenessSweepAsync()
+        {
+            var now = Environment.TickCount64;
+            if ((now - _lastMassSweepTick) < MASS_SWEEP_COOLDOWN_MS)
+            {
+                CasterLogUtility.Log(
+                    $"STALL-HEAL: Mass sweep skipped — cooldown ({(now - _lastMassSweepTick)}ms < {MASS_SWEEP_COOLDOWN_MS}ms)",
+                    "STALL-HEAL");
+                return;
+            }
+            _lastMassSweepTick = now;
+
+            var casterAddresses = new HashSet<string>(
+                Globals.BlockCasters
+                    .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                    .Select(c => c.ValidatorAddress!),
+                StringComparer.Ordinal);
+
+            // Get all non-caster validators that haven't already been excluded
+            var candidates = Globals.NetworkValidators.Values
+                .Where(nv => !string.IsNullOrEmpty(nv.Address)
+                    && !casterAddresses.Contains(nv.Address)
+                    && nv.CheckFailCount <= 3)
+                .ToList();
+
+            if (candidates.Count == 0)
+            {
+                CasterLogUtility.Log("STALL-HEAL: No candidates for mass sweep (all already excluded or are casters)", "STALL-HEAL");
+                return;
+            }
+
+            CasterLogUtility.Log(
+                $"STALL-HEAL: Starting mass liveness sweep of {candidates.Count} non-caster validators (StallRoundFailCount={StallRoundFailCount})",
+                "STALL-HEAL");
+
+            int evicted = 0;
+            int alive = 0;
+
+            // Parallel HTTP version check with 2s timeout per validator
+            var tasks = candidates.Select(async nv =>
+            {
+                try
+                {
+                    var cleanIP = (nv.IPAddress ?? "").Replace("::ffff:", "");
+                    if (string.IsNullOrEmpty(cleanIP)) return false;
+
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                    var resp = await client.GetAsync(uri, cts.Token);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        var version = await resp.Content.ReadAsStringAsync();
+                        if (!string.IsNullOrEmpty(version) && IsMajorVersionCurrent(version))
+                        {
+                            // Validator is alive and on current version
+                            Interlocked.Increment(ref alive);
+                            return true;
+                        }
+                    }
+                    // HTTP responded but wrong version or error status
+                    nv.CheckFailCount = 4;
+                    Interlocked.Increment(ref evicted);
+                    return false;
+                }
+                catch
+                {
+                    // Timeout or network error — validator unreachable
+                    nv.CheckFailCount = 4;
+                    Interlocked.Increment(ref evicted);
+                    return false;
+                }
+            });
+
+            await Task.WhenAll(tasks);
+
+            // Clear the proof cache so the next round regenerates from the updated filter
+            ClearProofGenerationCache();
+
+            CasterLogUtility.Log(
+                $"STALL-HEAL: Mass sweep complete — evicted={evicted}, alive={alive}, total={candidates.Count}. Proof cache cleared.",
+                "STALL-HEAL");
+        }
+
         public static void ClearProofGenerationCache()
         {
             lock (ProofCacheLock)
@@ -561,9 +695,10 @@ namespace ReserveBlockCore.Utilities
                     else try
                     {
                         var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
-                        // FIX: Increased timeout from 1500ms to 3000ms — 1.5s was too aggressive for
-                        // validators with 50ms+ latency that are under load or slightly behind on blocks.
-                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(3000));
+                        // STALL-HEAL: Use shorter timeout during stall conditions (1.5s vs 3s)
+                        // to cycle through offline validators faster.
+                        var vgTimeout = IsStalling ? 1500 : 3000;
+                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(vgTimeout));
                         if (versionResp == null || !versionResp.IsSuccessStatusCode)
                         {
                             CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — GetWalletVersion returned {versionResp?.StatusCode}. Rejecting.", "VERSIONGATE");
@@ -571,6 +706,8 @@ namespace ReserveBlockCore.Utilities
                             // These indicate a genuine version mismatch, not a transient issue.
                             if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail1))
                                 nvFail1.CheckFailCount = 4;
+                            // STALL-HEAL: Clear proof cache so this validator is immediately excluded from next round
+                            ClearProofGenerationCache();
                             return (false, null);
                         }
                         var peerVersion = await versionResp.Content.ReadAsStringAsync();
@@ -579,30 +716,35 @@ namespace ReserveBlockCore.Utilities
                             CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Rejecting.", "VERSIONGATE");
                             if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail2))
                                 nvFail2.CheckFailCount = 4;
+                            // STALL-HEAL: Clear proof cache so this validator is immediately excluded from next round
+                            ClearProofGenerationCache();
                             return (false, null);
                         }
                     }
                     catch (Exception vex)
                     {
-                        // FIX: For timeout/network exceptions, increment CheckFailCount gradually instead
-                        // of hard-setting to 4. This gives validators 3 strikes before exclusion,
-                        // preventing permanent exclusion from a single transient timeout.
                         var isTimeout = vex is TimeoutException || vex is TaskCanceledException || vex is OperationCanceledException;
                         CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — version check failed: {vex.Message}. Rejecting (timeout={isTimeout}).", "VERSIONGATE");
                         if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail3))
                         {
-                            if (isTimeout)
+                            if (isTimeout && !IsStalling)
                             {
-                                // Gradual increment — allows 3 timeouts before exclusion from proof generation
+                                // Normal mode: Gradual increment — allows 3 timeouts before exclusion from proof generation
                                 nvFail3.CheckFailCount = Math.Min(nvFail3.CheckFailCount + 1, 4);
                                 CasterLogUtility.Log($"VersionGate: {winningProof.Address} CheckFailCount incremented to {nvFail3.CheckFailCount}/4.", "VERSIONGATE");
                             }
                             else
                             {
-                                // Definitive failure (DNS, connection refused, etc.) — exclude immediately
+                                // STALL-HEAL: During stall, set CheckFailCount=4 immediately on ANY timeout.
+                                // No point being gentle when the network is already stuck — every 3s timeout
+                                // compounds the stall. Also handles definitive failures (DNS, connection refused).
                                 nvFail3.CheckFailCount = 4;
+                                if (isTimeout)
+                                    CasterLogUtility.Log($"VersionGate: {winningProof.Address} STALL-HEAL: CheckFailCount set to 4 immediately (stalling={IsStalling}).", "VERSIONGATE");
                             }
                         }
+                        // STALL-HEAL: Clear proof cache so this validator is immediately excluded from next round
+                        ClearProofGenerationCache();
                         return (false, null);
                     }
 
