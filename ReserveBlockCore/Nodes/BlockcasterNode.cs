@@ -317,6 +317,24 @@ namespace ReserveBlockCore.Nodes
                 if (!Globals.IsBootstrapMode)
                     await PingCasters();
 
+                // EVICTION-AWARE: Periodic check — if we think we're a caster but no peer
+                // caster lists us, we were evicted (e.g., after a network blip where peers
+                // replaced us). This catches bootstrap casters that reconnect and accidentally
+                // re-add themselves, as well as any node that somehow ended up as a phantom caster.
+                if (Globals.IsBlockCaster)
+                {
+                    var wasEvicted = await CasterDiscoveryService.PerformEvictionAwarenessCheckAsync();
+                    if (wasEvicted)
+                    {
+                        CasterLogUtility.Log(
+                            "MonitorCasters: eviction detected — skipping caster work this cycle. " +
+                            "Node will participate as regular validator until re-promoted.",
+                            "EVICTION-AWARE");
+                        await Task.Delay(10000);
+                        continue;
+                    }
+                }
+
                 if (Globals.BlockCasters.Any())
                 {
                     await CasterDiscoveryService.EvaluateCasterPool();

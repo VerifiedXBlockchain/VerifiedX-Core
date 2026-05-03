@@ -1772,6 +1772,226 @@ namespace ReserveBlockCore.Services
 
         #endregion
 
+        #region Eviction Awareness — "Verify Before You Cast"
+
+        /// <summary>
+        /// EVICTION-AWARE: Queries up to 3 known peer caster IPs (from hardcoded bootstrap or current BlockCasters)
+        /// to check whether this node's ValidatorAddress appears in their active caster list.
+        /// Returns a tuple: (selfConfirmed, liveCasterList, peersReached).
+        ///   - selfConfirmed: true if at least one reachable peer lists us as a caster.
+        ///   - liveCasterList: the caster list from the first peer that responded (may be null if none responded).
+        ///   - peersReached: how many peers responded successfully.
+        /// Used to prevent a previously-evicted bootstrap caster from blindly re-adding itself.
+        /// </summary>
+        public static async Task<(bool selfConfirmed, List<CasterInfo>? liveCasterList, int peersReached)> VerifySelfInRemoteCasterListsAsync(
+            IEnumerable<string> peerIPs)
+        {
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                return (false, null, 0);
+
+            var ipsToQuery = peerIPs
+                .Where(ip => !string.IsNullOrEmpty(ip))
+                .Select(ip => ip.Replace("::ffff:", ""))
+                .Distinct()
+                .Take(3)
+                .ToList();
+
+            if (ipsToQuery.Count == 0)
+                return (false, null, 0);
+
+            bool selfFound = false;
+            List<CasterInfo>? bestCasterList = null;
+            int peersReached = 0;
+
+            foreach (var ip in ipsToQuery)
+            {
+                try
+                {
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetCasters";
+                    var resp = await client.GetStringAsync(url);
+                    if (string.IsNullOrEmpty(resp) || resp == "0")
+                        continue;
+
+                    peersReached++;
+
+                    // Parse the SignedCasterListResponse
+                    var parsed = Newtonsoft.Json.JsonConvert.DeserializeObject<SignedCasterListResponse>(resp);
+                    if (parsed?.Casters != null && parsed.Casters.Count > 0)
+                    {
+                        if (bestCasterList == null)
+                            bestCasterList = parsed.Casters;
+
+                        if (parsed.Casters.Any(c => c.Address == Globals.ValidatorAddress))
+                        {
+                            selfFound = true;
+                            bestCasterList = parsed.Casters; // prefer the list that includes us
+                            CasterLogUtility.Log(
+                                $"VerifySelfInRemote: peer {ip} confirms us in caster list ({parsed.Casters.Count} casters)",
+                                "EVICTION-AWARE");
+                            break; // one confirmation is enough
+                        }
+                        else
+                        {
+                            CasterLogUtility.Log(
+                                $"VerifySelfInRemote: peer {ip} does NOT list us. Their casters: [{string.Join(",", parsed.Casters.Select(c => c.Address))}]",
+                                "EVICTION-AWARE");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CasterLogUtility.Log(
+                        $"VerifySelfInRemote: peer {ip} unreachable: {ex.Message}",
+                        "EVICTION-AWARE");
+                }
+            }
+
+            CasterLogUtility.Log(
+                $"VerifySelfInRemote RESULT: selfConfirmed={selfFound} peersReached={peersReached} liveCasterCount={bestCasterList?.Count ?? 0}",
+                "EVICTION-AWARE");
+
+            return (selfFound, bestCasterList, peersReached);
+        }
+
+        /// <summary>
+        /// EVICTION-AWARE: Fetches the live caster list from known bootstrap peer IPs.
+        /// Used by GetBlockcasters() to replace hardcoded injection with the actual network state
+        /// when the chain is already running.
+        /// Returns the live caster list as Peers objects, or null if no peers responded.
+        /// </summary>
+        public static async Task<List<Peers>?> FetchLiveCasterListFromPeersAsync(IEnumerable<string> peerIPs)
+        {
+            var ipsToQuery = peerIPs
+                .Where(ip => !string.IsNullOrEmpty(ip))
+                .Select(ip => ip.Replace("::ffff:", ""))
+                .Distinct()
+                .Take(3)
+                .ToList();
+
+            foreach (var ip in ipsToQuery)
+            {
+                try
+                {
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetCasters";
+                    var resp = await client.GetStringAsync(url);
+                    if (string.IsNullOrEmpty(resp) || resp == "0")
+                        continue;
+
+                    var parsed = Newtonsoft.Json.JsonConvert.DeserializeObject<SignedCasterListResponse>(resp);
+                    if (parsed?.Casters != null && parsed.Casters.Count > 0)
+                    {
+                        var result = parsed.Casters
+                            .Where(c => !string.IsNullOrEmpty(c.Address))
+                            .Select(c => new Peers
+                            {
+                                IsIncoming = false,
+                                IsOutgoing = true,
+                                PeerIP = c.PeerIP,
+                                FailCount = 0,
+                                IsValidator = true,
+                                ValidatorAddress = c.Address,
+                                ValidatorPublicKey = c.PublicKey,
+                            })
+                            .ToList();
+
+                        CasterLogUtility.Log(
+                            $"FetchLiveCasterList: peer {ip} returned {result.Count} casters: [{string.Join(",", result.Select(r => r.ValidatorAddress))}]",
+                            "EVICTION-AWARE");
+                        return result;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CasterLogUtility.Log(
+                        $"FetchLiveCasterList: peer {ip} unreachable: {ex.Message}",
+                        "EVICTION-AWARE");
+                }
+            }
+
+            CasterLogUtility.Log("FetchLiveCasterList: no peers responded — true cold start", "EVICTION-AWARE");
+            return null;
+        }
+
+        /// <summary>
+        /// EVICTION-AWARE: Continuous eviction check. If this node thinks it's a caster but
+        /// no reachable peer caster lists it, this node was evicted and should stand down.
+        /// Called periodically from MonitorCasters(). Returns true if this node was evicted
+        /// (caller should flip IsBlockCaster=false and remove self from BlockCasters).
+        /// Skips the check during true cold start (no reachable peers).
+        /// </summary>
+        public static async Task<bool> PerformEvictionAwarenessCheckAsync()
+        {
+            if (!Globals.IsBlockCaster || string.IsNullOrEmpty(Globals.ValidatorAddress))
+                return false;
+
+            var peerCasters = Globals.BlockCasters.ToList()
+                .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
+                .Select(c => c.PeerIP!.Replace("::ffff:", ""))
+                .ToList();
+
+            if (peerCasters.Count == 0)
+            {
+                // Solo caster or no peers to check against — can't determine eviction
+                return false;
+            }
+
+            var (selfConfirmed, liveCasterList, peersReached) = await VerifySelfInRemoteCasterListsAsync(peerCasters);
+
+            // If no peers were reachable at all, we can't conclude eviction (network issue)
+            if (peersReached == 0)
+            {
+                CasterLogUtility.Log(
+                    "EvictionCheck: no peers reachable — cannot determine eviction status, skipping",
+                    "EVICTION-AWARE");
+                return false;
+            }
+
+            // Peers responded but none listed us → we were evicted
+            if (!selfConfirmed)
+            {
+                CasterLogUtility.Log(
+                    $"EvictionCheck: {peersReached} peer(s) reachable, NONE list us as caster → EVICTED. " +
+                    $"Standing down. Live caster count from peers: {liveCasterList?.Count ?? 0}",
+                    "EVICTION-AWARE");
+                ConsoleWriterService.OutputValCaster(
+                    $"[EVICTION-AWARE] This node was evicted from the caster pool by peers. " +
+                    $"Standing down to regular validator. Will wait for re-promotion if needed.");
+
+                // Replace our BlockCasters with the live list from peers if available
+                if (liveCasterList != null && liveCasterList.Count > 0)
+                {
+                    var nBag = new System.Collections.Concurrent.ConcurrentBag<Peers>();
+                    foreach (var ci in liveCasterList)
+                    {
+                        nBag.Add(new Peers
+                        {
+                            PeerIP = ci.PeerIP,
+                            IsValidator = true,
+                            ValidatorAddress = ci.Address,
+                            ValidatorPublicKey = ci.PublicKey,
+                            FailCount = 0,
+                        });
+                    }
+                    Globals.BlockCasters = nBag;
+                    Globals.SyncKnownCastersFromBlockCasters();
+                    CasterLogUtility.Log(
+                        $"EvictionCheck: replaced BlockCasters with {liveCasterList.Count} peers from live list",
+                        "EVICTION-AWARE");
+                }
+
+                Globals.IsBlockCaster = false;
+                return true;
+            }
+
+            return false;
+        }
+
+        #endregion
+
         #region Block catch-up helpers
 
         /// <summary>
