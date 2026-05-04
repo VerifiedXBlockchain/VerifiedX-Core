@@ -204,6 +204,37 @@ namespace ReserveBlockCore.Utilities
                     Globals.LastBlock = new Block { Height = -1 };
                 }
 
+                // Step 6: Clear stale in-memory queues to prevent orphaned blocks from
+                // passing validation via Block.GetPreviousHash() after rollback.
+                // Without this, blocks referencing the rolled-back block's hash can still
+                // be validated and committed, creating gaps in the chain.
+                var queueKeysToRemove = Globals.NetworkBlockQueue.Keys.Where(k => k > targetHeight).ToList();
+                var removedQueueCount = 0;
+                foreach (var key in queueKeysToRemove)
+                {
+                    if (Globals.NetworkBlockQueue.TryRemove(key, out _))
+                        removedQueueCount++;
+                }
+
+                var broadcastKeysToRemove = Globals.BlockQueueBroadcasted.Keys.Where(k => k > targetHeight).ToList();
+                foreach (var key in broadcastKeysToRemove)
+                    Globals.BlockQueueBroadcasted.TryRemove(key, out _);
+
+                var backupKeysToRemove = Globals.BackupProofs.Keys.Where(k => k > targetHeight).ToList();
+                foreach (var key in backupKeysToRemove)
+                    Globals.BackupProofs.TryRemove(key, out _);
+
+                // Also clear BlockHashes for removed heights
+                var hashKeysToRemove = Globals.BlockHashes.Keys.Where(k => k > targetHeight).ToList();
+                foreach (var key in hashKeysToRemove)
+                    Globals.BlockHashes.TryRemove(key, out _);
+
+                LogUtility.Log(
+                    $"[RollbackFast] Cleared in-memory queues above height {targetHeight}: " +
+                    $"NetworkBlockQueue={removedQueueCount}, BlockQueueBroadcasted={broadcastKeysToRemove.Count}, " +
+                    $"BackupProofs={backupKeysToRemove.Count}, BlockHashes={hashKeysToRemove.Count}",
+                    "BlockRollback");
+
                 LogUtility.Log(
                     $"[RollbackFast] SUCCESS: Rolled back {numBlocksRollback} block(s). " +
                     $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",

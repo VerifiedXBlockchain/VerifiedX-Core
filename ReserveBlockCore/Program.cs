@@ -992,17 +992,22 @@ namespace ReserveBlockCore
                     else
                         P2PClient.UpdateMaxHeight(maxHeight);
 
-                    // FORK-RECOVERY: Check if this node is stuck at the same height while peers advance.
-                    // This catches validators (non-casters) that received a bad block and can't progress.
-                    // After VALIDATOR_STUCK_THRESHOLD consecutive cycles with no height change and peers ahead,
-                    // automatically rolls back the bad block and resyncs from peers.
-                    if (!Globals.IsResyncing && !ForkRecoveryUtility.IsRecoveryInProgress)
-                    {
-                        await ForkRecoveryUtility.CheckAndRecoverAsync(
-                            Globals.LastBlock.Height,
-                            maxHeight,
-                            "Program.BlockHeightCheck");
-                    }
+                    // FORK-RECOVERY: DISABLED — time-based stuck detection was too aggressive.
+                    // It triggered false-positive rollbacks during normal block production delays,
+                    // causing the missing-block-22802 bug (stale NetworkBlockQueue entries allowed
+                    // orphaned blocks to pass validation after rollback).
+                    //
+                    // Phase 2 will replace this with caster-driven hash-based fork detection:
+                    // Casters detect hash splits, vote on canonical hash (3/5 majority),
+                    // and push corrections to validators via SignalR.
+                    //
+                    // if (!Globals.IsResyncing && !ForkRecoveryUtility.IsRecoveryInProgress)
+                    // {
+                    //     await ForkRecoveryUtility.CheckAndRecoverAsync(
+                    //         Globals.LastBlock.Height,
+                    //         maxHeight,
+                    //         "Program.BlockHeightCheck");
+                    // }
 
                     var MaxHeight = P2PClient.MaxHeight();
                     foreach (var node in Globals.Nodes.Values)

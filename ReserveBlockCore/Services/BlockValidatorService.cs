@@ -421,6 +421,36 @@ namespace ReserveBlockCore.Services
                 //        return result;
                 //}
 
+                // SAFETY: Enforce strict height continuity — no gaps allowed.
+                // This prevents orphaned blocks from being committed when the
+                // in-memory NetworkBlockQueue contains stale entries after rollback.
+                if (block.Height != Globals.LastBlock.Height + 1)
+                {
+                    // Don't reject if validateOnly (preflight) — only enforce on actual commit
+                    if (!validateOnly)
+                    {
+                        LogUtility.Log(
+                            $"[ValidateBlock] HEIGHT-GAP: Rejecting block at height {block.Height}, " +
+                            $"expected {Globals.LastBlock.Height + 1}. LastBlock.Hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                            "BlockValidatorService");
+                        DbContext.Rollback("BlockValidatorService.ValidateBlock()-heightGap");
+                        return result;
+                    }
+                }
+
+                // SAFETY: Verify PrevHash matches the actual LastBlock hash.
+                // This catches cases where Block.GetPreviousHash() resolved from stale
+                // in-memory data (NetworkBlockQueue) instead of the actual chain tip.
+                if (!validateOnly && block.Height > 0 && block.PrevHash != Globals.LastBlock.Hash)
+                {
+                    LogUtility.Log(
+                        $"[ValidateBlock] PREVHASH-MISMATCH: Block {block.Height} PrevHash={block.PrevHash?[..Math.Min(16, block.PrevHash?.Length ?? 0)]} " +
+                        $"!= LastBlock.Hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                        "BlockValidatorService");
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-prevHashMismatch");
+                    return result;
+                }
+
                 var newBlock = new Block
                 {
                     Height = block.Height,
