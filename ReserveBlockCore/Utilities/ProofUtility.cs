@@ -217,13 +217,13 @@ namespace ReserveBlockCore.Utilities
             var blockHeight = Globals.LastBlock.Height + 1;
             var prevHash = Globals.LastBlock.Hash;
 
-            // FIX A: Don't generate proofs for validators that can't be reached.
-            // Filter by CheckFailCount AND require either IsFullyTrusted or recent LastSeen (< 5 min).
-            // This prevents wasting time generating VRF proofs for offline/stale validators.
-            var now = TimeUtil.GetTime();
+            // FIX A: Only generate proofs for fully trusted validators.
+            // The LastSeen fallback was allowing untrusted validators (hydrated from recent blocks
+            // during startup with IsFullyTrusted=false) to enter the proof pool and win elections
+            // they can't fulfill — causing version gate timeouts and block fetch failures.
+            // This now aligns with EvalTick which also requires IsFullyTrusted for promotion.
             var newPeers = Globals.NetworkValidators.Values
-                .Where(x => x.CheckFailCount <= 3 &&
-                       (x.IsFullyTrusted || (x.LastSeen > 0 && (now - x.LastSeen) < 300)))
+                .Where(x => x.CheckFailCount <= 3 && x.IsFullyTrusted)
                 .ToList();
 
             List<string> CompletedIPs = new List<string>();
