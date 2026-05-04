@@ -493,10 +493,15 @@ namespace ReserveBlockCore.Services
                     // includes a node that rejected the promotion, breaking quorum.
                     CasterLogUtility.Log($"     sending PromoteToCaster HTTP to {ip}…", "CasterFlow");
                     ConsoleWriterService.OutputValCaster($"[CasterFlow] → POST PromoteToCaster {ip}");
-                    var accepted = await NotifyPromotionAndAwaitAcceptance(ip, v.Address, newCaster).ConfigureAwait(false);
+                    var (accepted, promotionUnreachable) = await NotifyPromotionAndAwaitAcceptance(ip, v.Address, newCaster).ConfigureAwait(false);
                     if (!accepted)
                     {
-                        CasterLogUtility.Log($"  <<  promotion REJECTED/failed by candidate", "CasterFlow");
+                        if (promotionUnreachable)
+                        {
+                            RevokeFullyTrustedValidatorState(v.Address, "PromoteToCaster unreachable or HTTP error");
+                            TrackPromotionCooldown(v.Address, currentHeight);
+                        }
+                        CasterLogUtility.Log($"  <<  promotion REJECTED/failed by candidate (unreachable={promotionUnreachable})", "CasterFlow");
                         ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {v.Address} at {ip} did not accept promotion. Not adding to caster pool.");
                         continue;
@@ -792,7 +797,7 @@ namespace ReserveBlockCore.Services
                 }
             }
 
-            if (toRemove.Count > 0)
+                if (toRemove.Count > 0)
             {
                 var remaining = casters
                     .Where(c => !toRemove.Contains(c.ValidatorAddress ?? ""))
@@ -808,6 +813,7 @@ namespace ReserveBlockCore.Services
                     var reason = removalReasons.GetValueOrDefault(addr, "unknown");
                     ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] VersionAudit: Demoted caster {addr} — {reason}.");
+                    RevokeFullyTrustedValidatorState(addr, $"version audit demotion ({reason})");
                 }
 
                 // Broadcast demotion to all remaining casters so they remove the node too
@@ -820,20 +826,40 @@ namespace ReserveBlockCore.Services
         }
 
         /// <summary>
-        /// Sends a promotion notification to the candidate and waits for acceptance.
-        /// Returns true only if the candidate responds with an acceptance confirmation.
-        /// The candidate's caster list includes the new caster so it knows the full pool.
+        /// Clears fully-trusted status for a validator that left the caster pool or could not be reached
+        /// for promotion. They exit proof quorum and caster promotion until gossip/chain restores trust.
         /// </summary>
-        private static async Task<bool> NotifyPromotionAndAwaitAcceptance(string peerIP, string address, Peers newCaster)
+        private static void RevokeFullyTrustedValidatorState(string validatorAddress, string reason)
+        {
+            if (string.IsNullOrEmpty(validatorAddress) || validatorAddress == "unknown")
+                return;
+            if (!Globals.NetworkValidators.TryGetValue(validatorAddress, out var nv))
+                return;
+            nv.IsFullyTrusted = false;
+            nv.CheckFailCount = Math.Max(nv.CheckFailCount, 4);
+            nv.LastSeen = 0;
+            Globals.NetworkValidators[validatorAddress] = nv;
+            ProofUtility.ClearProofGenerationCache();
+            CasterLogUtility.Log(
+                $"NetworkValidator trust revoked for {validatorAddress}: {reason}",
+                "CasterFlow");
+        }
+
+        /// <summary>
+        /// Sends a promotion notification to the candidate and waits for acceptance.
+        /// Returns (true, false) only if the candidate responds with an acceptance confirmation.
+        /// <paramref name="unreachable"/> is true when the HTTP call failed (offline, timeout, non-success status).
+        /// </summary>
+        private static async Task<(bool accepted, bool unreachable)> NotifyPromotionAndAwaitAcceptance(string peerIP, string address, Peers newCaster)
         {
             try
             {
                 var account = AccountData.GetLocalValidator();
                 if (account == null)
-                    return false;
+                    return (false, false);
                 var privateKey = account.GetPrivKey;
                 if (privateKey == null || string.IsNullOrEmpty(account.PublicKey))
-                    return false;
+                    return (false, false);
 
                 using var client = Globals.HttpClientFactory.CreateClient();
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -865,7 +891,7 @@ namespace ReserveBlockCore.Services
                 var canonicalMessage = $"PROMOTE|{address}|{blockHeight}|{promoterAddress}|{casterListHashHex}";
                 var signature = SignatureService.CreateSignature(canonicalMessage, privateKey, account.PublicKey);
                 if (signature == "ERROR")
-                    return false;
+                    return (false, false);
 
                 var promotion = new CasterPromotionRequest
                 {
@@ -896,13 +922,13 @@ namespace ReserveBlockCore.Services
                     {
                         ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {address} at {peerIP} ACCEPTED promotion.");
-                        return true;
+                        return (true, false);
                     }
                     else
                     {
                         ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {address} at {peerIP} REJECTED promotion. Response: {body}");
-                        return false;
+                        return (false, false);
                     }
                 }
                 else
@@ -914,14 +940,14 @@ namespace ReserveBlockCore.Services
                         "CasterFlow");
                     ConsoleWriterService.OutputValCaster(
                         $"[CasterDiscovery] Candidate {address} at {peerIP} promotion request failed: {response.StatusCode}");
-                    return false;
+                    return (false, true);
                 }
             }
             catch (Exception ex)
             {
                 CasterLogUtility.Log($"NotifyPromotion EXCEPTION peer={peerIP}: {ex.GetType().Name}: {ex.Message}", "CasterFlow");
                 ErrorLogUtility.LogError($"NotifyPromotionAndAwaitAcceptance to {peerIP} failed: {ex.Message}", "CasterDiscoveryService");
-                return false;
+                return (false, true);
             }
         }
 
@@ -1035,6 +1061,8 @@ namespace ReserveBlockCore.Services
         {
             ConsoleWriterService.OutputValCaster(
                 $"[CasterDiscovery] Caster {removedAddress} removed. Evaluating pool for replacement...");
+
+            RevokeFullyTrustedValidatorState(removedAddress, "removed from BlockCasters (eviction/demotion)");
 
             _lastEvaluationHeight = long.MinValue;
             await EvaluateCasterPool().ConfigureAwait(false);

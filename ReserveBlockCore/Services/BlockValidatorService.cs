@@ -896,6 +896,43 @@ namespace ReserveBlockCore.Services
                                         
                                         // No DB save needed — VBTCValidatorRegistry derives state from block scanning
 
+                                        // VALIDATOR-REJOIN: Hydrate NetworkValidators when a REGISTER TX is on-chain.
+                                        // This is the strongest proof of validator liveness — the TX passed consensus
+                                        // and was included in a committed block. Add/update as fully trusted.
+                                        if (!string.IsNullOrEmpty(validatorAddress) && !string.IsNullOrEmpty(ipAddress))
+                                        {
+                                            var cleanIP = ipAddress.Replace("::ffff:", "");
+                                            var now = TimeUtil.GetTime();
+                                            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existingNv))
+                                            {
+                                                // Update existing entry — reset fail counts, update IP if changed
+                                                existingNv.IPAddress = cleanIP;
+                                                existingNv.IsFullyTrusted = true;
+                                                existingNv.LastSeen = now;
+                                                existingNv.CheckFailCount = 0;
+                                                Globals.NetworkValidators[validatorAddress] = existingNv;
+                                            }
+                                            else
+                                            {
+                                                // Add new entry — validator just registered on-chain
+                                                var nv = new NetworkValidator
+                                                {
+                                                    Address = validatorAddress,
+                                                    IPAddress = cleanIP,
+                                                    PublicKey = "", // Will be populated via P2P handshake or proof generation fallback
+                                                    IsFullyTrusted = true,
+                                                    LastSeen = now,
+                                                    FirstSeenAtHeight = block.Height,
+                                                    CheckFailCount = 0,
+                                                };
+                                                Globals.NetworkValidators.TryAdd(validatorAddress, nv);
+                                            }
+                                            // Clear any winner failure tracking for this validator
+                                            Nodes.BlockcasterNode.ClearWinnerFailures(validatorAddress);
+                                            Utilities.ProofUtility.ClearProofGenerationCache();
+                                            LogUtility.Log($"VALIDATOR-REJOIN: Hydrated NetworkValidators from REGISTER TX for {validatorAddress} (IP: {cleanIP}) at block {block.Height}", "BlockValidatorService");
+                                        }
+
                                         //LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
@@ -947,6 +984,45 @@ namespace ReserveBlockCore.Services
                                         }
 
                                         // No DB save needed — VBTCValidatorRegistry derives state from block scanning
+
+                                        // VALIDATOR-REJOIN: Hydrate NetworkValidators when a HEARTBEAT TX is on-chain.
+                                        // A heartbeat TX in a committed block is the strongest proof of liveness —
+                                        // the validator crafted, signed, and broadcast this TX, and it passed consensus.
+                                        // This is the primary mechanism for returning validators to re-enter the
+                                        // in-memory NetworkValidators pool after being evicted or after a full restart.
+                                        if (!string.IsNullOrEmpty(validatorAddress) && !string.IsNullOrEmpty(ipAddress))
+                                        {
+                                            var cleanIP = ipAddress.Replace("::ffff:", "");
+                                            var now = TimeUtil.GetTime();
+                                            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existingNv))
+                                            {
+                                                // Update existing entry — reset fail counts, update IP if changed
+                                                existingNv.IPAddress = cleanIP;
+                                                existingNv.IsFullyTrusted = true;
+                                                existingNv.LastSeen = now;
+                                                existingNv.CheckFailCount = 0;
+                                                Globals.NetworkValidators[validatorAddress] = existingNv;
+                                            }
+                                            else
+                                            {
+                                                // Add new entry — validator just heartbeated on-chain
+                                                var nv = new NetworkValidator
+                                                {
+                                                    Address = validatorAddress,
+                                                    IPAddress = cleanIP,
+                                                    PublicKey = "", // Will be populated via P2P handshake or proof generation fallback
+                                                    IsFullyTrusted = true,
+                                                    LastSeen = now,
+                                                    FirstSeenAtHeight = block.Height,
+                                                    CheckFailCount = 0,
+                                                };
+                                                Globals.NetworkValidators.TryAdd(validatorAddress, nv);
+                                            }
+                                            // Clear any winner failure tracking for this validator
+                                            Nodes.BlockcasterNode.ClearWinnerFailures(validatorAddress);
+                                            Utilities.ProofUtility.ClearProofGenerationCache();
+                                            LogUtility.Log($"VALIDATOR-REJOIN: Hydrated NetworkValidators from HEARTBEAT TX for {validatorAddress} (IP: {cleanIP}) at block {block.Height}", "BlockValidatorService");
+                                        }
 
                                         //LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}", "BlockValidatorService");
                                     }

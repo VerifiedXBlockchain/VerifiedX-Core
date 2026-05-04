@@ -127,10 +127,19 @@ namespace ReserveBlockCore.Services
         {
             if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
+                LogUtility.Log("VALIDATOR-STARTUP: Waiting for chain sync before starting validator process...", "ValidatorService.StartupValidatorProcess");
+                var syncWaitLogged = false;
                 while (!Globals.IsChainSynced)
                 {
+                    if (!syncWaitLogged && Globals.LastBlock.Height > 0)
+                    {
+                        LogUtility.Log($"VALIDATOR-STARTUP: Chain not synced yet. Height={Globals.LastBlock.Height}, Nodes={Globals.Nodes.Count}, ValidatorNodes={Globals.ValidatorNodes.Count}, BlockCasters={Globals.BlockCasters.Count}",
+                            "ValidatorService.StartupValidatorProcess");
+                        syncWaitLogged = true;
+                    }
                     await Task.Delay(1000);
                 }
+                LogUtility.Log($"VALIDATOR-STARTUP: Chain synced at height {Globals.LastBlock.Height}. Starting validator services...", "ValidatorService.StartupValidatorProcess");
                 
                 // Scan recent blocks first to rebuild accurate validator state from consensus
                 // Block-scan-based validator registry replaces startup DB scan

@@ -378,8 +378,12 @@ namespace ReserveBlockCore.P2P
                     await node.Connection.DisposeAsync();
                 }                                
             }
-            catch 
+            catch (Exception ex)
             {
+                // DIAGNOSTIC: Log the actual error so we can see why validator P2P connections fail
+                LogUtility.Log(
+                    $"CONNECT-FAIL: Validator connection to {peer.PeerIP} failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                    "P2PValidatorClient.Connect");
                 Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
                 peer.FailCount += 1;
                 if (peer.FailCount > 600)
@@ -668,8 +672,14 @@ namespace ReserveBlockCore.P2P
                     await node.Connection.DisposeAsync();
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                // DIAGNOSTIC: Log the actual error so we can see why blockcaster SignalR connections fail
+                // This was previously a bare catch{} that silently swallowed all errors — making it
+                // impossible to diagnose why returning validators couldn't connect to casters.
+                LogUtility.Log(
+                    $"CONNECT-CASTER-FAIL: Blockcaster connection to {peer.PeerIP} ({url}) failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                    "P2PValidatorClient.ConnectBlockcaster");
                 Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
                 peer.FailCount += 1;
                 if (peer.FailCount > 600)

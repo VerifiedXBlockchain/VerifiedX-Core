@@ -130,6 +130,180 @@ namespace ReserveBlockCore.Services
             var peerDb = Peers.GetAll();
             Globals.BannedIPs = new ConcurrentDictionary<string, Peers>(
                 peerDb.Find(x => x.IsBanned || x.IsPermaBanned).ToArray().ToDictionary(x => x.PeerIP, x => x));
+
+            // VALIDATOR-REJOIN-FIX: Reset stale FailCounts for validator peers on startup.
+            // When validators go offline for extended periods, the remaining nodes accumulate
+            // FailCounts in the thousands for those IPs. With FailCount > 600, IsOutgoing is
+            // set to false and persisted. This prevents P2P connections from being established
+            // to/from those validators after restart, even though the nodes are back online.
+            // Resetting at startup ensures returning validators can re-establish P2P connections.
+            ResetStaleValidatorPeerFailCounts();
+        }
+
+        /// <summary>
+        /// VALIDATOR-REJOIN-FIX: Reset FailCount and IsOutgoing for validator peers at startup.
+        /// High FailCounts from prolonged offline periods prevent P2P connection establishment.
+        /// The blockchain is the source of truth — a validator's on-chain presence (REGISTER/HEARTBEAT TX)
+        /// proves legitimacy, not the P2P connection history. Resetting these counters allows
+        /// returning validators to re-establish connections and rejoin the network.
+        /// </summary>
+        internal static void ResetStaleValidatorPeerFailCounts()
+        {
+            try
+            {
+                var peerDb = Peers.GetAll();
+                if (peerDb == null) return;
+
+                var staleValidatorPeers = peerDb.Find(x => x.IsValidator && (x.FailCount > 10 || !x.IsOutgoing)).ToList();
+                if (!staleValidatorPeers.Any()) return;
+
+                int resetCount = 0;
+                foreach (var peer in staleValidatorPeers)
+                {
+                    var oldFailCount = peer.FailCount;
+                    var oldIsOutgoing = peer.IsOutgoing;
+                    peer.FailCount = 0;
+                    peer.IsOutgoing = true;
+                    peerDb.UpdateSafe(peer);
+                    resetCount++;
+                    LogUtility.Log(
+                        $"VALIDATOR-REJOIN-FIX: Reset stale peer {peer.PeerIP} (addr={peer.ValidatorAddress}): " +
+                        $"FailCount {oldFailCount}→0, IsOutgoing {oldIsOutgoing}→true",
+                        "StartupService.ResetStaleValidatorPeerFailCounts()");
+                }
+
+                if (resetCount > 0)
+                {
+                    ConsoleWriterService.Output($"[Startup] Reset {resetCount} stale validator peer FailCounts to allow P2P reconnection.");
+                    LogUtility.Log(
+                        $"VALIDATOR-REJOIN-FIX: Reset {resetCount} stale validator peer FailCounts on startup.",
+                        "StartupService.ResetStaleValidatorPeerFailCounts()");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error resetting stale validator peer fail counts: {ex.Message}",
+                    "StartupService.ResetStaleValidatorPeerFailCounts()");
+            }
+        }
+
+        /// <summary>
+        /// VALIDATOR-REJOIN-FIX: Scan the last N blocks for VBTC_V2_VALIDATOR_HEARTBEAT and
+        /// VBTC_V2_VALIDATOR_REGISTER transactions. For each one found, hydrate Globals.NetworkValidators
+        /// with the validator's address and IP from the on-chain TX data.
+        /// 
+        /// This is the blockchain-as-source-of-truth approach: a TX in a committed block is the
+        /// strongest proof of validator liveness. No DB trust, no P2P dependency — just the chain.
+        /// 
+        /// Called after chain sync completes but BEFORE the liveness sweep, so returning validators
+        /// that broadcast heartbeat TXs during the caster's downtime are discovered and present
+        /// when the sweep checks them.
+        /// </summary>
+        internal static void ScanRecentBlocksForValidators()
+        {
+            const int SCAN_DEPTH = 500; // Scan last 500 blocks for validator TXs
+
+            try
+            {
+                var lastHeight = Globals.LastBlock.Height;
+                if (lastHeight <= 0) return;
+
+                var startHeight = Math.Max(0, lastHeight - SCAN_DEPTH);
+                var blockChain = BlockchainData.GetBlocks();
+                int hydratedCount = 0;
+                var currentTime = TimeUtil.GetTime();
+
+                LogUtility.Log(
+                    $"VALIDATOR-REJOIN-SCAN: Starting scan of blocks {startHeight}→{lastHeight} for HEARTBEAT/REGISTER TXs",
+                    "StartupService.ScanRecentBlocksForValidators");
+
+                for (long h = startHeight; h <= lastHeight; h++)
+                {
+                    try
+                    {
+                        var block = blockChain.Query().Where(x => x.Height == h).FirstOrDefault();
+                        if (block == null || block.Transactions == null || block.Transactions.Count <= 1)
+                            continue;
+
+                        foreach (var tx in block.Transactions)
+                        {
+                            if (tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT &&
+                                tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER)
+                                continue;
+
+                            try
+                            {
+                                if (string.IsNullOrEmpty(tx.Data)) continue;
+
+                                var txData = JObject.Parse(tx.Data);
+                                var validatorAddress = txData["ValidatorAddress"]?.ToString();
+                                var ipAddress = txData["IPAddress"]?.ToString();
+
+                                if (string.IsNullOrEmpty(validatorAddress) || string.IsNullOrEmpty(ipAddress))
+                                    continue;
+
+                                // Validate IP format
+                                var cleanIP = ipAddress.Replace("::ffff:", "");
+                                if (!System.Net.IPAddress.TryParse(cleanIP, out _))
+                                    continue;
+
+                                // Skip if already in NetworkValidators with a recent LastSeen
+                                if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existing))
+                                {
+                                    // Update LastSeen and IP if the block is newer
+                                    if (block.Timestamp > existing.LastSeen)
+                                    {
+                                        existing.LastSeen = block.Timestamp;
+                                        existing.IPAddress = cleanIP;
+                                        existing.IsFullyTrusted = true;
+                                        existing.CheckFailCount = 0;
+                                        Globals.NetworkValidators[validatorAddress] = existing;
+                                    }
+                                    continue;
+                                }
+
+                                // Add new entry — the TX on-chain IS the proof of legitimacy
+                                var netVal = new NetworkValidator
+                                {
+                                    Address = validatorAddress,
+                                    IPAddress = cleanIP,
+                                    PublicKey = txData["FrostPublicKey"]?.ToString() ?? "",
+                                    IsFullyTrusted = true,
+                                    LastSeen = block.Timestamp,
+                                    FirstSeenAtHeight = block.Height,
+                                    CheckFailCount = 0,
+                                    FirstAdvertised = block.Timestamp,
+                                };
+
+                                if (Globals.NetworkValidators.TryAdd(validatorAddress, netVal))
+                                {
+                                    hydratedCount++;
+                                }
+                            }
+                            catch { /* skip malformed TX data */ }
+                        }
+                    }
+                    catch { /* skip unreadable block */ }
+                }
+
+                // Clear proof cache so the new validators are included in proof generation
+                if (hydratedCount > 0)
+                {
+                    Utilities.ProofUtility.ClearProofGenerationCache();
+                }
+
+                LogUtility.Log(
+                    $"VALIDATOR-REJOIN-SCAN: Complete. Scanned {lastHeight - startHeight} blocks, hydrated {hydratedCount} validators. " +
+                    $"NetworkValidators.Count now = {Globals.NetworkValidators.Count}",
+                    "StartupService.ScanRecentBlocksForValidators");
+                ConsoleWriterService.Output(
+                    $"[Startup] Blockchain validator scan: found {hydratedCount} validators in last {SCAN_DEPTH} blocks.");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"VALIDATOR-REJOIN-SCAN error: {ex.Message}",
+                    "StartupService.ScanRecentBlocksForValidators");
+            }
         }
 
         public static async void EncryptedPasswordEntry()
@@ -1078,6 +1252,22 @@ namespace ReserveBlockCore.Services
                 {                    
                     Globals.StopAllTimers = false;
                     Globals.IsChainSynced = true;
+
+                    // VALIDATOR-REJOIN-FIX: Scan recent blocks for HEARTBEAT and REGISTER TXs
+                    // to hydrate NetworkValidators from on-chain state. This runs BEFORE the
+                    // liveness sweep so returning validators discovered from the blockchain
+                    // are present before the sweep checks them.
+                    _ = Task.Run(() =>
+                    {
+                        try
+                        {
+                            ScanRecentBlocksForValidators();
+                        }
+                        catch (Exception scanEx)
+                        {
+                            ErrorLogUtility.LogError($"VALIDATOR-REJOIN-SCAN failed: {scanEx.Message}", "StartupService.DownloadBlocksOnStart");
+                        }
+                    });
 
                     // POST-SYNC LIVENESS SWEEP: After sync completes, verify all NetworkValidators
                     // are actually online and running a compatible version. Remove offline/outdated ones.

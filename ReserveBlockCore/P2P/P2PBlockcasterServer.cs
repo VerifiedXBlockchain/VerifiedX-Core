@@ -27,6 +27,7 @@ namespace ReserveBlockCore.P2P
 
                 if (Globals.BannedIPs.ContainsKey(peerIP))
                 {
+                    LogUtility.Log($"BANNED-IP-REJECT: Rejecting blockcaster connection from banned IP {peerIP}", "P2PBlockcasterServer.OnConnectedAsync");
                     Context.Abort();
                     return;
                 }

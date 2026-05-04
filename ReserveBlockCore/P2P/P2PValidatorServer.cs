@@ -28,6 +28,7 @@ namespace ReserveBlockCore.P2P
 
                 if (Globals.BannedIPs.ContainsKey(peerIP))
                 {
+                    LogUtility.Log($"BANNED-IP-REJECT: Rejecting validator connection from banned IP {peerIP}", "P2PValidatorServer.OnConnectedAsync");
                     Context.Abort();
                     return;
                 }
