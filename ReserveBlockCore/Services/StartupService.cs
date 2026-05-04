@@ -255,7 +255,6 @@ namespace ReserveBlockCore.Services
                                     {
                                         existing.LastSeen = block.Timestamp;
                                         existing.IPAddress = cleanIP;
-                                        existing.IsFullyTrusted = true;
                                         existing.CheckFailCount = 0;
                                         Globals.NetworkValidators[validatorAddress] = existing;
                                     }
@@ -268,7 +267,7 @@ namespace ReserveBlockCore.Services
                                     Address = validatorAddress,
                                     IPAddress = cleanIP,
                                     PublicKey = txData["FrostPublicKey"]?.ToString() ?? "",
-                                    IsFullyTrusted = true,
+                                    IsFullyTrusted = false,
                                     LastSeen = block.Timestamp,
                                     FirstSeenAtHeight = block.Height,
                                     CheckFailCount = 0,
