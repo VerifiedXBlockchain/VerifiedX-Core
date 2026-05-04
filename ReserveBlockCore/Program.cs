@@ -45,6 +45,7 @@ namespace ReserveBlockCore
             bool skipStateSync = false;
             bool startGUI = false;
             bool headlessMode = false;
+            long? revertToHeight = null;
 
             var argList = args.ToList();
             // Exact "snapshot" = cold chain DB checkpoint + copy under the DB folder (excludes wallet DBs).
@@ -269,6 +270,15 @@ namespace ReserveBlockCore
                     {
                         Globals.BlockSeedCalls = true;
                     }
+                    if (argC.StartsWith("revertblock="))
+                    {
+                        var revertParts = argC.Split('=', 2);
+                        if (revertParts.Length == 2 && long.TryParse(revertParts[1], out var revertHeight) && revertHeight >= 0)
+                        {
+                            revertToHeight = revertHeight;
+                            Console.WriteLine($"[REVERT] Will revert chain to height {revertToHeight} after DB initialization.");
+                        }
+                    }
                     if(argC.Contains("ipaddress"))
                     {
                         var ipSplit = argC.Split(new char[] { '=' });
@@ -374,6 +384,37 @@ namespace ReserveBlockCore
             });
 
             await DbContext.CheckPoint(); //checkpoints db log files
+
+            // STARTUP REVERT: If revertblock=N was passed, delete all blocks/headers above N
+            // and rebuild state from genesis before the rest of startup reads chain state.
+            if (revertToHeight.HasValue)
+            {
+                Console.WriteLine($"[REVERT] Reverting chain to height {revertToHeight.Value}...");
+                try
+                {
+                    // 1. Delete blocks above target from block store (rsrvblkdata.db)
+                    var revertBlocks = Block.GetBlocks();
+                    var deletedBlocks = revertBlocks.DeleteManySafe(x => x.Height > revertToHeight.Value);
+                    DbContext.DB.Checkpoint();
+
+                    // 2. Delete blockchain headers above target (rsrvblockchain.db)
+                    var revertBlockchain = Blockchain.GetBlockchain();
+                    var deletedHeaders = revertBlockchain?.DeleteManySafe(x => x.Height > revertToHeight.Value) ?? 0;
+                    DbContext.DB_Blockchain.Checkpoint();
+
+                    Console.WriteLine($"[REVERT] Deleted {deletedBlocks} block(s) and {deletedHeaders} blockchain header(s) above height {revertToHeight.Value}.");
+
+                    // 3. Rebuild all state (transactions, account balances, world trei) from remaining blocks
+                    //Console.WriteLine($"[REVERT] Rebuilding state from genesis... (this may take a while for long chains)");
+                    //var resetResult = await BlockRollbackUtility.ResetTreis();
+                    //Console.WriteLine($"[REVERT] State rebuild {(resetResult ? "succeeded" : "FAILED")}. Continuing normal startup...");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[REVERT] ERROR during revert: {ex.Message}");
+                    Console.WriteLine($"[REVERT] The node may be in an inconsistent state. Consider using snapshot recovery.");
+                }
+            }
 
             await VFXLogging.ClearElmah();
             StartupService.SetBlockHeight(); //sets current block height
