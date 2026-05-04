@@ -28,14 +28,34 @@ namespace ReserveBlockCore.P2P
 
                 if (Globals.BannedIPs.ContainsKey(peerIP))
                 {
-                    LogUtility.Log($"BANNED-IP-REJECT: Rejecting validator connection from banned IP {peerIP}", "P2PValidatorServer.OnConnectedAsync");
-                    Context.Abort();
-                    return;
+                    // FIX 4: If the banned IP is an active caster, auto-unban it instead of rejecting.
+                    // Caster IPs must always be allowed to connect for consensus to function.
+                    if (BanService.IsCasterIP(peerIP))
+                    {
+                        BanService.UnbanPeer(peerIP);
+                        LogUtility.Log($"CASTER-AUTO-UNBAN: Unbanned caster IP {peerIP} on connection attempt", "P2PValidatorServer.OnConnectedAsync");
+                        // Fall through to allow connection
+                    }
+                    else
+                    {
+                        LogUtility.Log($"BANNED-IP-REJECT: Rejecting validator connection from banned IP {peerIP}", "P2PValidatorServer.OnConnectedAsync");
+                        Context.Abort();
+                        return;
+                    }
                 }
 
                 // HAL-14 Security Enhancement: Rate limiting and connection monitoring
+                // FIX 4: Skip rate-limit banning for caster IPs — casters naturally make
+                // many connections during consensus rounds and should never be banned for it.
                 if (ConnectionSecurityHelper.ShouldRateLimit(peerIP))
                 {
+                    if (BanService.IsCasterIP(peerIP))
+                    {
+                        LogUtility.Log($"CASTER-RATE-LIMIT-SKIP: Rate limit triggered for caster IP {peerIP} — skipping ban", "P2PValidatorServer.OnConnectedAsync");
+                        // Don't ban, but still throttle the connection
+                        await EndOnConnect(peerIP, "Too many connection attempts (throttled, not banned)", $"Rate limited caster IP: {peerIP}");
+                        return;
+                    }
                     BanService.BanPeer(peerIP, "Connection rate limit exceeded", "OnConnectedAsync-RateLimit");
                     await EndOnConnect(peerIP, "Too many connection attempts", $"Rate limited IP: {peerIP}");
                     return;

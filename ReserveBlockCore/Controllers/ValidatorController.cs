@@ -329,8 +329,30 @@ namespace ReserveBlockCore.Controllers
 
                 if (!string.IsNullOrEmpty(peerIP) && Globals.BannedIPs.ContainsKey(peerIP))
                 {
-                    CasterLogUtility.Log($"SendWinningProof REJECTED — banned IP {peerIP} height={blockHeight}", "PROOFDIAG");
-                    return Unauthorized();
+                    // FIX 1 (caster-ban-cascade): If the banned IP is actually a caster, auto-unban it
+                    // instead of rejecting. This recovers from pre-fix bans that are still in the dictionary.
+                    if (BanService.IsCasterIP(peerIP))
+                    {
+                        BanService.UnbanPeer(peerIP);
+                        CasterLogUtility.Log($"SendWinningProof AUTO-UNBANNED caster IP {peerIP} height={blockHeight}", "PROOFDIAG");
+                        // Fall through to serve the proof normally
+                    }
+                    else
+                    {
+                        CasterLogUtility.Log($"SendWinningProof REJECTED — banned IP {peerIP} height={blockHeight}", "PROOFDIAG");
+                        return Unauthorized();
+                    }
+                }
+
+                // FIX 3: Stale height suppression — if the requested height is more than 10 blocks
+                // behind our tip, return "0" immediately instead of spinning. This prevents stuck
+                // casters from flooding peers with stale proof requests that can never succeed.
+                var staleThreshold = 10;
+                var myHeightForStale = Globals.LastBlock.Height;
+                if (blockHeight < myHeightForStale - staleThreshold)
+                {
+                    CasterLogUtility.Log($"SendWinningProof → {peerIP} height={blockHeight} result=0 (stale: {myHeightForStale - blockHeight} blocks behind tip {myHeightForStale})", "PROOFDIAG");
+                    return Ok("0");
                 }
 
                 // FIX C: If the requested height is close to our tip (within 2 blocks),

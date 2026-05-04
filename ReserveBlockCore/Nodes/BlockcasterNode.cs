@@ -145,6 +145,12 @@ namespace ReserveBlockCore.Nodes
     private static int _forkStuckRounds = 0;
     private static int _forkRecoveryInProgress; // 0 = idle, 1 = running (interlocked)
     const int FORK_RECOVERY_THRESHOLD = 5; // After this many stuck rounds, trigger self-healing
+    /// <summary>FIX 5: Lower threshold for forced height sync + block download when stuck.
+    /// Unlike full fork recovery (which requires hash sync failure), this lighter-weight
+    /// path simply re-syncs height with peers and downloads missing blocks. This handles
+    /// the scenario where a caster falls behind due to bans/network issues but doesn't
+    /// have a hash mismatch (it just never received the newer blocks).</summary>
+    const int STUCK_RESYNC_THRESHOLD = 3; // After 3 stuck rounds, force height sync
 
     /// <summary>FIX D3: Clears all winner failure tracking for a given address.
     /// Called when a heartbeat TX is detected, indicating the validator restarted.</summary>
@@ -313,6 +319,11 @@ namespace ReserveBlockCore.Nodes
                     // If self-recovered, fall through to normal caster work
                 }
 
+
+                // FIX 2b: Proactively unban any caster IPs every MonitorTick (5s).
+                // This catches bans that accumulated before Fix 1 was deployed and
+                // ensures casters can always communicate during consensus rounds.
+                BanService.UnbanCasterIPs();
 
                 if (!Globals.IsBootstrapMode)
                     await PingCasters();
@@ -1671,15 +1682,37 @@ namespace ReserveBlockCore.Nodes
                     CasterLogUtility.Flush();
 
                     // FORK-RECOVERY: Track consecutive rounds where lastBlock height doesn't advance.
-                    // If we're stuck at the same height for FORK_RECOVERY_THRESHOLD rounds AND hash sync
-                    // has already given up (indicating we're on a minority fork), trigger automatic
-                    // rollback + resync to self-heal.
+                    // FIX 5: Two-tier stuck detection:
+                    //   Tier 1 (STUCK_RESYNC_THRESHOLD = 3 rounds): Force height sync + block download.
+                    //     This handles the common case where a caster fell behind due to bans/network issues.
+                    //   Tier 2 (FORK_RECOVERY_THRESHOLD = 5 rounds + hash sync failure): Full fork recovery
+                    //     with rollback. This handles the case where we're on a wrong fork block.
                     {
                         var currentLastBlockHeight = Globals.LastBlock.Height;
                         if (_forkStuckHeight == currentLastBlockHeight)
                         {
                             _forkStuckRounds++;
-                            // Only trigger recovery if hash sync has also failed (confirming we're on a wrong block)
+
+                            // FIX 5 (Tier 1): Lightweight resync — sync height + download blocks.
+                            // Triggered earlier than full fork recovery, doesn't require hash sync failure.
+                            if (_forkStuckRounds == STUCK_RESYNC_THRESHOLD)
+                            {
+                                CasterLogUtility.Log(
+                                    $"STUCK-RESYNC: {_forkStuckRounds} rounds stuck at height {currentLastBlockHeight}. " +
+                                    $"Forcing height sync + block download + caster unban.",
+                                    "FORK-RECOVERY");
+                                // Unban all caster IPs in case bans are causing the stuck state
+                                BanService.UnbanCasterIPs();
+                                // Force height sync and block download
+                                await SyncHeightWithPeersAsync();
+                                try { await BlockDownloadService.GetAllBlocks(); } catch { }
+                                // Clear proof cache so stale data doesn't persist
+                                ProofUtility.ClearProofGenerationCache();
+                                // Reset timing so next round starts fresh
+                                ResetRoundTiming(Globals.LastBlock.Height, force: true);
+                            }
+
+                            // Tier 2: Full fork recovery (existing logic)
                             bool hashSyncGaveUp = _hashSyncFailHeight == currentLastBlockHeight && _hashSyncFailCount >= HASH_SYNC_MAX_RETRIES;
                             if (_forkStuckRounds >= FORK_RECOVERY_THRESHOLD && hashSyncGaveUp)
                             {
