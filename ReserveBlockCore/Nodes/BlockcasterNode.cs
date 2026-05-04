@@ -380,6 +380,30 @@ namespace ReserveBlockCore.Nodes
             _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
         }
 
+        /// <summary>
+        /// PHASE 2: After SyncBlockHashWithPeersAsync corrects this caster's own block,
+        /// broadcast the canonical block to all connected validators so they can correct
+        /// themselves without waiting for the next round.
+        /// Uses message type "FC" (Fork Correction) through the existing GetCasterMessage channel.
+        /// </summary>
+        private static async Task BroadcastForkCorrectionToValidators(long height, string blockJson)
+        {
+            try
+            {
+                var data = JsonConvert.SerializeObject(new { Height = height, BlockJson = blockJson });
+                await Broadcast("FC", data, "");
+                CasterLogUtility.Log(
+                    $"[ForkCorrection] Broadcasted correction for height {height} to all connected validators.",
+                    "FORK-CORRECTION");
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log(
+                    $"[ForkCorrection] Error broadcasting correction: {ex.Message}",
+                    "FORK-CORRECTION");
+            }
+        }
+
         /// <summary>One caster HTTP poll; used in parallel so N casters finish in ~one timeout instead of N×6s.</summary>
         private static async Task PollCasterGetApprovalAsync(Peers caster, Proof finalizedWinner)
         {
@@ -1864,10 +1888,12 @@ namespace ReserveBlockCore.Nodes
                                 if (correctBlock != null && correctBlock.Hash == majority.Key)
                                 {
                                     var result = await BlockValidatorService.ValidateBlock(correctBlock, true, false, false, true);
-                                    if (result)
+                    if (result)
                                     {
                                         CasterLogUtility.Log($"BlockHashSync: Applied majority block. New hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}", "HASHSYNC");
                                         syncSucceeded = true;
+                                        // PHASE 2: Push fork correction to all connected validators
+                                        await BroadcastForkCorrectionToValidators(myHeight, json);
                                     }
                                     else
                                         CasterLogUtility.Log($"BlockHashSync: Majority block validation FAILED.", "HASHSYNC");

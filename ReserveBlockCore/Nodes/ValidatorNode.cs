@@ -604,6 +604,9 @@ namespace ReserveBlockCore.Nodes
                 case "7":
                     _ = ReceiveConfirmedBlock(data);
                     break;
+                case "FC":
+                    _ = ReceiveForkCorrection(data, ipAddress);
+                    break;
                 case "7777":
                     _ = TxMessage(data);
                     break;
@@ -872,6 +875,31 @@ namespace ReserveBlockCore.Nodes
                     }
                 }
 
+            }
+        }
+
+        //FC — Fork Correction from caster
+        /// <summary>
+        /// PHASE 2: Handles incoming fork correction messages from casters.
+        /// When a caster detects a hash divergence via SyncBlockHashWithPeersAsync and
+        /// corrects its own block, it broadcasts the canonical block to all connected
+        /// validators. This handler delegates to ForkCorrectionService for validation
+        /// and application.
+        /// </summary>
+        private static async Task ReceiveForkCorrection(string data, string casterIP)
+        {
+            if (string.IsNullOrEmpty(data)) return;
+            try
+            {
+                var correction = JsonConvert.DeserializeAnonymousType(data, new { Height = 0L, BlockJson = "" });
+                if (correction != null && correction.Height > 0 && !string.IsNullOrEmpty(correction.BlockJson))
+                {
+                    await ForkCorrectionService.HandleForkCorrectionAsync(correction.Height, correction.BlockJson, casterIP ?? "unknown");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[ForkCorrection] Error processing correction from {casterIP}: {ex.Message}", "ValidatorNode");
             }
         }
 
