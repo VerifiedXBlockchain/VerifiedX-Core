@@ -288,89 +288,315 @@ namespace ReserveBlockCore.Utilities
             }
         }
 
+        /// <summary>
+        /// Full chain state rebuild — wipes ALL chain-derived state databases and replays
+        /// every block through StateData.UpdateTreis() (the standard commit path that handles
+        /// ALL transaction types: TX, NFT, tokens, ADNR, votes, reserves, vBTC, privacy, etc.)
+        /// 
+        /// After replay, resyncs local wallet balances from the rebuilt AccountStateTrei and
+        /// re-populates local TransactionData for wallet addresses.
+        /// 
+        /// Does NOT wipe user data (wallet, HD wallet, peers, config, keystore, beacon, DST).
+        /// </summary>
         public static async Task<bool> ResetTreis()
         {
-            var blockChain = BlockchainData.GetBlocks().FindAll();
-            var failCount = 0;
-            List<Block> failBlocks = new List<Block>();
-
-            var transactions = TransactionData.GetAll();
-            var stateTrei = StateData.GetAccountStateTrei();
-            var worldTrei = WorldTrei.GetWorldTrei();
-
-            transactions.DeleteAllSafe();//delete all local transactions
-            stateTrei.DeleteAllSafe(); //removes all state trei data
-            worldTrei.DeleteAllSafe();  //removes the state trei
-
-            DbContext.DB.Checkpoint();
-            DbContext.DB_AccountStateTrei.Checkpoint();
-            DbContext.DB_WorldStateTrei.Checkpoint();
-
-            var accounts = AccountData.GetAccounts();
-            var accountList = accounts.FindAll().ToList();
-            if (accountList.Count() > 0)
+            try
             {
-                foreach (var account in accountList)
-                {
-                    account.Balance = 0M;
-                    accounts.UpdateSafe(account);//updating local record with synced state trei
-                }
-            }
+                Console.WriteLine("[ResetTreis] Starting full chain state rebuild...");
 
-            foreach (var block in blockChain)
-            {
-                var result = await BlockchainRescanUtility.ValidateBlock(block, true);
-                if (result != false)
-                {
-                    await StateData.UpdateTreis(block);
+                // ═══════════════════════════════════════════════════════════════
+                // STEP 1: Wipe all chain-derived state databases
+                // ═══════════════════════════════════════════════════════════════
+                Console.WriteLine("[ResetTreis] Step 1: Wiping chain-derived state databases...");
 
-                    foreach (Transaction transaction in block.Transactions)
+                // Core state treis
+                var transactions = TransactionData.GetAll();
+                var stateTrei = StateData.GetAccountStateTrei();
+                var worldTrei = WorldTrei.GetWorldTrei();
+
+                transactions.DeleteAllSafe();
+                stateTrei.DeleteAllSafe();
+                worldTrei.DeleteAllSafe();
+
+                // Smart contract state — drop all collections in the SC state DB
+                try
+                {
+                    if (DbContext.DB_SmartContractStateTrei != null)
                     {
-                        var mempool = TransactionData.GetPool();
-
-                        var mempoolTx = mempool.FindAll().Where(x => x.Hash == transaction.Hash).FirstOrDefault();
-                        if (mempoolTx != null)
+                        foreach (var name in DbContext.DB_SmartContractStateTrei.GetCollectionNames().ToList())
                         {
-                            mempool.DeleteManySafe(x => x.Hash == transaction.Hash);
-                            TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
-                        }
-
-                        var account = AccountData.GetAccounts().FindAll().Where(x => x.Address == transaction.ToAddress).FirstOrDefault();
-                        if (account != null)
-                        {
-                            AccountData.UpdateLocalBalanceAdd(transaction.ToAddress, transaction.Amount);
-                            var txdata = TransactionData.GetAll();
-                            txdata.InsertSafe(transaction);
-                        }
-
-                        //Adds sent TX to wallet
-                        var fromAccount = AccountData.GetAccounts().FindOne(x => x.Address == transaction.FromAddress);
-                        if (fromAccount != null)
-                        {
-                            var txData = TransactionData.GetAll();
-                            var fromTx = transaction;
-                            fromTx.Amount = transaction.Amount * -1M;
-                            fromTx.Fee = transaction.Fee * -1M;
-                            txData.InsertSafe(fromTx);
-                            await AccountData.UpdateLocalBalance(fromAccount.Address, (transaction.Amount + transaction.Fee));
+                            DbContext.DB_SmartContractStateTrei.DropCollection(name);
                         }
                     }
                 }
-                else
+                catch (Exception ex)
                 {
-                    //issue with chain and must redownload
-                    failBlocks.Add(block);
-                    failCount++;
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe SmartContractStateTrei: {ex.Message}");
                 }
-            }
 
-            if (failCount == 0)
-            {
-                return true;
+                // DecShop state — drop all collections in the DecShop state DB
+                try
+                {
+                    if (DbContext.DB_DecShopStateTrei != null)
+                    {
+                        foreach (var name in DbContext.DB_DecShopStateTrei.GetCollectionNames().ToList())
+                        {
+                            DbContext.DB_DecShopStateTrei.DropCollection(name);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DecShopStateTrei: {ex.Message}");
+                }
+
+                // Topic trei
+                try
+                {
+                    var topicTrei = TopicTrei.GetTopics();
+                    if (topicTrei != null) topicTrei.DeleteAllSafe();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe TopicTrei: {ex.Message}");
+                }
+
+                // Vote
+                try
+                {
+                    var votes = Vote.GetVotes();
+                    if (votes != null) votes.DeleteAllSafe();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe Vote: {ex.Message}");
+                }
+
+                // DNR (Domain Name Records)
+                try
+                {
+                    var dnr = Adnr.GetAdnr();
+                    if (dnr != null) dnr.DeleteAllSafe();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DNR/ADNR: {ex.Message}");
+                }
+
+                // Reserve transactions
+                try
+                {
+                    var reserveTxDb = ReserveTransactions.GetReserveTransactionsDb();
+                    if (reserveTxDb != null) reserveTxDb.DeleteAllSafe();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe ReserveTransactions: {ex.Message}");
+                }
+
+                // Mempool
+                try
+                {
+                    var mempool = TransactionData.GetPool();
+                    if (mempool != null) mempool.DeleteAllSafe();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe Mempool: {ex.Message}");
+                }
+
+                // vBTC / Bitcoin state databases — wipe all collections
+                try
+                {
+                    if (DbContext.DB_vBTC != null)
+                    {
+                        foreach (var name in DbContext.DB_vBTC.GetCollectionNames().ToList())
+                        {
+                            DbContext.DB_vBTC.DropCollection(name);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_vBTC: {ex.Message}");
+                }
+
+                try
+                {
+                    if (DbContext.DB_TokenizedWithdrawals != null)
+                    {
+                        foreach (var name in DbContext.DB_TokenizedWithdrawals.GetCollectionNames().ToList())
+                        {
+                            DbContext.DB_TokenizedWithdrawals.DropCollection(name);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_TokenizedWithdrawals: {ex.Message}");
+                }
+
+                try
+                {
+                    if (DbContext.DB_VBTCWithdrawalRequests != null)
+                    {
+                        foreach (var name in DbContext.DB_VBTCWithdrawalRequests.GetCollectionNames().ToList())
+                        {
+                            DbContext.DB_VBTCWithdrawalRequests.DropCollection(name);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_VBTCWithdrawalRequests: {ex.Message}");
+                }
+
+                // Shares
+                try
+                {
+                    if (DbContext.DB_Shares != null)
+                    {
+                        foreach (var name in DbContext.DB_Shares.GetCollectionNames().ToList())
+                        {
+                            DbContext.DB_Shares.DropCollection(name);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_Shares: {ex.Message}");
+                }
+
+                // Checkpoint all wiped databases
+                DbContext.DB.Checkpoint();
+                DbContext.DB_AccountStateTrei.Checkpoint();
+                DbContext.DB_WorldStateTrei.Checkpoint();
+                try { DbContext.DB_SmartContractStateTrei.Checkpoint(); } catch { }
+                try { DbContext.DB_DecShopStateTrei.Checkpoint(); } catch { }
+                try { DbContext.DB_TopicTrei.Checkpoint(); } catch { }
+                try { DbContext.DB_Vote.Checkpoint(); } catch { }
+                try { DbContext.DB_DNR.Checkpoint(); } catch { }
+                try { DbContext.DB_Reserve.Checkpoint(); } catch { }
+                try { DbContext.DB_Mempool.Checkpoint(); } catch { }
+                try { DbContext.DB_vBTC?.Checkpoint(); } catch { }
+                try { DbContext.DB_TokenizedWithdrawals?.Checkpoint(); } catch { }
+                try { DbContext.DB_VBTCWithdrawalRequests?.Checkpoint(); } catch { }
+                try { DbContext.DB_Shares?.Checkpoint(); } catch { }
+
+                Console.WriteLine("[ResetTreis] Step 1 complete — all state databases wiped.");
+
+                // ═══════════════════════════════════════════════════════════════
+                // STEP 2: Reset local account balances to 0
+                // ═══════════════════════════════════════════════════════════════
+                Console.WriteLine("[ResetTreis] Step 2: Resetting local account balances...");
+                var accounts = AccountData.GetAccounts();
+                var accountList = accounts.FindAll().ToList();
+                foreach (var account in accountList)
+                {
+                    account.Balance = 0M;
+                    accounts.UpdateSafe(account);
+                }
+
+                // ═══════════════════════════════════════════════════════════════
+                // STEP 3: Replay each block through UpdateTreis (the standard commit path)
+                // ═══════════════════════════════════════════════════════════════
+                Console.WriteLine("[ResetTreis] Step 3: Replaying blocks through UpdateTreis...");
+                var allBlocks = BlockchainData.GetBlocks().FindAll().OrderBy(b => b.Height).ToList();
+                int processedCount = 0;
+                int failCount = 0;
+                var failBlocks = new List<Block>();
+
+                foreach (var block in allBlocks)
+                {
+                    try
+                    {
+                        // UpdateTreis is the comprehensive state commit path — it handles ALL TX types:
+                        // TX, NFT, tokens, ADNR, votes, topics, dec shops, reserves, vBTC V2,
+                        // privacy/shielded TXs, bridge locks/unlocks, etc.
+                        await StateData.UpdateTreis(block);
+                        processedCount++;
+
+                        if (processedCount % 1000 == 0)
+                            Console.WriteLine($"[ResetTreis] Processed {processedCount}/{allBlocks.Count} blocks...");
+                    }
+                    catch (Exception ex)
+                    {
+                        failBlocks.Add(block);
+                        failCount++;
+                        Console.WriteLine($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}");
+                    }
+                }
+
+                Console.WriteLine($"[ResetTreis] Step 3 complete — replayed {processedCount} blocks ({failCount} failures).");
+
+                // ═══════════════════════════════════════════════════════════════
+                // STEP 4: Resync local wallet from rebuilt state
+                // ═══════════════════════════════════════════════════════════════
+                Console.WriteLine("[ResetTreis] Step 4: Resyncing local wallet balances and transactions...");
+
+                // 4a: Update local account balances from rebuilt AccountStateTrei
+                var walletAccounts = accounts.FindAll().ToList();
+                var walletAddresses = new HashSet<string>(walletAccounts.Select(a => a.Address));
+
+                foreach (var account in walletAccounts)
+                {
+                    var stateEntry = StateData.GetSpecificAccountStateTrei(account.Address);
+                    if (stateEntry != null)
+                    {
+                        account.Balance = stateEntry.Balance;
+                    }
+                    else
+                    {
+                        account.Balance = 0M;
+                    }
+                    accounts.UpdateSafe(account);
+                }
+
+                // 4b: Re-populate local TransactionData for wallet addresses
+                var txData = TransactionData.GetAll();
+                foreach (var block in allBlocks)
+                {
+                    foreach (var tx in block.Transactions)
+                    {
+                        bool isRelevant = walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress);
+                        if (isRelevant)
+                        {
+                            // Check if already inserted (avoid duplicates)
+                            var existing = txData.FindOne(x => x.Hash == tx.Hash);
+                            if (existing == null)
+                            {
+                                txData.InsertSafe(tx);
+                            }
+                        }
+                    }
+                }
+
+                // 4c: Clear mempool of any TXs that were included in blocks
+                try
+                {
+                    var mempool = TransactionData.GetPool();
+                    if (mempool != null && mempool.Count() > 0)
+                    {
+                        foreach (var block in allBlocks)
+                        {
+                            foreach (var tx in block.Transactions)
+                            {
+                                mempool.DeleteManySafe(x => x.Hash == tx.Hash);
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                Console.WriteLine($"[ResetTreis] Step 4 complete — wallet resynced for {walletAccounts.Count} accounts.");
+                Console.WriteLine($"[ResetTreis] Full chain state rebuild COMPLETE. Processed {processedCount} blocks with {failCount} failures.");
+
+                return failCount == 0;
             }
-            else
+            catch (Exception ex)
             {
-                //chain is invalid. Delete and redownload
+                Console.WriteLine($"[ResetTreis] CRITICAL ERROR: {ex.Message}");
+                Console.WriteLine($"[ResetTreis] Stack trace: {ex.StackTrace}");
                 return false;
             }
         }
