@@ -404,6 +404,7 @@ namespace ReserveBlockCore
 
                     Console.WriteLine($"[REVERT] Deleted {deletedBlocks} block(s) and {deletedHeaders} blockchain header(s) above height {revertToHeight.Value}.");
 
+                    //Add this back when we are ready to test full revert.
                     // 3. Rebuild all state (transactions, account balances, world trei) from remaining blocks
                     //Console.WriteLine($"[REVERT] Rebuilding state from genesis... (this may take a while for long chains)");
                     //var resetResult = await BlockRollbackUtility.ResetTreis();
