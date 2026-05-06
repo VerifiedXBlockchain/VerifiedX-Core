@@ -143,7 +143,7 @@ namespace ReserveBlockCore.Config
                 config.AutoDownloadNFTAsset = dict.ContainsKey("AutoDownloadNFTAsset") ? Convert.ToBoolean(dict["AutoDownloadNFTAsset"]) : false;
                 config.IgnoreIncomingNFTs = dict.ContainsKey("IgnoreIncomingNFTs") ? Convert.ToBoolean(dict["IgnoreIncomingNFTs"]) : false;
 			config.RejectAssetExtensionTypes = new List<string>();
-                config.ElmahFileStore = dict.ContainsKey("ElmahFileStore") ? Convert.ToInt32(dict["ElmahFileStore"]) : 10000;
+                config.ElmahFileStore = dict.ContainsKey("ElmahFileStore") ? Convert.ToInt32(dict["ElmahFileStore"]) : 1000;
 
                 // HAL-17 Fix: Load timeout configuration with backward-compatible defaults
                 config.SignalRShortTimeoutMs = dict.ContainsKey("SignalRShortTimeoutMs") ? Convert.ToInt32(dict["SignalRShortTimeoutMs"]) : 2000;
