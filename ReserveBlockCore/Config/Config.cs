@@ -321,6 +321,8 @@ namespace ReserveBlockCore.Config
 
             if (config.TestNet == true || Globals.IsTestNet)
             {
+                Globals.BeaconPort = 33338;
+                Globals.BeaconWebPort = 33339;
                 Globals.ADJPort = 13339;
                 Globals.ValPort = 13339;
                 Globals.ArbiterPort = 13342;

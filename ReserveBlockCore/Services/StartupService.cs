@@ -596,8 +596,8 @@ namespace ReserveBlockCore.Services
                 if(Globals.SelfBeacon?.SelfBeaconActive == true)
                 {
                     _ = BeaconServerFast.StartBeaconServer();
-                    var port = Globals.Port + 20000; //23338 - mainnet
-                    
+                    var port = Globals.BeaconPort; //23338 - mainnet | 33338 - testnet
+
                     BeaconServer server = new BeaconServer(GetPathUtility.GetBeaconPath(), port);
                     Thread obj_thread = new Thread(server.StartServer());
                     Console.WriteLine("Beacon Stopped");

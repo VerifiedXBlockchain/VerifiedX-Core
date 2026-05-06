@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.SignalR.Client;
 using Newtonsoft.Json;
 using ReserveBlockCore.Beacon;
 using ReserveBlockCore.Bitcoin.FROST;
+using ReserveBlockCore.Bitcoin.Services;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.EllipticCurve;
 using ReserveBlockCore.Extensions;
@@ -554,6 +555,108 @@ namespace ReserveBlockCore.Services
 
         private const int MAX_PORT_CHECK_RETRIES = 3;
 
+        /// <summary>
+        /// Target number of validator SignalR connections to maintain.
+        /// The loop will keep trying to connect until this many active connections exist.
+        /// </summary>
+        private const int TARGET_VAL_CONNECTIONS = 8;
+
+        /// <summary>
+        /// Populates the peer database with active validators discovered from committed blocks.
+        /// Uses VBTCValidatorRegistry which scans the last 1000 blocks for REGISTER/HEARTBEAT TXs.
+        /// 
+        /// This is the primary validator discovery mechanism — blocks are the trust anchor.
+        /// No gossip trust gates, rate limits, or cross-validation needed since the data
+        /// comes from committed, validated blocks.
+        /// </summary>
+        private static void PopulateValidatorPeersFromBlocks()
+        {
+            try
+            {
+                if (!Globals.IsChainSynced)
+                    return;
+
+                var activeValidators = VBTCValidatorRegistry.GetActiveValidators();
+                if (activeValidators == null || !activeValidators.Any())
+                    return;
+
+                var myIP = Globals.ReportedIP?.Replace("::ffff:", "") ?? "";
+                var peerDB = Peers.GetAll();
+                if (peerDB == null)
+                    return;
+
+                int upsertedCount = 0;
+
+                foreach (var val in activeValidators)
+                {
+                    // Skip validators with no IP address
+                    if (string.IsNullOrEmpty(val.IPAddress))
+                        continue;
+
+                    var cleanIP = val.IPAddress.Replace("::ffff:", "");
+
+                    // Skip self
+                    if (!string.IsNullOrEmpty(myIP) && cleanIP == myIP)
+                        continue;
+
+                    // Skip our own validator address
+                    if (val.ValidatorAddress == Globals.ValidatorAddress)
+                        continue;
+
+                    // Skip banned IPs
+                    if (Globals.BannedIPs.ContainsKey(cleanIP))
+                        continue;
+
+                    // Upsert into peer DB as a validator
+                    var existingPeer = peerDB.FindOne(x => x.PeerIP == cleanIP);
+                    if (existingPeer != null)
+                    {
+                        // Only update if not already marked as validator, or if address changed
+                        if (!existingPeer.IsValidator || existingPeer.ValidatorAddress != val.ValidatorAddress)
+                        {
+                            existingPeer.IsValidator = true;
+                            existingPeer.ValidatorAddress = val.ValidatorAddress;
+                            if (!string.IsNullOrEmpty(val.FrostPublicKey))
+                                existingPeer.ValidatorPublicKey = val.FrostPublicKey;
+                            peerDB.UpdateSafe(existingPeer);
+                            upsertedCount++;
+                        }
+                    }
+                    else
+                    {
+                        var newPeer = new Peers
+                        {
+                            PeerIP = cleanIP,
+                            IsIncoming = false,
+                            IsOutgoing = true,
+                            FailCount = 0,
+                            IsValidator = true,
+                            ValidatorAddress = val.ValidatorAddress,
+                            ValidatorPublicKey = val.FrostPublicKey ?? "",
+                            WalletVersion = Globals.CLIVersion
+                        };
+                        peerDB.InsertSafe(newPeer);
+                        upsertedCount++;
+                    }
+                }
+
+                if (upsertedCount > 0)
+                {
+                    LogUtility.Log(
+                        $"BLOCK-DISCOVERY: Upserted {upsertedCount} validator peers from block scan. " +
+                        $"Total active on-chain: {activeValidators.Count}, " +
+                        $"ValidatorNodes connected: {Globals.ValidatorNodes.Values.Count(x => x.IsConnected)}",
+                        "ValidatorService.PopulateValidatorPeersFromBlocks");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(
+                    $"Error populating validator peers from blocks: {ex.Message}",
+                    "ValidatorService.PopulateValidatorPeersFromBlocks");
+            }
+        }
+
         internal static async Task StartupValidators()
         {
             //wait 5 seconds
@@ -615,14 +718,29 @@ namespace ReserveBlockCore.Services
                 portFailCount = 0;
                 Globals.PortsOpened = true;
 
-                var startupCount = Globals.ValidatorNodes.Count / 2 + 1;
                 var delay = new TimeSpan(0,0,15);
 
                 try
                 {
+                    // Populate peer DB from on-chain validator registry (block-based discovery).
+                    // This runs every loop iteration so new validators from new blocks get picked up.
+                    PopulateValidatorPeersFromBlocks();
+
                     var ConnectedCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
-                    if (ConnectedCount < Globals.MaxValPeers)
+                    if (ConnectedCount < TARGET_VAL_CONNECTIONS)
+                    {
                         await P2PValidatorClient.ConnectToValidators();
+
+                        // Log connection progress for diagnostics
+                        var newCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
+                        if (newCount < TARGET_VAL_CONNECTIONS)
+                        {
+                            LogUtility.Log(
+                                $"VAL-CONNECT: {newCount}/{TARGET_VAL_CONNECTIONS} validator connections " +
+                                $"(target not yet met, will retry next loop)",
+                                "ValidatorService.StartupValidators()");
+                        }
+                    }
 
                     if(Globals.BlockCasters.Any())
                     {

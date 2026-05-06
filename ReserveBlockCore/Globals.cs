@@ -153,6 +153,8 @@ namespace ReserveBlockCore
         public static int PasswordClearTime = 10;
         public static int NFTTimeout = 0;
         public static int Port = 3338;
+        public static int BeaconPort = 23338;
+        public static int BeaconWebPort = 23339;
         //deprecate in v5.0.1 or greater
         public static int ADJPort = 3339;
         public static int ValPort = 3339;
