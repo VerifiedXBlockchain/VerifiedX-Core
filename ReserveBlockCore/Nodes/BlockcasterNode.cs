@@ -363,6 +363,16 @@ namespace ReserveBlockCore.Nodes
 
                 await CasterDiscoveryService.RefreshIfDueAsync();
 
+                // Chain-based validator liveness sweep: every 500 blocks, reconcile
+                // NetworkValidators against on-chain REGISTER/HEARTBEAT TX activity.
+                // Removes validators that haven't posted a TX in the scan window and
+                // discovers new validators from chain data. No HTTP pinging needed.
+                await CasterDiscoveryService.ChainBasedValidatorSweepAsync();
+
+                // Purge validators with high fail counts + not seen recently (safety net).
+                // This was previously defined but never called — now it runs every tick.
+                CasterDiscoveryService.PurgeStaleValidators();
+
                 // Periodically audit existing casters for outdated versions.
                 // This prevents deadlocks where a caster inflates the quorum but can't produce proofs.
                 await CasterDiscoveryService.AuditExistingCasterVersions();

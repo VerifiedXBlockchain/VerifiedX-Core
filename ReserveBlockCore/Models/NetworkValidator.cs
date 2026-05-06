@@ -270,7 +270,7 @@ namespace ReserveBlockCore.Models
         {
             var currentTime = TimeUtil.GetTime();
             var pendingStaleThreshold = currentTime - 3600; // 1 hour for pending validators
-            var mainRegistryStaleThreshold = currentTime - 86400; // 24 hours for main registry
+            var mainRegistryStaleThreshold = currentTime - 7200; // 2 hours for main registry (was 24h — too lenient, stale validators stayed 18+ hours)
             var failCountThreshold = 50; // Remove validators with very high sustained fail counts
 
             // Cleanup pending validators (1 hour inactivity)

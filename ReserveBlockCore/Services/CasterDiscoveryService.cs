@@ -2074,5 +2074,196 @@ namespace ReserveBlockCore.Services
         }
 
         #endregion
+
+        #region Chain-Based Validator Liveness Sweep
+
+        /// <summary>
+        /// Block interval for the chain-based validator liveness sweep.
+        /// Every 500 blocks (~83 min at 10s/block), reconcile NetworkValidators against
+        /// on-chain REGISTER/HEARTBEAT TX activity from VBTCValidatorRegistry.
+        /// </summary>
+        public const int ChainSweepIntervalBlocks = 500;
+
+        /// <summary>Height at which the last chain-based sweep ran. Prevents duplicate runs at the same boundary.</summary>
+        private static long _lastChainSweepHeight = -1;
+
+        /// <summary>
+        /// Periodically reconciles <see cref="Globals.NetworkValidators"/> against on-chain
+        /// validator activity (REGISTER/HEARTBEAT TXs) from <see cref="Bitcoin.Services.VBTCValidatorRegistry"/>.
+        /// 
+        /// Called from <see cref="BlockcasterNode.MonitorCasters"/> every 500 blocks.
+        /// 
+        /// Phase 1 — Remove stale: validators in NetworkValidators but NOT in the on-chain
+        ///           active set are removed (they haven't posted a TX in the scan window).
+        /// Phase 2 — Discover new: validators in the on-chain active set but NOT in
+        ///           NetworkValidators are added as fully trusted.
+        /// Phase 3 — Refresh active: validators in both sets get LastSeen updated.
+        /// 
+        /// No HTTP pinging — purely on-chain data. Scales without network overhead.
+        /// </summary>
+        public static async Task ChainBasedValidatorSweepAsync()
+        {
+            if (!Globals.IsBlockCaster)
+                return;
+
+            var currentHeight = Globals.LastBlock?.Height ?? 0;
+            if (currentHeight <= 0)
+                return;
+
+            // Height gate: only run at 500-block boundaries, once per boundary
+            if (currentHeight % ChainSweepIntervalBlocks != 0 || currentHeight == _lastChainSweepHeight)
+                return;
+
+            _lastChainSweepHeight = currentHeight;
+
+            try
+            {
+                // Get the canonical on-chain active validator set (scans last 1000 blocks)
+                var onChainValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
+                if (onChainValidators == null || onChainValidators.Count == 0)
+                {
+                    CasterLogUtility.Log(
+                        $"ChainSweep height={currentHeight}: on-chain active set is empty — skipping sweep (chain may not be synced)",
+                        "CHAIN-SWEEP");
+                    return;
+                }
+
+                var onChainAddresses = new HashSet<string>(
+                    onChainValidators
+                        .Where(v => !string.IsNullOrEmpty(v.ValidatorAddress))
+                        .Select(v => v.ValidatorAddress),
+                    StringComparer.Ordinal);
+
+                var onChainByAddress = onChainValidators
+                    .Where(v => !string.IsNullOrEmpty(v.ValidatorAddress))
+                    .ToDictionary(v => v.ValidatorAddress, v => v, StringComparer.Ordinal);
+
+                var selfAddress = Globals.ValidatorAddress ?? "";
+                var currentCasterAddresses = Globals.BlockCasters.ToList()
+                    .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                    .Select(c => c.ValidatorAddress!)
+                    .ToHashSet(StringComparer.Ordinal);
+
+                int removed = 0;
+                int added = 0;
+                int refreshed = 0;
+
+                // ── Phase 1: Remove stale validators not in on-chain active set ──
+                var networkValSnapshot = Globals.NetworkValidators.ToArray();
+                foreach (var kvp in networkValSnapshot)
+                {
+                    var addr = kvp.Key;
+                    var nv = kvp.Value;
+
+                    // Never remove ourselves
+                    if (addr == selfAddress)
+                        continue;
+
+                    // Skip current casters — they're managed by PingCasters/AuditExistingCasterVersions
+                    if (currentCasterAddresses.Contains(addr))
+                        continue;
+
+                    if (!onChainAddresses.Contains(addr))
+                    {
+                        // Not in on-chain active set → hasn't posted a TX in ~1000 blocks → stale
+                        Globals.NetworkValidators.TryRemove(addr, out _);
+                        removed++;
+                        CasterLogUtility.Log(
+                            $"ChainSweep REMOVE: {addr} — no on-chain TX in scan window (ip={nv.IPAddress} lastSeen={nv.LastSeen} failCount={nv.CheckFailCount})",
+                            "CHAIN-SWEEP");
+                        ConsoleWriterService.OutputValCaster(
+                            $"[ChainSweep] Removed stale validator {addr} — no on-chain activity in {Bitcoin.Services.VBTCValidatorRegistry.SCAN_WINDOW} blocks");
+                    }
+                }
+
+                // ── Phase 2: Add newly discovered on-chain validators ──
+                var now = TimeUtil.GetTime();
+                foreach (var onChainVal in onChainValidators)
+                {
+                    if (string.IsNullOrEmpty(onChainVal.ValidatorAddress))
+                        continue;
+
+                    // Skip self
+                    if (onChainVal.ValidatorAddress == selfAddress)
+                        continue;
+
+                    // Skip if already in NetworkValidators
+                    if (Globals.NetworkValidators.ContainsKey(onChainVal.ValidatorAddress))
+                        continue;
+
+                    // Skip validators without usable data
+                    var pk = onChainVal.FrostPublicKey;
+                    if (string.IsNullOrWhiteSpace(pk) || pk == "PLACEHOLDER_FROST_PUBLIC_KEY")
+                        continue;
+
+                    var ip = (onChainVal.IPAddress ?? "").Replace("::ffff:", "");
+                    if (string.IsNullOrEmpty(ip))
+                        continue;
+
+                    // Add as fully trusted — on-chain TX is strong proof of legitimacy
+                    var newNv = new Models.NetworkValidator
+                    {
+                        Address = onChainVal.ValidatorAddress,
+                        IPAddress = ip,
+                        PublicKey = pk,
+                        IsFullyTrusted = true,
+                        LastSeen = now,
+                        CheckFailCount = 0,
+                        FirstSeenAtHeight = currentHeight,
+                        FirstAdvertised = now,
+                    };
+                    Globals.NetworkValidators[onChainVal.ValidatorAddress] = newNv;
+                    added++;
+                    CasterLogUtility.Log(
+                        $"ChainSweep ADD: {onChainVal.ValidatorAddress} — discovered from on-chain TX (ip={ip} lastHeartbeat={onChainVal.LastHeartbeatBlock})",
+                        "CHAIN-SWEEP");
+                    ConsoleWriterService.OutputValCaster(
+                        $"[ChainSweep] Added new validator {onChainVal.ValidatorAddress} from on-chain data (ip={ip})");
+                }
+
+                // ── Phase 3: Refresh LastSeen for validators in both sets ──
+                foreach (var kvp in Globals.NetworkValidators)
+                {
+                    if (kvp.Key == selfAddress)
+                        continue;
+
+                    if (onChainAddresses.Contains(kvp.Key))
+                    {
+                        var nv = kvp.Value;
+                        nv.LastSeen = now;
+                        nv.CheckFailCount = 0;
+                        Globals.NetworkValidators[kvp.Key] = nv;
+                        refreshed++;
+                    }
+                }
+
+                // Clear proof cache if pool changed
+                if (removed > 0 || added > 0)
+                    ProofUtility.ClearProofGenerationCache();
+
+                CasterLogUtility.Log(
+                    $"ChainSweep COMPLETE height={currentHeight}: removed={removed} added={added} refreshed={refreshed} " +
+                    $"onChainActive={onChainValidators.Count} networkValidators={Globals.NetworkValidators.Count}",
+                    "CHAIN-SWEEP");
+
+                if (removed > 0 || added > 0)
+                {
+                    ConsoleWriterService.OutputValCaster(
+                        $"[ChainSweep] Sweep at height {currentHeight}: -{removed} stale, +{added} new, ~{refreshed} refreshed. " +
+                        $"Pool: {Globals.NetworkValidators.Count} validators");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(
+                    $"ChainBasedValidatorSweepAsync error at height {currentHeight}: {ex.Message}",
+                    "CasterDiscoveryService.ChainBasedValidatorSweepAsync");
+                CasterLogUtility.Log(
+                    $"ChainSweep ERROR: {ex.Message}",
+                    "CHAIN-SWEEP");
+            }
+        }
+
+        #endregion
     }
 }
