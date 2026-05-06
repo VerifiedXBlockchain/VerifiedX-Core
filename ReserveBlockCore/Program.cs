@@ -406,9 +406,9 @@ namespace ReserveBlockCore
 
                     //Add this back when we are ready to test full revert.
                     // 3. Rebuild all state (transactions, account balances, world trei) from remaining blocks
-                    //Console.WriteLine($"[REVERT] Rebuilding state from genesis... (this may take a while for long chains)");
-                    //var resetResult = await BlockRollbackUtility.ResetTreis();
-                    //Console.WriteLine($"[REVERT] State rebuild {(resetResult ? "succeeded" : "FAILED")}. Continuing normal startup...");
+                    Console.WriteLine($"[REVERT] Rebuilding state from genesis... (this may take a while for long chains)");
+                    var resetResult = await BlockRollbackUtility.ResetTreis();
+                    Console.WriteLine($"[REVERT] State rebuild {(resetResult ? "succeeded" : "FAILED")}. Continuing normal startup...");
                 }
                 catch (Exception ex)
                 {

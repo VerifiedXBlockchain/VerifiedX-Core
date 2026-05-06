@@ -186,6 +186,7 @@ namespace ReserveBlockCore.Utilities
                 if (!ValidateParentHashExists(block))
                 {
                     result.IsValid = false;
+                    result.IsParentHashMismatch = true;
                     result.ErrorMessage = "Parent hash does not exist in blockchain or block queue";
                     ErrorLogUtility.LogError($"HAL-20 Security: {result.ErrorMessage} from {sourceIP}", "InputValidationHelper.ValidateBlockHeaders()");
                     return result;
@@ -734,6 +735,10 @@ namespace ReserveBlockCore.Utilities
             public bool IsValid { get; set; }
             public string ErrorMessage { get; set; } = string.Empty;
             public bool IsDuplicate { get; set; }
+            /// <summary>FORK-FIX: True when failure is due to parent hash not existing in our chain.
+            /// This is a fork symptom, not an attack — the sender is on the correct chain and we are not.
+            /// Callers should NOT ban for this reason.</summary>
+            public bool IsParentHashMismatch { get; set; }
         }
 
         #endregion

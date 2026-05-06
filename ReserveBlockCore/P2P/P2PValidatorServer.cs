@@ -503,9 +503,23 @@ namespace ReserveBlockCore.P2P
                                 // Just log and return false for duplicates - no need to ban
                                 return false;
                             }
+                            else if (headerValidation.IsParentHashMismatch)
+                            {
+                                // FORK-FIX: Parent hash mismatch at the expected next height is a FORK symptom,
+                                // not an attack. The sender has the correct chain; WE are on the wrong fork.
+                                // Banning correct validators makes the fork permanent and unrecoverable.
+                                // Log it but do NOT ban — the PREVHASH-MISMATCH recovery in ValidateBlock
+                                // will handle self-healing.
+                                LogUtility.Log(
+                                    $"FORK-NO-BAN: Block from {callerIP} has parent hash not in our chain " +
+                                    $"(block height {nextBlock?.Height}). This indicates WE may be on a minority fork. " +
+                                    $"NOT banning — fork recovery will handle this.",
+                                    "P2PValidatorServer.ReceiveBlockVal()");
+                                return false;
+                            }
                             else
                             {
-                                // Ban for other validation failures (invalid version, timestamp, parent hash)
+                                // Ban for genuinely invalid headers (wrong version, timestamp way off, etc.)
                                 BanService.BanPeer(callerIP, "Invalid block header", "ReceiveBlockVal");
                                 return false;
                             }

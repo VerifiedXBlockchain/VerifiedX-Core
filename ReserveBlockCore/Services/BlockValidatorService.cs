@@ -25,6 +25,12 @@ namespace ReserveBlockCore.Services
         public static SemaphoreSlim ValidateBlocksSemaphore = new SemaphoreSlim(1, 1);
         public static SemaphoreSlim ValidateBlockSemaphore = new SemaphoreSlim(1, 1);
 
+        /// <summary>FORK-FIX: Consecutive PREVHASH-MISMATCH detections at the same height trigger automatic fork recovery.</summary>
+        private static long _prevHashMismatchHeight = -1;
+        private static int _prevHashMismatchCount = 0;
+        /// <summary>After this many consecutive PREVHASH-MISMATCH rejections at the same expected height, trigger fork recovery.</summary>
+        public const int PREVHASH_MISMATCH_RECOVERY_THRESHOLD = 3;
+
         public static void UpdateMemBlocks(Block block)
         {
             foreach (var trans in block.Transactions)
@@ -408,18 +414,30 @@ namespace ReserveBlockCore.Services
                     }
                 }
 
-                //if (Globals.IsBlockCaster && !validateOnly && !skipCasterCheck)
-                //{
-                //    if (!Globals.CasterApprovedBlockHashDict.ContainsKey(block.Height))
-                //        return result;
-
-                //    var hash = Globals.CasterApprovedBlockHashDict[block.Height];
-                //    if (hash == null)
-                //        return result;
-
-                //    if (hash != block.Hash)
-                //        return result;
-                //}
+                // FORK-FIX: Re-enabled caster block hash enforcement.
+                // This was previously commented out, which allowed a caster to commit ANY block
+                // that passes basic validation — even if it wasn't the block agreed upon by
+                // VerifyBlockHashAgreementAsync. This is the ROOT CAUSE of the block 28131/28132
+                // fork: one caster committed a different block than the other 4.
+                // Now: If this node is a caster and the approved hash dict has an entry for this
+                // height, the block hash MUST match. If no entry exists yet (single-caster or
+                // agreement still pending), allow the block through.
+                if (Globals.IsBlockCaster && !validateOnly && !skipCasterCheck)
+                {
+                    if (Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var approvedHash))
+                    {
+                        if (!string.IsNullOrEmpty(approvedHash) && approvedHash != block.Hash)
+                        {
+                            LogUtility.Log(
+                                $"[ValidateBlock] CASTER-HASH-REJECT: Block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} " +
+                                $"does not match caster-approved hash={approvedHash[..Math.Min(16, approvedHash.Length)]}. " +
+                                $"Rejecting to prevent fork.",
+                                "BlockValidatorService");
+                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-casterHashMismatch");
+                            return result;
+                        }
+                    }
+                }
 
                 // SAFETY: Enforce strict height continuity — no gaps allowed.
                 // This prevents orphaned blocks from being committed when the
@@ -443,10 +461,82 @@ namespace ReserveBlockCore.Services
                 // in-memory data (NetworkBlockQueue) instead of the actual chain tip.
                 if (!validateOnly && block.Height > 0 && block.PrevHash != Globals.LastBlock.Hash)
                 {
+                    var expectedHeight = Globals.LastBlock.Height + 1;
                     LogUtility.Log(
                         $"[ValidateBlock] PREVHASH-MISMATCH: Block {block.Height} PrevHash={block.PrevHash?[..Math.Min(16, block.PrevHash?.Length ?? 0)]} " +
                         $"!= LastBlock.Hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
                         "BlockValidatorService");
+
+                    // FORK-FIX: Track consecutive PREVHASH-MISMATCH at the expected next height.
+                    // If the block is at height N+1 but its PrevHash doesn't match our block N,
+                    // this means WE are on a minority fork. After PREVHASH_MISMATCH_RECOVERY_THRESHOLD
+                    // consecutive mismatches, trigger automatic rollback + resync.
+                    if (block.Height == expectedHeight)
+                    {
+                        if (_prevHashMismatchHeight == expectedHeight)
+                        {
+                            _prevHashMismatchCount++;
+                        }
+                        else
+                        {
+                            _prevHashMismatchHeight = expectedHeight;
+                            _prevHashMismatchCount = 1;
+                        }
+
+                        LogUtility.Log(
+                            $"[ValidateBlock] FORK-DETECT: PREVHASH-MISMATCH count={_prevHashMismatchCount}/{PREVHASH_MISMATCH_RECOVERY_THRESHOLD} " +
+                            $"at expected height {expectedHeight}. Our tip hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                            "BlockValidatorService");
+
+                        if (_prevHashMismatchCount >= PREVHASH_MISMATCH_RECOVERY_THRESHOLD)
+                        {
+                            LogUtility.Log(
+                                $"[ValidateBlock] FORK-RECOVERY-TRIGGER: {_prevHashMismatchCount} consecutive PREVHASH-MISMATCH " +
+                                $"at height {expectedHeight}. Local chain is on minority fork. " +
+                                $"Triggering automatic rollback + resync.",
+                                "BlockValidatorService");
+
+                            // Reset counter before recovery to prevent re-triggering during the recovery process
+                            _prevHashMismatchCount = 0;
+                            _prevHashMismatchHeight = -1;
+
+                            // Fire-and-forget recovery — must release the semaphore first so the recovery
+                            // can re-enter ValidateBlock after rollback + download.
+                            // We do this on a background task because we're inside the ValidateBlockSemaphore.
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    // Small delay to let the semaphore release in the finally block
+                                    await Task.Delay(100);
+                                    var recovered = await ForkRecoveryUtility.RecoverAsync(
+                                        Globals.LastBlock.Height,
+                                        "BlockValidatorService.PREVHASH-MISMATCH");
+                                    if (recovered)
+                                    {
+                                        LogUtility.Log(
+                                            $"[ValidateBlock] FORK-RECOVERY-SUCCESS: Recovered from minority fork. " +
+                                            $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                            "BlockValidatorService");
+                                    }
+                                    else
+                                    {
+                                        LogUtility.Log(
+                                            $"[ValidateBlock] FORK-RECOVERY-PARTIAL: Recovery returned false. " +
+                                            $"Tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                            "BlockValidatorService");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogUtility.Log(
+                                        $"[ValidateBlock] FORK-RECOVERY-ERROR: {ex.Message}",
+                                        "BlockValidatorService");
+                                }
+                            });
+                        }
+                    }
+
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-prevHashMismatch");
                     return result;
                 }

@@ -157,33 +157,42 @@ namespace ReserveBlockCore.Services
 
         private static DateTime GetNextUnbanDate(int banCount)
         {
-            if(banCount == 1)
+            // FORK-FIX: Softened ban escalation — the old schedule was too aggressive.
+            // During a fork, legitimate validators rapidly accumulate bans (parent hash
+            // mismatch, block reception errors) and get perma-banned after ~10 occurrences.
+            // New schedule: much longer ramp before serious bans, and perma-ban threshold
+            // raised from 10 to 25 to survive extended network disagreements.
+            if(banCount <= 2)
             {
                 return DateTime.UtcNow.AddMinutes(1);
             }
-            else if(banCount == 2)
+            else if(banCount <= 4)
             {
                 return DateTime.UtcNow.AddMinutes(5);
             }
-            else if(banCount == 3)
+            else if(banCount <= 7)
+            {
+                return DateTime.UtcNow.AddMinutes(15);
+            }
+            else if(banCount <= 10)
             {
                 return DateTime.UtcNow.AddMinutes(30);
             }
-            else if(banCount == 4)
+            else if(banCount <= 15)
             {
-                return DateTime.UtcNow.AddMinutes(60);
+                return DateTime.UtcNow.AddHours(1);
             }
-            else if(banCount > 4 && banCount < 10)
+            else if(banCount <= 20)
             {
-                return DateTime.UtcNow.AddHours(12);
+                return DateTime.UtcNow.AddHours(6);
             }
-            else if(banCount == 10)
+            else if(banCount <= 25)
             {
-                return DateTime.UtcNow.AddHours(24); //one last chance. 24 hour ban
+                return DateTime.UtcNow.AddHours(24);
             }
             else
             {
-                return DateTime.UtcNow.AddYears(99); //perma banned now
+                return DateTime.UtcNow.AddYears(99); //perma banned now (was 10, now 25+)
             }
         }
 
@@ -345,9 +354,12 @@ namespace ReserveBlockCore.Services
                 var peers = Peers.GetAll();
                 if (peers != null)
                 {
+                    // FORK-FIX: Raised perma-ban threshold from 10 to 25 to match softened escalation.
+                    // During fork events, legitimate validators can accumulate many short bans
+                    // from parent hash mismatches. They shouldn't be perma-banned for this.
                     var permaBanList = peers.Query().Where(x =>
                         x.IsBanned &&
-                        x.BanCount > 10 &&
+                        x.BanCount > 25 &&
                         !x.IsPermaBanned).ToEnumerable();
 
                     if (permaBanList.Count() > 0)
