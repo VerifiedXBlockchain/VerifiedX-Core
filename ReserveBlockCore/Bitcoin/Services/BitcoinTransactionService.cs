@@ -226,40 +226,38 @@ namespace ReserveBlockCore.Bitcoin.Services
                 string frostGroupPublicKey = contract?.FrostGroupPublicKey;
                 string? ceremonyId = null;
 
-                // If local DB doesn't have the contract (e.g. remote validator / non-validator node),
-                // reconstruct the needed data from the State Trei + SmartContractMain which all nodes share.
-                if (string.IsNullOrEmpty(frostGroupPublicKey))
+                // Always resolve ceremonyId from State Trei — VBTCContractV2 doesn't store it,
+                // and validators need it to look up their FROST key packages (stored under the DKG ceremonyId).
+                try
                 {
-                    LogUtility.Log($"[FROST] VBTCContractV2 not in local DB for {scUID}, falling back to State Trei",
-                        "BitcoinTransactionService.SignTransactionWithFROST()");
-
                     var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                    if (scStateTreiRec == null || string.IsNullOrEmpty(scStateTreiRec.ContractData))
+                    if (scStateTreiRec != null && !string.IsNullOrEmpty(scStateTreiRec.ContractData))
                     {
-                        return (false, string.Empty, string.Empty, $"Contract not found in local DB or State Trei: {scUID}");
+                        var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                        if (scMainDecompile?.Features != null)
+                        {
+                            var tknzFeature = scMainDecompile.Features
+                                .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                .Select(x => x.FeatureFeatures)
+                                .FirstOrDefault();
+
+                            if (tknzFeature is TokenizationV2Feature tknz)
+                            {
+                                ceremonyId = tknz.CeremonyId;
+
+                                // Also fill in FrostGroupPublicKey if local DB didn't have it
+                                if (string.IsNullOrEmpty(frostGroupPublicKey))
+                                    frostGroupPublicKey = tknz.FrostGroupPublicKey;
+
+                                LogUtility.Log($"[FROST] Resolved from State Trei: FrostGroupPublicKey={frostGroupPublicKey}, CeremonyId={ceremonyId ?? "null"}",
+                                    "BitcoinTransactionService.SignTransactionWithFROST()");
+                            }
+                        }
                     }
-
-                    var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
-                    if (scMainDecompile == null || scMainDecompile.Features == null)
-                    {
-                        return (false, string.Empty, string.Empty, $"Failed to decompile contract {scUID} from State Trei");
-                    }
-
-                    var tknzFeature = scMainDecompile.Features
-                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                        .Select(x => x.FeatureFeatures)
-                        .FirstOrDefault();
-
-                    if (tknzFeature == null)
-                    {
-                        return (false, string.Empty, string.Empty, $"TokenizationV2 feature not found in contract {scUID}");
-                    }
-
-                    var tknz = (TokenizationV2Feature)tknzFeature;
-                    frostGroupPublicKey = tknz.FrostGroupPublicKey;
-                    ceremonyId = tknz.CeremonyId;
-
-                    LogUtility.Log($"[FROST] Resolved FrostGroupPublicKey from State Trei: {frostGroupPublicKey}, CeremonyId: {ceremonyId ?? "null"}",
+                }
+                catch (Exception decompileEx)
+                {
+                    LogUtility.Log($"[FROST] State Trei decompile warning (non-blocking): {decompileEx.Message}",
                         "BitcoinTransactionService.SignTransactionWithFROST()");
                 }
 
