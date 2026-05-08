@@ -74,12 +74,13 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Phase 3: DKG Round 2 - Share Distribution
                 progressCallback?.Invoke(2, 50); // Round 2 starting
-                var round2Success = await CoordinateShareDistribution(sessionId, validators, round1Results);
-                if (!round2Success)
+                var respondingAddresses = await CoordinateShareDistribution(sessionId, validators, round1Results);
+                if (respondingAddresses == null || respondingAddresses.Count == 0)
                 {
                     LogUtility.Log($"[FROST MPC] DKG Round 2 failed - share distribution error", "FrostMPCService.CoordinateDKGCeremony");
                     return null;
                 }
+                LogUtility.Log($"[FROST MPC] DKG Round 2 complete. {respondingAddresses.Count}/{validators.Count} validators actually responded with shares.", "FrostMPCService.CoordinateDKGCeremony");
                 progressCallback?.Invoke(2, 65); // Round 2 complete
 
                 // Phase 4: DKG Round 3 - Verification Phase
@@ -94,7 +95,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Phase 5: Aggregate and finalize
                 progressCallback?.Invoke(3, 90); // Aggregating
-                var dkgResult = await AggregateDKGResult(sessionId, ceremonyId, validators, threshold, round1Results);
+                var dkgResult = await AggregateDKGResult(sessionId, ceremonyId, validators, threshold, round1Results, respondingAddresses);
                 if (dkgResult != null)
                 {
                     progressCallback?.Invoke(3, 100); // Complete
@@ -243,11 +244,13 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// FIND-024 Fix: Coordinate share distribution between validators (Round 2)
-        /// Now collects generated shares from each validator's response and redistributes them
+        /// Coordinate share distribution between validators (Round 2).
+        /// Collects generated shares from each validator's response and redistributes them
         /// so that DKGRound3Finalize has the data it needs to produce a real group key.
+        /// Returns the list of validator addresses that actually responded with shares,
+        /// or null on failure. This becomes the "actual participants" list for the snapshot.
         /// </summary>
-        private static async Task<bool> CoordinateShareDistribution(
+        private static async Task<List<string>?> CoordinateShareDistribution(
             string sessionId,
             List<VBTCValidator> validators,
             Dictionary<string, string> commitments)
@@ -297,7 +300,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 {
                     ErrorLogUtility.LogError($"FROST DKG: Only {allGeneratedShares.Count}/{validators.Count} validators generated Round 2 shares (need {requiredCount})", 
                         "FrostMPCService.CoordinateShareDistribution");
-                    return false;
+                    return null;
                 }
 
                 LogUtility.Log($"[FROST MPC] Collected Round 2 shares from {allGeneratedShares.Count}/{validators.Count} validators. Redistributing...", 
@@ -345,12 +348,19 @@ namespace ReserveBlockCore.Bitcoin.Services
                 LogUtility.Log($"[FROST MPC] Share redistribution complete: {distributeSuccessCount}/{validators.Count} validators received shares", 
                     "FrostMPCService.CoordinateShareDistribution");
 
-                return distributeSuccessCount >= requiredCount;
+                if (distributeSuccessCount < requiredCount)
+                    return null;
+
+                // Return only the addresses of validators that actually responded with shares
+                var respondingAddresses = allGeneratedShares.Keys.ToList();
+                LogUtility.Log($"[FROST MPC] Actual participating validators: {string.Join(", ", respondingAddresses.Select(a => a.Length > 8 ? a.Substring(0, 8) + "..." : a))}", 
+                    "FrostMPCService.CoordinateShareDistribution");
+                return respondingAddresses;
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Share distribution error: {ex.Message}", "FrostMPCService.CoordinateShareDistribution");
-                return false;
+                return null;
             }
         }
 
@@ -423,7 +433,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             string ceremonyId,
             List<VBTCValidator> validators,
             int threshold,
-            Dictionary<string, string> commitments)
+            Dictionary<string, string> commitments,
+            List<string> respondingAddresses)
         {
             try
             {
@@ -513,7 +524,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     TaprootAddress = taprootAddress,
                     DKGProof = dkgProof ?? string.Empty,
                     CompletionTimestamp = TimeUtil.GetTime(),
-                    ParticipantAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
+                    ParticipantAddresses = respondingAddresses,
                     Threshold = threshold
                 };
             }

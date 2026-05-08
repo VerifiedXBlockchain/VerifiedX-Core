@@ -226,35 +226,21 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 ceremony.Status = CeremonyStatus.ValidatingValidators;
                 ceremony.ProgressPercentage = 5;
 
-                var currentBlock = Globals.LastBlock.Height;
+                // Get candidate validators — these are all known active validators.
+                // Some may be offline. The actual snapshot will be built from who responds.
                 var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
-                var totalRegisteredValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
 
                 if (activeValidators == null || !activeValidators.Any())
                 {
                     ceremony.Status = CeremonyStatus.Failed;
-                    ceremony.ErrorMessage = $"No active validators available for vBTC V2 contract creation. Total registered: {totalRegisteredValidators}. " +
-                        $"No active validators found in recent blocks.";
+                    ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
 
-                var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
-                if (activeValidators.Count < requiredActiveValidators)
-                {
-                    // Log details about each validator's staleness for debugging
-                    var allVals = Services.VBTCValidatorRegistry.GetActiveValidators();
-                    var valDetails = allVals != null
-                        ? string.Join(", ", allVals.Select(v => $"{v.ValidatorAddress.Substring(0, 8)}...(Active:{v.IsActive}, HB:{v.LastHeartbeatBlock}, Gap:{currentBlock - v.LastHeartbeatBlock})"))
-                        : "N/A";
-                    ceremony.Status = CeremonyStatus.Failed;
-                    ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}. " +
-                        $"Scan window: {Services.VBTCValidatorRegistry.SCAN_WINDOW} blocks. Validators: [{valDetails}]";
-                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
-                    return;
-                }
+                LogUtility.Log($"[MPC Ceremony] Starting with {activeValidators.Count} candidate validators. " +
+                    $"Snapshot will be built from actual respondents.", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
 
-                ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
                 ceremony.ProgressPercentage = 15;
                 ceremony.Status = CeremonyStatus.Round1InProgress;
 
@@ -283,6 +269,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
+
+                // Snapshot only the validators that actually participated (responded with shares)
+                ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+                LogUtility.Log($"[MPC Ceremony] Validator snapshot built from {dkgResult.ParticipantAddresses.Count} actual respondents " +
+                    $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
 
                 ceremony.DepositAddress = dkgResult.TaprootAddress;
                 ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
@@ -645,35 +636,21 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             ceremony.Status = CeremonyStatus.ValidatingValidators;
             ceremony.ProgressPercentage = 5;
 
-            // Step 1: Get list of active validators (using blockchain-based staleness check)
-            var currentBlock = Globals.LastBlock.Height;
+            // Get candidate validators — these are all known active validators.
+            // Some may be offline. The actual snapshot will be built from who responds.
             var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
-            var totalRegisteredValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
 
             if (activeValidators == null || !activeValidators.Any())
             {
                 ceremony.Status = CeremonyStatus.Failed;
-                ceremony.ErrorMessage = $"No active validators available for vBTC V2 contract creation. Total registered: {totalRegisteredValidators}. " +
-                    $"No active validators found in recent blocks.";
+                ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
 
-            var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
-            if (activeValidators.Count < requiredActiveValidators)
-            {
-                var allVals = Services.VBTCValidatorRegistry.GetActiveValidators();
-                var valDetails = allVals != null
-                    ? string.Join(", ", allVals.Select(v => $"{v.ValidatorAddress.Substring(0, 8)}...(Active:{v.IsActive}, HB:{v.LastHeartbeatBlock}, Gap:{currentBlock - v.LastHeartbeatBlock})"))
-                    : "N/A";
-                ceremony.Status = CeremonyStatus.Failed;
-                ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}. " +
-                    $"Scan window: {Services.VBTCValidatorRegistry.SCAN_WINDOW} blocks. Validators: [{valDetails}]";
-                ceremony.CompletedTimestamp = TimeUtil.GetTime();
-                return;
-            }
+            LogUtility.Log($"[MPC Ceremony] Starting with {activeValidators.Count} candidate validators. " +
+                $"Snapshot will be built from actual respondents.", "VBTCController.ExecuteMPCCeremonyLocally");
 
-            ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
             ceremony.ProgressPercentage = 15;
 
             // Execute FROST DKG Ceremony via FrostMPCService with progress callback
@@ -705,6 +682,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
+
+            // Snapshot only the validators that actually participated (responded with shares)
+            ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+            LogUtility.Log($"[MPC Ceremony] Validator snapshot built from {dkgResult.ParticipantAddresses.Count} actual respondents " +
+                $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocally");
 
             // DKG ceremony completed successfully
             ceremony.DepositAddress = dkgResult.TaprootAddress;
