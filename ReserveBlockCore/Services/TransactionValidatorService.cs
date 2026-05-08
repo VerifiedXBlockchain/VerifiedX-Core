@@ -95,6 +95,7 @@ namespace ReserveBlockCore.Services
                 && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
                 && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT
                 && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+                && txRequest.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
                 && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
@@ -112,6 +113,7 @@ namespace ReserveBlockCore.Services
                     && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
                     && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT
                     && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
                     && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC

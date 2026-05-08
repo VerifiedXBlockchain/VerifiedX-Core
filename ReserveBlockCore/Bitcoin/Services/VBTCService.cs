@@ -933,7 +933,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // The previous call to FeeCalcService.CalculateTXFee(...) was overwriting Fee = 0.0M
                 // with a non-zero value which broke consensus on fee-free TX types and caused
                 // validator balance checks to reject casters that don't have a funded wallet.
-                completionTx.Fee = 0.0M;
+                completionTx.Fee = 0M.ToNormalizeDecimal();
 
                 // Build and sign transaction
                 completionTx.Build();
