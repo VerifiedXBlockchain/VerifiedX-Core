@@ -60,6 +60,65 @@ namespace ReserveBlockCore.Bitcoin.FROST
                     await context.Response.WriteAsync(response);
                 });
 
+                /// <summary>
+                /// GET /frost/key/pubkey/{scUID} - Retrieve the FROST pubkey package for a contract.
+                /// Public data (no secrets) — needed by non-validator coordinators for signature aggregation.
+                /// Tries both SCUID and ceremonyId lookups in FrostValidatorKeyStore.
+                /// </summary>
+                endpoints.MapGet("/frost/key/pubkey/{scUID}", async context =>
+                {
+                    try
+                    {
+                        var scUID = context.Request.RouteValues["scUID"]?.ToString();
+                        if (string.IsNullOrEmpty(scUID))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "scUID required" }));
+                            return;
+                        }
+
+                        var myAddr = Globals.ValidatorAddress;
+                        string? pubkeyPackage = null;
+
+                        if (!string.IsNullOrEmpty(myAddr))
+                        {
+                            // Try SCUID lookup
+                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(scUID, myAddr);
+                            if (keyStore != null && !string.IsNullOrEmpty(keyStore.PubkeyPackage))
+                            {
+                                pubkeyPackage = keyStore.PubkeyPackage;
+                            }
+
+                            // Try GroupPublicKey fallback via local contract
+                            if (string.IsNullOrEmpty(pubkeyPackage))
+                            {
+                                var vbtcContract = ReserveBlockCore.Bitcoin.Models.VBTCContractV2.GetContract(scUID);
+                                if (vbtcContract != null && !string.IsNullOrEmpty(vbtcContract.FrostGroupPublicKey))
+                                {
+                                    var gpkStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
+                                    if (gpkStore != null && !string.IsNullOrEmpty(gpkStore.PubkeyPackage))
+                                        pubkeyPackage = gpkStore.PubkeyPackage;
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(pubkeyPackage))
+                        {
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, PubkeyPackage = pubkeyPackage }));
+                        }
+                        else
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Pubkey package not found" }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                    }
+                });
+
                 #endregion
 
                 #region DKG Endpoints (3-round ceremony)

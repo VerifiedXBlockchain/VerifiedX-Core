@@ -1100,6 +1100,72 @@ namespace ReserveBlockCore.Bitcoin.Services
                     }
                 }
 
+                // Tier 4: Non-validator fallback — use pubkey package from local VBTCContractV2.
+                // Non-validator wallet nodes don't have FrostValidatorKeyStore records (those are validator-only),
+                // but the contract owner's local DB stores the FrostPubkeyPackage from DKG.
+                if (string.IsNullOrEmpty(pubkeyPackage))
+                {
+                    var localContract = VBTCContractV2.GetContract(scUID);
+                    if (localContract != null && !string.IsNullOrEmpty(localContract.FrostPubkeyPackage))
+                    {
+                        pubkeyPackage = localContract.FrostPubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package via local VBTCContractV2 fallback (non-validator node)", "FrostMPCService.AggregateSignature");
+                    }
+                }
+
+                // Tier 5: Fetch pubkey package from a validator via the /frost/key/pubkey endpoint.
+                // This is the last resort for non-validator nodes where the local contract doesn't have it.
+                if (string.IsNullOrEmpty(pubkeyPackage))
+                {
+                    LogUtility.Log($"[FROST MPC] Tier 5: Fetching pubkey package from validators...", "FrostMPCService.AggregateSignature");
+                    foreach (var validator in validators)
+                    {
+                        try
+                        {
+                            // Try scUID first, then ceremonyId
+                            foreach (var lookupId in new[] { scUID, ceremonyId }.Where(id => !string.IsNullOrEmpty(id)))
+                            {
+                                var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/key/pubkey/{lookupId}";
+                                var response = await _httpClient.GetAsync(url);
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    var responseBody = await response.Content.ReadAsStringAsync();
+                                    var json = JObject.Parse(responseBody);
+                                    var pp = json["PubkeyPackage"]?.Value<string>();
+                                    if (!string.IsNullOrEmpty(pp))
+                                    {
+                                        pubkeyPackage = pp;
+                                        LogUtility.Log($"[FROST MPC] Found pubkey package from validator {validator.ValidatorAddress} (lookup: {lookupId})", "FrostMPCService.AggregateSignature");
+
+                                        // Cache it locally so we don't need to fetch again
+                                        try
+                                        {
+                                            var localContract = VBTCContractV2.GetContract(scUID);
+                                            if (localContract != null)
+                                            {
+                                                localContract.FrostPubkeyPackage = pp;
+                                                VBTCContractV2.UpdateContract(localContract);
+                                                LogUtility.Log($"[FROST MPC] Cached pubkey package to local VBTCContractV2", "FrostMPCService.AggregateSignature");
+                                            }
+                                        }
+                                        catch (Exception cacheEx)
+                                        {
+                                            LogUtility.Log($"[FROST MPC] Warning: Failed to cache pubkey package locally: {cacheEx.Message}", "FrostMPCService.AggregateSignature");
+                                        }
+
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!string.IsNullOrEmpty(pubkeyPackage)) break;
+                        }
+                        catch (Exception fetchEx)
+                        {
+                            LogUtility.Log($"[FROST MPC] Failed to fetch pubkey package from {validator.ValidatorAddress}: {fetchEx.Message}", "FrostMPCService.AggregateSignature");
+                        }
+                    }
+                }
+
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
                     ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
