@@ -642,50 +642,58 @@ namespace ReserveBlockCore.Bitcoin.Services
                 string depositAddress = null;
                 int totalRegisteredValidators = 0;
                 long lastValidatorActivityBlock = 0;
+                List<string> snapshotAddresses = null; // DKG participant addresses from the contract
 
                 if (vbtcContract != null)
                 {
                     depositAddress = vbtcContract.DepositAddress;
                     totalRegisteredValidators = vbtcContract.TotalRegisteredValidators;
                     lastValidatorActivityBlock = vbtcContract.LastValidatorActivityBlock;
+                    
+                    // Try to get snapshot from local contract first
+                    // If not available locally, we'll try State Trei below
                 }
-                else
+                
+                // Always try to resolve the snapshot from State Trei (authoritative source for DKG participants)
                 {
-                    SCLogUtility.Log($"VBTCContractV2 not in local DB for {scUID}, falling back to State Trei + GenerateSmartContractInMemory", "VBTCService.CompleteWithdrawal()");
-
-                    // Get smart contract state from the State Trei (shared across ALL nodes — consensus data)
                     var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                    if (scStateTreiRec == null || string.IsNullOrEmpty(scStateTreiRec.ContractData))
+                    if (scStateTreiRec != null && !string.IsNullOrEmpty(scStateTreiRec.ContractData))
                     {
-                        SCLogUtility.Log($"Smart contract state not found in State Trei: {scUID}", "VBTCService.CompleteWithdrawal()");
+                        try
+                        {
+                            var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                            if (scMainDecompile?.Features != null)
+                            {
+                                var tknzFeature = scMainDecompile.Features
+                                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                    .Select(x => x.FeatureFeatures)
+                                    .FirstOrDefault();
+
+                                if (tknzFeature is TokenizationV2Feature tknz)
+                                {
+                                    snapshotAddresses = tknz.ValidatorAddressesSnapshot;
+                                    
+                                    // If we didn't have a local contract, fill in from State Trei
+                                    if (vbtcContract == null)
+                                    {
+                                        depositAddress = tknz.DepositAddress;
+                                        totalRegisteredValidators = tknz.ValidatorAddressesSnapshot?.Count ?? 0;
+                                        lastValidatorActivityBlock = tknz.ProofBlockHeight;
+                                        SCLogUtility.Log($"Resolved from State Trei — DepositAddress: {depositAddress}, Validators: {totalRegisteredValidators}, ActivityBlock: {lastValidatorActivityBlock}", "VBTCService.CompleteWithdrawal()");
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception decompileEx)
+                        {
+                            SCLogUtility.Log($"Failed to decompile contract from State Trei: {decompileEx.Message}", "VBTCService.CompleteWithdrawal()");
+                        }
+                    }
+                    else if (vbtcContract == null)
+                    {
+                        SCLogUtility.Log($"Smart contract state not found in State Trei and no local contract: {scUID}", "VBTCService.CompleteWithdrawal()");
                         return (false, string.Empty, string.Empty, $"vBTC V2 contract not found in local DB or State Trei: {scUID}");
                     }
-
-                    // Decompile the contract from the State Trei's ContractData field
-                    var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
-                    if (scMainDecompile == null || scMainDecompile.Features == null)
-                    {
-                        SCLogUtility.Log($"Failed to decompile smart contract from State Trei ContractData: {scUID}", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, string.Empty, $"Failed to decompile contract {scUID} from State Trei");
-                    }
-
-                    var tknzFeature = scMainDecompile.Features
-                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                        .Select(x => x.FeatureFeatures)
-                        .FirstOrDefault();
-
-                    if (tknzFeature == null)
-                    {
-                        SCLogUtility.Log($"No TokenizationV2 feature on contract: {scUID}", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, string.Empty, $"Contract {scUID} has no TokenizationV2 feature");
-                    }
-
-                    var tknz = (TokenizationV2Feature)tknzFeature;
-                    depositAddress = tknz.DepositAddress;
-                    totalRegisteredValidators = tknz.ValidatorAddressesSnapshot?.Count ?? 0;
-                    lastValidatorActivityBlock = tknz.ProofBlockHeight; // Default to DKG completion block
-
-                    SCLogUtility.Log($"Resolved from State Trei — DepositAddress: {depositAddress}, Validators: {totalRegisteredValidators}, ActivityBlock: {lastValidatorActivityBlock}", "VBTCService.CompleteWithdrawal()");
                 }
 
                 if (string.IsNullOrEmpty(depositAddress))
@@ -739,17 +747,53 @@ namespace ReserveBlockCore.Bitcoin.Services
                 
                 SCLogUtility.Log($"Starting FROST withdrawal for contract {scUID}", "VBTCService.CompleteWithdrawal()");
 
-                // Get active validators for FROST signing
-                var validators = VBTCValidatorRegistry.GetActiveValidators();
-                if (validators == null || !validators.Any())
+                // Get validators for FROST signing — use the contract's DKG snapshot (only those validators
+                // hold FROST key shares), filtered by the registry (to get IPs) and reachability probe.
+                var allRegistryValidators = VBTCValidatorRegistry.GetActiveValidators();
+                if (allRegistryValidators == null || !allRegistryValidators.Any())
                 {
-                    SCLogUtility.Log($"No active validators available for FROST signing", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, "No active validators available for FROST signing");
+                    SCLogUtility.Log($"No active validators in registry for FROST signing", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, "No active validators in registry for FROST signing");
                 }
 
-                // Phase 5: Calculate DYNAMIC adjusted threshold based on validator availability
+                // Filter to only validators from the contract's DKG snapshot (they hold the key shares)
+                List<VBTCValidator> snapshotValidators;
+                if (snapshotAddresses != null && snapshotAddresses.Any())
+                {
+                    var snapshotSet = new HashSet<string>(snapshotAddresses);
+                    snapshotValidators = allRegistryValidators.Where(v => snapshotSet.Contains(v.ValidatorAddress)).ToList();
+                    SCLogUtility.Log($"[FROST Signing] Filtered to {snapshotValidators.Count} snapshot validators " +
+                        $"(from {allRegistryValidators.Count} registry, {snapshotAddresses.Count} in snapshot)", "VBTCService.CompleteWithdrawal()");
+                }
+                else
+                {
+                    // Fallback: no snapshot available — use all registry validators (legacy behavior)
+                    snapshotValidators = allRegistryValidators;
+                    SCLogUtility.Log($"[FROST Signing] WARNING: No snapshot addresses found for contract {scUID}. " +
+                        $"Using all {allRegistryValidators.Count} registry validators (legacy fallback)", "VBTCService.CompleteWithdrawal()");
+                }
+
+                if (!snapshotValidators.Any())
+                {
+                    SCLogUtility.Log($"No snapshot validators found in registry for FROST signing. " +
+                        $"Snapshot had {snapshotAddresses?.Count ?? 0} addresses but none matched active registry.", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, "No DKG snapshot validators are currently active in the registry");
+                }
+
+                // Probe reachability — only contact validators that are actually online
+                var validators = await FrostMPCService.ProbeValidatorReachability(snapshotValidators);
+                if (!validators.Any())
+                {
+                    SCLogUtility.Log($"No reachable validators for FROST signing (0/{snapshotValidators.Count} responded to health check)", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"No reachable validators for FROST signing (0/{snapshotValidators.Count} snapshot validators online)");
+                }
+
+                // Use the snapshot total (not registry total) for threshold calculation
+                int snapshotTotal = snapshotAddresses?.Count ?? totalRegisteredValidators;
+
+                // Calculate DYNAMIC adjusted threshold based on validator availability
                 int adjustedThreshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(
-                    totalRegisteredValidators,
+                    snapshotTotal,
                     validators.Count,
                     lastValidatorActivityBlock,
                     Globals.LastBlock.Height
@@ -760,17 +804,18 @@ namespace ReserveBlockCore.Bitcoin.Services
                 
                 // Log threshold information
                 string thresholdInfo = VBTCThresholdCalculator.GetThresholdExplanation(
-                    totalRegisteredValidators,
+                    snapshotTotal,
                     validators.Count,
                     lastValidatorActivityBlock,
                     Globals.LastBlock.Height
                 );
-                SCLogUtility.Log($"Threshold calculation: {thresholdInfo}", "VBTCService.CompleteWithdrawal()");
+                SCLogUtility.Log($"Threshold calculation (snapshot-based): {thresholdInfo}", "VBTCService.CompleteWithdrawal()");
                 
                 if (validators.Count < requiredValidators)
                 {
-                    SCLogUtility.Log($"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)");
+                    SCLogUtility.Log($"Insufficient reachable validators. Have: {validators.Count}, Need: {requiredValidators} " +
+                        $"(Adjusted threshold: {adjustedThreshold}%, Snapshot: {snapshotTotal})", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"Insufficient reachable validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)");
                 }
 
                 // Get withdrawal details — prefer contract Active* fields (set by StateData when TX is mined),
@@ -801,7 +846,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 long feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
 
                 // Execute FROST withdrawal (build + sign; broadcast only if not signOnly)
-                SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination} (signOnly={signOnly})", "VBTCService.CompleteWithdrawal()");
+                // Use the withdrawal requestor's address as the FROST coordinator/leader —
+                // they already proved token ownership during the withdrawal request step.
+                var coordinatorAddress = withdrawalRequest.RequestorAddress;
+                SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination} (signOnly={signOnly}, coordinator={coordinatorAddress})", "VBTCService.CompleteWithdrawal()");
                 
                 var btcResult = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
                     depositAddress,
@@ -811,7 +859,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     scUID,
                     validators,
                     adjustedThreshold,
-                    broadcast: !signOnly
+                    broadcast: !signOnly,
+                    coordinatorAddress: coordinatorAddress
                 );
 
                 if (!btcResult.Success)

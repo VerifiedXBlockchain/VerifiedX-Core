@@ -131,9 +131,6 @@ namespace ReserveBlockCore.Controllers
 
                 var result = await WalletVbtcService.CompleteWithdrawal(req.ScUID, req.RequestHash);
 
-                if (result.remoteResult != null)
-                    return Ok(new { success = true, message = "Withdrawal completed!", remoteResult = result.remoteResult });
-
                 if (result.success)
                     return Ok(new { success = true, message = "Withdrawal completed!", vfxTxHash = result.vfxTxHash, btcTxHash = result.btcTxHash });
                 else

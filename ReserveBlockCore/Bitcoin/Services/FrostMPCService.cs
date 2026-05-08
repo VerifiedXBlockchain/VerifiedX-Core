@@ -636,7 +636,10 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 var sessionId = Guid.NewGuid().ToString();
                 // Use provided coordinator address, fall back to validator address, then first validator
-                var leaderAddress = coordinatorAddress ?? Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
+                // Note: Globals.ValidatorAddress is "" (not null) for non-validators, so ?? won't fall through
+                var leaderAddress = !string.IsNullOrEmpty(coordinatorAddress) ? coordinatorAddress
+                    : !string.IsNullOrEmpty(Globals.ValidatorAddress) ? Globals.ValidatorAddress
+                    : validators.First().ValidatorAddress;
 
                 LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}", "FrostMPCService.CoordinateSigningCeremony");
 
