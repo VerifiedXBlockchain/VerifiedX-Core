@@ -138,7 +138,9 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Verify leader is a registered active vBTC validator
+                            // Unified MPC: Any VFX wallet owner can coordinate (not just validators).
+                            // The coordinator only orchestrates HTTP calls — it never touches private
+                            // key material. FROST protocol guarantees this is safe.
                             if (string.IsNullOrEmpty(request.LeaderAddress))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -150,19 +152,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var leaderValidator = Services.VBTCValidatorRegistry.GetValidator(request.LeaderAddress);
-                            if (leaderValidator == null || !leaderValidator.IsActive)
-                            {
-                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                                {
-                                    Success = false,
-                                    Message = "Leader is not a registered active vBTC validator"
-                                }));
-                                return;
-                            }
-
-                            // FIND-0013 Fix: Verify all participants are registered active validators
+                            // Verify all participants are registered active validators
                             foreach (var participantAddr in request.ParticipantAddresses)
                             {
                                 var participantValidator = Services.VBTCValidatorRegistry.GetValidator(participantAddr);
@@ -1311,7 +1301,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Verify leader is a registered active vBTC validator
+                            // Unified MPC: Any VFX wallet owner can coordinate signing (not just validators).
                             if (string.IsNullOrEmpty(request.LeaderAddress))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -1323,19 +1313,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var leaderValidator = Services.VBTCValidatorRegistry.GetValidator(request.LeaderAddress);
-                            if (leaderValidator == null || !leaderValidator.IsActive)
-                            {
-                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                                {
-                                    Success = false,
-                                    Message = "Leader is not a registered active vBTC validator"
-                                }));
-                                return;
-                            }
-
-                            // FIND-0013 Fix: Cryptographic signature verification
+                            // Cryptographic signature verification (any valid VFX address accepted)
                             if (string.IsNullOrEmpty(request.LeaderSignature))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;

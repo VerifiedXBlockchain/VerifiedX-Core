@@ -629,15 +629,9 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                // FIND-027 Fix: Safety guard — CompleteWithdrawal requires FROST signing which can only
-                // run on a validator node. If this is a non-validator, fail fast with a clear error
-                // instead of crashing with a NullReferenceException deep in the FROST signing flow.
-                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                {
-                    SCLogUtility.Log($"CompleteWithdrawal called on non-validator node. This must be delegated to a validator.", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, 
-                        "This node is not a validator and cannot coordinate FROST signing. The withdrawal must be delegated to a remote validator.");
-                }
+                // Unified MPC: Any VFX wallet owner can now coordinate FROST signing directly.
+                // The leader check in FrostStartup.cs has been relaxed to accept any valid VFX
+                // signature, and FrostMPCService signs with AddressSignature (owner's key).
 
                 // Get contract — try local DB first, fall back to State Trei for remote validators
                 var vbtcContract = VBTCContractV2.GetContract(scUID);

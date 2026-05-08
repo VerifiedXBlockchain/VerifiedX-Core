@@ -613,8 +613,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
         /// <summary>
         /// Background task that executes the MPC (FROST DKG) ceremony.
-        /// If this node is a validator, it coordinates the ceremony locally.
-        /// If this node is a regular wallet, it delegates to a remote validator.
+        /// Unified MPC: Any VFX wallet owner can coordinate directly — no delegation needed.
         /// </summary>
         private async Task ExecuteMPCCeremony(string ceremonyId)
         {
@@ -623,14 +622,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
                     return;
 
-                // Non-validator wallet node: delegate the entire ceremony to a remote validator
-                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                {
-                    await ExecuteMPCCeremonyViaRemoteValidator(ceremonyId, ceremony);
-                    return;
-                }
-
-                // Validator node: coordinate the ceremony locally
+                // Unified path: always coordinate locally (owner signs with AddressSignature)
                 await ExecuteMPCCeremonyLocally(ceremonyId, ceremony);
             }
             catch (Exception ex)

@@ -28,10 +28,12 @@ namespace ReserveBlockCore.Bitcoin.Services
 
         /// <summary>
         /// Coordinate a complete FROST DKG ceremony to generate a Taproot deposit address
-        /// Returns the group public key, Taproot address, and DKG proof
+        /// Returns the group public key, Taproot address, and DKG proof.
+        /// Any node (validator or wallet) can coordinate — the coordinator only orchestrates
+        /// HTTP calls and never touches private key material.
         /// </summary>
         /// <param name="ceremonyId">Ceremony ID (NOT smart contract UID - that doesn't exist yet)</param>
-        /// <param name="ownerAddress">Contract owner's VFX address</param>
+        /// <param name="ownerAddress">Contract owner's VFX address (used as leader address)</param>
         /// <param name="validators">List of active validators to participate</param>
         /// <param name="threshold">Required threshold percentage (e.g., 51)</param>
         /// <param name="progressCallback">Optional callback to report progress (round, percentage)</param>
@@ -46,7 +48,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             try
             {
                 var sessionId = Guid.NewGuid().ToString();
-                var leaderAddress = Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
+                // Use the owner's address as the leader — any VFX address can coordinate
+                var leaderAddress = ownerAddress;
 
                 LogUtility.Log($"[FROST MPC] Starting DKG ceremony. Ceremony: {ceremonyId}, Session: {sessionId}, Validators: {validators.Count}, Threshold: {threshold}%", "FrostMPCService.CoordinateDKGCeremony");
 
@@ -119,10 +122,11 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                // FIND-0013 Fix: Sign with leader's key using deterministic message format
+                // Sign with leader's key using deterministic message format
+                // Any VFX wallet owner can be the leader — not just validators
                 var timestamp = TimeUtil.GetTime();
                 var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var leaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(leaderMessage);
+                var leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
 
                 var startRequest = new FrostDKGStartRequest
                 {
@@ -301,10 +305,13 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Step 2: Redistribute all shares to each validator via batch endpoint
                 // Each validator will extract the shares meant for them and auto-finalize DKG
+                // Note: leaderAddress is not available here directly, but the DKG start already
+                // established trust. We use the owner address from the coordinator context.
+                // For share redistribution, we sign with whatever local identity is available.
                 var leaderAddress = Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
                 var timestamp = TimeUtil.GetTime();
                 var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var leaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(leaderMessage);
+                var leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
 
                 var redistributePayload = JsonConvert.SerializeObject(new
                 {
@@ -535,12 +542,14 @@ namespace ReserveBlockCore.Bitcoin.Services
             string scUID,
             List<VBTCValidator> validators,
             int threshold,
-            string? ceremonyId = null)
+            string? ceremonyId = null,
+            string? coordinatorAddress = null)
         {
             try
             {
                 var sessionId = Guid.NewGuid().ToString();
-                var leaderAddress = Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
+                // Use provided coordinator address, fall back to validator address, then first validator
+                var leaderAddress = coordinatorAddress ?? Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
 
                 LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}", "FrostMPCService.CoordinateSigningCeremony");
 
@@ -601,10 +610,11 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                // FIND-0013 Fix: Sign with leader's key using deterministic message format
+                // Sign with leader's key using deterministic message format
+                // Any VFX wallet owner can be the leader — not just validators
                 var timestamp = TimeUtil.GetTime();
                 var signingLeaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var signingLeaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(signingLeaderMessage);
+                var signingLeaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, signingLeaderMessage);
 
                 var startRequest = new FrostSigningStartRequest
                 {

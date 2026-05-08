@@ -103,6 +103,30 @@ namespace ReserveBlockCore.Services
             return SignatureService.CreateSignature(message, privateKey, validatorAccount.PublicKey);
         }
 
+        /// <summary>
+        /// Sign a message using any local wallet address (not just validators).
+        /// Used by unified MPC ceremony coordination so any wallet owner can act as leader.
+        /// Falls back to ValidatorSignature if the address matches the validator address.
+        /// </summary>
+        public static string AddressSignature(string address, string message)
+        {
+            // Fast path: if this is the validator address, use existing method
+            if (!string.IsNullOrEmpty(Globals.ValidatorAddress) && address == Globals.ValidatorAddress)
+                return ValidatorSignature(message);
+
+            var account = AccountData.GetSingleAccount(address);
+            if (account == null)
+            {
+                ErrorLogUtility.LogError($"Account not found for address: {address}", "SignatureService.AddressSignature");
+                return "ERROR";
+            }
+
+            BigInteger b1 = BigInteger.Parse(account.GetKey, NumberStyles.AllowHexSpecifier);
+            PrivateKey privateKey = new PrivateKey("secp256k1", b1);
+
+            return SignatureService.CreateSignature(message, privateKey, account.PublicKey);
+        }
+
         public static string AdjudicatorSignature(string message)
         {
             var account = Globals.AdjudicateAccount;            
