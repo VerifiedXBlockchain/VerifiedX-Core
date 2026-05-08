@@ -24,6 +24,83 @@ namespace ReserveBlockCore.Bitcoin.Services
             Timeout = TimeSpan.FromSeconds(30)
         };
 
+        #region Validator Reachability
+
+        /// <summary>
+        /// Dedicated short-timeout HttpClient for health check probes.
+        /// Uses a 5-second timeout so we don't wait 30 seconds per offline validator.
+        /// </summary>
+        private static readonly HttpClient _probeHttpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+
+        /// <summary>
+        /// Probe all validators to find which ones are actually reachable on the FROST port.
+        /// Uses the /health endpoint with a short timeout to quickly identify online validators.
+        /// This prevents the DKG ceremony from being passed 34 validators when only 4 are online.
+        /// </summary>
+        /// <param name="validators">All registered/active validators to probe</param>
+        /// <returns>List of validators that responded successfully to the health check</returns>
+        public static async Task<List<VBTCValidator>> ProbeValidatorReachability(List<VBTCValidator> validators)
+        {
+            var reachable = new System.Collections.Concurrent.ConcurrentBag<VBTCValidator>();
+            var unreachableCount = 0;
+
+            LogUtility.Log($"[FROST MPC] Probing {validators.Count} validators for FROST port reachability...", 
+                "FrostMPCService.ProbeValidatorReachability");
+
+            var tasks = validators.Select(async validator =>
+            {
+                try
+                {
+                    // Validate IP before making HTTP call
+                    if (!InputValidationHelper.ValidateValidatorIPAddress(validator.IPAddress, out string ipError))
+                    {
+                        Interlocked.Increment(ref unreachableCount);
+                        return;
+                    }
+
+                    var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/health";
+                    var response = await _probeHttpClient.GetAsync(url);
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var body = await response.Content.ReadAsStringAsync();
+                        if (body.Contains("\"Success\":true") || body.Contains("\"Success\": true"))
+                        {
+                            reachable.Add(validator);
+                            return;
+                        }
+                    }
+
+                    Interlocked.Increment(ref unreachableCount);
+                }
+                catch
+                {
+                    // Timeout or connection refused — validator is offline
+                    Interlocked.Increment(ref unreachableCount);
+                }
+            });
+
+            await Task.WhenAll(tasks);
+
+            var reachableList = reachable.ToList();
+
+            LogUtility.Log($"[FROST MPC] Reachability probe complete: {reachableList.Count}/{validators.Count} validators online on FROST port {Globals.FrostValidatorPort}. " +
+                $"({unreachableCount} unreachable)", "FrostMPCService.ProbeValidatorReachability");
+
+            if (reachableList.Count > 0)
+            {
+                var addressList = string.Join(", ", reachableList.Select(v => v.ValidatorAddress));
+                LogUtility.Log($"[FROST MPC] Reachable validators: {addressList}", "FrostMPCService.ProbeValidatorReachability");
+            }
+
+            return reachableList;
+        }
+
+        #endregion
+
         #region DKG Ceremony - Taproot Address Generation
 
         /// <summary>
@@ -74,7 +151,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Phase 3: DKG Round 2 - Share Distribution
                 progressCallback?.Invoke(2, 50); // Round 2 starting
-                var respondingAddresses = await CoordinateShareDistribution(sessionId, validators, round1Results);
+                var respondingAddresses = await CoordinateShareDistribution(sessionId, validators, round1Results, leaderAddress);
                 if (respondingAddresses == null || respondingAddresses.Count == 0)
                 {
                     LogUtility.Log($"[FROST MPC] DKG Round 2 failed - share distribution error", "FrostMPCService.CoordinateDKGCeremony");
@@ -253,7 +330,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         private static async Task<List<string>?> CoordinateShareDistribution(
             string sessionId,
             List<VBTCValidator> validators,
-            Dictionary<string, string> commitments)
+            Dictionary<string, string> commitments,
+            string leaderAddress)
         {
             try
             {
@@ -308,10 +386,8 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Step 2: Redistribute all shares to each validator via batch endpoint
                 // Each validator will extract the shares meant for them and auto-finalize DKG
-                // Note: leaderAddress is not available here directly, but the DKG start already
-                // established trust. We use the owner address from the coordinator context.
-                // For share redistribution, we sign with whatever local identity is available.
-                var leaderAddress = Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
+                // Use the same leaderAddress that was used in BroadcastDKGStart so validators
+                // accept the request (they check leaderAddr == session.LeaderAddress).
                 var timestamp = TimeUtil.GetTime();
                 var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
                 var leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);

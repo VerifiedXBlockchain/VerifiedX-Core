@@ -227,10 +227,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 ceremony.ProgressPercentage = 5;
 
                 // Get candidate validators — these are all known active validators.
-                // Some may be offline. The actual snapshot will be built from who responds.
-                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                // Some may be offline. We probe reachability to filter to only online ones.
+                var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
 
-                if (activeValidators == null || !activeValidators.Any())
+                if (allValidators == null || !allValidators.Any())
                 {
                     ceremony.Status = CeremonyStatus.Failed;
                     ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
@@ -238,8 +238,25 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return;
                 }
 
-                LogUtility.Log($"[MPC Ceremony] Starting with {activeValidators.Count} candidate validators. " +
-                    $"Snapshot will be built from actual respondents.", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+                LogUtility.Log($"[MPC Ceremony] Found {allValidators.Count} registered validators. Probing FROST port reachability...", 
+                    "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+
+                // Probe which validators are actually reachable on the FROST port
+                var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+
+                if (activeValidators.Count < 3) // FROST minimum: need at least 3 for threshold signing
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = $"Insufficient reachable validators for DKG ceremony. " +
+                        $"Only {activeValidators.Count} of {allValidators.Count} registered validators are online on FROST port " +
+                        $"(minimum 3 required).";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    LogUtility.Log($"[MPC Ceremony] {ceremony.ErrorMessage}", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+                    return;
+                }
+
+                LogUtility.Log($"[MPC Ceremony] Starting DKG with {activeValidators.Count} reachable validators " +
+                    $"(out of {allValidators.Count} registered).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
 
                 ceremony.ProgressPercentage = 15;
                 ceremony.Status = CeremonyStatus.Round1InProgress;
@@ -637,10 +654,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             ceremony.ProgressPercentage = 5;
 
             // Get candidate validators — these are all known active validators.
-            // Some may be offline. The actual snapshot will be built from who responds.
-            var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+            // Some may be offline. We probe reachability to filter to only online ones.
+            var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
 
-            if (activeValidators == null || !activeValidators.Any())
+            if (allValidators == null || !allValidators.Any())
             {
                 ceremony.Status = CeremonyStatus.Failed;
                 ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
@@ -648,8 +665,25 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 return;
             }
 
-            LogUtility.Log($"[MPC Ceremony] Starting with {activeValidators.Count} candidate validators. " +
-                $"Snapshot will be built from actual respondents.", "VBTCController.ExecuteMPCCeremonyLocally");
+            LogUtility.Log($"[MPC Ceremony] Found {allValidators.Count} registered validators. Probing FROST port reachability...", 
+                "VBTCController.ExecuteMPCCeremonyLocally");
+
+            // Probe which validators are actually reachable on the FROST port
+            var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+
+            if (activeValidators.Count < 3) // FROST minimum: need at least 3 for threshold signing
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = $"Insufficient reachable validators for DKG ceremony. " +
+                    $"Only {activeValidators.Count} of {allValidators.Count} registered validators are online on FROST port " +
+                    $"(minimum 3 required).";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                LogUtility.Log($"[MPC Ceremony] {ceremony.ErrorMessage}", "VBTCController.ExecuteMPCCeremonyLocally");
+                return;
+            }
+
+            LogUtility.Log($"[MPC Ceremony] Starting DKG with {activeValidators.Count} reachable validators " +
+                $"(out of {allValidators.Count} registered).", "VBTCController.ExecuteMPCCeremonyLocally");
 
             ceremony.ProgressPercentage = 15;
 
