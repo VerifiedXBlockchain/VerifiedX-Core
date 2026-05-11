@@ -860,7 +860,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     validators,
                     adjustedThreshold,
                     broadcast: !signOnly,
-                    coordinatorAddress: coordinatorAddress
+                    coordinatorAddress: coordinatorAddress,
+                    withdrawalRequestHash: withdrawalRequestHash  // FIND-028: Validator-side dedup
                 );
 
                 if (!btcResult.Success)

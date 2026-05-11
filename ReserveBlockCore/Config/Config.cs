@@ -353,13 +353,13 @@ namespace ReserveBlockCore.Config
                         Count = 0,
                         FailCount = 0
                     },
-                    new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "testnet4-electrumx.wakiyamap.dev",
-                        Port = 51002,
-                        UseSsl = true,
-                        Count = 0,
-                        FailCount = 0
-                    },
+                    //new Bitcoin.ElectrumX.ClientSettings {
+                    //    Host = "testnet4-electrumx.wakiyamap.dev",
+                    //    Port = 51002,
+                    //    UseSsl = true,
+                    //    Count = 0,
+                    //    FailCount = 0
+                    //},
                     new Bitcoin.ElectrumX.ClientSettings {
                         Host = "blackie.c3-soft.com",
                         Port = 57010,
@@ -408,13 +408,13 @@ namespace ReserveBlockCore.Config
                             Count = 0,
                             FailCount = 0
                         },
-                        new Bitcoin.ElectrumX.ClientSettings {
-                            Host = "testnet4-electrumx.wakiyamap.dev",
-                            Port = 51002,
-                            UseSsl = true,
-                            Count = 0,
-                            FailCount = 0
-                        },
+                        //new Bitcoin.ElectrumX.ClientSettings {
+                        //    Host = "testnet4-electrumx.wakiyamap.dev",
+                        //    Port = 51002,
+                        //    UseSsl = true,
+                        //    Count = 0,
+                        //    FailCount = 0
+                        //},
                         new Bitcoin.ElectrumX.ClientSettings {
                             Host = "blackie.c3-soft.com",
                             Port = 57010,

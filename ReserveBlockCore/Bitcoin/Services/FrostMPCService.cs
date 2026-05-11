@@ -630,7 +630,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             string? ceremonyId = null,
-            string? coordinatorAddress = null)
+            string? coordinatorAddress = null,
+            string? withdrawalRequestHash = null)
         {
             try
             {
@@ -644,7 +645,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}", "FrostMPCService.CoordinateSigningCeremony");
 
                 // Phase 1: Broadcast signing start
-                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId);
+                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId, withdrawalRequestHash);
                 if (!startSuccess)
                 {
                     LogUtility.Log($"[FROST MPC] Failed to start signing ceremony", "FrostMPCService.CoordinateSigningCeremony");
@@ -696,7 +697,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             string leaderAddress,
             List<VBTCValidator> validators,
             int threshold,
-            string? ceremonyId = null)
+            string? ceremonyId = null,
+            string? withdrawalRequestHash = null)
         {
             try
             {
@@ -716,7 +718,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Timestamp = timestamp,
                     LeaderSignature = signingLeaderSignature,
                     SignerAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
-                    RequiredThreshold = threshold
+                    RequiredThreshold = threshold,
+                    WithdrawalRequestHash = withdrawalRequestHash  // FIND-028: For validator-side dedup
                 };
 
                 var tasks = validators.Select(async validator =>

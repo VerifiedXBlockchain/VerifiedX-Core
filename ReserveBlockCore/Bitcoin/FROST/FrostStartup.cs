@@ -1360,6 +1360,44 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // FIND-028: Validator-side withdrawal dedup check.
+                            // If this signing request carries a WithdrawalRequestHash, verify that
+                            // we haven't already signed for this withdrawal. This is the network-level
+                            // defense against double-spend — even if the coordinator's code is modified.
+                            if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
+                            {
+                                var (blocked, reason) = ReserveBlockCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash);
+                                if (blocked)
+                                {
+                                    LogUtility.Log($"[FROST Dedup] BLOCKED signing start for withdrawal {request.WithdrawalRequestHash}: {reason}",
+                                        "FrostStartup.SignStart");
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = $"FIND-028: {reason}"
+                                    }));
+                                    return;
+                                }
+
+                                // Verify the withdrawal request exists in local DB and is not completed
+                                var withdrawalReq = ReserveBlockCore.Bitcoin.Models.VBTCWithdrawalRequest
+                                    .GetByTransactionHash(request.WithdrawalRequestHash);
+                                if (withdrawalReq != null && withdrawalReq.IsCompleted)
+                                {
+                                    LogUtility.Log($"[FROST Dedup] BLOCKED: Withdrawal already completed on-chain: {request.WithdrawalRequestHash}",
+                                        "FrostStartup.SignStart");
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = "Withdrawal request already completed on-chain"
+                                    }));
+                                    return;
+                                }
+                            }
+
                             // Unified MPC: Any VFX wallet owner can coordinate signing (not just validators).
                             if (string.IsNullOrEmpty(request.LeaderAddress))
                             {
@@ -1484,6 +1522,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 MessageHash = request.MessageHash,
                                 SmartContractUID = request.SmartContractUID,
                                 LeaderAddress = request.LeaderAddress,
+                                WithdrawalRequestHash = request.WithdrawalRequestHash,  // FIND-028
                                 SignerAddresses = request.SignerAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
                                 StartTimestamp = TimeUtil.GetTime(),
@@ -1497,6 +1536,12 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                             if (!FrostSessionStorage.SigningSessions.TryAdd(request.SessionId, signingSession))
                             {
+                                // FIND-028: Record failed if we can't create session (conflict)
+                                if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
+                                {
+                                    ReserveBlockCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                        .RecordSigningFailed(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId);
+                                }
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
@@ -1504,6 +1549,13 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                     Message = "Signing session already exists"
                                 }));
                                 return;
+                            }
+
+                            // FIND-028: Record signing started for withdrawal dedup
+                            if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
+                            {
+                                ReserveBlockCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .RecordSigningStarted(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId);
                             }
 
                             LogUtility.Log($"[FROST] Signing ceremony started with real nonce generation. Session: {request.SessionId}", "FrostStartup.SignStart");
@@ -1822,6 +1874,15 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             // Store this validator's signature share
                             var myAddr = Globals.ValidatorAddress ?? "";
                             session.Round2Shares.TryAdd(myAddr, signatureShare);
+
+                            // FIND-028: Record signing completed for withdrawal dedup tracking.
+                            // After generating a signature share, this validator has committed its key share
+                            // to this withdrawal. It MUST NOT sign for the same withdrawal again.
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash))
+                            {
+                                ReserveBlockCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .RecordSigningCompleted(session.SmartContractUID, session.WithdrawalRequestHash, sessionId);
+                            }
 
                             LogUtility.Log($"[FROST] Signing Round 2 signature share generated via native library for session {sessionId}", "FrostStartup.SignRound2");
 

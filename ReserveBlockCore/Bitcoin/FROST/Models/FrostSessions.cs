@@ -59,6 +59,10 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public string MessageHash { get; set; }
         public string SmartContractUID { get; set; }
         public string LeaderAddress { get; set; }
+        /// <summary>
+        /// FIND-028: VFX withdrawal request TX hash for dedup tracking. Null for non-withdrawal signings.
+        /// </summary>
+        public string? WithdrawalRequestHash { get; set; }
         public List<string> SignerAddresses { get; set; }
         public int RequiredThreshold { get; set; }
         public long StartTimestamp { get; set; }

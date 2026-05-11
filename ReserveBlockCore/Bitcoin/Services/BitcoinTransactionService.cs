@@ -217,7 +217,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 string scUID,
                 List<VBTCValidator> validators,
                 int threshold,
-                string? coordinatorAddress = null)
+                string? coordinatorAddress = null,
+                string? withdrawalRequestHash = null)
         {
             try
             {
@@ -305,7 +306,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                         validators,
                         threshold,
                         ceremonyId,
-                        coordinatorAddress);
+                        coordinatorAddress,
+                        withdrawalRequestHash);
 
                     if (signingResult == null || !signingResult.SignatureValid)
                     {
@@ -453,7 +455,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                 List<VBTCValidator> validators,
                 int threshold,
                 bool broadcast = true,
-                string? coordinatorAddress = null)
+                string? coordinatorAddress = null,
+                string? withdrawalRequestHash = null)
         {
             try
             {
@@ -476,7 +479,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     scUID, 
                     validators,
                     threshold,
-                    coordinatorAddress);
+                    coordinatorAddress,
+                    withdrawalRequestHash);
 
                 if (!signingResult.Success)
                 {

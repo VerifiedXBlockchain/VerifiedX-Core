@@ -89,6 +89,11 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public string LeaderSignature { get; set; }
         public List<string> SignerAddresses { get; set; }
         public int RequiredThreshold { get; set; }
+        /// <summary>
+        /// FIND-028: VFX withdrawal request TX hash. When set, validators enforce one-time signing
+        /// per withdrawal to prevent double-spend attacks. Null for non-withdrawal signings (e.g. bridge exits).
+        /// </summary>
+        public string? WithdrawalRequestHash { get; set; }
     }
 
     /// <summary>
