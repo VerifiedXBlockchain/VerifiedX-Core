@@ -33,6 +33,29 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
+        #region Stale Peer Management Constants
+
+        /// <summary>
+        /// Peers with FailCount at or above this value are excluded from connection attempts.
+        /// They will be rehabilitated when PopulateValidatorPeersFromBlocks detects a fresh
+        /// on-chain heartbeat/register TX and resets their FailCount.
+        /// </summary>
+        private const int MAX_FAIL_COUNT_FOR_CONNECT = 200;
+
+        /// <summary>
+        /// Peers with FailCount at or above this value get demoted (IsValidator = false).
+        /// This prevents them from being selected at all until re-discovered on-chain.
+        /// </summary>
+        private const int FAIL_COUNT_DEMOTION_THRESHOLD = 2000;
+
+        /// <summary>
+        /// For peers with FailCount above this value, only log every Nth failure to reduce noise.
+        /// </summary>
+        private const int FAIL_LOG_THROTTLE_AFTER = 50;
+        private const int FAIL_LOG_THROTTLE_INTERVAL = 100;
+
+        #endregion
+
         #region Security Helper Methods
 
         /// <summary>
@@ -380,14 +403,31 @@ namespace ReserveBlockCore.P2P
             }
             catch (Exception ex)
             {
-                // DIAGNOSTIC: Log the actual error so we can see why validator P2P connections fail
-                LogUtility.Log(
-                    $"CONNECT-FAIL: Validator connection to {peer.PeerIP} failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
-                    "P2PValidatorClient.Connect");
-                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
                 peer.FailCount += 1;
+
+                // Throttle logging for high-fail-count peers to reduce log noise
+                if (peer.FailCount <= FAIL_LOG_THROTTLE_AFTER || peer.FailCount % FAIL_LOG_THROTTLE_INTERVAL == 0)
+                {
+                    LogUtility.Log(
+                        $"CONNECT-FAIL: Validator connection to {peer.PeerIP} failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                        "P2PValidatorClient.Connect");
+                }
+
+                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+
                 if (peer.FailCount > 600)
                     peer.IsOutgoing = false;
+
+                // Demote peers that have been unreachable for a very long time
+                if (peer.FailCount >= FAIL_COUNT_DEMOTION_THRESHOLD)
+                {
+                    peer.IsValidator = false;
+                    LogUtility.Log(
+                        $"PEER-DEMOTED: Demoting {peer.PeerIP} from validator status after {peer.FailCount} consecutive failures. " +
+                        $"Will be re-enabled if a fresh on-chain heartbeat is detected.",
+                        "P2PValidatorClient.Connect");
+                }
+
                 Peers.GetAll()?.UpdateSafe(peer);
             }
             finally
@@ -428,8 +468,10 @@ namespace ReserveBlockCore.P2P
             }
 
             Random rnd = new Random();
+            // Filter out peers with excessive failures — they'll be rehabilitated when
+            // PopulateValidatorPeersFromBlocks detects a fresh on-chain heartbeat.
             var newPeers = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .Where(x => !SkipIPs.Contains(x.PeerIP) && x.FailCount < MAX_FAIL_COUNT_FOR_CONNECT)
                 .ToArray()
                 .OrderBy(x => rnd.Next())
                 .ThenBy(x => x.FailCount)
@@ -452,8 +494,9 @@ namespace ReserveBlockCore.P2P
                     SkipIPs.Add(validator.NodeIP);
                 }
 
+                // Still respect FailCount ceiling even after clearing SkipValPeers
                 newPeers = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .Where(x => !SkipIPs.Contains(x.PeerIP) && x.FailCount < MAX_FAIL_COUNT_FOR_CONNECT)
                 .ToArray()
                 .OrderBy(x => rnd.Next())
                 .ThenBy(x => x.FailCount)
@@ -674,16 +717,31 @@ namespace ReserveBlockCore.P2P
             }
             catch (Exception ex)
             {
-                // DIAGNOSTIC: Log the actual error so we can see why blockcaster SignalR connections fail
-                // This was previously a bare catch{} that silently swallowed all errors — making it
-                // impossible to diagnose why returning validators couldn't connect to casters.
-                LogUtility.Log(
-                    $"CONNECT-CASTER-FAIL: Blockcaster connection to {peer.PeerIP} ({url}) failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
-                    "P2PValidatorClient.ConnectBlockcaster");
-                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
                 peer.FailCount += 1;
+
+                // Throttle logging for high-fail-count peers to reduce log noise
+                if (peer.FailCount <= FAIL_LOG_THROTTLE_AFTER || peer.FailCount % FAIL_LOG_THROTTLE_INTERVAL == 0)
+                {
+                    LogUtility.Log(
+                        $"CONNECT-CASTER-FAIL: Blockcaster connection to {peer.PeerIP} ({url}) failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                        "P2PValidatorClient.ConnectBlockcaster");
+                }
+
+                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+
                 if (peer.FailCount > 600)
                     peer.IsOutgoing = false;
+
+                // Demote peers that have been unreachable for a very long time
+                if (peer.FailCount >= FAIL_COUNT_DEMOTION_THRESHOLD)
+                {
+                    peer.IsValidator = false;
+                    LogUtility.Log(
+                        $"PEER-DEMOTED: Demoting caster {peer.PeerIP} from validator status after {peer.FailCount} consecutive failures. " +
+                        $"Will be re-enabled if a fresh on-chain heartbeat is detected.",
+                        "P2PValidatorClient.ConnectBlockcaster");
+                }
+
                 Peers.GetAll()?.UpdateSafe(peer);
             }
             finally

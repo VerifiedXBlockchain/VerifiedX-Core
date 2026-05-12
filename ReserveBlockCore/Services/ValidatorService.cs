@@ -611,13 +611,40 @@ namespace ReserveBlockCore.Services
                     var existingPeer = peerDB.FindOne(x => x.PeerIP == cleanIP);
                     if (existingPeer != null)
                     {
-                        // Only update if not already marked as validator, or if address changed
+                        bool needsUpdate = false;
+
+                        // Re-enable validator status if it was demoted due to failures
                         if (!existingPeer.IsValidator || existingPeer.ValidatorAddress != val.ValidatorAddress)
                         {
                             existingPeer.IsValidator = true;
                             existingPeer.ValidatorAddress = val.ValidatorAddress;
                             if (!string.IsNullOrEmpty(val.FrostPublicKey))
                                 existingPeer.ValidatorPublicKey = val.FrostPublicKey;
+                            needsUpdate = true;
+                        }
+
+                        // STALE-PEER-FIX: Reset FailCount for validators that are actively on-chain.
+                        // This is the recovery mechanism: when a validator comes back online and sends
+                        // a heartbeat TX that gets included in a block, we detect it here and reset
+                        // their FailCount so the connection loop will try them again.
+                        if (existingPeer.FailCount > 0)
+                        {
+                            var previousFailCount = existingPeer.FailCount;
+                            existingPeer.FailCount = 0;
+                            existingPeer.IsOutgoing = true;
+                            needsUpdate = true;
+
+                            if (previousFailCount >= 50)
+                            {
+                                LogUtility.Log(
+                                    $"PEER-REHABILITATED: Reset FailCount for {cleanIP} (was {previousFailCount}) — " +
+                                    $"validator {val.ValidatorAddress} found active on-chain.",
+                                    "ValidatorService.PopulateValidatorPeersFromBlocks");
+                            }
+                        }
+
+                        if (needsUpdate)
+                        {
                             peerDB.UpdateSafe(existingPeer);
                             upsertedCount++;
                         }
