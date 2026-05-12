@@ -1,4 +1,4 @@
-﻿using NBitcoin;
+using NBitcoin;
 using ReserveBlockCore.Bitcoin.Services;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
@@ -21,6 +21,9 @@ namespace ReserveBlockCore.Bitcoin.Models
         public string? ADNR { get; set; }
         public decimal Balance { get; set; }
         public bool IsValidating { get; set; }
+
+        /// <summary>Optional Base (EVM) address linked to this BTC account for wallet Base ETH / vBTC.b balance display.</summary>
+        public string? LinkedEvmAddress { get; set; }
 
         #endregion
 
@@ -247,6 +250,30 @@ namespace ReserveBlockCore.Bitcoin.Models
             SaveBitcoinAddress(btcAddress);
 
             _ = AddressSyncService.SyncAddress(btcAddress.Address);
+        }
+
+        #endregion
+
+        #region Linked EVM (Base) address
+
+        public static bool SetLinkedEvmAddress(string btcAddress, string? evmAddress)
+        {
+            if (!string.IsNullOrEmpty(evmAddress))
+            {
+                var e = evmAddress.Trim();
+                if (!e.StartsWith("0x", StringComparison.Ordinal) || e.Length != 42)
+                    return false;
+            }
+
+            var accounts = GetBitcoin();
+            if (accounts == null) return false;
+
+            var account = accounts.FindOne(x => x.Address == btcAddress);
+            if (account == null) return false;
+
+            account.LinkedEvmAddress = string.IsNullOrWhiteSpace(evmAddress) ? null : evmAddress.Trim();
+            accounts.UpdateSafe(account);
+            return true;
         }
 
         #endregion

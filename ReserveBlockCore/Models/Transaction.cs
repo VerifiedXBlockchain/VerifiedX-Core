@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -48,6 +48,29 @@ namespace ReserveBlockCore.Models
                 Timestamp + FromAddress + ToAddress + Amount + Fee + Nonce + TransactionType + Data + UnlockTime;
             return HashingService.GenerateHash(HashingService.GenerateHash(data));
         }
+
+        /// <summary>Hash for privacy transaction types; see privacy implementation plan.</summary>
+        public string BuildPrivate()
+        {
+            var data = GetPrivateHashInput();
+            Hash = HashingService.GenerateHash(HashingService.GenerateHash(data));
+            return Hash;
+        }
+
+        private string GetPrivateHashInput()
+        {
+            var sb = new StringBuilder();
+            sb.Append(Timestamp);
+            sb.Append(TransactionType);
+            sb.Append(Data ?? "");
+            if (TransactionType == TransactionType.VFX_SHIELD || TransactionType == TransactionType.VBTC_V2_SHIELD)
+            {
+                sb.Append(FromAddress);
+                sb.Append(Amount);
+                sb.Append(Nonce);
+            }
+            return sb.ToString();
+        }
         public static void Add(Transaction transaction)
         {
             var transactions = GetAll();
@@ -82,7 +105,28 @@ namespace ReserveBlockCore.Models
         TKNZ_TX,//tokenization token tx
         TKNZ_BURN,//tokenization token burn
         TKNZ_WD_ARB,
-        TKNZ_WD_OWNER
+        TKNZ_WD_OWNER,
+        VBTC_V2_VALIDATOR_REGISTER,      // Validator registers for vBTC v2
+        VBTC_V2_VALIDATOR_HEARTBEAT,     // Validator heartbeat
+        VBTC_V2_VALIDATOR_EXIT,          // Validator exits vBTC v2 pool
+        VBTC_V2_CONTRACT_CREATE,         // Create vBTC v2 contract
+        VBTC_V2_TRANSFER,                // Transfer vBTC v2 tokens
+        VBTC_V2_WITHDRAWAL_REQUEST,      // Request withdrawal to BTC
+        VBTC_V2_WITHDRAWAL_COMPLETE,     // Complete withdrawal
+        VBTC_V2_WITHDRAWAL_CANCEL,       // Request cancellation
+        VBTC_V2_WITHDRAWAL_VOTE,         // Validator votes on cancellation
+        VFX_SHIELD,
+        VFX_UNSHIELD,
+        VFX_PRIVATE_TRANSFER,
+        VBTC_V2_SHIELD,
+        VBTC_V2_UNSHIELD,
+        VBTC_V2_PRIVATE_TRANSFER,
+        VBTC_V2_BRIDGE_LOCK,              // Lock vBTC for bridging to Base (user broadcasts)
+        VBTC_V2_BRIDGE_UNLOCK,             // Unlock vBTC after burn on Base (legacy, single-lock exact match)
+        VBTC_V2_BRIDGE_POOL_UNLOCK,        // Pool-based unlock: credit vBTC from multiple locks FIFO to a destination VFX address
+        VBTC_V2_BRIDGE_EXIT_TO_BTC,        // Base burnForBTCExit → record BTC withdrawal intent on VFX
+        VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE, // After BTC broadcast / completion
+        VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL     // FROST failed for some locks → blacklist + reverse + retry
     }
 
     public enum ReserveTransactionType

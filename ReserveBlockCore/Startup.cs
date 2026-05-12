@@ -131,6 +131,13 @@ namespace ReserveBlockCore
 
             app.Use((context, func) =>
             {
+                // Block explorer and wallet are always accessible regardless of API lock state
+                var reqPath = context.Request.Path.HasValue ? context.Request.Path.Value.ToLower() : "";
+                if (reqPath.StartsWith("/explorer") || reqPath.StartsWith("/wallet"))
+                {
+                    return func.Invoke();
+                }
+
                 if (APIEnabled)
                 {
                     if (Globals.AlwaysRequireAPIPassword == true)

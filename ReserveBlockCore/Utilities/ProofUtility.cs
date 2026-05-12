@@ -3,7 +3,6 @@ using ReserveBlockCore.Data;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Services;
-using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -12,141 +11,539 @@ namespace ReserveBlockCore.Utilities
 {
     public class ProofUtility
     {
-        private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+        private static readonly object ProofCacheLock = new object();
+        private static long _proofCacheHeight = long.MinValue;
+        private static List<Proof>? _allProofsCache;
+
+        /// <summary>STALL-HEAL: Consecutive round failures at the same height. Set by consensus loop, read by VersionGate.</summary>
+        public static volatile int StallRoundFailCount = 0;
+        /// <summary>STALL-HEAL: Height at which stall counting started.</summary>
+        public static long StallHeight = -1;
+        /// <summary>STALL-HEAL: Minimum consecutive failures before triggering mass liveness sweep.</summary>
+        public const int STALL_SWEEP_THRESHOLD = 3;
+        /// <summary>STALL-HEAL: Timestamp of last mass sweep to prevent running it every round.</summary>
+        private static long _lastMassSweepTick = 0;
+        /// <summary>STALL-HEAL: Minimum interval between mass sweeps (30 seconds).</summary>
+        private const long MASS_SWEEP_COOLDOWN_MS = 30_000;
+
+        /// <summary>
+        /// STALL-HEAL: Called by the consensus loop to track consecutive round failures.
+        /// When failures exceed STALL_SWEEP_THRESHOLD, triggers a mass liveness sweep.
+        /// </summary>
+        public static void TrackRoundFailure(long height)
+        {
+            if (Interlocked.Read(ref StallHeight) == height)
+            {
+                StallRoundFailCount++;
+            }
+            else
+            {
+                Interlocked.Exchange(ref StallHeight, height);
+                StallRoundFailCount = 1;
+            }
+        }
+
+        /// <summary>
+        /// STALL-HEAL: Reset stall tracking when a block is successfully produced.
+        /// </summary>
+        public static void ResetStallTracking()
+        {
+            StallRoundFailCount = 0;
+            Interlocked.Exchange(ref StallHeight, -1);
+        }
+
+        /// <summary>
+        /// STALL-HEAL: Whether the network is currently in a stall condition
+        /// (multiple consecutive round failures at the same height).
+        /// </summary>
+        public static bool IsStalling => StallRoundFailCount >= STALL_SWEEP_THRESHOLD;
+
+        /// <summary>
+        /// STALL-HEAL: Performs a parallel HTTP liveness check on ALL non-caster NetworkValidators.
+        /// Any validator that fails the check gets CheckFailCount=4, immediately removing it from
+        /// future proof generation. After the sweep, clears the proof cache so the next round uses
+        /// the pruned list. This is the nuclear option — only triggered after STALL_SWEEP_THRESHOLD
+        /// consecutive round failures at the same height.
+        /// </summary>
+        public static async Task MassLivenessSweepAsync()
+        {
+            var now = Environment.TickCount64;
+            if ((now - _lastMassSweepTick) < MASS_SWEEP_COOLDOWN_MS)
+            {
+                CasterLogUtility.Log(
+                    $"STALL-HEAL: Mass sweep skipped — cooldown ({(now - _lastMassSweepTick)}ms < {MASS_SWEEP_COOLDOWN_MS}ms)",
+                    "STALL-HEAL");
+                return;
+            }
+            _lastMassSweepTick = now;
+
+            var casterAddresses = new HashSet<string>(
+                Globals.BlockCasters
+                    .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                    .Select(c => c.ValidatorAddress!),
+                StringComparer.Ordinal);
+
+            // Get all non-caster validators that haven't already been excluded
+            var candidates = Globals.NetworkValidators.Values
+                .Where(nv => !string.IsNullOrEmpty(nv.Address)
+                    && !casterAddresses.Contains(nv.Address)
+                    && nv.CheckFailCount <= 3)
+                .ToList();
+
+            if (candidates.Count == 0)
+            {
+                CasterLogUtility.Log("STALL-HEAL: No candidates for mass sweep (all already excluded or are casters)", "STALL-HEAL");
+                return;
+            }
+
+            CasterLogUtility.Log(
+                $"STALL-HEAL: Starting mass liveness sweep of {candidates.Count} non-caster validators (StallRoundFailCount={StallRoundFailCount})",
+                "STALL-HEAL");
+
+            int evicted = 0;
+            int alive = 0;
+
+            // Parallel HTTP version check with 2s timeout per validator
+            var tasks = candidates.Select(async nv =>
+            {
+                try
+                {
+                    var cleanIP = (nv.IPAddress ?? "").Replace("::ffff:", "");
+                    if (string.IsNullOrEmpty(cleanIP)) return false;
+
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                    var resp = await client.GetAsync(uri, cts.Token);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        var version = await resp.Content.ReadAsStringAsync();
+                        if (!string.IsNullOrEmpty(version) && IsMajorVersionCurrent(version))
+                        {
+                            // Validator is alive and on current version
+                            Interlocked.Increment(ref alive);
+                            return true;
+                        }
+                    }
+                    // HTTP responded but wrong version or error status
+                    nv.CheckFailCount = 4;
+                    Interlocked.Increment(ref evicted);
+                    return false;
+                }
+                catch
+                {
+                    // Timeout or network error — validator unreachable
+                    nv.CheckFailCount = 4;
+                    Interlocked.Increment(ref evicted);
+                    return false;
+                }
+            });
+
+            await Task.WhenAll(tasks);
+
+            // Clear the proof cache so the next round regenerates from the updated filter
+            ClearProofGenerationCache();
+
+            CasterLogUtility.Log(
+                $"STALL-HEAL: Mass sweep complete — evicted={evicted}, alive={alive}, total={candidates.Count}. Proof cache cleared.",
+                "STALL-HEAL");
+        }
+
+        public static void ClearProofGenerationCache()
+        {
+            lock (ProofCacheLock)
+            {
+                _proofCacheHeight = long.MinValue;
+                _allProofsCache = null;
+            }
+        }
 
         public static async Task<List<Proof>> GenerateProofs()
         {
-            List<Proof> proofs = new List<Proof>();
+            return await GetOrCreateAllProofsAsync();
+        }
 
+        private static async Task<List<Proof>> GetOrCreateAllProofsAsync()
+        {
             var blockHeight = Globals.LastBlock.Height + 1;
-            var prevHash = Globals.LastBlock.Hash;
 
-            var peerDB = Peers.GetAll();
-            //Force unban quicker
+            lock (ProofCacheLock)
+            {
+                if (_proofCacheHeight == blockHeight && _allProofsCache != null)
+                    return _allProofsCache;
+            }
+
             await BanService.RunUnban();
 
-            var badList = Globals.FailedProducers.ToList();
-
-            var newPeers = Globals.NetworkValidators.Values.Where(x => x.CheckFailCount <= 3 && !badList.Contains(x.Address)).ToList();
-
-            List<NetworkValidator> peersMissingDataList = new List<NetworkValidator>();
-            List<string> CompletedIPs = new List<string>();
-            List<string> CompletedAddresses = new List<string>();
-
-            foreach (var val in newPeers)
+            lock (ProofCacheLock)
             {
-                if (val.Address != null && val.PublicKey != null)
+                if (_proofCacheHeight == blockHeight && _allProofsCache != null)
+                    return _allProofsCache;
+            }
+
+            List<Proof> proofs;
+            // FIX: Use legacy (NetworkValidators) path until liveness sweep confirms which validators
+            // are actually reachable. The snapshot path reads from VBTCValidatorRegistry which contains
+            // ALL historical validators including offline ones — we must not use it until we've verified liveness.
+            if (Globals.IsBootstrapMode || !Globals.ValidatorLivenessSweepComplete)
+                proofs = await GenerateProofsFromNetworkValidatorsLegacy();
+            else
+            {
+                proofs = await GenerateProofsFromSnapshotAsync();
+                if (proofs.Count == 0)
+                    proofs = await GenerateProofsFromNetworkValidatorsLegacy();
+            }
+
+            lock (ProofCacheLock)
+            {
+                if (_proofCacheHeight == blockHeight && _allProofsCache != null)
+                    return _allProofsCache;
+                if (blockHeight >= _proofCacheHeight)
                 {
-                    if (CompletedIPs.Contains(val.IPAddress) ||
-                        CompletedAddresses.Contains(val.Address) ||
-                        IsProducerExcluded(val.Address) ||
-                        badList.Contains(val.Address))
-                        continue;
-
-                    CompletedIPs.Add(val.IPAddress);
-                    CompletedAddresses.Add(val.Address);
-
-                    var stateAddress = StateData.GetSpecificAccountStateTrei(val.Address);
-                    if (stateAddress == null)
-                    {
-                        continue;
-                    }
-
-                    if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
-                    {
-                        continue;
-                    }
-
-                    var proof = await CreateProof(val.Address, val.PublicKey, blockHeight, prevHash);
-                    if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
-                    {
-                        Proof _proof = new Proof
-                        {
-                            Address = val.Address,
-                            BlockHeight = blockHeight,
-                            PreviousBlockHash = prevHash,
-                            ProofHash = proof.Item2,
-                            PublicKey = val.PublicKey,
-                            VRFNumber = proof.Item1,
-                            IPAddress = val.IPAddress.Replace("::ffff:", "")
-                        };
-
-                        proofs.Add(_proof);
-                    }
-                }
-                else
-                {
-                    //TODO: Try to get info or remove them.
-                    peersMissingDataList.Add(val);
+                    _allProofsCache = proofs;
+                    _proofCacheHeight = blockHeight;
+                    Globals.LastProofBlockheight = blockHeight;
                 }
             }
 
-            CompletedIPs.Clear();
-            CompletedAddresses.Clear();
-
-            CompletedIPs = new List<string>();
-            CompletedAddresses = new List<string>();
-
-            Globals.LastProofBlockheight = blockHeight;
-
             return proofs;
         }
-        public static async Task<List<Proof>> GenerateCasterProofs()
+
+        /// <summary>Legacy path: in-memory NetworkValidators (bootstrap only).</summary>
+        private static async Task<List<Proof>> GenerateProofsFromNetworkValidatorsLegacy()
         {
             List<Proof> proofs = new List<Proof>();
 
             var blockHeight = Globals.LastBlock.Height + 1;
             var prevHash = Globals.LastBlock.Hash;
 
-            var peerDB = Peers.GetAll();
-            //Force unban quicker
-            await BanService.RunUnban();
+            // FIX A: Only generate proofs for fully trusted validators.
+            // The LastSeen fallback was allowing untrusted validators (hydrated from recent blocks
+            // during startup with IsFullyTrusted=false) to enter the proof pool and win elections
+            // they can't fulfill — causing version gate timeouts and block fetch failures.
+            // This now aligns with EvalTick which also requires IsFullyTrusted for promotion.
+            var newPeers = Globals.NetworkValidators.Values
+                .Where(x => x.CheckFailCount <= 3 && x.IsFullyTrusted)
+                .ToList();
 
-            var badList = Globals.FailedProducers.ToList();
-
-            var newPeers = Globals.BlockCasters.Where(x => !badList.Contains(x.PeerIP)).ToList();
-
-            List<NetworkValidator> peersMissingDataList = new List<NetworkValidator>();
             List<string> CompletedIPs = new List<string>();
             List<string> CompletedAddresses = new List<string>();
+            int skippedNoPubKey = 0;
+            int skippedNoState = 0;
+            int skippedLowBalance = 0;
+            int skippedDuplicate = 0;
+            int skippedExcluded = 0;
 
             foreach (var val in newPeers)
             {
-                if (val.ValidatorAddress != null && val.ValidatorPublicKey != null)
-                {
-                    var proof = await CreateProof(val.ValidatorAddress, val.ValidatorPublicKey, blockHeight, prevHash);
-                    if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
-                    {
-                        Proof _proof = new Proof
-                        {
-                            Address = val.ValidatorAddress,
-                            BlockHeight = blockHeight,
-                            PreviousBlockHash = prevHash,
-                            ProofHash = proof.Item2,
-                            PublicKey = val.ValidatorPublicKey,
-                            VRFNumber = proof.Item1,
-                            IPAddress = val.PeerIP.Replace("::ffff:", "")
-                        };
+                if (val.Address == null)
+                    continue;
 
-                        proofs.Add(_proof);
+                // FIX: Fallback — if the in-memory NetworkValidator entry has no PublicKey
+                // (common when the entry was created without it, e.g. an older re-seed path
+                // or a P2P advertisement that didn't include it), look it up from
+                // Globals.BlockCasters which carries the genesis-trusted bootstrap pubkeys.
+                // Without this fallback the legacy path silently drops the entry, allProofs
+                // comes back empty, and the consensus loop stalls with no diagnostic.
+                var pubKey = val.PublicKey;
+                if (string.IsNullOrEmpty(pubKey))
+                {
+                    var fromCasters = Globals.BlockCasters
+                        .FirstOrDefault(c => c.ValidatorAddress == val.Address && !string.IsNullOrEmpty(c.ValidatorPublicKey));
+                    if (fromCasters != null && !string.IsNullOrEmpty(fromCasters.ValidatorPublicKey))
+                    {
+                        pubKey = fromCasters.ValidatorPublicKey;
+                        // Hydrate the NetworkValidator entry so future rounds don't take the slow path.
+                        val.PublicKey = pubKey;
+                        Globals.NetworkValidators[val.Address] = val;
                     }
                 }
-                else
+
+                if (string.IsNullOrEmpty(pubKey))
                 {
-                    //TODO: Try to get info or remove them.
-                    //peersMissingDataList.Add(val);
+                    skippedNoPubKey++;
+                    continue;
+                }
+
+                if (CompletedIPs.Contains(val.IPAddress) ||
+                    CompletedAddresses.Contains(val.Address))
+                {
+                    skippedDuplicate++;
+                    continue;
+                }
+                if (IsProducerExcluded(val.Address))
+                {
+                    skippedExcluded++;
+                    continue;
+                }
+
+                CompletedIPs.Add(val.IPAddress);
+                CompletedAddresses.Add(val.Address);
+
+                var stateAddress = StateData.GetSpecificAccountStateTrei(val.Address);
+                if (stateAddress == null)
+                {
+                    skippedNoState++;
+                    continue;
+                }
+
+                if (stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
+                {
+                    skippedLowBalance++;
+                    continue;
+                }
+
+                var proof = await CreateProof(val.Address, pubKey, blockHeight, prevHash);
+                if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
+                {
+                    proofs.Add(new Proof
+                    {
+                        Address = val.Address,
+                        BlockHeight = blockHeight,
+                        PreviousBlockHash = prevHash,
+                        ProofHash = proof.Item2,
+                        PublicKey = pubKey,
+                        VRFNumber = proof.Item1,
+                        IPAddress = (val.IPAddress ?? "").Replace("::ffff:", "")
+                    });
                 }
             }
 
-            CompletedIPs.Clear();
-            CompletedAddresses.Clear();
-
-            CompletedIPs = new List<string>();
-            CompletedAddresses = new List<string>();
-
-            Globals.LastProofBlockheight = blockHeight;
+            // DIAGNOSTIC: When we end up with zero proofs but had eligible peers, dump per-reason
+            // counts so the operator can see *why* (no PublicKey / no state / low balance / etc.).
+            // Without this the empty-set case in the consensus loop is otherwise invisible.
+            if (proofs.Count == 0 && newPeers.Count > 0)
+            {
+                CasterLogUtility.Log(
+                    $"PROOFS-DIAG (legacy): allProofs=0 peersConsidered={newPeers.Count} " +
+                    $"skippedNoPubKey={skippedNoPubKey} skippedNoState={skippedNoState} " +
+                    $"skippedLowBalance={skippedLowBalance} skippedDuplicate={skippedDuplicate} " +
+                    $"skippedExcluded={skippedExcluded} BlockCasters={Globals.BlockCasters.Count}",
+                    "PROOFS-DIAG");
+            }
 
             return proofs;
+        }
+
+        /// <summary>Deterministic path: validator snapshot (post-bootstrap).</summary>
+        private static async Task<List<Proof>> GenerateProofsFromSnapshotAsync()
+        {
+            List<Proof> proofs = new List<Proof>();
+            var blockHeight = Globals.LastBlock.Height + 1;
+            var prevHash = Globals.LastBlock.Hash;
+            var snapshot = ValidatorSnapshotService.GetSnapshotForHeight(blockHeight);
+
+            // FIX: After liveness sweep, filter snapshot entries against NetworkValidators.
+            // The snapshot reads from VBTCValidatorRegistry (all historical validators),
+            // but NetworkValidators has been cleaned by the liveness sweep to contain only
+            // confirmed-reachable validators. Use it as an allowlist.
+            var useNetworkFilter = Globals.ValidatorLivenessSweepComplete && Globals.NetworkValidators.Count > 0;
+
+            foreach (var entry in snapshot)
+            {
+                if (string.IsNullOrEmpty(entry.PublicKey))
+                    continue;
+
+                // Skip validators not confirmed reachable by liveness sweep
+                if (useNetworkFilter && !Globals.NetworkValidators.ContainsKey(entry.Address))
+                    continue;
+
+                var proof = await CreateProof(entry.Address, entry.PublicKey, blockHeight, prevHash);
+                if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
+                {
+                    proofs.Add(new Proof
+                    {
+                        Address = entry.Address,
+                        BlockHeight = blockHeight,
+                        PreviousBlockHash = prevHash,
+                        ProofHash = proof.Item2,
+                        PublicKey = entry.PublicKey,
+                        VRFNumber = proof.Item1,
+                        IPAddress = (entry.IPAddress ?? "").Replace("::ffff:", "")
+                    });
+                }
+            }
+
+            return proofs;
+        }
+
+        /// <summary>
+        /// Checks if a wallet version string has a major version matching Globals.MajorVer.
+        /// Returns false for null/empty/malformed versions.
+        /// </summary>
+        internal static bool IsMajorVersionCurrent(string? walletVersion)
+        {
+            if (string.IsNullOrEmpty(walletVersion))
+                return false;
+            try
+            {
+                var parts = walletVersion!.Split('.');
+                if (parts.Length < 1) return false;
+                var major = Convert.ToInt32(parts[0]);
+                return major >= Globals.MajorVer;
+            }
+            catch { return false; }
+        }
+
+        public static async Task<List<Proof>> GenerateCasterProofs()
+        {
+            var all = await GetOrCreateAllProofsAsync();
+
+            // FIX: Filter BlockCasters to only include peers with current major wallet version.
+            // This prevents phantom casters on outdated versions from inflating the proof count
+            // and potentially winning VRF elections they can't fulfil.
+            //
+            // HYDRATE: Newly-promoted casters (see CasterDiscoveryService.HandlePromotion) may
+            // enter BlockCasters with an empty WalletVersion because the signed CasterInfo
+            // payload doesn't carry a version. Without this hydration they'd be silently
+            // filtered out here, producing casterProofs=0 and permanently blocking a newly
+            // promoted node from casting blocks.
+            //
+            // For our own entry we always know the version. For peers with an IP we do a
+            // best-effort HTTP fetch of /valapi/validator/GetWalletVersion (same endpoint
+            // used by CasterDiscoveryService.CheckCandidateVersionDetailed). On success the
+            // result is cached directly on the Peers object; on failure we skip this caster
+            // for this round and try again next tick.
+            foreach (var c in Globals.BlockCasters)
+            {
+                if (string.IsNullOrEmpty(c.ValidatorAddress))
+                    continue;
+                if (!string.IsNullOrEmpty(c.WalletVersion))
+                    continue;
+
+                if (c.ValidatorAddress == Globals.ValidatorAddress)
+                {
+                    c.WalletVersion = Globals.CLIVersion;
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(c.PeerIP))
+                    continue;
+
+                try
+                {
+                    using var verClient = Globals.HttpClientFactory.CreateClient();
+                    using var verCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    var verUri = $"http://{c.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                    var verResp = await verClient.GetAsync(verUri, verCts.Token);
+                    if (verResp.IsSuccessStatusCode)
+                    {
+                        var ver = await verResp.Content.ReadAsStringAsync();
+                        if (!string.IsNullOrEmpty(ver))
+                        {
+                            c.WalletVersion = ver.Trim();
+                            CasterLogUtility.Log(
+                                $"Hydrated WalletVersion for caster {c.ValidatorAddress} at {c.PeerIP}: '{c.WalletVersion}'",
+                                "PROOFS-HYDRATE");
+                        }
+                    }
+                }
+                catch { /* best-effort — will retry next proof generation cycle */ }
+            }
+
+            var validCasters = Globals.BlockCasters
+                .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                .Where(c => IsMajorVersionCurrent(c.WalletVersion))
+                .ToList();
+            
+            var casterAddrs = new HashSet<string>(
+                validCasters.Select(c => c.ValidatorAddress!),
+                StringComparer.Ordinal);
+            var list = all.Where(p => casterAddrs.Contains(p.Address)).ToList();
+
+            // DIAGNOSTIC: Log detail when casterProofs=0 but allProofs exist, to identify pool/caster mismatch
+            if (list.Count == 0 && all.Count > 0)
+            {
+                var allAddrs = string.Join(", ", all.Select(p => p.Address).Distinct().Take(10));
+                var casterAddrList = string.Join(", ", casterAddrs.Take(10));
+                var totalBlockCasters = Globals.BlockCasters.Count;
+                var castersWithAddr = Globals.BlockCasters.Count(c => !string.IsNullOrEmpty(c.ValidatorAddress));
+                var netValCount = Globals.NetworkValidators.Count;
+                CasterLogUtility.Log(
+                    $"casterProofs=0 DIAGNOSTIC: allProofs={all.Count} proofAddrs=[{allAddrs}] " +
+                    $"casterAddrs=[{casterAddrList}] BlockCasters.Total={totalBlockCasters} " +
+                    $"BlockCasters.WithAddr={castersWithAddr} NetworkValidators={netValCount}",
+                    "PROOFS-DIAG");
+            }
+
+            // Snapshot / NetworkValidators often omit seed casters; build missing proofs from agreed BlockCasters (pubkey on peer).
+            var blockHeight = Globals.LastBlock.Height + 1;
+            var prevHash = Globals.LastBlock.Hash;
+            foreach (var peer in validCasters)
+            {
+                if (string.IsNullOrEmpty(peer.ValidatorAddress))
+                    continue;
+                
+                // Try to populate missing public key from NetworkValidators or via HTTP
+                if (string.IsNullOrEmpty(peer.ValidatorPublicKey))
+                {
+                    if (Globals.NetworkValidators.TryGetValue(peer.ValidatorAddress, out var nv) && !string.IsNullOrEmpty(nv.PublicKey))
+                    {
+                        peer.ValidatorPublicKey = nv.PublicKey;
+                    }
+                    else
+                    {
+                        // Fetch public key from the remote caster's ValidatorInfo endpoint
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(peer.PeerIP))
+                            {
+                                using var client = Globals.HttpClientFactory.CreateClient();
+                                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                                var uri = $"http://{peer.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/ValidatorInfo";
+                                var response = await client.GetAsync(uri, cts.Token);
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    var infoStr = await response.Content.ReadAsStringAsync();
+                                    if (!string.IsNullOrEmpty(infoStr) && infoStr.Contains(","))
+                                    {
+                                        var parts = infoStr.Split(',');
+                                        if (parts.Length >= 2)
+                                        {
+                                            var remoteAddress = parts[0].Trim();
+                                            var remotePubKey = parts[1].Trim();
+                                            if (!string.IsNullOrEmpty(remotePubKey))
+                                            {
+                                                peer.ValidatorPublicKey = remotePubKey;
+                                                if (string.IsNullOrEmpty(peer.ValidatorAddress))
+                                                    peer.ValidatorAddress = remoteAddress;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch { /* best-effort */ }
+                        
+                        if (string.IsNullOrEmpty(peer.ValidatorPublicKey))
+                            continue;
+                    }
+                }
+                
+                if (list.Exists(p => p.Address == peer.ValidatorAddress))
+                    continue;
+
+                var stateAddress = StateData.GetSpecificAccountStateTrei(peer.ValidatorAddress);
+                if (stateAddress == null || stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
+                    continue;
+
+                var proofTuple = await CreateProof(peer.ValidatorAddress, peer.ValidatorPublicKey, blockHeight, prevHash);
+                if (proofTuple.Item1 != 0 && !string.IsNullOrEmpty(proofTuple.Item2))
+                {
+                    list.Add(new Proof
+                    {
+                        Address = peer.ValidatorAddress,
+                        BlockHeight = blockHeight,
+                        PreviousBlockHash = prevHash,
+                        ProofHash = proofTuple.Item2,
+                        PublicKey = peer.ValidatorPublicKey,
+                        VRFNumber = proofTuple.Item1,
+                        IPAddress = (peer.PeerIP ?? "").Replace("::ffff:", "")
+                    });
+                }
+            }
+
+            return list;
         }
         public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight, string prevBlockHash)
         {
@@ -263,28 +660,108 @@ namespace ReserveBlockCore.Utilities
                     {
                         return (true, null);
                     }
-                    var uri = $"http://{winningProof.IPAddress.Replace("::ffff:", "")}:{Globals.ValPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
-                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 7));
+
+                    var cleanIP = winningProof.IPAddress.Replace("::ffff:", "");
+
+                    // FIX B: Version gate — reject validators on outdated versions.
+                    // Old nodes won't have the GetWalletVersion endpoint → 404 → rejected.
+                    // OPTIMIZATION: Skip the HTTP version gate if the winner is already a known
+                    // BlockCaster with a validated WalletVersion. GenerateCasterProofs already
+                    // filters by IsMajorVersionCurrent, so reaching here means the version was
+                    // already confirmed. This saves ~200ms per round.
+                    var skipVersionGate = Globals.BlockCasters.Any(c =>
+                        c.ValidatorAddress == winningProof.Address &&
+                        !string.IsNullOrEmpty(c.WalletVersion) &&
+                        IsMajorVersionCurrent(c.WalletVersion));
+
+                    // FIX: Also skip VersionGate for recently-seen NetworkValidators (seen within 120s).
+                    // These validators just passed discovery checks recently and the HTTP call is
+                    // redundant — avoids timeout-induced exclusion for nodes under transient load.
+                    if (!skipVersionGate)
+                    {
+                        var now = TimeUtil.GetTime();
+                        skipVersionGate = Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvRecent)
+                            && nvRecent.CheckFailCount <= 3
+                            && nvRecent.LastSeen > 0
+                            && (now - nvRecent.LastSeen) < 120;
+                        if (skipVersionGate)
+                            CasterLogUtility.Log($"VersionGate: Skipping for {winningProof.Address} — recently seen ({now - nvRecent!.LastSeen}s ago).", "VERSIONGATE");
+                    }
+
+                    if (skipVersionGate)
+                    {
+                        // Version already confirmed by GenerateCasterProofs or recent liveness — skip HTTP call
+                    }
+                    else try
+                    {
+                        var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                        // STALL-HEAL: Use shorter timeout during stall conditions (1.5s vs 3s)
+                        // to cycle through offline validators faster.
+                        var vgTimeout = IsStalling ? 1500 : 3000;
+                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(vgTimeout));
+                        if (versionResp == null || !versionResp.IsSuccessStatusCode)
+                        {
+                            CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — GetWalletVersion returned {versionResp?.StatusCode}. Rejecting.", "VERSIONGATE");
+                            // FIX: Hard-set CheckFailCount=4 for definitive HTTP failures (404, 500, etc.)
+                            // These indicate a genuine version mismatch, not a transient issue.
+                            if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail1))
+                                nvFail1.CheckFailCount = 4;
+                            // STALL-HEAL: Clear proof cache so this validator is immediately excluded from next round
+                            ClearProofGenerationCache();
+                            return (false, null);
+                        }
+                        var peerVersion = await versionResp.Content.ReadAsStringAsync();
+                        if (string.IsNullOrEmpty(peerVersion) || !IsMajorVersionCurrent(peerVersion))
+                        {
+                            CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Rejecting.", "VERSIONGATE");
+                            if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail2))
+                                nvFail2.CheckFailCount = 4;
+                            // STALL-HEAL: Clear proof cache so this validator is immediately excluded from next round
+                            ClearProofGenerationCache();
+                            return (false, null);
+                        }
+                    }
+                    catch (Exception vex)
+                    {
+                        var isTimeout = vex is TimeoutException || vex is TaskCanceledException || vex is OperationCanceledException;
+                        CasterLogUtility.Log($"VersionGate: Winner {winningProof.Address} at {cleanIP} — version check failed: {vex.Message}. Rejecting (timeout={isTimeout}).", "VERSIONGATE");
+                        if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvFail3))
+                        {
+                            if (isTimeout && !IsStalling)
+                            {
+                                // Normal mode: Gradual increment — allows 3 timeouts before exclusion from proof generation
+                                nvFail3.CheckFailCount = Math.Min(nvFail3.CheckFailCount + 1, 4);
+                                CasterLogUtility.Log($"VersionGate: {winningProof.Address} CheckFailCount incremented to {nvFail3.CheckFailCount}/4.", "VERSIONGATE");
+                            }
+                            else
+                            {
+                                // STALL-HEAL: During stall, set CheckFailCount=4 immediately on ANY timeout.
+                                // No point being gentle when the network is already stuck — every 3s timeout
+                                // compounds the stall. Also handles definitive failures (DNS, connection refused).
+                                nvFail3.CheckFailCount = 4;
+                                if (isTimeout)
+                                    CasterLogUtility.Log($"VersionGate: {winningProof.Address} STALL-HEAL: CheckFailCount set to 4 immediately (stalling={IsStalling}).", "VERSIONGATE");
+                            }
+                        }
+                        // STALL-HEAL: Clear proof cache so this validator is immediately excluded from next round
+                        ClearProofGenerationCache();
+                        return (false, null);
+                    }
+
+                    var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
+                    var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
 
                     if (response != null)
                     {
                         if (response.IsSuccessStatusCode)
                         {
-                            //var blockJson = await response.Content.ReadAsStringAsync();
-                            //if (blockJson == null)
-                            //    return (false, null);
-
-                            //var block = JsonConvert.DeserializeObject<Block>(blockJson);
-
-                            //if (block == null)
-                            //    return (false, null);
-
                             return (true, null);
                         }
                     }
                 }
                 catch (Exception ex)
                 {
+                    CasterLogUtility.Log($"[VERIFY] VerifyWinnerAvailability failed for {winningProof.Address}: {ex.Message}", "CONSENSUS");
                 }
             }
 
@@ -302,7 +779,23 @@ namespace ReserveBlockCore.Utilities
                     {
                         return (true, Globals.NextValidatorBlock);
                     }
-                    var uri = $"http://{ip.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
+
+                    var cleanIP = ip.Replace("::ffff:", "");
+
+                    // FIX C: Version gate for block-crafting validators too.
+                    try
+                    {
+                        var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
+                        var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
+                        if (versionResp == null || !versionResp.IsSuccessStatusCode)
+                            return (false, null);
+                        var peerVersion = await versionResp.Content.ReadAsStringAsync();
+                        if (string.IsNullOrEmpty(peerVersion) || !IsMajorVersionCurrent(peerVersion))
+                            return (false, null);
+                    }
+                    catch { return (false, null); }
+
+                    var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
 
                     if (response != null)
@@ -344,14 +837,30 @@ namespace ReserveBlockCore.Utilities
                 ).ToList();
 
                 // Sort deterministically by VRF number with tiebreaking
-                return validProofs
-                    .OrderBy(x => x.VRFNumber)  // Closest to zero wins
-                    .ThenBy(x => x.ProofHash)   // Tiebreak by proof hash
-                    .ThenBy(x => x.Address)     // Final tiebreak by address
-                    .FirstOrDefault();
+                return SelectWinnerByVrfOrdering(validProofs);
 
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Deterministic VRF-based winner selection. Pure ordering function — does NOT
+        /// re-verify proof signatures or filter by height/prev-hash. Callers (notably
+        /// <see cref="SortProofs"/>) are responsible for pre-filtering. Exposed so unit
+        /// tests can exercise the tiebreak logic without needing to mint cryptographically
+        /// valid <see cref="Proof.ProofHash"/> values for synthetic test fixtures.
+        ///
+        /// Order: lowest VRFNumber, then lowest ProofHash (ordinal), then lowest Address (ordinal).
+        /// Returns null when the input collection is empty.
+        /// </summary>
+        public static Proof? SelectWinnerByVrfOrdering(IEnumerable<Proof> validProofs)
+        {
+            if (validProofs == null) return null;
+            return validProofs
+                .OrderBy(x => x.VRFNumber)                                  // Closest to zero wins
+                .ThenBy(x => x.ProofHash, StringComparer.Ordinal)           // Tiebreak by proof hash
+                .ThenBy(x => x.Address, StringComparer.Ordinal)             // Final tiebreak by address
+                .FirstOrDefault();
         }
 
         public static void AddFailedProducer(string address)

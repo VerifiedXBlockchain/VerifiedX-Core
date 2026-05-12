@@ -132,33 +132,12 @@ namespace ReserveBlockCore.Controllers
                                                 var sAccount = accounts.FindOne(x => x.Address == scState.OwnerAddress);
                                                 if (sAccount != null)
                                                 {
+                                                    TokenAccount tknAcc = null;
                                                     var scFeature = sc.Features.Where(x => x.FeatureName == FeatureName.Token).FirstOrDefault();
-                                                    var scTokenFeature = (TokenFeature)scFeature.FeatureFeatures;
-                                                    var tknAcc = new TokenAccount
+                                                    if (scFeature != null)
                                                     {
-                                                        Balance = 0.0M,
-                                                        DecimalPlaces = scTokenFeature.TokenDecimalPlaces,
-                                                        LockedBalance = 0.0M,
-                                                        SmartContractUID = sc.SmartContractUID,
-                                                        TokenName = scTokenFeature.TokenName,
-                                                        TokenTicker = scTokenFeature.TokenTicker
-                                                    };
-
-                                                    var nAccBalList = accountBalanceList.Where(x => x.Address == scState.OwnerAddress).FirstOrDefault();
-                                                    if (nAccBalList != null)
-                                                    {
-                                                        if(!nAccBalList.TokenAccounts.Exists(x => x.SmartContractUID == tknAcc.SmartContractUID))
-                                                            nAccBalList.TokenAccounts.Add(tknAcc);
-                                                    }
-                                                }
-                                                else
-                                                {
-                                                    var rAccount = ReserveAccount.GetReserveAccountSingle(scState.OwnerAddress);
-                                                    if (rAccount != null)
-                                                    {
-                                                        var scFeature = sc.Features.Where(x => x.FeatureName == FeatureName.Token).FirstOrDefault();
                                                         var scTokenFeature = (TokenFeature)scFeature.FeatureFeatures;
-                                                        var tknAcc = new TokenAccount
+                                                        tknAcc = new TokenAccount
                                                         {
                                                             Balance = 0.0M,
                                                             DecimalPlaces = scTokenFeature.TokenDecimalPlaces,
@@ -167,12 +146,91 @@ namespace ReserveBlockCore.Controllers
                                                             TokenName = scTokenFeature.TokenName,
                                                             TokenTicker = scTokenFeature.TokenTicker
                                                         };
+                                                    }
+                                                    else
+                                                    {
+                                                        var scV2Feature = sc.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
+                                                        if (scV2Feature != null)
+                                                        {
+                                                            var tv2 = scV2Feature.FeatureFeatures is TokenizationV2Feature tv2Direct
+                                                                ? tv2Direct
+                                                                : JsonConvert.DeserializeObject<TokenizationV2Feature>(scV2Feature.FeatureFeatures.ToString());
+                                                            if (tv2 != null)
+                                                            {
+                                                                tknAcc = new TokenAccount
+                                                                {
+                                                                    Balance = 0.0M,
+                                                                    DecimalPlaces = 8,
+                                                                    LockedBalance = 0.0M,
+                                                                    SmartContractUID = sc.SmartContractUID,
+                                                                    TokenName = tv2.AssetName,
+                                                                    TokenTicker = tv2.AssetTicker
+                                                                };
+                                                            }
+                                                        }
+                                                    }
 
+                                                    if (tknAcc != null)
+                                                    {
                                                         var nAccBalList = accountBalanceList.Where(x => x.Address == scState.OwnerAddress).FirstOrDefault();
                                                         if (nAccBalList != null)
                                                         {
-                                                            if (!nAccBalList.TokenAccounts.Exists(x => x.SmartContractUID == tknAcc.SmartContractUID))
+                                                            if(!nAccBalList.TokenAccounts.Exists(x => x.SmartContractUID == tknAcc.SmartContractUID))
                                                                 nAccBalList.TokenAccounts.Add(tknAcc);
+                                                        }
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    var rAccount = ReserveAccount.GetReserveAccountSingle(scState.OwnerAddress);
+                                                    if (rAccount != null)
+                                                    {
+                                                        TokenAccount tknAcc = null;
+                                                        var scFeature = sc.Features.Where(x => x.FeatureName == FeatureName.Token).FirstOrDefault();
+                                                        if (scFeature != null)
+                                                        {
+                                                            var scTokenFeature = (TokenFeature)scFeature.FeatureFeatures;
+                                                            tknAcc = new TokenAccount
+                                                            {
+                                                                Balance = 0.0M,
+                                                                DecimalPlaces = scTokenFeature.TokenDecimalPlaces,
+                                                                LockedBalance = 0.0M,
+                                                                SmartContractUID = sc.SmartContractUID,
+                                                                TokenName = scTokenFeature.TokenName,
+                                                                TokenTicker = scTokenFeature.TokenTicker
+                                                            };
+                                                        }
+                                                        else
+                                                        {
+                                                            var scV2Feature = sc.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
+                                                            if (scV2Feature != null)
+                                                            {
+                                                                var tv2 = scV2Feature.FeatureFeatures is TokenizationV2Feature tv2Direct
+                                                                    ? tv2Direct
+                                                                    : JsonConvert.DeserializeObject<TokenizationV2Feature>(scV2Feature.FeatureFeatures.ToString());
+                                                                if (tv2 != null)
+                                                                {
+                                                                    tknAcc = new TokenAccount
+                                                                    {
+                                                                        Balance = 0.0M,
+                                                                        DecimalPlaces = 8,
+                                                                        LockedBalance = 0.0M,
+                                                                        SmartContractUID = sc.SmartContractUID,
+                                                                        TokenName = tv2.AssetName,
+                                                                        TokenTicker = tv2.AssetTicker
+                                                                    };
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if (tknAcc != null)
+                                                        {
+                                                            var nAccBalList = accountBalanceList.Where(x => x.Address == scState.OwnerAddress).FirstOrDefault();
+                                                            if (nAccBalList != null)
+                                                            {
+                                                                if (!nAccBalList.TokenAccounts.Exists(x => x.SmartContractUID == tknAcc.SmartContractUID))
+                                                                    nAccBalList.TokenAccounts.Add(tknAcc);
+                                                            }
                                                         }
                                                     }
                                                 }

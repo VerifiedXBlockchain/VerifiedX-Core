@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Utilities;
 using System;
@@ -65,6 +65,16 @@ namespace ReserveBlockCore.Config
         public int MaxBlockSizeBytes { get; set; }
         public int BlockValidationTimeoutMs { get; set; }
 
+        // Base Bridge configuration (config.txt keys)
+        public string? BaseBridgeRpcUrl { get; set; }
+        public string? BaseBridgeRpcUrl2 { get; set; }
+        public string? BaseBridgeRpcUrl3 { get; set; }
+        public string? BaseBridgeContract { get; set; }
+        public int BaseBridgeChainId { get; set; }
+
+        /// <summary>When true, enables casterlog.txt and caster-scoped validator console diagnostics.</summary>
+        public bool CasterLog { get; set; }
+
         public static Config ReadConfigFile()
         {
             var path = GetPathUtility.GetConfigPath();
@@ -126,13 +136,14 @@ namespace ReserveBlockCore.Config
                 config.BlockSeedCalls = dict.ContainsKey("BlockSeedCalls") ? Convert.ToBoolean(dict["BlockSeedCalls"]) : false;
                 config.BitcoinAddressFormat = dict.ContainsKey("BitcoinAddressFormat") ? (Bitcoin.Bitcoin.BitcoinAddressFormat)Convert.ToInt32(dict["BitcoinAddressFormat"]) : Bitcoin.Bitcoin.BitcoinAddressFormat.Segwit;
                 config.SkipIPs = dict.ContainsKey("SkipIPs") ? dict["SkipIPs"] : null;
-                config.ReportedIP = dict.ContainsKey("ReportedIP") ? dict["ReportedIP"] : null;
+                config.ReportedIP = dict.ContainsKey("IPAddress") ? dict["IPAddress"] : 
+                                    dict.ContainsKey("ReportedIP") ? dict["ReportedIP"] : null;
                 config.TestNetName = dict.ContainsKey("TestNetName") ? dict["TestNetName"] : null;
 
                 config.AutoDownloadNFTAsset = dict.ContainsKey("AutoDownloadNFTAsset") ? Convert.ToBoolean(dict["AutoDownloadNFTAsset"]) : false;
                 config.IgnoreIncomingNFTs = dict.ContainsKey("IgnoreIncomingNFTs") ? Convert.ToBoolean(dict["IgnoreIncomingNFTs"]) : false;
 			config.RejectAssetExtensionTypes = new List<string>();
-                config.ElmahFileStore = dict.ContainsKey("ElmahFileStore") ? Convert.ToInt32(dict["ElmahFileStore"]) : 10000;
+                config.ElmahFileStore = dict.ContainsKey("ElmahFileStore") ? Convert.ToInt32(dict["ElmahFileStore"]) : 1000;
 
                 // HAL-17 Fix: Load timeout configuration with backward-compatible defaults
                 config.SignalRShortTimeoutMs = dict.ContainsKey("SignalRShortTimeoutMs") ? Convert.ToInt32(dict["SignalRShortTimeoutMs"]) : 2000;
@@ -158,6 +169,20 @@ namespace ReserveBlockCore.Config
 					".nls", ".ctbl", ".crypt1", ".hsq", ".iws", ".vzr", ".lkh", ".ezt", ".rna", ".aepl", ".hts", ".atm", ".fuj", ".aut", 
 					".fjl", ".delf", ".buk", ".bmw", ".capxml", ".bps", ".cyw", ".iva", ".pid", ".lpaq5", ".dx", ".bqf", ".qit", ".pr", ".lok", 
 					".xnt"};
+
+                // Base Bridge (optional). Accepts BaseBridgeContract or legacy BaseBridgeV2Contract key.
+                config.BaseBridgeRpcUrl = dict.ContainsKey("BaseBridgeRpcUrl") ? dict["BaseBridgeRpcUrl"] : null;
+                config.BaseBridgeRpcUrl2 = dict.ContainsKey("BaseBridgeRpcUrl2") ? dict["BaseBridgeRpcUrl2"] : null;
+                config.BaseBridgeRpcUrl3 = dict.ContainsKey("BaseBridgeRpcUrl3") ? dict["BaseBridgeRpcUrl3"] : null;
+                if (dict.ContainsKey("BaseBridgeContract"))
+                    config.BaseBridgeContract = dict["BaseBridgeContract"];
+                else if (dict.ContainsKey("BaseBridgeV2Contract"))
+                    config.BaseBridgeContract = dict["BaseBridgeV2Contract"];
+                else
+                    config.BaseBridgeContract = null;
+                config.BaseBridgeChainId = dict.ContainsKey("BaseBridgeChainId") ? Convert.ToInt32(dict["BaseBridgeChainId"]) : 0;
+
+                config.CasterLog = dict.ContainsKey("CasterLog") ? Convert.ToBoolean(dict["CasterLog"]) : false;
 
                 config.MotherAddress = dict.ContainsKey("MotherAddress") ? dict["MotherAddress"] : null;
                 config.MotherPassword = dict.ContainsKey("MotherPassword") ? dict["MotherPassword"] : null;
@@ -219,6 +244,7 @@ namespace ReserveBlockCore.Config
 			Globals.SelfSTUNServer = config.SelfSTUNServer;
 			Globals.LogMemory = config.LogMemory;
 			Globals.BlockSeedCalls = config.BlockSeedCalls;
+			Globals.CasterLogEnabled = config.CasterLog;
             Globals.BTCNetwork = NBitcoin.Network.Main;
 			Globals.SegwitP2SHStartPrefix = "3";
 			Globals.SegwitTaprootStartPrefix = "bc1";
@@ -227,6 +253,7 @@ namespace ReserveBlockCore.Config
 			if(!string.IsNullOrEmpty(config.ReportedIP))
 			{
 				Globals.ReportedIP = config.ReportedIP;
+				Globals.ReportedIPManuallySet = true;
 				Globals.ReportedIPs.TryAdd(Globals.ReportedIP, 99999);
 			}
 
@@ -294,6 +321,8 @@ namespace ReserveBlockCore.Config
 
             if (config.TestNet == true || Globals.IsTestNet)
             {
+                Globals.BeaconPort = 33338;
+                Globals.BeaconWebPort = 33339;
                 Globals.ADJPort = 13339;
                 Globals.ValPort = 13339;
                 Globals.ArbiterPort = 13342;
@@ -302,6 +331,7 @@ namespace ReserveBlockCore.Config
                 Globals.Port = 13338;
                 Globals.APIPort = 17292;
                 Globals.ValAPIPort = 17294;
+                Globals.FrostValidatorPort = 17295;
                 Globals.APIPortSSL = 17777;
                 Globals.AddressPrefix = 0x89; //address prefix 'x'
                 Globals.V1ValHeight = 200;
@@ -323,13 +353,13 @@ namespace ReserveBlockCore.Config
                         Count = 0,
                         FailCount = 0
                     },
-                    new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "testnet4-electrumx.wakiyamap.dev",
-                        Port = 51002,
-                        UseSsl = true,
-                        Count = 0,
-                        FailCount = 0
-                    },
+                    //new Bitcoin.ElectrumX.ClientSettings {
+                    //    Host = "testnet4-electrumx.wakiyamap.dev",
+                    //    Port = 51002,
+                    //    UseSsl = true,
+                    //    Count = 0,
+                    //    FailCount = 0
+                    //},
                     new Bitcoin.ElectrumX.ClientSettings {
                         Host = "blackie.c3-soft.com",
                         Port = 57010,
@@ -356,6 +386,7 @@ namespace ReserveBlockCore.Config
                     Globals.Port = 23338;
                     Globals.APIPort = 27292;
                     Globals.ValAPIPort = 27294;
+                    Globals.FrostValidatorPort = 27295;
                     Globals.APIPortSSL = 27777;
                     Globals.AddressPrefix = 0x89; //address prefix 'x'
                     Globals.V1ValHeight = 200;
@@ -377,13 +408,13 @@ namespace ReserveBlockCore.Config
                             Count = 0,
                             FailCount = 0
                         },
-                        new Bitcoin.ElectrumX.ClientSettings {
-                            Host = "testnet4-electrumx.wakiyamap.dev",
-                            Port = 51002,
-                            UseSsl = true,
-                            Count = 0,
-                            FailCount = 0
-                        },
+                        //new Bitcoin.ElectrumX.ClientSettings {
+                        //    Host = "testnet4-electrumx.wakiyamap.dev",
+                        //    Port = 51002,
+                        //    UseSsl = true,
+                        //    Count = 0,
+                        //    FailCount = 0
+                        //},
                         new Bitcoin.ElectrumX.ClientSettings {
                             Host = "blackie.c3-soft.com",
                             Port = 57010,
@@ -441,7 +472,7 @@ namespace ReserveBlockCore.Config
                     }
                     else
                     {
-                        Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.156.102:{port}", Group = 1, IsNetwork = true });
+                        Globals.STUNServers.Add(new StunServer { ServerIPPort = $"40.160.233.196:{port}", Group = 1, IsNetwork = true });
                     }
                 }
             }
@@ -525,8 +556,19 @@ namespace ReserveBlockCore.Config
 		
 		// HAL-19 Fix: Process DoS protection configuration
 		Globals.MaxBlockSizeBytes = config.MaxBlockSizeBytes;
-		Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
-		
+	Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
+
+		// Base Bridge: apply config.txt (primary RPC + optional fallbacks + contract)
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl))
+			Bitcoin.Services.BaseBridgeService.BaseRpcUrl = config.BaseBridgeRpcUrl.Trim();
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl2))
+			Bitcoin.Services.BaseBridgeService.BaseRpcUrl2 = config.BaseBridgeRpcUrl2.Trim();
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl3))
+			Bitcoin.Services.BaseBridgeService.BaseRpcUrl3 = config.BaseBridgeRpcUrl3.Trim();
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeContract))
+			Bitcoin.Services.BaseBridgeService.ContractAddress = config.BaseBridgeContract.Trim();
+		if (config.BaseBridgeChainId > 0)
+			Bitcoin.Services.BaseBridgeService.BaseChainId = config.BaseBridgeChainId;
         }
         public static void ProcessABL()
         {
@@ -579,12 +621,16 @@ namespace ReserveBlockCore.Config
             {
 				if (Globals.IsTestNet == false) //mainnet
 				{
-					File.AppendAllText(path + "config.txt", "Port=3338");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=7292");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=false");
-					File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
+				File.AppendAllText(path + "config.txt", "Port=3338");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=7292");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=false");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge V2 defaults (mainnet — set BaseBridgeContract to your proxy)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://mainnet.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=8453");
                 }
                 else if(Globals.IsCustomTestNet) //devnet
                 {
@@ -595,6 +641,10 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge V2 defaults (devnet — Base Sepolia)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x1154DDB476A38c01A389E1324121E15Df6703D19");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
                 else //testnet
                 {
@@ -604,6 +654,10 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge V2 defaults (testnet — Base Sepolia)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x1154DDB476A38c01A389E1324121E15Df6703D19");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
 				
 			}

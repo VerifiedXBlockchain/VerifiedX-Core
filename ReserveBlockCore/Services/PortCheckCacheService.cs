@@ -103,18 +103,24 @@ namespace ReserveBlockCore.Services
                 try
                 {
                     var isOpen = await IsPortOpenAsync(peerIP, port);
+                    var isValAPIOpen = await IsPortOpenAsync(peerIP, Globals.ValAPIPort);
+                    var isFrostAPIOpen = await IsPortOpenAsync(peerIP, Globals.FrostValidatorPort);
 
-                    if (!isOpen)
+                    if (!isOpen || !isValAPIOpen || !isFrostAPIOpen)
                     {
                         if (Globals.OptionalLogging)
                         {
-                            LogUtility.Log($"HAL-022: One-way validator detected - Port {port} not open on {peerIP}. Disconnecting.", serverType);
+                            LogUtility.Log($"HAL-022: One-way validator detected - Val Port: {isOpen} | Val API Port: {isValAPIOpen} | Frost Port: {isFrostAPIOpen} not open on {peerIP}. Disconnecting.", serverType);
                         }
 
                         await disconnectAction();
                     }
 
                     await CleanupExpiredEntries();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Server/connection already disposed - peer is already disconnected, nothing to do
                 }
                 catch (Exception ex)
                 {

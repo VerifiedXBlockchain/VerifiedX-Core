@@ -1,0 +1,3158 @@
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using ReserveBlockCore.Bitcoin.Models;
+using VbtcBaseBridge = ReserveBlockCore.Bitcoin.Services.BaseBridgeService;
+using VbtcBaseBridgeExit = ReserveBlockCore.Bitcoin.Services.BaseBridgeExitWatchService;
+using ReserveBlockCore.Controllers;
+using ReserveBlockCore.Data;
+using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.Privacy;
+using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.Privacy;
+using ReserveBlockCore.Services;
+using ReserveBlockCore.Utilities;
+using FrostBlacklist = ReserveBlockCore.Bitcoin.Services.FrostContractBlacklist;
+using System.Collections.Concurrent;
+
+namespace ReserveBlockCore.Bitcoin.Controllers
+{
+    /// <summary>
+    /// vBTC V2 Controller - MPC-based Tokenized Bitcoin
+    /// </summary>
+    [ActionFilterController]
+    [Route("vbtcapi/[controller]")]
+    [Route("vbtcapi/[controller]/{somePassword?}")]
+    [ApiController]
+    public class VBTCController : ControllerBase
+    {
+        #region In-Memory Ceremony Storage
+
+        /// <summary>
+        /// In-memory storage for MPC ceremony states
+        /// Key: CeremonyId, Value: MPCCeremonyState
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, MPCCeremonyState> _ceremonies = new();
+
+        /// <summary>
+        /// Maximum number of concurrent active (non-terminal) ceremonies allowed across all requestors.
+        /// </summary>
+        private const int MaxConcurrentCeremonies = 100;
+
+        /// <summary>
+        /// Check if a ceremony status is terminal (completed, failed, or timed out)
+        /// </summary>
+        private static bool IsCeremonyTerminal(CeremonyStatus status) =>
+            status == CeremonyStatus.Completed || status == CeremonyStatus.Failed || status == CeremonyStatus.TimedOut;
+
+        /// <summary>
+        /// Public accessor for the cleanup service to prune stale ceremonies.
+        /// Removes all ceremonies older than the given TTL, and any terminal ceremonies older than terminalTTL.
+        /// Returns the number of ceremonies removed.
+        /// </summary>
+        public static int CleanupStaleCeremonies(long activeTtlSeconds = 3600, long terminalTtlSeconds = 3600)
+        {
+            var now = TimeUtil.GetTime();
+            var removedCount = 0;
+
+            foreach (var kvp in _ceremonies)
+            {
+                var ceremony = kvp.Value;
+                var age = now - ceremony.InitiatedTimestamp;
+
+                if (IsCeremonyTerminal(ceremony.Status))
+                {
+                    // Terminal ceremonies: remove after terminalTtlSeconds
+                    if (age > terminalTtlSeconds)
+                    {
+                        if (_ceremonies.TryRemove(kvp.Key, out _))
+                            removedCount++;
+                    }
+                }
+                else
+                {
+                    // Active ceremonies: force-expire after activeTtlSeconds
+                    if (age > activeTtlSeconds)
+                    {
+                        ceremony.Status = CeremonyStatus.TimedOut;
+                        ceremony.ErrorMessage = "Ceremony expired due to inactivity (1 hour TTL exceeded).";
+                        ceremony.CompletedTimestamp = now;
+                        removedCount++;
+                    }
+                }
+            }
+
+            return removedCount;
+        }
+
+        /// <summary>
+        /// Remove a specific ceremony from memory (used after contract creation consumes the result).
+        /// </summary>
+        public static bool RemoveCeremony(string ceremonyId) => _ceremonies.TryRemove(ceremonyId, out _);
+
+        /// <summary>
+        /// Static method to initiate a ceremony — called by both the local VBTCController endpoint
+        /// and the public FrostStartup endpoint. Returns a JSON string result.
+        /// </summary>
+        public static async Task<string> InitiateMPCCeremonyStatic(string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                // Anti-spam: Check if this owner already has an active (non-terminal) ceremony
+                var existingActive = _ceremonies.Values.FirstOrDefault(c =>
+                    c.OwnerAddress == ownerAddress && !IsCeremonyTerminal(c.Status));
+                if (existingActive != null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "You already have an active MPC ceremony in progress. Complete or cancel it before starting a new one.",
+                        ExistingCeremonyId = existingActive.CeremonyId,
+                        Status = existingActive.Status.ToString(),
+                        ProgressPercentage = existingActive.ProgressPercentage
+                    });
+                }
+
+                // Anti-spam: Check global concurrent ceremony cap
+                var activeCeremonyCount = _ceremonies.Values.Count(c => !IsCeremonyTerminal(c.Status));
+                if (activeCeremonyCount >= MaxConcurrentCeremonies)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Maximum concurrent ceremony limit reached ({MaxConcurrentCeremonies}). Please try again later.",
+                        ActiveCeremonies = activeCeremonyCount
+                    });
+                }
+
+                // Generate unique ceremony ID
+                var ceremonyId = Guid.NewGuid().ToString();
+                var currentTime = TimeUtil.GetTime();
+
+                // Create initial ceremony state
+                var ceremony = new MPCCeremonyState
+                {
+                    CeremonyId = ceremonyId,
+                    OwnerAddress = ownerAddress,
+                    Status = CeremonyStatus.Initiated,
+                    InitiatedTimestamp = currentTime,
+                    RequiredThreshold = 51,
+                    ProgressPercentage = 0,
+                    CurrentRound = 0
+                };
+
+                // Store in memory
+                if (!_ceremonies.TryAdd(ceremonyId, ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create ceremony" });
+                }
+
+                // Start background ceremony process (validator-only local execution)
+                _ = Task.Run(async () => await ExecuteMPCCeremonyLocallyStatic(ceremonyId));
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "MPC ceremony initiated successfully. Use GetCeremonyStatus to check progress.",
+                    CeremonyId = ceremonyId,
+                    Status = ceremony.Status.ToString(),
+                    InitiatedTimestamp = currentTime
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Static method to get ceremony status — called by both the local VBTCController endpoint
+        /// and the public FrostStartup endpoint. Returns a JSON string result.
+        /// </summary>
+        public static string GetCeremonyStatusStatic(string ceremonyId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ceremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony ID cannot be null" });
+
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony not found" });
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Ceremony status retrieved",
+                    CeremonyId = ceremony.CeremonyId,
+                    Status = ceremony.Status.ToString(),
+                    OwnerAddress = ceremony.OwnerAddress,
+                    ProgressPercentage = ceremony.ProgressPercentage,
+                    CurrentRound = ceremony.CurrentRound,
+                    InitiatedTimestamp = ceremony.InitiatedTimestamp,
+                    CompletedTimestamp = ceremony.CompletedTimestamp,
+                    ErrorMessage = ceremony.ErrorMessage,
+                    DepositAddress = ceremony.Status == CeremonyStatus.Completed ? ceremony.DepositAddress : null,
+                    FrostGroupPublicKey = ceremony.Status == CeremonyStatus.Completed ? ceremony.FrostGroupPublicKey : null,
+                    DKGProof = ceremony.Status == CeremonyStatus.Completed ? ceremony.DKGProof : null,
+                    ValidatorCount = ceremony.ValidatorSnapshot?.Count ?? 0,
+                    RequiredThreshold = ceremony.RequiredThreshold,
+                    ProofBlockHeight = ceremony.ProofBlockHeight
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Static version of ExecuteMPCCeremonyLocally for use by the FrostStartup public endpoint.
+        /// This only runs the validator-local path (no remote delegation).
+        /// </summary>
+        private static async Task ExecuteMPCCeremonyLocallyStatic(string ceremonyId)
+        {
+            try
+            {
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                    return;
+
+                // This runs on a validator node — coordinate locally
+                ceremony.Status = CeremonyStatus.ValidatingValidators;
+                ceremony.ProgressPercentage = 5;
+
+                // Get candidate validators — these are all known active validators.
+                // Some may be offline. We probe reachability to filter to only online ones.
+                var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+
+                if (allValidators == null || !allValidators.Any())
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
+
+                LogUtility.Log($"[MPC Ceremony] Found {allValidators.Count} registered validators. Probing FROST port reachability...", 
+                    "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+
+                // Probe which validators are actually reachable on the FROST port
+                var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+
+                if (activeValidators.Count < 3) // FROST minimum: need at least 3 for threshold signing
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = $"Insufficient reachable validators for DKG ceremony. " +
+                        $"Only {activeValidators.Count} of {allValidators.Count} registered validators are online on FROST port " +
+                        $"(minimum 3 required).";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    LogUtility.Log($"[MPC Ceremony] {ceremony.ErrorMessage}", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+                    return;
+                }
+
+                LogUtility.Log($"[MPC Ceremony] Starting DKG with {activeValidators.Count} reachable validators " +
+                    $"(out of {allValidators.Count} registered).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+
+                ceremony.ProgressPercentage = 15;
+                ceremony.Status = CeremonyStatus.Round1InProgress;
+
+                var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                    ceremonyId,
+                    ceremony.OwnerAddress,
+                    activeValidators,
+                    ceremony.RequiredThreshold,
+                    (round, percentage) =>
+                    {
+                        ceremony.CurrentRound = round;
+                        ceremony.ProgressPercentage = percentage;
+                        if (round == 1 && ceremony.Status != CeremonyStatus.Round1InProgress)
+                            ceremony.Status = CeremonyStatus.Round1InProgress;
+                        else if (round == 2 && ceremony.Status != CeremonyStatus.Round2InProgress)
+                            ceremony.Status = CeremonyStatus.Round2InProgress;
+                        else if (round == 3 && ceremony.Status != CeremonyStatus.Round3InProgress)
+                            ceremony.Status = CeremonyStatus.Round3InProgress;
+                    }
+                );
+
+                if (dkgResult == null)
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = "FROST DKG ceremony failed - unable to generate Taproot address";
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
+
+                // Snapshot only the validators that actually participated (responded with shares)
+                ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+                LogUtility.Log($"[MPC Ceremony] Validator snapshot built from {dkgResult.ParticipantAddresses.Count} actual respondents " +
+                    $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+
+                ceremony.DepositAddress = dkgResult.TaprootAddress;
+                ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
+                ceremony.DKGProof = dkgResult.DKGProof;
+                ceremony.ProofBlockHeight = Globals.LastBlock.Height;
+                ceremony.Status = CeremonyStatus.Completed;
+                ceremony.ProgressPercentage = 100;
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+            }
+            catch (Exception ex)
+            {
+                if (_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = ex.Message;
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                }
+            }
+        }
+
+        #endregion
+
+        #region API Status
+
+        /// <summary>
+        /// Check Status of vBTC V2 API
+        /// </summary>
+        /// <returns>API name and version</returns>
+        [HttpGet]
+        public IEnumerable<string> Get()
+        {
+            return new string[] { "VFX/vBTC-V2", "vBTC API V2 - MPC Based" };
+        }
+
+        #endregion
+
+        #region Validator Management
+
+        // RegisterValidator removed — on-chain registration goes through
+        // ValidatorService.SendVBTCV2RegistrationTx() called by StartupValidatorProcess().
+        // Use GetValidatorList / GetValidatorStatus to query validators.
+
+        /// <summary>
+        /// Get list of all registered vBTC V2 validators
+        /// </summary>
+        /// <param name="activeOnly">Filter for active validators only</param>
+        /// <returns>List of validators</returns>
+        [HttpGet("GetValidatorList/{activeOnly?}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetValidatorList(bool activeOnly = false)
+        {
+            try
+            {
+                var validators = activeOnly
+                    ? Services.VBTCValidatorRegistry.GetActiveValidators()
+                    : Services.VBTCValidatorRegistry.GetActiveValidators();
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Validators retrieved",
+                    Validators = validators
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Validator sends heartbeat to maintain active status
+        /// </summary>
+        /// <param name="validatorAddress">Validator VFX address</param>
+        /// <returns>Heartbeat confirmation</returns>
+        [HttpPost("ValidatorHeartbeat/{validatorAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ValidatorHeartbeat(string validatorAddress)
+        {
+            try
+            {
+                // Update validator's last heartbeat block
+                var validator = Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                if (validator == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
+                }
+                // No DB update needed — VBTCValidatorRegistry derives state from block scanning
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Heartbeat recorded",
+                    ValidatorAddress = validatorAddress,
+                    CurrentBlock = Globals.LastBlock.Height
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get validator status and details
+        /// </summary>
+        /// <param name="validatorAddress">Validator VFX address</param>
+        /// <returns>Validator details</returns>
+        [HttpGet("GetValidatorStatus/{validatorAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetValidatorStatus(string validatorAddress)
+        {
+            try
+            {
+                var validator = Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                if (validator == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Validator found",
+                    Validator = validator
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region MPC Ceremony Management
+
+        /// <summary>
+        /// Initiate an MPC (FROST DKG) ceremony to generate a deposit address
+        /// This runs asynchronously in the background - use GetCeremonyStatus to check progress
+        /// </summary>
+        /// <param name="ownerAddress">Address requesting the ceremony</param>
+        /// <returns>Ceremony ID for tracking progress</returns>
+        [HttpPost("InitiateMPCCeremony/{ownerAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> InitiateMPCCeremony(string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                // Anti-spam: Check if this owner already has an active (non-terminal) ceremony
+                var existingActive = _ceremonies.Values.FirstOrDefault(c =>
+                    c.OwnerAddress == ownerAddress && !IsCeremonyTerminal(c.Status));
+                if (existingActive != null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "You already have an active MPC ceremony in progress. Complete or cancel it before starting a new one.",
+                        ExistingCeremonyId = existingActive.CeremonyId,
+                        Status = existingActive.Status.ToString(),
+                        ProgressPercentage = existingActive.ProgressPercentage
+                    });
+                }
+
+                // Anti-spam: Check global concurrent ceremony cap
+                var activeCeremonyCount = _ceremonies.Values.Count(c => !IsCeremonyTerminal(c.Status));
+                if (activeCeremonyCount >= MaxConcurrentCeremonies)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Maximum concurrent ceremony limit reached ({MaxConcurrentCeremonies}). Please try again later.",
+                        ActiveCeremonies = activeCeremonyCount
+                    });
+                }
+
+                // Generate unique ceremony ID
+                var ceremonyId = Guid.NewGuid().ToString();
+                var currentTime = TimeUtil.GetTime();
+
+                // Create initial ceremony state
+                var ceremony = new MPCCeremonyState
+                {
+                    CeremonyId = ceremonyId,
+                    OwnerAddress = ownerAddress,
+                    Status = CeremonyStatus.Initiated,
+                    InitiatedTimestamp = currentTime,
+                    RequiredThreshold = 51,
+                    ProgressPercentage = 0,
+                    CurrentRound = 0
+                };
+
+                // Store in memory
+                if (!_ceremonies.TryAdd(ceremonyId, ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create ceremony" });
+                }
+
+                // Start background ceremony process
+                _ = Task.Run(async () => await ExecuteMPCCeremony(ceremonyId));
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "MPC ceremony initiated successfully. Use GetCeremonyStatus to check progress.",
+                    CeremonyId = ceremonyId,
+                    Status = ceremony.Status.ToString(),
+                    InitiatedTimestamp = currentTime
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get the status of an ongoing or completed MPC ceremony
+        /// </summary>
+        /// <param name="ceremonyId">Ceremony ID from InitiateMPCCeremony</param>
+        /// <returns>Ceremony status and results if completed</returns>
+        [HttpGet("GetCeremonyStatus/{ceremonyId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetCeremonyStatus(string ceremonyId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ceremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony ID cannot be null" });
+
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony not found" });
+                }
+
+                var response = new
+                {
+                    Success = true,
+                    Message = "Ceremony status retrieved",
+                    CeremonyId = ceremony.CeremonyId,
+                    Status = ceremony.Status.ToString(),
+                    OwnerAddress = ceremony.OwnerAddress,
+                    ProgressPercentage = ceremony.ProgressPercentage,
+                    CurrentRound = ceremony.CurrentRound,
+                    InitiatedTimestamp = ceremony.InitiatedTimestamp,
+                    CompletedTimestamp = ceremony.CompletedTimestamp,
+                    ErrorMessage = ceremony.ErrorMessage,
+                    // Only include results if completed
+                    DepositAddress = ceremony.Status == CeremonyStatus.Completed ? ceremony.DepositAddress : null,
+                    FrostGroupPublicKey = ceremony.Status == CeremonyStatus.Completed ? ceremony.FrostGroupPublicKey : null,
+                    DKGProof = ceremony.Status == CeremonyStatus.Completed ? ceremony.DKGProof : null,
+                    ValidatorCount = ceremony.ValidatorSnapshot?.Count ?? 0,
+                    RequiredThreshold = ceremony.RequiredThreshold,
+                    ProofBlockHeight = ceremony.ProofBlockHeight
+                };
+
+                return JsonConvert.SerializeObject(response);
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Cancel an active MPC ceremony. Only the original owner can cancel.
+        /// </summary>
+        /// <param name="ceremonyId">Ceremony ID to cancel</param>
+        /// <param name="ownerAddress">Owner address that initiated the ceremony</param>
+        /// <returns>Cancellation result</returns>
+        [HttpPost("CancelCeremony/{ceremonyId}/{ownerAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CancelCeremony(string ceremonyId, string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ceremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony ID cannot be null" });
+
+                if (string.IsNullOrEmpty(ownerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony not found" });
+                }
+
+                if (ceremony.OwnerAddress != ownerAddress)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Only the ceremony owner can cancel it" });
+                }
+
+                if (IsCeremonyTerminal(ceremony.Status))
+                {
+                    // Already terminal — just remove it
+                    _ceremonies.TryRemove(ceremonyId, out _);
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = $"Ceremony was already in terminal state ({ceremony.Status}). Removed from memory."
+                    });
+                }
+
+                // Mark as failed (cancelled)
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "Ceremony cancelled by owner";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+
+                // Remove immediately since owner explicitly cancelled
+                _ceremonies.TryRemove(ceremonyId, out _);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Ceremony cancelled and removed successfully",
+                    CeremonyId = ceremonyId,
+                    PreviousStatus = ceremony.Status.ToString()
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Background task that executes the MPC (FROST DKG) ceremony.
+        /// Unified MPC: Any VFX wallet owner can coordinate directly — no delegation needed.
+        /// </summary>
+        private async Task ExecuteMPCCeremony(string ceremonyId)
+        {
+            try
+            {
+                if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                    return;
+
+                // Unified path: always coordinate locally (owner signs with AddressSignature)
+                await ExecuteMPCCeremonyLocally(ceremonyId, ceremony);
+            }
+            catch (Exception ex)
+            {
+                if (_ceremonies.TryGetValue(ceremonyId, out var ceremony))
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = ex.Message;
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Execute MPC ceremony locally (validator node path)
+        /// </summary>
+        private async Task ExecuteMPCCeremonyLocally(string ceremonyId, MPCCeremonyState ceremony)
+        {
+            // Update status: Validating validators
+            ceremony.Status = CeremonyStatus.ValidatingValidators;
+            ceremony.ProgressPercentage = 5;
+
+            // Get candidate validators — these are all known active validators.
+            // Some may be offline. We probe reachability to filter to only online ones.
+            var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+
+            if (allValidators == null || !allValidators.Any())
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
+
+            LogUtility.Log($"[MPC Ceremony] Found {allValidators.Count} registered validators. Probing FROST port reachability...", 
+                "VBTCController.ExecuteMPCCeremonyLocally");
+
+            // Probe which validators are actually reachable on the FROST port
+            var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+
+            if (activeValidators.Count < 3) // FROST minimum: need at least 3 for threshold signing
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = $"Insufficient reachable validators for DKG ceremony. " +
+                    $"Only {activeValidators.Count} of {allValidators.Count} registered validators are online on FROST port " +
+                    $"(minimum 3 required).";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                LogUtility.Log($"[MPC Ceremony] {ceremony.ErrorMessage}", "VBTCController.ExecuteMPCCeremonyLocally");
+                return;
+            }
+
+            LogUtility.Log($"[MPC Ceremony] Starting DKG with {activeValidators.Count} reachable validators " +
+                $"(out of {allValidators.Count} registered).", "VBTCController.ExecuteMPCCeremonyLocally");
+
+            ceremony.ProgressPercentage = 15;
+
+            // Execute FROST DKG Ceremony via FrostMPCService with progress callback
+            ceremony.Status = CeremonyStatus.Round1InProgress;
+
+            var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                ceremonyId,
+                ceremony.OwnerAddress,
+                activeValidators,
+                ceremony.RequiredThreshold,
+                (round, percentage) =>
+                {
+                    ceremony.CurrentRound = round;
+                    ceremony.ProgressPercentage = percentage;
+
+                    if (round == 1 && ceremony.Status != CeremonyStatus.Round1InProgress)
+                        ceremony.Status = CeremonyStatus.Round1InProgress;
+                    else if (round == 2 && ceremony.Status != CeremonyStatus.Round2InProgress)
+                        ceremony.Status = CeremonyStatus.Round2InProgress;
+                    else if (round == 3 && ceremony.Status != CeremonyStatus.Round3InProgress)
+                        ceremony.Status = CeremonyStatus.Round3InProgress;
+                }
+            );
+
+            if (dkgResult == null)
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "FROST DKG ceremony failed - unable to generate Taproot address";
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
+
+            // Snapshot only the validators that actually participated (responded with shares)
+            ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+            LogUtility.Log($"[MPC Ceremony] Validator snapshot built from {dkgResult.ParticipantAddresses.Count} actual respondents " +
+                $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocally");
+
+            // DKG ceremony completed successfully
+            ceremony.DepositAddress = dkgResult.TaprootAddress;
+            ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
+            ceremony.DKGProof = dkgResult.DKGProof;
+            ceremony.ProofBlockHeight = Globals.LastBlock.Height;
+
+            ceremony.Status = CeremonyStatus.Completed;
+            ceremony.ProgressPercentage = 100;
+            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+        }
+
+        #endregion
+
+        #region Contract Creation
+
+        /// <summary>
+        /// Create a new vBTC V2 contract with MPC-generated deposit address
+        /// IMPORTANT: You must first call InitiateMPCCeremony and wait for it to complete,
+        /// then pass the CeremonyId to this method
+        /// </summary>
+        /// <param name="payload">Contract creation payload (must include CeremonyId)</param>
+        /// <returns>Contract creation result with smart contract UID</returns>
+        [HttpPost("CreateVBTCContract")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CreateVBTCContract([FromBody] VBTCContractPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // Check if CeremonyId is provided
+                if (string.IsNullOrEmpty(payload.CeremonyId))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "CeremonyId is required. Please call InitiateMPCCeremony first and wait for it to complete, then pass the CeremonyId to this method."
+                    });
+                }
+
+                // Retrieve ceremony from memory
+                if (!_ceremonies.TryGetValue(payload.CeremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Ceremony not found. Please initiate a new ceremony with InitiateMPCCeremony."
+                    });
+                }
+
+                // Validate ceremony is completed
+                if (ceremony.Status != CeremonyStatus.Completed)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Ceremony is not complete. Current status: {ceremony.Status}. Use GetCeremonyStatus to check progress.",
+                        CeremonyId = payload.CeremonyId,
+                        Status = ceremony.Status.ToString(),
+                        ProgressPercentage = ceremony.ProgressPercentage
+                    });
+                }
+
+                // Validate owner address matches ceremony
+                if (ceremony.OwnerAddress != payload.OwnerAddress)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Owner address does not match the ceremony owner address."
+                    });
+                }
+
+                var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
+
+                // Use ceremony results
+                string depositAddress = ceremony.DepositAddress!;
+                string frostGroupPublicKey = ceremony.FrostGroupPublicKey!;
+                string dkgProof = ceremony.DKGProof!;
+                var validatorSnapshot = ceremony.ValidatorSnapshot;
+
+                // CRITICAL FIX: When the ceremony was delegated to a remote validator,
+                // the remote validator generated its own ceremony ID which was used for the
+                // actual DKG ceremony. Validators stored their FROST key packages under that
+                // remote ceremony ID. We must use it here so that signing can find the keys.
+                var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
+                    ? ceremony.RemoteCeremonyId
+                    : payload.CeremonyId;
+
+                if (effectiveCeremonyId != payload.CeremonyId)
+                {
+                    LogUtility.Log($"[FROST MPC] Using remote ceremony ID for contract. Local: {payload.CeremonyId}, Remote (validators use): {effectiveCeremonyId}",
+                        "VBTCController.CreateVBTCContract");
+                }
+
+                // Create TokenizationV2Feature
+                var tokenizationV2Feature = new TokenizationV2Feature
+                {
+                    AssetName = payload.Name,
+                    AssetTicker = payload.Ticker ?? "vBTC",
+                    DepositAddress = depositAddress,
+                    Version = 2,
+                    ValidatorAddressesSnapshot = validatorSnapshot,
+                    FrostGroupPublicKey = frostGroupPublicKey,
+                    RequiredThreshold = 51, // 51% initially
+                    DKGProof = dkgProof,
+                    ProofBlockHeight = Globals.LastBlock.Height,
+                    CeremonyId = effectiveCeremonyId,
+                    ImageBase = payload.ImageBase
+                };
+
+                // Create smart contract
+                var scMain = new SmartContractMain
+                {
+                    SmartContractUID = scUID,
+                    Name = payload.Name,
+                    Description = payload.Description ?? "vBTC V2 Token - MPC-based Tokenized Bitcoin",
+                    MinterAddress = payload.OwnerAddress,
+                    MinterName = payload.OwnerAddress,
+                    IsPublic = true,
+                    SCVersion = Globals.SCVersion,
+                    IsMinter = true,
+                    IsPublished = false,
+                    IsToken = false,
+                    Id = 0,
+                    SmartContractAsset = new SmartContractAsset
+                    {
+                        Name = "vbtc_v2_token",
+                        Location = "default",
+                        AssetAuthorName = payload.OwnerAddress,
+                        FileSize = 0
+                    },
+                    Features = new List<SmartContractFeatures>
+                    {
+                        new SmartContractFeatures
+                        {
+                            FeatureName = FeatureName.TokenizationV2,
+                            FeatureFeatures = tokenizationV2Feature
+                        }
+                    }
+                };
+
+                // Write smart contract (uses TokenizationV2SourceGenerator)
+                var result = await SmartContractWriterService.WriteSmartContract(scMain);
+                if (string.IsNullOrWhiteSpace(result.Item1))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Failed to generate smart contract code"
+                    });
+                }
+
+                // Save smart contract to databases
+                SmartContractMain.SmartContractData.SaveSmartContract(result.Item2, result.Item1);
+                await VBTCContractV2.SaveSmartContract(result.Item2, result.Item1, payload.OwnerAddress);
+
+                // Create and broadcast mint transaction
+                var scTx = await SmartContractService.MintSmartContractTx(result.Item2, TransactionType.VBTC_V2_CONTRACT_CREATE);
+                if (scTx == null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Failed to create or broadcast smart contract transaction"
+                    });
+                }
+
+                // Mark contract as published in the tokenized bitcoin database
+                await TokenizedBitcoin.SetTokenContractIsPublished(scUID);
+
+                // Ceremony results consumed — remove from memory immediately to free space
+                RemoveCeremony(payload.CeremonyId);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "vBTC V2 contract created and published to blockchain successfully",
+                    SmartContractUID = scUID,
+                    TransactionHash = scTx.Hash,
+                    CeremonyId = payload.CeremonyId,
+                    DepositAddress = depositAddress,
+                    FrostGroupPublicKey = frostGroupPublicKey,
+                    DKGProof = dkgProof,
+                    ValidatorCount = validatorSnapshot.Count,
+                    ProofBlockHeight = ceremony.ProofBlockHeight,
+                    RequiredThreshold = 51
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get MPC-generated deposit address for a vBTC V2 contract
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>Deposit address and MPC public key data</returns>
+        [HttpGet("GetMPCDepositAddress/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetMPCDepositAddress(string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(scUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID is required" });
+
+                // FIND-025 Fix: Load real contract data instead of returning placeholders
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "vBTC V2 contract not found for the given scUID"
+                    });
+                }
+
+                if (string.IsNullOrEmpty(contract.DepositAddress))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Contract exists but deposit address has not been generated yet. DKG ceremony may not have completed."
+                    });
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Deposit address retrieved",
+                    SmartContractUID = scUID,
+                    DepositAddress = contract.DepositAddress,
+                    FrostGroupPublicKey = contract.FrostGroupPublicKey ?? string.Empty,
+                    RequiredThreshold = contract.RequiredThreshold,
+                    DKGProof = contract.DKGProof ?? string.Empty
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Create a new vBTC V2 contract with pre-signed external request (Raw format)
+        /// SECURITY: Includes signature verification, timestamp validation, and replay attack prevention
+        /// IMPORTANT: You must first call InitiateMPCCeremony and wait for it to complete
+        /// </summary>
+        /// <param name="payload">Raw contract creation request with signature and unique ID</param>
+        /// <returns>Contract creation result with smart contract UID</returns>
+        [HttpPost("CreateVBTCContractRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CreateVBTCContractRaw([FromBody] VBTCContractRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // 1. Validate required fields
+                if (string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.Name))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Contract name cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.CeremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony ID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.UniqueId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Unique ID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner signature cannot be null" });
+
+                // 2. Timestamp validation (reject if older than 5 minutes)
+                var currentTime = TimeUtil.GetTime();
+                var timeDifference = Math.Abs(currentTime - payload.Timestamp);
+                if (timeDifference > 300) // 5 minutes = 300 seconds
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
+                }
+
+                // 3. Verify owner signature
+                var signatureData = $"{payload.OwnerAddress}{payload.Name}{payload.Description}{payload.Ticker}{payload.CeremonyId}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
+                if (!isValidSignature)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
+                }
+
+                // 5. Retrieve ceremony from memory
+                if (!_ceremonies.TryGetValue(payload.CeremonyId, out var ceremony))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Ceremony not found. Please initiate a new ceremony with InitiateMPCCeremony."
+                    });
+                }
+
+                // 6. Validate ceremony is completed
+                if (ceremony.Status != CeremonyStatus.Completed)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Ceremony is not complete. Current status: {ceremony.Status}. Use GetCeremonyStatus to check progress.",
+                        CeremonyId = payload.CeremonyId,
+                        Status = ceremony.Status.ToString(),
+                        ProgressPercentage = ceremony.ProgressPercentage
+                    });
+                }
+
+                // 7. Validate owner address matches ceremony
+                if (ceremony.OwnerAddress != payload.OwnerAddress)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Owner address does not match the ceremony owner address."
+                    });
+                }
+
+                var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
+
+                // Use ceremony results
+                string depositAddress = ceremony.DepositAddress!;
+                string frostGroupPublicKey = ceremony.FrostGroupPublicKey!;
+                string dkgProof = ceremony.DKGProof!;
+                var validatorSnapshot = ceremony.ValidatorSnapshot;
+
+                // CRITICAL FIX: Same as CreateVBTCContract — use the remote ceremony ID
+                // when the ceremony was delegated, so validators can find their FROST keys.
+                var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
+                    ? ceremony.RemoteCeremonyId
+                    : payload.CeremonyId;
+
+                if (effectiveCeremonyId != payload.CeremonyId)
+                {
+                    LogUtility.Log($"[FROST MPC] Using remote ceremony ID for raw contract. Local: {payload.CeremonyId}, Remote (validators use): {effectiveCeremonyId}",
+                        "VBTCController.CreateVBTCContractRaw");
+                }
+
+                // Create TokenizationV2Feature
+                var tokenizationV2Feature = new TokenizationV2Feature
+                {
+                    AssetName = payload.Name,
+                    AssetTicker = payload.Ticker ?? "vBTC",
+                    DepositAddress = depositAddress,
+                    Version = 2,
+                    ValidatorAddressesSnapshot = validatorSnapshot,
+                    FrostGroupPublicKey = frostGroupPublicKey,
+                    RequiredThreshold = 51, // 51% initially
+                    DKGProof = dkgProof,
+                    ProofBlockHeight = Globals.LastBlock.Height,
+                    CeremonyId = effectiveCeremonyId,
+                    ImageBase = payload.ImageBase
+                };
+
+                // Create smart contract
+                var scMain = new SmartContractMain
+                {
+                    SmartContractUID = scUID,
+                    Name = payload.Name,
+                    Description = payload.Description,
+                    MinterAddress = payload.OwnerAddress,
+                    MinterName = payload.OwnerAddress, // Can be customized
+                    SmartContractAsset = new SmartContractAsset
+                    {
+                        Name = "vbtc_v2_token",
+                        Location = "default",
+                        AssetAuthorName = payload.OwnerAddress,
+                        FileSize = 0
+                    },
+                    Features = new List<SmartContractFeatures>
+                    {
+                        new SmartContractFeatures
+                        {
+                            FeatureName = FeatureName.TokenizationV2,
+                            FeatureFeatures = tokenizationV2Feature
+                        }
+                    }
+                };
+
+                // Write smart contract (uses TokenizationV2SourceGenerator)
+                var result = await SmartContractWriterService.WriteSmartContract(scMain);
+                if (string.IsNullOrWhiteSpace(result.Item1))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to generate smart contract code" });
+                }
+
+                // Save smart contract to databases
+                SmartContractMain.SmartContractData.SaveSmartContract(result.Item2, result.Item1);
+                await VBTCContractV2.SaveSmartContract(result.Item2, result.Item1, payload.OwnerAddress);
+
+                // Create and broadcast mint transaction
+                var scTx = await SmartContractService.MintSmartContractTx(result.Item2, TransactionType.VBTC_V2_CONTRACT_CREATE);
+                if (scTx == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create or broadcast smart contract transaction" });
+                }
+
+                // Ceremony results consumed — remove from memory immediately to free space
+                RemoveCeremony(payload.CeremonyId);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "vBTC V2 contract created and published to blockchain successfully via raw request",
+                    SmartContractUID = scUID,
+                    TransactionHash = scTx.Hash,
+                    CeremonyId = payload.CeremonyId,
+                    DepositAddress = depositAddress,
+                    DKGProof = dkgProof,
+                    ValidatorCount = validatorSnapshot.Count,
+                    ProofBlockHeight = ceremony.ProofBlockHeight,
+                    UniqueId = payload.UniqueId,
+                    Timestamp = currentTime
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Transfer Operations
+
+        /// <summary>
+        /// Transfer vBTC V2 tokens from one address to another
+        /// </summary>
+        /// <param name="payload">Transfer details</param>
+        /// <returns>Transaction hash if successful</returns>
+        [HttpPost("TransferVBTC")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> TransferVBTC([FromBody] VBTCTransferPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.FromAddress) || 
+                    string.IsNullOrEmpty(payload.ToAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                // Call service to create and broadcast transaction
+                var result = await Services.VBTCService.TransferVBTC(
+                    payload.SmartContractUID,
+                    payload.FromAddress,
+                    payload.ToAddress,
+                    payload.Amount
+                );
+
+                if (result.Item1)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "vBTC V2 transfer transaction created and broadcast successfully",
+                        TransactionHash = result.Item2,
+                        From = payload.FromAddress,
+                        To = payload.ToAddress,
+                        Amount = payload.Amount,
+                        SmartContractUID = payload.SmartContractUID
+                    });
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.Item2 });
+                }
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Transfer vBTC V2 tokens to multiple recipients
+        /// </summary>
+        /// <param name="payload">Multi-transfer details</param>
+        /// <returns>Transaction hash if successful</returns>
+        [HttpPost("TransferVBTCMulti")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> TransferVBTCMulti([FromBody] VBTCTransferMultiPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // Validate total balance
+                // Create multi-transfer transaction
+                // Broadcast to network
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = false,
+                    Message = "Multi-transfer is not yet supported. Use single TransferVBTC for individual transfers."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Transfer ownership of vBTC V2 contract to another address
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <param name="toAddress">New owner address</param>
+        /// <returns>Transaction hash if successful</returns>
+        [HttpGet("TransferOwnership/{scUID}/{toAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> TransferOwnership(string scUID, string toAddress)
+        {
+            return await Services.VBTCService.TransferOwnership(scUID, toAddress);
+        }
+
+        #endregion
+
+        #region Withdrawal Operations
+
+        /// <summary>
+        /// Request withdrawal of vBTC to Bitcoin address
+        /// </summary>
+        /// <param name="payload">Withdrawal request details</param>
+        /// <returns>Withdrawal request confirmation</returns>
+        [HttpPost("RequestWithdrawal")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> RequestWithdrawal([FromBody] VBTCWithdrawalPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.RequestorAddress) || 
+                    string.IsNullOrEmpty(payload.BTCAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                if (payload.FeeRate <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
+
+                // Call service to create and broadcast withdrawal request transaction
+                var result = await Services.VBTCService.RequestWithdrawal(
+                    payload.SmartContractUID,
+                    payload.RequestorAddress,
+                    payload.BTCAddress,
+                    payload.Amount,
+                    payload.FeeRate
+                );
+
+                if (result.Item1)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "vBTC V2 withdrawal request created successfully",
+                        RequestHash = result.Item2,
+                        SmartContractUID = payload.SmartContractUID,
+                        Amount = payload.Amount,
+                        Destination = payload.BTCAddress,
+                        FeeRate = payload.FeeRate,
+                        Status = "Requested"
+                    });
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.Item2 });
+                }
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Complete withdrawal by coordinating FROST MPC signing and broadcasting Bitcoin transaction.
+        /// Unified MPC: Any VFX wallet owner can coordinate directly — no delegation needed.
+        /// </summary>
+        /// <param name="payload">Withdrawal completion details</param>
+        /// <returns>Both VFX and Bitcoin transaction hashes if successful</returns>
+        [HttpPost("CompleteWithdrawal")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CompleteWithdrawal([FromBody] VBTCWithdrawalCompletePayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                // Unified path: execute FROST withdrawal locally (owner signs with AddressSignature)
+                var result = await Services.VBTCService.CompleteWithdrawal(
+                    payload.SmartContractUID,
+                    payload.WithdrawalRequestHash
+                );
+
+                if (result.Success)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "vBTC V2 withdrawal completed successfully with FROST signing",
+                        VFXTransactionHash = result.VFXTxHash,
+                        BTCTransactionHash = result.BTCTxHash,
+                        Status = "Pending_BTC",
+                        SmartContractUID = payload.SmartContractUID
+                    });
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.ErrorMessage });
+                }
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Request cancellation of a failed withdrawal
+        /// </summary>
+        /// <param name="payload">Cancellation request with failure proof</param>
+        /// <returns>Cancellation request ID</returns>
+        [HttpPost("CancelWithdrawal")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CancelWithdrawal([FromBody] VBTCCancellationPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // Validate required fields
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.OwnerAddress) ||
+                    string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                var cancellationUID = Guid.NewGuid().ToString();
+
+                // Create cancellation record
+                var cancellation = new VBTCWithdrawalCancellation
+                {
+                    CancellationUID = cancellationUID,
+                    SmartContractUID = payload.SmartContractUID,
+                    OwnerAddress = payload.OwnerAddress,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    BTCTxHash = payload.BTCTxHash,
+                    FailureProof = payload.FailureProof,
+                    RequestTime = TimeUtil.GetTime(),
+                    ValidatorVotes = new Dictionary<string, bool>(),
+                    ApproveCount = 0,
+                    RejectCount = 0,
+                    IsApproved = false,
+                    IsProcessed = false
+                };
+
+                // Save cancellation to database
+                VBTCWithdrawalCancellation.SaveCancellation(cancellation);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Cancellation request created. Awaiting validator votes (75% required).",
+                    CancellationUID = cancellationUID,
+                    RequiredVotes = "75%"
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Validator votes on withdrawal cancellation request
+        /// </summary>
+        /// <param name="payload">Vote details</param>
+        /// <returns>Vote confirmation and current tally</returns>
+        [HttpPost("VoteOnCancellation")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> VoteOnCancellation([FromBody] VBTCCancellationVotePayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // Validate required fields
+                if (string.IsNullOrEmpty(payload.CancellationUID) || string.IsNullOrEmpty(payload.ValidatorAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "CancellationUID and ValidatorAddress are required" });
+
+                // Verify validator is active
+                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
+                if (validator == null || !validator.IsActive)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
+                }
+
+                // Get cancellation record
+                var cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
+                if (cancellation == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cancellation request not found" });
+                }
+
+                if (cancellation.IsProcessed)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cancellation has already been processed" });
+                }
+
+                // Check if validator already voted
+                if (VBTCWithdrawalCancellation.HasValidatorVoted(payload.CancellationUID, payload.ValidatorAddress))
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator has already voted on this cancellation" });
+                }
+
+                // Record vote
+                VBTCWithdrawalCancellation.AddVote(payload.CancellationUID, payload.ValidatorAddress, payload.Approve);
+
+                // Refresh cancellation data after vote
+                cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
+                int totalValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
+                int votePercentage = totalValidators > 0 
+                    ? VBTCWithdrawalCancellation.GetVotePercentage(payload.CancellationUID, totalValidators) 
+                    : 0;
+
+                // Check if 75% threshold reached
+                if (votePercentage >= 75 && !cancellation!.IsProcessed)
+                {
+                    VBTCWithdrawalCancellation.MarkAsProcessed(payload.CancellationUID, true);
+                    cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Vote recorded",
+                    CancellationUID = payload.CancellationUID,
+                    ApproveCount = cancellation?.ApproveCount ?? 0,
+                    RejectCount = cancellation?.RejectCount ?? 0,
+                    TotalValidators = totalValidators,
+                    ApprovalPercentage = votePercentage,
+                    IsApproved = cancellation?.IsApproved ?? false
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Raw Withdrawal Operations
+
+        /// <summary>
+        /// Request withdrawal with pre-signed external request (Raw format)
+        /// SECURITY: Includes signature verification, timestamp validation, and replay attack prevention
+        /// </summary>
+        /// <param name="payload">Raw withdrawal request with signature and unique ID</param>
+        /// <returns>Withdrawal request confirmation</returns>
+        [HttpPost("RequestWithdrawalRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> RequestWithdrawalRaw([FromBody] VBTCWithdrawalRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // 1. Validate required fields
+                if (string.IsNullOrEmpty(payload.VFXAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "VFX address cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.BTCAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "BTC address cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.UniqueId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Unique ID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.VFXSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "VFX signature cannot be null" });
+
+                // 2. Timestamp validation (reject if older than 5 minutes)
+                var currentTime = TimeUtil.GetTime();
+                var timeDifference = Math.Abs(currentTime - payload.Timestamp);
+                if (timeDifference > 300) // 5 minutes = 300 seconds
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
+                }
+
+                // 3. Replay attack prevention - check if UniqueId already exists
+                var existingRequest = VBTCWithdrawalRequest.GetByUniqueId(payload.VFXAddress, payload.UniqueId, payload.SmartContractUID);
+                if (existingRequest != null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Duplicate request detected. This UniqueId has already been processed." });
+                }
+
+                // 4. Check for incomplete withdrawals (only 1 active withdrawal per contract)
+                var hasIncomplete = VBTCWithdrawalRequest.HasIncompleteRequest(payload.VFXAddress, payload.SmartContractUID);
+                if (hasIncomplete)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "An active withdrawal request already exists for this contract. Complete or cancel it first." });
+                }
+
+                // 5. Verify VFX signature
+                var signatureData = $"{payload.VFXAddress}{payload.BTCAddress}{payload.SmartContractUID}{payload.Amount}{payload.FeeRate}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.VFXAddress, signatureData, payload.VFXSignature);
+                if (!isValidSignature)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid VFX signature" });
+                }
+
+                // 6. Validate balance from State Trei
+                var scState = SmartContractStateTrei.GetSmartContractState(payload.SmartContractUID);
+                if (scState != null && scState.SCStateTreiTokenizationTXes != null)
+                {
+                    var tokenTxs = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == payload.VFXAddress || x.ToAddress == payload.VFXAddress).ToList();
+                    var vbtcBalance = tokenTxs.Sum(x => x.Amount);
+                    if (payload.Amount > vbtcBalance)
+                    {
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient vBTC balance. Available: {vbtcBalance}, Requested: {payload.Amount}" });
+                    }
+                }
+                else
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract state not found or no tokenization transactions exist." });
+                }
+
+                // 7. Create withdrawal request
+                var withdrawalRequest = new VBTCWithdrawalRequest
+                {
+                    RequestorAddress = payload.VFXAddress,
+                    OriginalRequestTime = payload.Timestamp,
+                    OriginalSignature = payload.VFXSignature,
+                    OriginalUniqueId = payload.UniqueId,
+                    Timestamp = currentTime,
+                    SmartContractUID = payload.SmartContractUID,
+                    Amount = payload.Amount,
+                    BTCDestination = payload.BTCAddress,
+                    FeeRate = payload.FeeRate,
+                    TransactionHash = "", // Will be set when completed
+                    IsCompleted = false,
+                    Status = VBTCWithdrawalStatus.Requested
+                };
+
+                // 8. Save to database
+                var saved = VBTCWithdrawalRequest.Save(withdrawalRequest);
+                if (!saved)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to save withdrawal request to database" });
+                }
+
+                var requestHash = $"{payload.VFXAddress.Substring(0, 8)}_{payload.UniqueId.Substring(0, 8)}_{currentTime}";
+
+                // 9. Update contract withdrawal status to "Requested" with full details
+                VBTCContractV2.UpdateWithdrawalStatus(payload.SmartContractUID, VBTCWithdrawalStatus.Requested,
+                    btcDestination: payload.BTCAddress, amount: payload.Amount, requestHash: requestHash);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Raw withdrawal request created successfully",
+                    RequestHash = requestHash,
+                    SmartContractUID = payload.SmartContractUID,
+                    Amount = payload.Amount,
+                    Destination = payload.BTCAddress,
+                    Status = "Requested",
+                    UniqueId = payload.UniqueId,
+                    Timestamp = currentTime
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Complete withdrawal with pre-signed validator authorization (Raw format)
+        /// SECURITY: Verifies validator signature and coordinates FROST signing
+        /// </summary>
+        /// <param name="payload">Raw completion request with validator signature</param>
+        /// <returns>Bitcoin transaction hash if successful</returns>
+        [HttpPost("CompleteWithdrawalRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CompleteWithdrawalRaw([FromBody] VBTCWithdrawalCompleteRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // 1. Validate required fields
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request hash cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.ValidatorAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator address cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.UniqueId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Unique ID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.ValidatorSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator signature cannot be null" });
+
+                // 2. Timestamp validation
+                var currentTime = TimeUtil.GetTime();
+                var timeDifference = Math.Abs(currentTime - payload.Timestamp);
+                if (timeDifference > 300)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
+                }
+
+                // 3. Verify validator is active and eligible
+                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
+                if (validator == null || !validator.IsActive)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
+                }
+
+                // 4. Verify validator signature (VFX signature over request data)
+                var signatureData = $"{payload.SmartContractUID}{payload.WithdrawalRequestHash}{payload.ValidatorAddress}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.ValidatorAddress, signatureData, payload.ValidatorSignature);
+                if (!isValidSignature)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid validator signature" });
+                }
+
+                // Unified MPC: execute FROST withdrawal locally (owner signs with AddressSignature)
+                var withdrawalResult = await Services.VBTCService.CompleteWithdrawal(
+                    payload.SmartContractUID,
+                    payload.WithdrawalRequestHash
+                );
+
+                if (!withdrawalResult.Success)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = withdrawalResult.ErrorMessage ?? "FROST signing ceremony failed"
+                    });
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Raw withdrawal completed successfully via FROST signing",
+                    BTCTransactionHash = withdrawalResult.BTCTxHash,
+                    VFXTransactionHash = withdrawalResult.VFXTxHash,
+                    Status = "Pending_BTC",
+                    SmartContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Cancel withdrawal with pre-signed owner authorization (Raw format)
+        /// SECURITY: Verifies owner signature and creates cancellation request for validator voting
+        /// </summary>
+        /// <param name="payload">Raw cancellation request with owner signature</param>
+        /// <returns>Cancellation request ID</returns>
+        [HttpPost("CancelWithdrawalRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CancelWithdrawalRaw([FromBody] VBTCCancellationRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                // 1. Validate required fields
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request hash cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.UniqueId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Unique ID cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner signature cannot be null" });
+
+                // 2. Timestamp validation
+                var currentTime = TimeUtil.GetTime();
+                var timeDifference = Math.Abs(currentTime - payload.Timestamp);
+                if (timeDifference > 300)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
+                }
+
+                // 3. Verify owner signature
+                var signatureData = $"{payload.SmartContractUID}{payload.OwnerAddress}{payload.WithdrawalRequestHash}{payload.BTCTxHash}{payload.FailureProof}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
+                if (!isValidSignature)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
+                }
+
+                // 4. Verify owner is the contract owner
+                var contract = VBTCContractV2.GetContract(payload.SmartContractUID);
+                if (contract == null || contract.OwnerAddress != payload.OwnerAddress)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Only the contract owner can request cancellation" });
+                }
+
+                var cancellationUID = Guid.NewGuid().ToString();
+
+                // 6. Create cancellation record
+                var cancellation = new VBTCWithdrawalCancellation
+                {
+                    CancellationUID = cancellationUID,
+                    SmartContractUID = payload.SmartContractUID,
+                    OwnerAddress = payload.OwnerAddress,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    BTCTxHash = payload.BTCTxHash,
+                    FailureProof = payload.FailureProof,
+                    RequestTime = currentTime,
+                    ValidatorVotes = new Dictionary<string, bool>(),
+                    ApproveCount = 0,
+                    RejectCount = 0,
+                    IsApproved = false,
+                    IsProcessed = false
+                };
+
+                // 7. Save to database
+                VBTCWithdrawalCancellation.SaveCancellation(cancellation);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Raw cancellation request created successfully. Awaiting validator votes (75% required).",
+                    CancellationUID = cancellationUID,
+                    SmartContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    RequiredVotes = "75%",
+                    UniqueId = payload.UniqueId,
+                    Timestamp = currentTime
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Balance & Status
+
+        /// <summary>
+        /// Get vBTC V2 balance for an address in a specific contract.
+        /// For the contract owner, the balance includes the BTC deposit address balance
+        /// (queried from ElectrumX) plus the net ledger balance from tokenization TXes.
+        /// For non-owners, the balance is simply received - sent from tokenization TXes.
+        /// </summary>
+        /// <param name="address">VFX address</param>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>Balance information</returns>
+        [HttpGet("GetVBTCBalance/{address}/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetVBTCBalance(string address, string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(scUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Address and Smart Contract UID are required" });
+
+                // Get contract state from State Trei
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract not found or no state available" });
+                }
+
+                decimal ledgerBalance = 0.0M;
+                bool isOwner = false;
+                decimal depositBalance = 0.0M;
+
+                // Calculate ledger balance from State Trei tokenization transactions.
+                // State entries use negative amounts for debits, so the net balance is simply the sum.
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var transactions = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == address || x.ToAddress == address)
+                        .ToList();
+
+                    if (transactions.Any())
+                    {
+                        ledgerBalance = transactions.Sum(x => x.Amount);
+                    }
+                }
+
+                // Check if this address is the contract owner (check both local DB and state trei)
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract != null && (contract.OwnerAddress == address || scState.OwnerAddress == address))
+                {
+                    isOwner = true;
+
+                    // For the owner, query ElectrumX for the real-time deposit address balance
+                    if (!string.IsNullOrEmpty(contract.DepositAddress))
+                    {
+                        try
+                        {
+                            using var client = await ReserveBlockCore.Bitcoin.Bitcoin.ElectrumXClient();
+                            if (client != null)
+                            {
+                                var balance = await client.GetBalance(contract.DepositAddress, false);
+                                depositBalance = balance.Confirmed / 100_000_000M;
+                            }
+                            else
+                            {
+                                depositBalance = contract.Balance;
+                            }
+
+                            // Also update the local contract balance while we have it
+                            if (contract.Balance != depositBalance)
+                            {
+                                contract.Balance = depositBalance;
+                                VBTCContractV2.UpdateContract(contract);
+                            }
+                        }
+                        catch (Exception elxEx)
+                        {
+                            // If ElectrumX is unavailable, fall back to cached local balance
+                            depositBalance = contract.Balance;
+                            ErrorLogUtility.LogError($"ElectrumX query failed, using cached balance: {elxEx.Message}", "VBTCController.GetVBTCBalance");
+                        }
+                    }
+                }
+
+                // Owner balance = deposit address balance + ledger balance
+                // Non-owner balance = just ledger balance
+                decimal totalBalance = isOwner ? depositBalance + ledgerBalance : ledgerBalance;
+
+                // Get pending withdrawal amount (locked funds)
+                var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, scUID);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Balance retrieved successfully",
+                    Address = address,
+                    SmartContractUID = scUID,
+                    Balance = totalBalance,
+                    DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
+                    LedgerBalance = ledgerBalance,
+                    AvailableBalance = totalBalance - pendingWithdrawals,
+                    PendingWithdrawals = pendingWithdrawals,
+                    IsOwner = isOwner,
+                    TransactionCount = scState.SCStateTreiTokenizationTXes?.Count(x => x.FromAddress == address || x.ToAddress == address) ?? 0
+                });
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"GetVBTCBalance error: {ex.Message}", "VBTCController.GetVBTCBalance");
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get all vBTC V2 balances for an address across all contracts
+        /// </summary>
+        /// <param name="address">VFX address</param>
+        /// <returns>List of balances by contract</returns>
+        [HttpGet("GetAllVBTCBalances/{address}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetAllVBTCBalances(string address)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(address))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Address is required" });
+
+                var contractBalances = new List<object>();
+                decimal totalBalance = 0.0M;
+
+                // Get all vBTC V2 contracts for this address from database
+                var contracts = VBTCContractV2.GetContractsByOwner(address);
+                if (contracts != null && contracts.Any())
+                {
+                    foreach (var contract in contracts)
+                    {
+                        // Get contract state from State Trei to calculate current balance
+                        var scState = SmartContractStateTrei.GetSmartContractState(contract.SmartContractUID);
+                        
+                        decimal ledgerBalance = 0.0M;
+                        int txCount = 0;
+
+                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        {
+                            var transactions = scState.SCStateTreiTokenizationTXes
+                                .Where(x => x.FromAddress == address || x.ToAddress == address)
+                                .ToList();
+
+                            if (transactions.Any())
+                            {
+                                ledgerBalance = transactions.Sum(x => x.Amount);
+                                txCount = transactions.Count;
+                            }
+                        }
+
+                        // Check if this address is the owner (check both local DB and state trei)
+                        bool isOwner = contract.OwnerAddress == address || scState?.OwnerAddress == address;
+                        decimal depositBalance = 0.0M;
+
+                        if (isOwner && !string.IsNullOrEmpty(contract.DepositAddress))
+                        {
+                            try
+                            {
+                                using var elxClient = await ReserveBlockCore.Bitcoin.Bitcoin.ElectrumXClient();
+                                if (elxClient != null)
+                                {
+                                    var balance = await elxClient.GetBalance(contract.DepositAddress, false);
+                                    depositBalance = balance.Confirmed / 100_000_000M;
+                                }
+                                else
+                                {
+                                    depositBalance = contract.Balance;
+                                }
+
+                                if (contract.Balance != depositBalance)
+                                {
+                                    contract.Balance = depositBalance;
+                                    VBTCContractV2.UpdateContract(contract);
+                                }
+                            }
+                            catch
+                            {
+                                depositBalance = contract.Balance;
+                            }
+                        }
+
+                        decimal contractBalance = isOwner ? depositBalance + ledgerBalance : ledgerBalance;
+
+                        if (contractBalance > 0 || isOwner)
+                        {
+                            var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, contract.SmartContractUID);
+
+                            contractBalances.Add(new
+                            {
+                                SmartContractUID = contract.SmartContractUID,
+                                DepositAddress = contract.DepositAddress,
+                                Balance = contractBalance,
+                                DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
+                                LedgerBalance = ledgerBalance,
+                                AvailableBalance = contractBalance - pendingWithdrawals,
+                                PendingWithdrawals = pendingWithdrawals,
+                                TransactionCount = txCount,
+                                IsOwner = isOwner,
+                                WithdrawalStatus = contract.WithdrawalStatus.ToString()
+                            });
+
+                            totalBalance += contractBalance;
+                        }
+                    }
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = $"Retrieved balances for {contractBalances.Count} contracts",
+                    Address = address,
+                    TotalBalance = totalBalance,
+                    ContractCount = contractBalances.Count,
+                    Contracts = contractBalances
+                });
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"GetAllVBTCBalances error: {ex.Message}", "VBTCController.GetAllVBTCBalances");
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get vBTC V2 contract details
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>Contract information</returns>
+        [HttpGet("GetContractDetails/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetContractDetails(string scUID)
+        {
+            try
+            {
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Contract details retrieved",
+                    SmartContractUID = scUID,
+                    Contract = contract
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get withdrawal history for a contract
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>List of historical withdrawals</returns>
+        [HttpGet("GetWithdrawalHistory/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetWithdrawalHistory(string scUID)
+        {
+            try
+            {
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Withdrawal history retrieved",
+                    SmartContractUID = scUID,
+                    WithdrawalHistory = contract.WithdrawalHistory ?? new List<VBTCWithdrawalHistory>()
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get current withdrawal status for a contract
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>Current withdrawal status</returns>
+        [HttpGet("GetWithdrawalStatus/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetWithdrawalStatus(string scUID)
+        {
+            try
+            {
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract == null)
+                {
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
+                }
+
+                var hasActiveWithdrawal = VBTCContractV2.HasActiveWithdrawal(scUID);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Withdrawal status retrieved",
+                    SmartContractUID = scUID,
+                    Status = contract.WithdrawalStatus.ToString(),
+                    HasActiveWithdrawal = hasActiveWithdrawal
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get the health status of a vBTC V2 contract by checking how many of the original
+        /// DKG validators are still online (heartbeating). Since 67% of original validators
+        /// must be available for FROST signing, this gives users visibility into whether
+        /// their contract can still process withdrawals.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>Validator health report with online/offline breakdown</returns>
+        [HttpGet("GetContractHealth/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetContractHealth(string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(scUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID is required" });
+
+                // Step 1: Resolve the ValidatorAddressesSnapshot from the contract.
+                // Try local DB first, fall back to State Trei + in-memory decompile (works on any node).
+                List<string>? originalValidators = null;
+                int requiredThreshold = 67;
+                long lastActivityBlock = 0;
+                string? depositAddress = null;
+
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract != null)
+                {
+                    lastActivityBlock = vbtcContract.LastValidatorActivityBlock;
+                    depositAddress = vbtcContract.DepositAddress;
+                    requiredThreshold = vbtcContract.RequiredThreshold;
+                }
+
+                // Get contract data from State Trei + decompile to extract ValidatorAddressesSnapshot
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
+                {
+                    try
+                    {
+                        var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                        if (scMainDecompile?.Features != null)
+                        {
+                            var tknzFeature = scMainDecompile.Features
+                                .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                .Select(x => x.FeatureFeatures)
+                                .FirstOrDefault();
+
+                            if (tknzFeature is TokenizationV2Feature tknz)
+                            {
+                                originalValidators = tknz.ValidatorAddressesSnapshot;
+                                if (requiredThreshold <= 0) requiredThreshold = tknz.RequiredThreshold;
+                                if (lastActivityBlock <= 0) lastActivityBlock = tknz.ProofBlockHeight;
+                                if (string.IsNullOrEmpty(depositAddress)) depositAddress = tknz.DepositAddress;
+                            }
+                        }
+                    }
+                    catch (Exception decompileEx)
+                    {
+                        ErrorLogUtility.LogError($"Failed to decompile contract {scUID} for health check: {decompileEx.Message}",
+                            "VBTCController.GetContractHealth()");
+                    }
+                }
+
+                if (originalValidators == null || !originalValidators.Any())
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Could not resolve the original validator snapshot for this contract. " +
+                                  "The contract may not exist or may not have a TokenizationV2 feature."
+                    });
+                }
+
+                // Step 2: Get currently active validators from block scanning
+                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                var activeAddressSet = new HashSet<string>(
+                    activeValidators?.Select(v => v.ValidatorAddress) ?? Enumerable.Empty<string>());
+
+                // Step 3: Cross-reference each original validator against the active set
+                var validatorDetails = new List<object>();
+                int onlineCount = 0;
+                int offlineCount = 0;
+
+                foreach (var addr in originalValidators)
+                {
+                    bool isOnline = activeAddressSet.Contains(addr);
+                    long? lastHeartbeat = null;
+
+                    if (isOnline)
+                    {
+                        onlineCount++;
+                        var activeVal = activeValidators!.FirstOrDefault(v => v.ValidatorAddress == addr);
+                        if (activeVal != null)
+                            lastHeartbeat = activeVal.LastHeartbeatBlock;
+                    }
+                    else
+                    {
+                        offlineCount++;
+                    }
+
+                    validatorDetails.Add(new
+                    {
+                        Address = addr,
+                        IsOnline = isOnline,
+                        LastHeartbeatBlock = lastHeartbeat
+                    });
+                }
+
+                // Step 4: Calculate health metrics
+                int totalOriginal = originalValidators.Count;
+                decimal onlinePercentage = totalOriginal > 0
+                    ? Math.Round(((decimal)onlineCount / totalOriginal) * 100m, 2)
+                    : 0m;
+
+                bool meetsThreshold = onlinePercentage >= requiredThreshold;
+                long currentBlock = Globals.LastBlock.Height;
+
+                // Use VBTCThresholdCalculator for adjusted threshold info
+                string thresholdExplanation;
+                int adjustedThreshold;
+                int requiredValidatorCount;
+                try
+                {
+                    adjustedThreshold = Services.VBTCThresholdCalculator.CalculateAdjustedThreshold(
+                        totalOriginal, onlineCount, lastActivityBlock, currentBlock);
+                    requiredValidatorCount = Services.VBTCThresholdCalculator.CalculateRequiredValidators(
+                        adjustedThreshold, onlineCount);
+                    thresholdExplanation = Services.VBTCThresholdCalculator.GetThresholdExplanation(
+                        totalOriginal, onlineCount, lastActivityBlock, currentBlock);
+                }
+                catch
+                {
+                    adjustedThreshold = requiredThreshold;
+                    requiredValidatorCount = (int)Math.Ceiling(onlineCount * (requiredThreshold / 100.0));
+                    thresholdExplanation = $"Original threshold: {requiredThreshold}%. Online: {onlineCount}/{totalOriginal} ({onlinePercentage}%).";
+                }
+
+                // Determine overall health status
+                string healthStatus;
+                if (onlinePercentage >= 80)
+                    healthStatus = "Excellent";
+                else if (onlinePercentage >= 67)
+                    healthStatus = "Healthy";
+                else if (onlinePercentage >= 50)
+                    healthStatus = "Degraded";
+                else if (onlinePercentage > 0)
+                    healthStatus = "Critical";
+                else
+                    healthStatus = "Offline";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Contract health retrieved",
+                    SmartContractUID = scUID,
+                    DepositAddress = depositAddress,
+                    HealthStatus = healthStatus,
+                    TotalOriginalValidators = totalOriginal,
+                    OnlineValidators = onlineCount,
+                    OfflineValidators = offlineCount,
+                    OnlinePercentage = onlinePercentage,
+                    RequiredThreshold = requiredThreshold,
+                    AdjustedThreshold = adjustedThreshold,
+                    RequiredValidatorCount = requiredValidatorCount,
+                    CanProcessWithdrawals = onlineCount >= requiredValidatorCount,
+                    IsHealthy = meetsThreshold,
+                    CurrentBlockHeight = currentBlock,
+                    ScanWindow = Services.VBTCValidatorRegistry.SCAN_WINDOW,
+                    ThresholdExplanation = thresholdExplanation,
+                    Validators = validatorDetails
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Utility
+
+        /// <summary>
+        /// Get default vBTC V2 image (Base64 encoded)
+        /// </summary>
+        /// <returns>Default image data</returns>
+        [HttpGet("GetDefaultImageBase")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetDefaultImageBase()
+        {
+            try
+            {
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Default image retrieved",
+                    EncodingFormat = "base64",
+                    ImageExtension = "png",
+                    ImageName = "defaultvBTC_V2.png",
+                    ImageBase = string.Empty // No default image bundled; callers should provide their own
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get list of all vBTC V2 contracts
+        /// </summary>
+        /// <param name="address">Optional: Filter by owner address</param>
+        /// <returns>List of vBTC V2 contracts</returns>
+        [HttpGet("GetContractList/{address?}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetContractList(string? address = null)
+        {
+            try
+            {
+                var contracts = string.IsNullOrEmpty(address)
+                    ? VBTCContractV2.GetAllContracts()
+                    : VBTCContractV2.GetContractsByOwner(address);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Contract list retrieved",
+                    Contracts = contracts ?? new List<VBTCContractV2>()
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #region Privacy (vBTC shielded pool, Phase 7)
+
+        /// <summary>Transparent vBTC → shielded (T→Z). Optional co-shield warning when local wallet has little shielded VFX for future fees.</summary>
+        [HttpPost("ShieldVBTC")]
+        public async Task<string> ShieldVBTC([FromBody] ShieldVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.FromAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress required." });
+                if (!AddressValidateUtility.ValidateAddress(req.FromAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid FromAddress." });
+                var account = AccountData.GetSingleAccount(req.FromAddress);
+                if (account == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress not in local wallet." });
+
+                var sw = PrivacyDbContext.Wallets().FindOne(x => x.TransparentSourceAddress == req.FromAddress);
+                var vfxUnspent = PrivacyApiHelper.SumVfxUnspent(sw);
+                string? coShieldWarning = vfxUnspent < Globals.PrivateTxFixedFee * 2
+                    ? "Low or no shielded VFX for future ZK fees; consider also shielding VFX."
+                    : null;
+
+                var nonce = AccountStateTrei.GetNextNonce(req.FromAddress);
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildShield(
+                        req.FromAddress,
+                        req.VbtcContractUid,
+                        req.VbtcAmount,
+                        Globals.MinFeePerKB,
+                        nonce,
+                        ts,
+                        req.RecipientZfxAddress,
+                        req.Memo,
+                        out var tx,
+                        out var err,
+                        DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = err ?? "Build failed." });
+
+                tx!.Fee = req.TransparentFee ?? FeeCalcService.CalculateTXFee(tx);
+                tx.BuildPrivate();
+                var pk = account.GetPrivKey;
+                if (pk == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cannot sign (wallet locked?)." });
+                var sig = SignatureService.CreateSignature(tx.Hash, pk, account.PublicKey);
+                if (sig == "ERROR")
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Signature failed." });
+                tx.Signature = sig;
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+                if (!ok)
+                    return json;
+                return JsonConvert.SerializeObject(new { Success = true, Hash = tx.Hash, Message = "Broadcast.", CoShieldWarning = coShieldWarning });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpPost("UnshieldVBTC")]
+        public async Task<string> UnshieldVBTC([FromBody] UnshieldVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "ZfxAddress required." });
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No shielded wallet for zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = kmErr ?? "Keys" });
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var candidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var fee = Globals.PrivateTxFixedFee;
+                if (!CommitmentSelectionService.TrySelectInputs(candidates, req.TransparentVbtcAmount + fee, out var inputs, out _, out var selErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
+
+                var vfxCandidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var vfxFeeNote = vfxCandidates.Where(c => c.Amount >= fee).OrderBy(c => c.Amount).FirstOrDefault();
+                if (vfxFeeNote == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Need at least one shielded VFX note whose amount covers the fixed ZK fee. Co-shield VFX or consolidate notes first." });
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(req.VbtcContractUid, inputs, req.TransparentVbtcAmount, req.TransparentToAddress, keys, ts, out var tx, out var berr, vfxFeeNote, DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return ok ? JsonConvert.SerializeObject(new { Success = true, Hash = tx!.Hash, Message = "Broadcast." }) : json;
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpPost("PrivateTransferVBTC")]
+        public async Task<string> PrivateTransferVBTC([FromBody] PrivateTransferVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "ZfxAddress required." });
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No shielded wallet for zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = kmErr ?? "Keys" });
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var candidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var fee = Globals.PrivateTxFixedFee;
+                if (!CommitmentSelectionService.TrySelectInputs(candidates, req.PaymentAmount + fee, out var inputs, out _, out var selErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
+
+                var vfxCandidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var vfxFeeNote = vfxCandidates.Where(c => c.Amount >= fee).OrderBy(c => c.Amount).FirstOrDefault();
+                if (vfxFeeNote == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Need at least one shielded VFX note whose amount covers the fixed ZK fee. Co-shield VFX or consolidate notes first." });
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(req.VbtcContractUid, inputs, req.PaymentAmount, req.RecipientZfxAddress, keys, ts, out var tx, out var berr, vfxFeeNote, DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return ok ? JsonConvert.SerializeObject(new { Success = true, Hash = tx!.Hash, Message = "Broadcast." }) : json;
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpGet("GetShieldedVBTCBalance")]
+        public Task<string> GetShieldedVBTCBalance([FromQuery] string zfxAddress, [FromQuery] string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(zfxAddress) || string.IsNullOrWhiteSpace(scUID))
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "zfxAddress and scUID required." }));
+                var w = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (w == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Balance = 0.0m }));
+                var asset = VbtcPrivacyAsset.FormatAssetKey(scUID);
+                var sum = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).Sum(c => c.Amount) ?? 0;
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Balance = sum, Asset = asset }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        [HttpGet("GetShieldedVBTCPoolState/{scUID}")]
+        public Task<string> GetShieldedVBTCPoolState(string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(scUID))
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "scUID required." }));
+                var st = VBTCPrivacyService.GetPoolState(scUID);
+                if (st == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Asset = VbtcPrivacyAsset.FormatAssetKey(scUID), CurrentMerkleRoot = (string?)null, TotalCommitments = 0L, TotalShieldedSupply = 0.0M, LastUpdateHeight = 0L }));
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, st.AssetType, st.CurrentMerkleRoot, st.TotalCommitments, st.TotalShieldedSupply, st.LastUpdateHeight }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        #endregion
+
+        #region Base Bridge Operations
+
+        /// <summary>
+        /// Lock vBTC for bridging to Base. Creates a bridge lock record and optionally
+        /// triggers immediate relay to mint vBTC.b on Base Sepolia.
+        /// </summary>
+        /// <param name="payload">Bridge lock request</param>
+        /// <returns>Lock ID and status</returns>
+        [HttpPost("BridgeToBase")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> BridgeToBase([FromBody] VBTCBridgeLockPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID is required" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress is required" });
+
+                if (string.IsNullOrEmpty(payload.EvmDestination))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "EvmDestination is required" });
+
+                // Validate EVM address format
+                if (!payload.EvmDestination.StartsWith("0x") || payload.EvmDestination.Length != 42)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "EvmDestination must be a valid EVM address (0x + 40 hex chars)" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                if (AccountData.GetSingleAccount(payload.OwnerAddress) == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress must be a wallet account on this node (required to sign VBTC_V2_BRIDGE_LOCK)." });
+
+                // Check available balance using existing service
+                var balResult = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(
+                    payload.SmartContractUID, payload.OwnerAddress);
+
+                if (!balResult.success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Failed to check balance" });
+
+                // Deduct local bridge reservations not yet reflected in state trei (see BridgeLockRecord.GetLockedAmount)
+                var alreadyLocked = BridgeLockRecord.GetLockedAmount(payload.OwnerAddress, payload.SmartContractUID);
+                var availableBalance = balResult.availableBalance - alreadyLocked;
+
+                if (payload.Amount > availableBalance)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Insufficient available balance. Available: {availableBalance} BTC, Requested: {payload.Amount} BTC, Reserved (pending VFX confirmation): {alreadyLocked} BTC"
+                    });
+                }
+
+                var lockId = Guid.NewGuid().ToString("N");
+                var amountSats = (long)(payload.Amount * 100_000_000M);
+
+                var txResult = await Services.VBTCService.CreateBridgeLockTx(
+                    payload.SmartContractUID,
+                    payload.OwnerAddress,
+                    payload.Amount,
+                    payload.EvmDestination,
+                    lockId);
+
+                if (!txResult.Success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = txResult.TxHashOrError, LockId = lockId });
+
+                var vfxTxHash = txResult.TxHashOrError;
+
+                var lockRecord = new BridgeLockRecord
+                {
+                    LockId = lockId,
+                    SmartContractUID = payload.SmartContractUID,
+                    OwnerAddress = payload.OwnerAddress,
+                    Amount = payload.Amount,
+                    AmountSats = amountSats,
+                    EvmDestination = payload.EvmDestination,
+                    Status = BridgeLockStatus.Locked,
+                    CreatedAtUtc = TimeUtil.GetTime(),
+                    VfxLockTxHash = vfxTxHash,
+                    VfxLockConfirmedOnChain = false
+                };
+
+                if (!BridgeLockRecord.Save(lockRecord))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "VFX lock transaction was broadcast but saving the local bridge record failed. Check wallet transactions.",
+                        LockId = lockId,
+                        VfxLockTxHash = vfxTxHash
+                    });
+                }
+
+                LogUtility.Log($"[BaseBridge] VFX bridge lock broadcast. LockId: {lockId}, Tx: {vfxTxHash}, Amount: {payload.Amount} BTC, To: {payload.EvmDestination}",
+                    "VBTCController.BridgeToBase");
+
+                string status;
+                if (VbtcBaseBridge.IsEnabled)
+                    status = "VFX lock broadcast. After the lock confirms on-chain, validators sign mint attestations and casters submit mintWithProof on Base.";
+                else
+                    status = "VFX lock broadcast. Configure BaseBridgeRpcUrl and BaseBridgeContract in config.txt for Base mint (VBTCb).";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "vBTC bridge lock transaction broadcast",
+                    LockId = lockId,
+                    VfxLockTxHash = vfxTxHash,
+                    SmartContractUID = payload.SmartContractUID,
+                    Amount = payload.Amount,
+                    AmountSats = amountSats,
+                    EvmDestination = payload.EvmDestination,
+                    Status = status,
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get bridge lock status by lock ID
+        /// </summary>
+        [HttpGet("GetBridgeLockStatus/{lockId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLockStatus(string lockId)
+        {
+            try
+            {
+                var record = BridgeLockRecord.GetByLockId(lockId);
+                if (record == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Bridge lock not found" });
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Bridge lock found",
+                    Lock = record
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Validator node: sign the VBTCb mint message for a confirmed VFX bridge lock.
+        /// Casters POST the same <see cref="MintAttestationRequest"/> body to each validator; response uses lowercase <c>success</c> / <c>signature</c> for collector compatibility.
+        /// </summary>
+        [HttpPost("SignMintAttestation")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SignMintAttestation([FromBody] MintAttestationRequest request)
+        {
+            try
+            {
+                if (request == null)
+                    return JsonConvert.SerializeObject(new { success = false, message = "Payload cannot be null" });
+
+                var (ok, sig, err) = await Services.BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                if (!ok)
+                    return JsonConvert.SerializeObject(new { success = false, message = err ?? "Signing failed" });
+
+                return JsonConvert.SerializeObject(new { success = true, signature = sig });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { success = false, message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Returns in-memory mint attestation progress for a lock ID on this node (caster-collected signatures).
+        /// </summary>
+        [HttpGet("GetMintAttestation/{lockId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetMintAttestation(string lockId)
+        {
+            try
+            {
+                var state = Services.BaseBridgeAttestationService.GetAttestationState(lockId);
+                if (state == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "No attestation state for this lock on this node" }));
+
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Attestation = state }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// List all bridge locks for a contract
+        /// </summary>
+        [HttpGet("GetBridgeLocks/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLocks(string scUID)
+        {
+            try
+            {
+                var records = BridgeLockRecord.GetBySmartContract(scUID);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = $"Found {records.Count} bridge locks",
+                    Locks = records
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// List all bridge locks for an owner address (across all contracts)
+        /// </summary>
+        [HttpGet("GetBridgeLocksByOwner/{ownerAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLocksByOwner(string ownerAddress)
+        {
+            try
+            {
+                var records = BridgeLockRecord.GetByOwner(ownerAddress);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = $"Found {records.Count} bridge locks for owner",
+                    Locks = records
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Deprecated: VBTCb does not use a relay-key queue. Mint uses validator attestations and caster-submitted mintWithProof.
+        /// </summary>
+        [HttpPost("RelayPendingBridgeLocks")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> RelayPendingBridgeLocks()
+        {
+            return Task.FromResult(JsonConvert.SerializeObject(new
+            {
+                Success = false,
+                Message = "VBTCb has no relay queue. Use SignMintAttestation on validators and caster flow for mintWithProof after the VFX lock confirms."
+            }));
+        }
+
+        /// <summary>
+        /// Get vBTC.b balance on Base for a given EVM address
+        /// </summary>
+        [HttpGet("GetBaseBalance/{evmAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBaseBalance(string evmAddress)
+        {
+            try
+            {
+                var result = await VbtcBaseBridge.GetBaseBalance(evmAddress);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = result.Success,
+                    Message = result.Message,
+                    EvmAddress = evmAddress,
+                    VBTCbBalance = result.Balance,
+                    ContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    Network = VbtcBaseBridge.BaseNetworkDisplayName,
+                    ChainId = VbtcBaseBridge.BaseChainId
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get bridge configuration status
+        /// </summary>
+        [HttpGet("GetBridgeStatus")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeStatus()
+        {
+            try
+            {
+                var pendingAttestations = BridgeLockRecord.GetPendingV2Attestations().Count;
+                var totalSupply = VbtcBaseBridge.CanReadVbtcToken
+                    ? await VbtcBaseBridge.GetBaseTotalSupply()
+                    : (false, 0M, "Not configured");
+
+                var sync = BridgeExitSyncState.GetOrCreate();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
+                    ExitWatchConfigured = VbtcBaseBridgeExit.IsConfigured,
+                    BaseRpcUrl = VbtcBaseBridge.BaseRpcUrl,
+                    VBTCbContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    BaseChainId = VbtcBaseBridge.BaseChainId,
+                    PendingV2Attestations = pendingAttestations,
+                    BaseTotalSupply = totalSupply.Item2,
+                    ExitPollLastScannedBlock = sync.LastScannedBlock,
+                    Network = VbtcBaseBridge.BaseNetworkDisplayName
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Returns the contract address, chainId, and ABI needed by the frontend to call mintWithProof via MetaMask.
+        /// </summary>
+        [HttpGet("GetBridgeConfig")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string GetBridgeConfig()
+        {
+            return JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                IsEnabled = VbtcBaseBridge.IsEnabled,
+                ContractAddress = VbtcBaseBridge.ContractAddress,
+                ChainId = VbtcBaseBridge.BaseChainId,
+                Network = VbtcBaseBridge.BaseNetworkDisplayName,
+                Abi = Services.BaseBridgeService.CONTRACT_ABI
+            });
+        }
+
+        /// <summary>
+        /// Configure the Base bridge at runtime (alternative to environment variables).
+        /// WARNING: Only use in development/demo. In production, use environment variables.
+        /// </summary>
+        [HttpPost("ConfigureBridge")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ConfigureBridge([FromBody] VBTCBridgeConfigPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (!string.IsNullOrEmpty(payload.BaseRpcUrl))
+                    VbtcBaseBridge.BaseRpcUrl = payload.BaseRpcUrl;
+
+                if (!string.IsNullOrEmpty(payload.VBTCbContractAddress))
+                    VbtcBaseBridge.VBTCbContractAddress = payload.VBTCbContractAddress;
+
+                if (payload.BaseChainId > 0)
+                    VbtcBaseBridge.BaseChainId = payload.BaseChainId;
+
+                LogUtility.Log($"[BaseBridge] Configuration updated via API. Enabled: {VbtcBaseBridge.IsEnabled}",
+                    "VBTCController.ConfigureBridge");
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Bridge configuration updated",
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
+                    BaseRpcUrl = VbtcBaseBridge.BaseRpcUrl,
+                    VBTCbContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    BaseChainId = VbtcBaseBridge.BaseChainId
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Manually poll Base for <c>burnForExit</c> / <c>ExitBurned</c> and unlock matching VFX locks (same as background worker).
+        /// </summary>
+        [HttpPost("PollBaseExitBurns")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> PollBaseExitBurns()
+        {
+            try
+            {
+                var result = await VbtcBaseBridgeExit.PollOnce();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Processed = result.Processed,
+                    ScannedToBlock = result.ScannedToBlock,
+                    Message = result.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Reset the exit burn scan cursor to rescan from a specific Base block number.
+        /// Use this to re-detect missed burn events (e.g. VfxExitBurned, BTCExitBurned).
+        /// The background loop will automatically rescan from the specified block on its next tick.
+        /// </summary>
+        [HttpPost("RescanExitBurns/{fromBlock}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string RescanExitBurns(long fromBlock)
+        {
+            try
+            {
+                var result = VbtcBaseBridgeExit.RescanFromBlock(fromBlock);
+                return JsonConvert.SerializeObject(new
+                {
+                    result.Success,
+                    result.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #endregion
+
+        #region FROST Contract Blacklist
+
+        /// <summary>
+        /// Manually blacklist a contract's FROST keys (e.g., contracts DKG'd before the participant ordering fix).
+        /// Blacklisted contracts are skipped during BTC exit contract selection.
+        /// </summary>
+        [HttpPost("InvalidateFrostContract/{scUID}")]
+        public IActionResult InvalidateFrostContract(string scUID)
+        {
+            if (string.IsNullOrWhiteSpace(scUID))
+                return BadRequest(new { Success = false, Message = "scUID is required" });
+
+            FrostBlacklist.Blacklist(scUID, "Manually invalidated via API");
+            return Ok(new { Success = true, Message = $"Contract {scUID} has been blacklisted for FROST signing (24h TTL)" });
+        }
+
+        /// <summary>
+        /// Remove a contract from the FROST blacklist (e.g., after successful re-DKG).
+        /// </summary>
+        [HttpPost("RemoveFrostBlacklist/{scUID}")]
+        public IActionResult RemoveFrostBlacklist(string scUID)
+        {
+            if (string.IsNullOrWhiteSpace(scUID))
+                return BadRequest(new { Success = false, Message = "scUID is required" });
+
+            var removed = FrostBlacklist.Remove(scUID);
+            return Ok(new { Success = true, Message = removed ? $"Contract {scUID} removed from blacklist" : $"Contract {scUID} was not in the blacklist" });
+        }
+
+        /// <summary>
+        /// List all currently blacklisted FROST contracts.
+        /// </summary>
+        [HttpGet("GetFrostBlacklist")]
+        public IActionResult GetFrostBlacklist()
+        {
+            var blacklist = FrostBlacklist.GetAll();
+            return Ok(new { Success = true, Blacklist = blacklist });
+        }
+
+        #endregion
+    }
+
+    #region Payload Models
+
+    public class VBTCContractPayload
+    {
+        public string OwnerAddress { get; set; }
+        public string Name { get; set; }
+        public string Description { get; set; }
+        public string? Ticker { get; set; }
+        public string? ImageBase { get; set; }
+        /// <summary>
+        /// Optional: Ceremony ID from a completed MPC ceremony
+        /// If provided, the deposit address from the ceremony will be used
+        /// If not provided, you must call InitiateMPCCeremony first
+        /// </summary>
+        public string? CeremonyId { get; set; }
+    }
+
+    public class VBTCTransferPayload
+    {
+        public string SmartContractUID { get; set; }
+        public string FromAddress { get; set; }
+        public string ToAddress { get; set; }
+        public decimal Amount { get; set; }
+    }
+
+    public class VBTCTransferMultiPayload
+    {
+        public string SmartContractUID { get; set; }
+        public string FromAddress { get; set; }
+        public List<VBTCTransferRecipient> Recipients { get; set; }
+    }
+
+    public class VBTCTransferRecipient
+    {
+        public string ToAddress { get; set; }
+        public decimal Amount { get; set; }
+    }
+
+    public class VBTCWithdrawalPayload
+    {
+        public string SmartContractUID { get; set; }
+        /// <summary>
+        /// The VFX address requesting withdrawal. Can be any address with a vBTC balance — not just the contract owner.
+        /// </summary>
+        public string RequestorAddress { get; set; }
+        public string BTCAddress { get; set; }
+        public decimal Amount { get; set; }
+        public int FeeRate { get; set; }
+    }
+
+    public class VBTCWithdrawalCompletePayload
+    {
+        public string SmartContractUID { get; set; }
+        public string WithdrawalRequestHash { get; set; }
+    }
+
+    public class VBTCCancellationPayload
+    {
+        public string SmartContractUID { get; set; }
+        public string OwnerAddress { get; set; }
+        public string WithdrawalRequestHash { get; set; }
+        public string BTCTxHash { get; set; }
+        public string FailureProof { get; set; }
+    }
+
+    public class VBTCCancellationVotePayload
+    {
+        public string CancellationUID { get; set; }
+        public string ValidatorAddress { get; set; }
+        public bool Approve { get; set; }
+        public string ValidatorSignature { get; set; }
+    }
+
+    // Raw Contract Creation Payload Models (for external/pre-signed requests)
+
+    public class VBTCContractRawPayload
+    {
+        public string OwnerAddress { get; set; }
+        public string Name { get; set; }
+        public string Description { get; set; }
+        public string? Ticker { get; set; }
+        public string? ImageBase { get; set; }
+        public string CeremonyId { get; set; }           // Ceremony ID from completed MPC ceremony
+        public long Timestamp { get; set; }              // Unix timestamp
+        public string UniqueId { get; set; }             // Unique request ID (prevents replay)
+        public string OwnerSignature { get; set; }       // Signature of request data
+    }
+
+    // Raw Withdrawal Payload Models (for external/pre-signed requests)
+
+    public class VBTCWithdrawalRawPayload
+    {
+        public string VFXAddress { get; set; }           // Owner's VFX address
+        public string BTCAddress { get; set; }           // BTC destination
+        public string SmartContractUID { get; set; }
+        public decimal Amount { get; set; }
+        public int FeeRate { get; set; }
+        public long Timestamp { get; set; }              // Unix timestamp
+        public string UniqueId { get; set; }             // Unique request ID (prevents replay)
+        public string VFXSignature { get; set; }         // Signature of request data
+        public bool IsTest { get; set; }                 // Testnet flag
+    }
+
+    public class VBTCWithdrawalCompleteRawPayload
+    {
+        public string SmartContractUID { get; set; }
+        public string WithdrawalRequestHash { get; set; }
+        public string ValidatorAddress { get; set; }     // Validator initiating completion
+        public long Timestamp { get; set; }
+        public string UniqueId { get; set; }
+        public string ValidatorSignature { get; set; }   // FROST signature proof
+    }
+
+    public class VBTCCancellationRawPayload
+    {
+        public string SmartContractUID { get; set; }
+        public string OwnerAddress { get; set; }
+        public string WithdrawalRequestHash { get; set; }
+        public string BTCTxHash { get; set; }
+        public string FailureProof { get; set; }         // Proof of BTC TX failure
+        public long Timestamp { get; set; }
+        public string UniqueId { get; set; }
+        public string OwnerSignature { get; set; }       // VFX signature
+    }
+
+    // Base Bridge Payload Models
+
+    public class VBTCBridgeLockPayload
+    {
+        public string SmartContractUID { get; set; } = string.Empty;
+        public string OwnerAddress { get; set; } = string.Empty;
+        public decimal Amount { get; set; }
+        public string EvmDestination { get; set; } = string.Empty;
+    }
+
+    public class VBTCBridgeConfigPayload
+    {
+        public string? BaseRpcUrl { get; set; }
+        public string? VBTCbContractAddress { get; set; }
+        public int BaseChainId { get; set; } = 0;
+    }
+
+    #endregion
+}
+

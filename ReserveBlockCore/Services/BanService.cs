@@ -8,6 +8,51 @@ namespace ReserveBlockCore.Services
     public class BanService
     {
         static SemaphoreSlim BanServiceLock = new SemaphoreSlim(1, 1);
+        /// <summary>
+        /// Checks whether the given IP belongs to an active block caster.
+        /// Caster IPs must never be banned — doing so breaks consensus quorum
+        /// and can cause cascading network splits.
+        /// </summary>
+        public static bool IsCasterIP(string ipAddress)
+        {
+            if (string.IsNullOrEmpty(ipAddress))
+                return false;
+            var normalized = ipAddress.Replace("::ffff:", "");
+            return Globals.BlockCasters.Any(c =>
+                !string.IsNullOrEmpty(c.PeerIP) &&
+                c.PeerIP.Replace("::ffff:", "").Replace(":" + Globals.Port, "") == normalized);
+        }
+
+        /// <summary>
+        /// Unbans all IPs that belong to active block casters.
+        /// Called periodically from MonitorCasters and RunUnban to prevent
+        /// consensus deadlocks caused by caster-to-caster bans.
+        /// </summary>
+        public static void UnbanCasterIPs()
+        {
+            try
+            {
+                var casterIPs = Globals.BlockCasters.ToList()
+                    .Where(c => !string.IsNullOrEmpty(c.PeerIP))
+                    .Select(c => c.PeerIP!.Replace("::ffff:", "").Replace(":" + Globals.Port, ""))
+                    .Where(ip => !string.IsNullOrEmpty(ip))
+                    .ToList();
+
+                foreach (var ip in casterIPs)
+                {
+                    if (Globals.BannedIPs.ContainsKey(ip))
+                    {
+                        UnbanPeer(ip);
+                        BanLogUtility.Log($"Auto-unbanned caster IP: {ip} (caster IPs must not be banned)", "BanService.UnbanCasterIPs");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"UnbanCasterIPs error: {ex.Message}", "BanService.UnbanCasterIPs()");
+            }
+        }
+
         public static void BanPeer(string ipAddress, string message, string location)
         {
             if (Globals.AdjudicateAccount == null)
@@ -19,6 +64,14 @@ namespace ReserveBlockCore.Services
             {
                 if (Globals.Nodes.ContainsKey(ipAddress))
                     return;
+            }
+
+            // FIX 1: Never ban active caster IPs — doing so breaks consensus quorum
+            // and causes cascading network splits where casters ban each other.
+            if (IsCasterIP(ipAddress))
+            {
+                BanLogUtility.Log($"BanPeer SKIPPED — {ipAddress} is an active caster IP. Reason: {message}", location);
+                return;
             }
 
             var peers = Peers.GetAll();
@@ -104,33 +157,42 @@ namespace ReserveBlockCore.Services
 
         private static DateTime GetNextUnbanDate(int banCount)
         {
-            if(banCount == 1)
+            // FORK-FIX: Softened ban escalation — the old schedule was too aggressive.
+            // During a fork, legitimate validators rapidly accumulate bans (parent hash
+            // mismatch, block reception errors) and get perma-banned after ~10 occurrences.
+            // New schedule: much longer ramp before serious bans, and perma-ban threshold
+            // raised from 10 to 25 to survive extended network disagreements.
+            if(banCount <= 2)
             {
                 return DateTime.UtcNow.AddMinutes(1);
             }
-            else if(banCount == 2)
+            else if(banCount <= 4)
             {
                 return DateTime.UtcNow.AddMinutes(5);
             }
-            else if(banCount == 3)
+            else if(banCount <= 7)
+            {
+                return DateTime.UtcNow.AddMinutes(15);
+            }
+            else if(banCount <= 10)
             {
                 return DateTime.UtcNow.AddMinutes(30);
             }
-            else if(banCount == 4)
+            else if(banCount <= 15)
             {
-                return DateTime.UtcNow.AddMinutes(60);
+                return DateTime.UtcNow.AddHours(1);
             }
-            else if(banCount > 4 && banCount < 10)
+            else if(banCount <= 20)
             {
-                return DateTime.UtcNow.AddHours(12);
+                return DateTime.UtcNow.AddHours(6);
             }
-            else if(banCount == 10)
+            else if(banCount <= 25)
             {
-                return DateTime.UtcNow.AddHours(24); //one last chance. 24 hour ban
+                return DateTime.UtcNow.AddHours(24);
             }
             else
             {
-                return DateTime.UtcNow.AddYears(99); //perma banned now
+                return DateTime.UtcNow.AddYears(99); //perma banned now (was 10, now 25+)
             }
         }
 
@@ -216,6 +278,11 @@ namespace ReserveBlockCore.Services
 
         public static async Task RunUnban()
         {
+            // FIX 2: Always unban caster IPs first, regardless of their NextUnbanDate.
+            // This is a safety net for any caster IPs that were banned before Fix 1 was deployed,
+            // or that were banned via a code path that bypasses BanPeer (e.g., direct dictionary insert).
+            UnbanCasterIPs();
+
             try
             {
                 var peers = Peers.GetAll();
@@ -287,9 +354,12 @@ namespace ReserveBlockCore.Services
                 var peers = Peers.GetAll();
                 if (peers != null)
                 {
+                    // FORK-FIX: Raised perma-ban threshold from 10 to 25 to match softened escalation.
+                    // During fork events, legitimate validators can accumulate many short bans
+                    // from parent hash mismatches. They shouldn't be perma-banned for this.
                     var permaBanList = peers.Query().Where(x =>
                         x.IsBanned &&
-                        x.BanCount > 10 &&
+                        x.BanCount > 25 &&
                         !x.IsPermaBanned).ToEnumerable();
 
                     if (permaBanList.Count() > 0)

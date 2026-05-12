@@ -1,4 +1,4 @@
-﻿global using ReserveBlockCore.Extensions;
+global using ReserveBlockCore.Extensions;
 
 using ReserveBlockCore.Commands;
 using ReserveBlockCore.Data;
@@ -23,6 +23,7 @@ using System.Reflection;
 using ReserveBlockCore.DST;
 using ReserveBlockCore.Engines;
 using ReserveBlockCore.Config;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Bitcoin.Utilities;
 using ReserveBlockCore.Bitcoin.Integrations;
 using ElmahCore.Mvc;
@@ -44,8 +45,12 @@ namespace ReserveBlockCore
             bool skipStateSync = false;
             bool startGUI = false;
             bool headlessMode = false;
+            long? revertToHeight = null;
 
             var argList = args.ToList();
+            // Exact "snapshot" = cold chain DB checkpoint + copy under the DB folder (excludes wallet DBs).
+            // Use "snapshot=0" / "snapshot=1" for the optional remote snapshot download flow.
+            bool coldChainSnapshot = argList.Exists(x => string.Equals(x?.Trim(), "snapshot", StringComparison.OrdinalIgnoreCase));
             //force culture info to US
             var culture = CultureInfo.GetCultureInfo("en-US");
             if (Thread.CurrentThread.CurrentCulture.Name != "en-US")
@@ -109,7 +114,7 @@ namespace ReserveBlockCore
                 LogUtility.Log("Warden monitoring service started", "Program.Main()");
             }
             //Forced Testnet
-            //Globals.IsTestNet = true;
+            Globals.IsTestNet = true;
             //Globals.IsCustomTestNet = true;
             Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
             Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
@@ -186,16 +191,6 @@ namespace ReserveBlockCore
                         Globals.HeadlessMode = true;
                         Globals.StopConsoleOutput = true;
                         Globals.StopValConsoleOutput = true;
-                    }
-
-                    if(argC.Contains("cFork"))
-                    {
-                        Globals.IsFork = true;
-                        var forkSplit = argC.Split(new char[] { '=' });
-                        if (string.IsNullOrEmpty(forkSplit[1]))
-                            await ForkConfiguration.RunForkedConfiguration();
-                        else
-                            await ForkConfiguration.RunForkedConfiguration(forkSplit[1]);
                     }
                     if(argC == "version")
                     {
@@ -275,6 +270,22 @@ namespace ReserveBlockCore
                     {
                         Globals.BlockSeedCalls = true;
                     }
+                    if (argC.StartsWith("revertblock="))
+                    {
+                        var revertParts = argC.Split('=', 2);
+                        if (revertParts.Length == 2 && long.TryParse(revertParts[1], out var revertHeight) && revertHeight >= 0)
+                        {
+                            revertToHeight = revertHeight;
+                            Console.WriteLine($"[REVERT] Will revert chain to height {revertToHeight} after DB initialization.");
+                        }
+                    }
+                    if(argC.Contains("ipaddress"))
+                    {
+                        var ipSplit = argC.Split(new char[] { '=' });
+                        Globals.ReportedIP = ipSplit[1];
+                        Globals.ReportedIPManuallySet = true;
+                        Globals.ReportedIPs.TryAdd(Globals.ReportedIP, 99999);
+                    }
                     if(argC.Contains("keslog"))
                     {
                         keslog = true;
@@ -283,24 +294,24 @@ namespace ReserveBlockCore
                     {
                         signalrLog = true;
                     }
-                    if (argC.Contains("snapshot"))
+                    if (argC.StartsWith("snapshot=", StringComparison.OrdinalIgnoreCase))
                     {
-                        var snapshot = argC.Split(new char[] { '=' });
+                        var snapshot = argC.Split(new char[] { '=' }, 2);
+                        if (snapshot.Length < 2)
+                            return;
                         var response = snapshot[1];
-                        if(response == "0")
+                        if (response == "0")
                         {
-                            //download auto
                             await SnapshotService.RunSnapshot();
                         }
-                        if(response == "1")
+                        if (response == "1")
                         {
-                            //prompt cli commands here
                             AnsiConsole.MarkupLine($"You have added the snapshot param. Do you want to download snapshot? ([green]'y'[/] for [green]yes[/] and [red]'n'[/] for [red]no[/])");
                             AnsiConsole.MarkupLine($"[yellow]Please note this will completely wipe out your database folder. Please make sure you have your private keys backed up.[/])");
                             var snapshotResponse = Console.ReadLine();
-                            if(!string.IsNullOrEmpty(snapshotResponse))
+                            if (!string.IsNullOrEmpty(snapshotResponse))
                             {
-                                if(snapshotResponse == "y")
+                                if (snapshotResponse == "y")
                                 {
                                     await SnapshotService.RunSnapshot();
                                 }
@@ -328,7 +339,14 @@ namespace ReserveBlockCore
             Config.Config.EstablishABLFile();
             var config = Config.Config.ReadConfigFile();
             Config.Config.ProcessConfig(config);
+            if (argList.Any(x => string.Equals(x?.Trim(), "casterlog", StringComparison.OrdinalIgnoreCase)))
+                Globals.CasterLogEnabled = true;
             Config.Config.ProcessABL();
+
+            _ = Task.Run(LogUtility.LogLoop);
+
+            // Run startup IP check (validates IP is configured; port checks happen later after servers start)
+            ValidatorPortCheckService.RunStartupIPCheck();
 
             LogUtility.Log(logCLIVer, "Main", true);
             LogUtility.Log($"VFX Wallet - {logCLIVer}", "Main");
@@ -343,9 +361,61 @@ namespace ReserveBlockCore
 
             StartupService.AnotherInstanceCheck(); //checks for another instance
 
+            if (coldChainSnapshot)
+                await LocalDbSnapshotService.CreateChainSnapshotAsync();
+
             StartupService.StartupDatabase();// initializes databases
 
+            // PLONK params: auto-download if not present, then load into native FFI (background — non-blocking)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var plonkParamsPath = await PLONKParamsDownloader.EnsureParamsAvailableAsync();
+                    if (!string.IsNullOrEmpty(plonkParamsPath))
+                        PLONKSetup.TryLoadParamsFile(plonkParamsPath);
+                    PLONKSetup.RefreshVerificationCapability();
+                    LogUtility.Log("PLONK params loaded successfully in background.", "Program.Main()");
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Background PLONK load failed: {ex}", "Program.Main()");
+                }
+            });
+
             await DbContext.CheckPoint(); //checkpoints db log files
+
+            // STARTUP REVERT: If revertblock=N was passed, delete all blocks/headers above N
+            // and rebuild state from genesis before the rest of startup reads chain state.
+            if (revertToHeight.HasValue)
+            {
+                Console.WriteLine($"[REVERT] Reverting chain to height {revertToHeight.Value}...");
+                try
+                {
+                    // 1. Delete blocks above target from block store (rsrvblkdata.db)
+                    var revertBlocks = Block.GetBlocks();
+                    var deletedBlocks = revertBlocks.DeleteManySafe(x => x.Height > revertToHeight.Value);
+                    DbContext.DB.Checkpoint();
+
+                    // 2. Delete blockchain headers above target (rsrvblockchain.db)
+                    var revertBlockchain = Blockchain.GetBlockchain();
+                    var deletedHeaders = revertBlockchain?.DeleteManySafe(x => x.Height > revertToHeight.Value) ?? 0;
+                    DbContext.DB_Blockchain.Checkpoint();
+
+                    Console.WriteLine($"[REVERT] Deleted {deletedBlocks} block(s) and {deletedHeaders} blockchain header(s) above height {revertToHeight.Value}.");
+
+                    //Add this back when we are ready to test full revert.
+                    // 3. Rebuild all state (transactions, account balances, world trei) from remaining blocks
+                    Console.WriteLine($"[REVERT] Rebuilding state from genesis... (this may take a while for long chains)");
+                    var resetResult = await BlockRollbackUtility.ResetTreis();
+                    Console.WriteLine($"[REVERT] State rebuild {(resetResult ? "succeeded" : "FAILED")}. Continuing normal startup...");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[REVERT] ERROR during revert: {ex.Message}");
+                    Console.WriteLine($"[REVERT] The node may be in an inconsistent state. Consider using snapshot recovery.");
+                }
+            }
 
             await VFXLogging.ClearElmah();
             StartupService.SetBlockHeight(); //sets current block height
@@ -500,8 +570,6 @@ namespace ReserveBlockCore
 
             await StartupService.SetSelfBeacon();
 
-            _ = Task.Run(LogUtility.LogLoop);
-
             //deprecate in v5.0.1 or greater
             _ = Task.Run(P2PClient.UpdateMethodCodes);
 
@@ -527,9 +595,39 @@ namespace ReserveBlockCore
 
             // HAL-071 Fix: Start mempool cleanup service to prevent unbounded growth
             MempoolCleanupService.Start();
+            CeremonyCleanupService.Start();
 
             MessageLocksCleanupService.Start();
             BroadcastTrackingCleanupService.Start();
+
+            // Base Bridge: Load configuration from environment variables
+            Bitcoin.Services.BaseBridgeService.LoadConfig();
+            Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+            if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+            {
+                LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "Program.Main()");
+                Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+            }
+            else
+            {
+                LogUtility.Log("[vBTC Bridge V2] No validator Base address derived (node may not be a validator).", "Program.Main()");
+            }
+
+            // vBTC V2: Start deposit balance scan loop (scans owned contracts via Electrum)
+            _ = Task.Run(Bitcoin.Services.VBTCService.VBTCV2BalanceScanLoop);
+
+            // Base bridge-back: poll ExitBurned logs (burnForExit) and unlock VFX bridge locks
+            _ = Task.Run(Bitcoin.Services.BaseBridgeExitWatchService.BridgeExitScanLoop);
+
+            // VBTCb: casters collect validator mint attestations over HTTP (validators expose SignMintAttestation)
+            // Caster attestation loop kept for backwards compatibility — but user nodes now handle minting directly via UserBridgeMintService.
+            _ = Task.Run(Bitcoin.Services.BaseBridgeAttestationService.ProcessPendingAttestationsLoop);
+
+            // V2 Bridge: Sync VFX validator set to Base contract
+            _ = Task.Run(() => Bitcoin.Services.BaseValidatorSyncService.ValidatorSyncLoop(CancellationToken.None));
+
+            // V2 Bridge: Caster consensus for burn exits
+            _ = Task.Run(() => Bitcoin.Services.BurnExitConsensusService.ConsensusLoop(CancellationToken.None));
 
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
@@ -663,6 +761,14 @@ namespace ReserveBlockCore
                     Globals.ValidatorPublicKey = myAccount.PublicKey;
                     Globals.GUIPasswordNeeded = false;
                     LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
+
+                    // Derive Base address now that ValidatorAddress is set
+                    Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                    if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                    {
+                        LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "Program.Main()");
+                        Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                    }
                 }
             }
 
@@ -927,6 +1033,23 @@ namespace ReserveBlockCore
                     }
                     else
                         P2PClient.UpdateMaxHeight(maxHeight);
+
+                    // FORK-RECOVERY: DISABLED — time-based stuck detection was too aggressive.
+                    // It triggered false-positive rollbacks during normal block production delays,
+                    // causing the missing-block-22802 bug (stale NetworkBlockQueue entries allowed
+                    // orphaned blocks to pass validation after rollback).
+                    //
+                    // Phase 2 will replace this with caster-driven hash-based fork detection:
+                    // Casters detect hash splits, vote on canonical hash (3/5 majority),
+                    // and push corrections to validators via SignalR.
+                    //
+                    // if (!Globals.IsResyncing && !ForkRecoveryUtility.IsRecoveryInProgress)
+                    // {
+                    //     await ForkRecoveryUtility.CheckAndRecoverAsync(
+                    //         Globals.LastBlock.Height,
+                    //         maxHeight,
+                    //         "Program.BlockHeightCheck");
+                    // }
 
                     var MaxHeight = P2PClient.MaxHeight();
                     foreach (var node in Globals.Nodes.Values)

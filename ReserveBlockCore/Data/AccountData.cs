@@ -148,12 +148,19 @@ namespace ReserveBlockCore.Data
 
                                 SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
 
-								if(scMain.Features != null)
-								{
+							if(scMain.Features != null)
+							{
                                     var tokenizedBitcoinFeature = scMain.Features.Where(x => x.FeatureName == FeatureName.Tokenization).FirstOrDefault();
-									if(tokenizedBitcoinFeature != null)
-									{
+								if(tokenizedBitcoinFeature != null)
+								{
                                         await TokenizedBitcoin.SaveSmartContract(scMain, null, account.Address);
+                                    }
+                                    
+                                    // vBTC V2 restoration
+                                    var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
+                                    if(tokenizedBitcoinV2Feature != null)
+                                    {
+                                        await VBTCContractV2.SaveSmartContract(scMain, null, account.Address);
                                     }
                                 }
                             }
@@ -212,6 +219,17 @@ namespace ReserveBlockCore.Data
                                             token.Balance = balance;
                                             await tokenDb.UpdateSafeAsync(token);
                                         }
+                                    }
+                                    
+                                    // vBTC V2 balance restoration
+                                    // FIND-001 FIX: Only ensure the canonical contract record exists.
+                                    // Token balances are tracked in SmartContractStateTrei.SCStateTreiTokenizationTXes,
+                                    // not in holder-specific VBTCContractV2 records.
+                                    var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
+                                    if (tokenizedBitcoinV2Feature != null)
+                                    {
+                                        await VBTCContractV2.SaveSmartContractTransfer(scMain, account.Address, null);
+                                        // Note: Balance is not updated here as it's tracked in SmartContractStateTrei
                                     }
                                 }
                             }

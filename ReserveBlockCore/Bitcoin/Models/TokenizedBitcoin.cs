@@ -162,7 +162,7 @@ namespace ReserveBlockCore.Bitcoin.Models
             return null;
         }
 
-        public static async Task SaveSmartContract(SmartContractMain scMain, string? scText = null, string? rbxAddress = null)
+        public static async Task SaveSmartContract(SmartContractMain scMain, string? scText = null, string? vfxAddress = null)
         {
             var scs = GetDb();
 
@@ -182,7 +182,7 @@ namespace ReserveBlockCore.Bitcoin.Models
                             {
                                 DepositAddress = tknz.DepositAddress,
                                 IsPublished = false,
-                                RBXAddress = rbxAddress == null ? scMain.MinterAddress : rbxAddress,
+                                RBXAddress = vfxAddress == null ? scMain.MinterAddress : vfxAddress,
                                 SmartContractMainId = scMain.Id,
                                 SmartContractUID = scMain.SmartContractUID,
                                 TokenDescription = scMain.Description,
@@ -211,11 +211,11 @@ namespace ReserveBlockCore.Bitcoin.Models
             }
 
         }
-        public static async Task SaveSmartContractCoinTransfer(SmartContractMain scMain, string rbxAddress, string? scText = null)
+        public static async Task SaveSmartContractCoinTransfer(SmartContractMain scMain, string vfxAddress, string? scText = null)
         {
             var scs = GetDb();
 
-            var exist = scs.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.RBXAddress == rbxAddress);
+            var exist = scs.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.RBXAddress == vfxAddress);
 
             if (exist == null)
             {
@@ -231,7 +231,7 @@ namespace ReserveBlockCore.Bitcoin.Models
                             {
                                 DepositAddress = tknz.DepositAddress,
                                 IsPublished = false,
-                                RBXAddress = rbxAddress == null ? scMain.MinterAddress : rbxAddress,
+                                RBXAddress = vfxAddress == null ? scMain.MinterAddress : vfxAddress,
                                 SmartContractMainId = scMain.Id,
                                 SmartContractUID = scMain.SmartContractUID,
                                 TokenDescription = scMain.Description,

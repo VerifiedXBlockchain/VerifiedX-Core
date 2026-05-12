@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -1016,7 +1016,7 @@ namespace ReserveBlockCore.Controllers
                             transaction.TransactionRating = rating;
                         }
 
-                        TransactionData.AddToPool(transaction);
+                        await TransactionData.AddToPool(transaction);
                         await P2PClient.SendTXMempool(transaction);//send out to mempool
 
                         output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Transaction has been broadcasted.", Hash = transaction.Hash });

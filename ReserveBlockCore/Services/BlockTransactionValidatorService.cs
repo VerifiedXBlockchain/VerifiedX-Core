@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Linq;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
@@ -554,6 +554,485 @@ namespace ReserveBlockCore.Services
                     var txdata = TransactionData.GetAll();
                     tx.TransactionStatus = TransactionStatus.Success;
                     txdata.InsertSafe(tx);
+                }
+
+                // vBTC V2 Transaction Processing
+                if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+                {
+                    try
+                    {
+                        // Parse transaction data
+                        var jobj = JObject.Parse(tx.Data);
+                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
+                        var toAddress = jobj["ToAddress"]?.ToObject<string?>();
+                        var amount = jobj["Amount"]?.ToObject<decimal?>();
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(fromAddress) || 
+                            string.IsNullOrEmpty(toAddress) || !amount.HasValue)
+                        {
+                            SCLogUtility.Log($"VBTC_V2_TRANSFER validation failed: Missing required fields", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // Validate contract exists via state trei (available on ALL nodes)
+                        var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTrei == null)
+                        {
+                            SCLogUtility.Log($"VBTC_V2_TRANSFER validation failed: Contract not found in state trei - {scUID}", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // Validate balance in state trei
+                        var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        {
+                            var transactions = scState.SCStateTreiTokenizationTXes
+                                .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                                .ToList();
+
+                            decimal balance = 0M;
+                            if (transactions.Any())
+                            {
+                                var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
+                                var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
+                                balance = received + sent;
+                            }
+
+                            if (balance < amount.Value)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_TRANSFER validation failed: Insufficient balance. Available: {balance}, Requested: {amount.Value}", 
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+                        }
+
+                        // Mark as success and insert
+                        var txdataSuccess = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Success;
+                        txdataSuccess.InsertSafe(tx);
+
+                        SCLogUtility.Log($"VBTC_V2_TRANSFER validated successfully. From: {fromAddress}, To: {toAddress}, Amount: {amount.Value}, SCUID: {scUID}", 
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2_TRANSFER validation error: {ex.Message}", 
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                }
+
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                {
+                    try
+                    {
+                        // Parse transaction data
+                        var jobj = JObject.Parse(tx.Data);
+                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
+                        var amount = jobj["Amount"]?.ToObject<decimal?>();
+                        var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+
+                        // FIND-002 FIX: Use tx.FromAddress as the requester, NOT tx.Data.OwnerAddress
+                        var requesterAddress = tx.FromAddress;
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) || 
+                            !amount.HasValue || !feeRate.HasValue)
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Missing required fields", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // Validate contract exists via state trei (available on ALL nodes)
+                        var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTrei == null)
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Contract not found in state trei - {scUID}", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // FIND-002 FIX: Check if THIS USER already has an active withdrawal request for this contract
+                        // (Per-user tracking, not contract-level)
+                        var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
+                        if (existingRequest != null)
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: User {requesterAddress} already has an active withdrawal request for contract {scUID}", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // FIND-002 FIX: Validate balance for requesterAddress (tx.FromAddress), not ownerAddress
+                        var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        {
+                            var transactions = scState.SCStateTreiTokenizationTXes
+                                .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
+                                .ToList();
+
+                            decimal balance = 0M;
+                            if (transactions.Any())
+                            {
+                                var received = transactions.Where(x => x.ToAddress == requesterAddress).Sum(x => x.Amount);
+                                var sent = transactions.Where(x => x.FromAddress == requesterAddress).Sum(x => x.Amount);
+                                balance = received + sent;
+                            }
+
+                            if (balance < amount.Value)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Insufficient balance. Requester: {requesterAddress}, Available: {balance}, Requested: {amount.Value}", 
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            // No ledger transactions — but owner may still have deposit balance
+                            bool isRequesterOwnerNoTx = scStateTrei.OwnerAddress == requesterAddress;
+                            decimal depositBal = 0M;
+                            if (isRequesterOwnerNoTx)
+                            {
+                                // Get deposit address from state trei contract data (available on ALL nodes)
+                                string wdDepositAddr = null;
+                                var scMainWd = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
+                                if (scMainWd?.Features != null)
+                                {
+                                    var tknzV2Wd = scMainWd.Features
+                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                    if (tknzV2Wd != null)
+                                        wdDepositAddr = ((TokenizationV2Feature)tknzV2Wd).DepositAddress;
+                                }
+                                if (!string.IsNullOrEmpty(wdDepositAddr))
+                                {
+                                    try
+                                    {
+                                        using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                        if (elxClient != null)
+                                        {
+                                            var bal = await elxClient.GetBalance(wdDepositAddr, false);
+                                            depositBal = bal.Confirmed / 100_000_000M;
+                                        }
+                                    }
+                                    catch { /* ElectrumX unavailable — depositBal stays 0 */ }
+                                }
+                            }
+                            if (isRequesterOwnerNoTx && depositBal >= amount.Value)
+                            {
+                                // Owner has sufficient deposit balance even without ledger transactions
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST: Owner {requesterAddress} using deposit balance ({depositBal}) for withdrawal of {amount.Value}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+                            else
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: No balance available for withdrawal. Requester: {requesterAddress}, IsOwner: {isRequesterOwnerNoTx}, DepositBalance: {depositBal}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+                        }
+
+                        // Mark as success and insert
+                        var txdataSuccess = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Success;
+                        txdataSuccess.InsertSafe(tx);
+
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validated successfully. Requester: {requesterAddress}, Amount: {amount.Value} BTC, Destination: {btcAddress}, SCUID: {scUID}", 
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation error: {ex.Message}", 
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                }
+
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
+                {
+                    try
+                    {
+                        // Parse transaction data
+                        var jobj = JObject.Parse(tx.Data);
+                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
+                        var btcTxHash = jobj["BTCTransactionHash"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash) || 
+                            string.IsNullOrEmpty(btcTxHash))
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Missing required fields", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // Validate contract exists via state trei (available on ALL nodes)
+                        var scStateComplete = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateComplete == null)
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Contract not found in state trei - {scUID}", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // FIND-002 FIX: Look up the withdrawal request by transaction hash and validate requester.
+                        // NOTE: VBTCWithdrawalRequest is a LOCAL DB record — only the wallet node that created
+                        // the withdrawal request has it. Remote nodes processing this block won't have it.
+                        // When not found, fall back to lightweight validation (contract + BTC hash checked below).
+                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                        if (withdrawalRequest != null)
+                        {
+                            // Full validation path (local node has the request record)
+                            // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
+                            if (withdrawalRequest.RequestorAddress != tx.FromAddress)
+                            {
+                                var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
+                                if (completingValidator == null || !completingValidator.IsActive)
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: tx.FromAddress ({tx.FromAddress}) is neither the original requester ({withdrawalRequest.RequestorAddress}) nor an active vBTC validator",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdata = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdata.InsertSafe(tx);
+                                    return;
+                                }
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE: Validator {tx.FromAddress} completing withdrawal on behalf of requester {withdrawalRequest.RequestorAddress}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+
+                            if (withdrawalRequest.IsCompleted)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Withdrawal request already completed - {withdrawalRequestHash}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            // Lightweight validation path (remote node — no local withdrawal request record).
+                            // Contract existence already validated above. Log and allow through.
+                            SCLogUtility.Log($"[VBTC V2] Withdrawal request not in local DB for hash: {withdrawalRequestHash}. " +
+                                $"Allowing block TX through with lightweight validation (contract exists in State Trei).",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        }
+
+                        // Validate Bitcoin transaction hash format (basic check - should be 64 hex chars)
+                        if (btcTxHash.Length != 64 || !System.Text.RegularExpressions.Regex.IsMatch(btcTxHash, "^[0-9a-fA-F]{64}$"))
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation failed: Invalid Bitcoin transaction hash format - {btcTxHash}", 
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
+                        }
+
+                        // Mark as success and insert
+                        var txdataSuccess = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Success;
+                        txdataSuccess.InsertSafe(tx);
+
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validated successfully. Requester: {withdrawalRequest?.RequestorAddress ?? tx.FromAddress}, SCUID: {scUID}, BTCTxHash: {btcTxHash}, RequestHash: {withdrawalRequestHash}", 
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_COMPLETE validation error: {ex.Message}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                }
+
+                // FIND-018 Fix: vBTC V2 Withdrawal Cancellation - Block-level validation
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(tx.Data);
+                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: Missing required fields",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                        }
+                        else
+                        {
+                            var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                            if (withdrawalRequest == null)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: Withdrawal request not found - {withdrawalRequestHash}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else if (withdrawalRequest.RequestorAddress != tx.FromAddress)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: tx.FromAddress ({tx.FromAddress}) does not match requestor ({withdrawalRequest.RequestorAddress})",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else if (withdrawalRequest.IsCompleted)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: Withdrawal already completed/cancelled - {withdrawalRequestHash}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validated successfully. Requester: {tx.FromAddress}, SCUID: {scUID}, WithdrawalHash: {withdrawalRequestHash}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation error: {ex.Message}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                }
+
+                // FIND-018 Fix: vBTC V2 Withdrawal Vote - Block-level validation
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(tx.Data);
+                        var cancellationUID = jobj["CancellationUID"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(cancellationUID))
+                        {
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: Missing CancellationUID",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                        }
+                        else
+                        {
+                            var cancellation = VBTCWithdrawalCancellation.GetCancellation(cancellationUID);
+                            if (cancellation == null)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: Cancellation not found - {cancellationUID}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else if (cancellation.IsProcessed)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: Cancellation already processed - {cancellationUID}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else
+                            {
+                                var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
+                                if (validator == null || !validator.IsActive)
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation failed: {tx.FromAddress} is not an active vBTC validator",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdata = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdata.InsertSafe(tx);
+                                }
+                                else
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validated successfully. Voter: {tx.FromAddress}, CancellationUID: {cancellationUID}",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE validation error: {ex.Message}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                }
+
+                if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+                {
+                    try
+                    {
+                        var txdataSuccess = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Success;
+                        txdataSuccess.InsertSafe(tx);
+                        SCLogUtility.Log($"VBTC_V2 bridge tx in block: {tx.Hash}, Type: {tx.TransactionType}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                    }
+                    catch (Exception ex)
+                    {
+                        SCLogUtility.Log($"VBTC_V2 bridge tx error: {ex.Message}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
                 }
 
                 if (tx.TransactionType == TransactionType.ADNR)

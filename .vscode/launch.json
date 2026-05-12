@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ReserveBlockCore",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/ReserveBlockCore/bin/Debug/net6.0/ReserveBlockCore.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/ReserveBlockCore",
+      "stopAtEntry": false,
+      "console": "integratedTerminal",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ROOT": "/usr/local/share/dotnet",
+        "PATH": "/usr/local/share/dotnet:${env:PATH}"
+      }
+    }
+  ]
+}

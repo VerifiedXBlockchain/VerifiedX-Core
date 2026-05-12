@@ -109,12 +109,12 @@ namespace ReserveBlockCore.P2P
                     await RemoveNode(node);
             }
         }
-        public static string MostLikelyIP()
+        public static bool IsPrivateIP(string ip)
         {
-            // Function to check if an IP is within private ranges
-            bool IsPrivateIP(string ip)
+            try
             {
                 var ipParts = ip.Split('.').Select(int.Parse).ToArray();
+                if (ipParts.Length != 4) return true; // Not a valid IPv4, treat as private
                 if (ipParts[0] == 10)
                     return true; // 10.0.0.0/8
                 if (ipParts[0] == 172 && ipParts[1] >= 16 && ipParts[1] <= 31)
@@ -123,10 +123,41 @@ namespace ReserveBlockCore.P2P
                     return true; // 192.168.0.0/16
                 if (ip == "127.0.0.1")
                     return true; // localhost loopback
-
                 return false;
             }
+            catch { return true; } // If parsing fails, treat as private
+        }
 
+        /// <summary>
+        /// Auto-promotes the best non-private IP from ReportedIPs to Globals.ReportedIP
+        /// when no IP was manually configured. Requires at least 2 peer confirmations.
+        /// </summary>
+        public static void TryAutoUpdateReportedIP()
+        {
+            // Don't overwrite manually configured IP
+            if (Globals.ReportedIPManuallySet)
+                return;
+
+            // Already set via auto-discovery
+            if (!string.IsNullOrEmpty(Globals.ReportedIP))
+                return;
+
+            // Find the top non-private IP with at least 2 confirmations
+            var bestIP = Globals.ReportedIPs
+                .Where(kv => !IsPrivateIP(kv.Key) && kv.Value >= 2)
+                .OrderByDescending(kv => kv.Value)
+                .Select(kv => kv.Key)
+                .FirstOrDefault();
+
+            if (!string.IsNullOrEmpty(bestIP))
+            {
+                Globals.ReportedIP = bestIP;
+                LogUtility.Log($"Auto-discovered IP address: {bestIP}", "P2PClient.TryAutoUpdateReportedIP()");
+            }
+        }
+
+        public static string MostLikelyIP()
+        {
             return Globals.ReportedIPs.Count != 0 ?
                 Globals.ReportedIPs
                     .Where(y => !IsPrivateIP(y.Key)) // Filter out private IPs
@@ -283,6 +314,7 @@ namespace ReserveBlockCore.P2P
                                 Globals.ReportedIPs[IP]++;
                             else
                                 Globals.ReportedIPs[IP] = 1;
+                            TryAutoUpdateReportedIP();
                         }
                     }                    
                 });
@@ -359,170 +391,6 @@ namespace ReserveBlockCore.P2P
                 ConnectLock.TryRemove(url, out _);
             }
         }
-
-        #endregion
-
-        #region Connect Adjudicator
-
-        private static ConcurrentDictionary<string, bool> ConnectAdjudicatorLock = new ConcurrentDictionary<string, bool>();
-        public static async Task<bool> ConnectAdjudicator(string url, string address, string time, string uName, string signature)
-        {
-            var IPAddress = GetPathUtility.IPFromURL(url);
-            try
-            {
-                if (!ConnectAdjudicatorLock.TryAdd(url, true))
-                    return false; 
-                var hubConnection = new HubConnectionBuilder()
-                .WithUrl(url, options => {
-                    options.Headers.Add("address", address);
-                    options.Headers.Add("time", time);
-                    options.Headers.Add("uName", uName);
-                    options.Headers.Add("signature", signature);
-                    options.Headers.Add("walver", Globals.CLIVersion);
-
-                })       
-                .Build();
-
-
-                LogUtility.Log($"Connecting to Adjudicator {IPAddress}", "ConnectAdjudicator()");                
-                hubConnection.Reconnecting += (sender) =>
-                {
-                    //LogUtility.Log("Reconnecting to Adjudicator", "ConnectAdjudicator()");
-                    //ConsoleWriterService.Output("[" + DateTime.Now.ToString() + $"] Connection to adjudicator {IPAddress} lost. Attempting to Reconnect.");
-                    return Task.CompletedTask;
-                };
-
-                hubConnection.Reconnected += (sender) =>
-                {
-                    //LogUtility.Log("Success! Reconnected to Adjudicator", "ConnectAdjudicator()");
-                    //ConsoleWriterService.Output("[" + DateTime.Now.ToString() + $"] Connection to adjudicator {IPAddress} has been restored.");
-                    return Task.CompletedTask;
-                };
-
-                hubConnection.Closed += (sender) =>
-                {
-                    //LogUtility.Log("Closed to Adjudicator", "ConnectAdjudicator()");
-                    //ConsoleWriterService.Output("[" + DateTime.Now.ToString() + $"] Connection to adjudicator {IPAddress} has been closed.");
-                    return Task.CompletedTask;
-                };
-                
-                hubConnection.On<string, string>("GetAdjMessage", async (message, data) => {
-                    if (message == "task" || 
-                    message == "taskResult" ||
-                    message == "fortisPool" || 
-                    message == "status" || 
-                    message == "tx" || 
-                    message == "badBlock" || 
-                    message == "sendWinningBlock" ||
-                    message == "disconnect" ||
-                    message == "terminate" ||
-                    message == "dupIP" ||
-                    message == "dupAddr")
-                    {
-                        switch(message)
-                        {
-                            case "task":
-                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "taskResult":
-                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "sendWinningBlock":
-                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "fortisPool":
-                                if(Globals.AdjudicateAccount == null)
-                                    await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "status":
-                                //ConsoleWriterService.Output(data);
-                                if (data == "Connected")
-                                {
-                                    //ValidatorLogUtility.Log("Connected to Validator Pool.", "P2PClient.ConnectAdjudicator()", true);
-                                    //LogUtility.Log("Success! Connected to Adjudicator", "ConnectAdjudicator()");
-                                }
-                                else
-                                {
-                                    ValidatorLogUtility.Log($"Response from adj: {data}", "P2PClient.ConnectAdjudicator()", true);
-                                }
-                                break;
-                            case "tx":
-                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "badBlock":
-                                //do something
-                                break;
-                            case "disconnect":
-                                await DisconnectAdjudicators();
-                                break;
-                            case "terminate":
-                                await ValidatorService.DoMasterNodeStop();
-                                break;
-                            case "dupIP":
-                                Globals.DuplicateAdjIP = true;
-                                break;
-                            case "dupAddr":
-                                Globals.DuplicateAdjAddr = true;
-                                break;
-                        }
-                    }
-                });
-
-                await hubConnection.StartAsync(new CancellationTokenSource(8000).Token);
-                if (string.IsNullOrEmpty(hubConnection.ConnectionId))
-                    return false;
-
-                var bench = Globals.AdjBench.Values.Where(x => x.IPAddress == IPAddress).FirstOrDefault();
-                if (Globals.AdjNodes.TryGetValue(IPAddress, out var node))
-                {
-                    node.Connection = hubConnection;
-                    node.IpAddress = IPAddress;
-                    node.AdjudicatorConnectDate = DateTime.UtcNow;
-                    node.Address = bench.RBXAddress;
-                }
-                else
-                {
-                    Globals.AdjNodes[IPAddress] = new AdjNodeInfo
-                    {
-                        Connection = hubConnection,
-                        IpAddress = IPAddress,
-                        AdjudicatorConnectDate = DateTime.UtcNow,
-                    Address = bench.RBXAddress
-                };
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                ValidatorLogUtility.Log($"Failed! Connecting to Adjudicator {IPAddress}: Reason - " + ex.ToString(), "ConnectAdjudicator()");
-            }
-            finally
-            {
-                ConnectAdjudicatorLock.TryRemove(url, out _);
-            }
-
-            return false;
-        }
-
-        #endregion
-
-        #region Disconnect Adjudicator
-        public static async Task DisconnectAdjudicators()
-        {
-            try
-            {
-                Globals.ValidatorAddress = "";
-                foreach (var node in Globals.AdjNodes.Values)
-                    if (node.Connection != null)
-                        await node.Connection.DisposeAsync();                    
-            }
-            catch (Exception ex)
-            {
-                ValidatorLogUtility.Log("Failed! Did not disconnect from Adjudicator: Reason - " + ex.ToString(), "DisconnectAdjudicator()");
-            }
-        }
-
 
         #endregion
 
@@ -646,7 +514,6 @@ namespace ReserveBlockCore.P2P
 
 
         #endregion
-
 
         #region Send TX To Adjudicators
         public static async Task SendTXToAdjudicator(Transaction tx)

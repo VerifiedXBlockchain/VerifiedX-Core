@@ -216,33 +216,110 @@ namespace ReserveBlockCore.Utilities
                     strBld.AppendLine("---------------------------------------------------------------------");
                 });
             }
-            if(Globals.ValidatorNodes.Count() > 0)
+
+            // FIX: Show full validator network from NetworkValidators registry (the authoritative
+            // HTTP-based peer list used by consensus), not just Globals.ValidatorNodes (which only
+            // contains SignalR connections — typically a small subset).
+            // Count summary first, then per-validator details.
+            try
             {
-                strBld.AppendLine("--------------------------Validator Node Info------------------------");
-                Globals.ValidatorNodes.Values.ToList().ForEach(x => {
-                    var ip = x.NodeIP;
-                    var lastcheck = x.NodeLastChecked != null ? x.NodeLastChecked.Value.ToLocalTime().ToLongTimeString() : "NA";
-                    var height = x.NodeHeight.ToString();
-                    var latency = x.NodeLatency.ToString();
+                var allValidators = Globals.NetworkValidators.Values
+                    .Where(v => v != null && !string.IsNullOrEmpty(v.Address))
+                    .OrderByDescending(v => v.IsFullyTrusted)
+                    .ThenBy(v => v.Address)
+                    .ToList();
 
-                    strBld.AppendLine("Node: " + ip + " - Last Checked: " + lastcheck + " - Height: " + height + " - Latency: " + latency);
-                    strBld.AppendLine("---------------------------------------------------------------------");
-                });
+                var trustedCount = allValidators.Count(v => v.IsFullyTrusted);
+                var pendingCount = allValidators.Count - trustedCount;
+                var signalRCount = Globals.ValidatorNodes.Count;
 
+                strBld.AppendLine("--------------------------Validator Network Info---------------------");
+                strBld.AppendLine($"NetworkValidators total: {allValidators.Count} (trusted: {trustedCount}, pending: {pendingCount}) | SignalR connected: {signalRCount}");
+                strBld.AppendLine("---------------------------------------------------------------------");
+
+                if (allValidators.Count > 0)
+                {
+                    foreach (var v in allValidators)
+                    {
+                        var ip = v.IPAddress ?? "?";
+                        var trusted = v.IsFullyTrusted ? "TRUSTED" : "PENDING";
+                        var lastSeen = v.LastSeen > 0
+                            ? DateTimeOffset.FromUnixTimeSeconds(v.LastSeen).LocalDateTime.ToString("HH:mm:ss")
+                            : "NA";
+                        var fails = v.CheckFailCount;
+                        strBld.AppendLine($"Validator: {v.Address} - IP: {ip} - {trusted} - LastSeen: {lastSeen} - Fails: {fails} - FirstSeenAtHeight: {v.FirstSeenAtHeight}");
+                        strBld.AppendLine("---------------------------------------------------------------------");
+                    }
+                }
+
+                // Also show the SignalR-only ValidatorNodes pool for reference (smaller subset)
+                if (Globals.ValidatorNodes.Count() > 0)
+                {
+                    strBld.AppendLine("--------------------------Validator SignalR Connections--------------");
+                    Globals.ValidatorNodes.Values.ToList().ForEach(x => {
+                        var ip = x.NodeIP;
+                        var lastcheck = x.NodeLastChecked != null ? x.NodeLastChecked.Value.ToLocalTime().ToLongTimeString() : "NA";
+                        var height = x.NodeHeight.ToString();
+                        var latency = x.NodeLatency.ToString();
+
+                        strBld.AppendLine("Node: " + ip + " - Last Checked: " + lastcheck + " - Height: " + height + " - Latency: " + latency);
+                        strBld.AppendLine("---------------------------------------------------------------------");
+                    });
+                }
             }
-            if (Globals.BlockCasterNodes.Count() > 0)
+            catch (Exception ex)
             {
-                strBld.AppendLine("--------------------------Caster Node Info------------------------");
-                Globals.BlockCasterNodes.Values.ToList().ForEach(x => {
-                    var ip = x.NodeIP;
-                    var lastcheck = x.NodeLastChecked != null ? x.NodeLastChecked.Value.ToLocalTime().ToLongTimeString() : "NA";
-                    var height = x.NodeHeight.ToString();
-                    var latency = x.NodeLatency.ToString();
+                strBld.AppendLine($"[Validator Network Info error: {ex.Message}]");
+                strBld.AppendLine("---------------------------------------------------------------------");
+            }
 
-                    strBld.AppendLine("Node: " + ip + " - Last Checked: " + lastcheck + " - Height: " + height + " - Latency: " + latency);
-                    strBld.AppendLine("---------------------------------------------------------------------");
-                });
+            // FIX: Show the authoritative caster list from Globals.BlockCasters (the consensus
+            // peer list used for HTTP heartbeat and proof exchange) instead of just
+            // Globals.BlockCasterNodes (SignalR connection dict, which can show stale entries
+            // with Height=-1, Latency=0 for casters that have gone offline). Display BlockCasterNodes
+            // as a secondary "SignalR" section so operators can still see SignalR state.
+            try
+            {
+                var casterList = Globals.BlockCasters.ToList();
+                strBld.AppendLine("--------------------------Caster List (BlockCasters)-----------------");
+                strBld.AppendLine($"BlockCasters total: {casterList.Count} | BlockCasterNodes (SignalR): {Globals.BlockCasterNodes.Count}");
+                strBld.AppendLine("---------------------------------------------------------------------");
 
+                if (casterList.Count > 0)
+                {
+                    foreach (var c in casterList)
+                    {
+                        var addr = c.ValidatorAddress ?? "?";
+                        var ip = (c.PeerIP ?? "?").Replace("::ffff:", "");
+                        var ver = c.WalletVersion ?? "?";
+                        var failCount = c.FailCount;
+                        var isSelf = (c.ValidatorAddress == Globals.ValidatorAddress) ? " (SELF)" : "";
+                        strBld.AppendLine($"Caster: {addr}{isSelf} - IP: {ip} - Version: {ver} - FailCount: {failCount}");
+                        strBld.AppendLine("---------------------------------------------------------------------");
+                    }
+                }
+
+                // Show SignalR connection state separately (entries with Height=-1 indicate a stale
+                // SignalR connection that should be cleaned up by PingCasters' periodic stale-cleanup).
+                if (Globals.BlockCasterNodes.Count() > 0)
+                {
+                    strBld.AppendLine("--------------------------Caster SignalR Connections-----------------");
+                    Globals.BlockCasterNodes.Values.ToList().ForEach(x => {
+                        var ip = x.NodeIP;
+                        var lastcheck = x.NodeLastChecked != null ? x.NodeLastChecked.Value.ToLocalTime().ToLongTimeString() : "NA";
+                        var height = x.NodeHeight.ToString();
+                        var latency = x.NodeLatency.ToString();
+                        var staleMarker = x.NodeHeight <= 0 ? " [STALE]" : "";
+
+                        strBld.AppendLine($"Node: {ip} - Last Checked: {lastcheck} - Height: {height} - Latency: {latency}{staleMarker}");
+                        strBld.AppendLine("---------------------------------------------------------------------");
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                strBld.AppendLine($"[Caster List error: {ex.Message}]");
+                strBld.AppendLine("---------------------------------------------------------------------");
             }
             if (seeds.Count() > 0)
             {

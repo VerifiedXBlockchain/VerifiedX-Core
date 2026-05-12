@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using Newtonsoft.Json;
 using ReserveBlockCore.Models.SmartContracts;
@@ -485,7 +485,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                             {
                                 var output = "Fail! Transaction Verify has failed.";
                                 scTx.TransactionStatus = TransactionStatus.Failed;
-                                TransactionData.AddTxToWallet(scTx, true);
+                                await TransactionData.AddTxToWallet(scTx, true);
                                 return await SCLogUtility.LogAndReturn($"Error Transfer Failed TX Verify: {payload.SCUID}. Result: {result.Item2}", "TokenizationService.TransferCoin()", false);
                             }
                         }
@@ -525,7 +525,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         var output = "Fail! Transaction Verify has failed.";
                         scTx.TransactionStatus = TransactionStatus.Failed;
-                        TransactionData.AddTxToWallet(scTx, true);
+                        await TransactionData.AddTxToWallet(scTx, true);
                         return await SCLogUtility.LogAndReturn($"Error Transfer Failed TX Verify: {payload.SCUID}. Result: {result.Item2}", "TokenizationService.TransferCoin()", false);
                     }
                 }
@@ -709,7 +709,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 {
                     var output = "Fail! Transaction Verify has failed.";
                     scTx.TransactionStatus = TransactionStatus.Failed;
-                    TransactionData.AddTxToWallet(scTx, true);
+                    await TransactionData.AddTxToWallet(scTx, true);
                     return await SCLogUtility.LogAndReturn($"Error Transfer Failed TX Verify: {scTx.Hash}. Result: {result.Item2}", "TokenizationService.TransferCoinMulti()", false);
                 }
             }
@@ -942,7 +942,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             if (account.GetPrivKey == null)
             {
                 tx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(tx, true);
+                await TransactionData.AddTxToWallet(tx, true);
                 //return (null, $"Private key was null for account {fromAddress}");
             }
             var txHash = tx.Hash;
@@ -951,7 +951,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             if (signature == "ERROR")
             {
                 tx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(tx, true);
+                await TransactionData.AddTxToWallet(tx, true);
                 //return (null, $"TX Signature Failed. SCUID: {scUID}");
             }
 
@@ -991,7 +991,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             if (account.GetPrivKey == null)
             {
                 tx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(tx, true);
+                await TransactionData.AddTxToWallet(tx, true);
                 //return (null, $"Private key was null for account {fromAddress}");
             }
             var txHash = tx.Hash;
@@ -1000,7 +1000,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             if (signature == "ERROR")
             {
                 tx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(tx, true);
+                await TransactionData.AddTxToWallet(tx, true);
                 //return (null, $"TX Signature Failed. SCUID: {scUID}");
             }
 
@@ -1046,14 +1046,14 @@ namespace ReserveBlockCore.Bitcoin.Services
             if ((scTx.Amount + scTx.Fee) > senderBalance)
             {
                 scTx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(scTx, true);
+                await TransactionData.AddTxToWallet(scTx, true);
                 return (null, $"Balance insufficient. SCUID: {scUID}");
             }
 
             if (account.GetPrivKey == null)
             {
                 scTx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(scTx, true);
+                await TransactionData.AddTxToWallet(scTx, true);
                 return (null, $"Private key was null for account {fromAddress}");
             }
             var txHash = scTx.Hash;
@@ -1061,7 +1061,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             if (signature == "ERROR")
             {
                 scTx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(scTx, true);
+                await TransactionData.AddTxToWallet(scTx, true);
                 return (null, $"TX Signature Failed. SCUID: {scUID}");
             }
 
@@ -1110,14 +1110,14 @@ namespace ReserveBlockCore.Bitcoin.Services
             if ((scTx.Amount + scTx.Fee) > senderBalance)
             {
                 scTx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(scTx, true);
+                await TransactionData.AddTxToWallet(scTx, true);
                 return (null, $"Balance insufficient for vBTC Mulit TX At: {currentTime}");
             }
 
             if (account.GetPrivKey == null)
             {
                 scTx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(scTx, true);
+                await TransactionData.AddTxToWallet(scTx, true);
                 return (null, $"Private key was null for account for vBTC Mulit TX At: {currentTime}");
             }
             var txHash = scTx.Hash;
@@ -1125,7 +1125,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             if (signature == "ERROR")
             {
                 scTx.TransactionStatus = TransactionStatus.Failed;
-                TransactionData.AddTxToWallet(scTx, true);
+                await TransactionData.AddTxToWallet(scTx, true);
                 return (null, $"TX Signature Failed for vBTC Mulit TX At: {currentTime}");
             }
 

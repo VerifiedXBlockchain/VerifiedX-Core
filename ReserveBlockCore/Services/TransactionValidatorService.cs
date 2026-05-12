@@ -1,16 +1,19 @@
-﻿using NBitcoin.Protocol;
+using NBitcoin.Protocol;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Arbiter;
 using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Bitcoin.Services;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.DST;
 using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.P2P;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using Spectre.Console;
 using System;
+using System.Linq;
 using System.Net;
 using System.Security.Principal;
 using System.Xml.Linq;
@@ -19,7 +22,7 @@ namespace ReserveBlockCore.Services
 {
     public class TransactionValidatorService
     {
-        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null)
+        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false)
         {
             bool txResult = false;
             bool runReserveCheck = true;
@@ -31,6 +34,9 @@ namespace ReserveBlockCore.Services
             var badNFTTx = Globals.BadNFTTxList.Exists(x => x == txRequest.Hash);
             if (badNFTTx) 
                 return (true, "");
+
+            if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
+                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification);
 
             var accStTrei = StateData.GetAccountStateTrei();
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);
@@ -83,14 +89,36 @@ namespace ReserveBlockCore.Services
             if(txRequest.TransactionType == TransactionType.TKNZ_WD_ARB && txRequest.Amount > 0.00M)
                 return (txResult, "This transaction type cannot have a send amount.");
 
-            if (txRequest.Fee <= 0 && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
+            // FIND-004 FIX: Exempt vBTC V2 validator transactions from fee requirements (they must be free)
+            if (txRequest.Fee <= 0 
+                && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
+                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
+                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT
+                && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+                && txRequest.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
+                && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
             {
                 return (txResult, "Fee cannot be less than or equal to zero.");
             }
 
             if(Globals.LastBlock.Height > Globals.TXHeightRule2) //around April 7, 2023 at 18:30 UTC
             {
-                if (txRequest.Fee <= 0.000003M && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB)
+                // FIND-004 FIX: Exempt vBTC V2 validator transactions from minimum fee requirements
+                if (txRequest.Fee <= 0.000003M 
+                    && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_EXIT
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
+                    && txRequest.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
                 {
                     return (txResult, "Fee cannot be less than 0.000003 VFX");
                 }
@@ -150,6 +178,7 @@ namespace ReserveBlockCore.Services
                 if (mempool.Count() > 0)
                 {
                     mempool.DeleteManySafe(x => x.Hash == txRequest.Hash);
+                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txRequest.Hash);
                 }
                 return (txResult, "This transactions has already been sent.");
             }
@@ -1063,6 +1092,103 @@ namespace ReserveBlockCore.Services
                                                     return (txResult, $"You are not the originator of this withdrawal.");
                                             }
                                             
+                                            break;
+                                        }
+
+                                    case "TransferVBTCV2()":
+                                        {
+                                            // FIND-006 FIX: Validate vBTC V2 transfers when called through function dispatcher
+                                            var jobj = JObject.Parse(txData);
+                                            var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
+                                            var toAddress = jobj["ToAddress"]?.ToObject<string?>();
+                                            var amount = jobj["Amount"]?.ToObject<decimal?>();
+
+                                            if (string.IsNullOrEmpty(scUID))
+                                                return (txResult, "ContractUID cannot be null.");
+
+                                            if (string.IsNullOrEmpty(fromAddress))
+                                                return (txResult, "FromAddress cannot be null.");
+
+                                            if (string.IsNullOrEmpty(toAddress))
+                                                return (txResult, "ToAddress cannot be null.");
+
+                                            // FIND-006 FIX #1: Bind sender - tx.Data.FromAddress MUST match tx.FromAddress
+                                            if (txRequest.FromAddress != fromAddress)
+                                                return (txResult, "From address in data must match transaction FromAddress.");
+
+                                            // FIND-006 FIX #2: Validate amount is positive
+                                            if (!amount.HasValue || amount.Value <= 0)
+                                                return (txResult, "Amount must be greater than zero.");
+
+                                            // Balance validation for both owner and non-owner:
+                                            // - Owner: query ElectrumX for deposit address balance + ledger balance
+                                            // - Non-owner: check ledger balance from tokenization TXes
+                                            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                                            if (scStateTreiRec != null)
+                                            {
+                                                bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
+
+                                                decimal ledgerBalance = 0M;
+                                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                                {
+                                                    var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
+                                                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                                                        .ToList();
+
+                                                    if (transactions.Any())
+                                                    {
+                                                        ledgerBalance = transactions.Sum(x => x.Amount);
+                                                    }
+                                                }
+
+                                                if (isOwner)
+                                                {
+                                                    // Owner: query ElectrumX for deposit address balance and add ledger balance
+                                                    decimal depositBalance = 0M;
+                                                    // Get deposit address from state trei contract data (available on ALL nodes)
+                                                    string depositAddr = null;
+                                                    var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                                                    if (scMainDecompile?.Features != null)
+                                                    {
+                                                        var tknzV2 = scMainDecompile.Features
+                                                            .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                                            .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                                        if (tknzV2 != null)
+                                                            depositAddr = ((TokenizationV2Feature)tknzV2).DepositAddress;
+                                                    }
+
+                                                    if (!string.IsNullOrEmpty(depositAddr))
+                                                    {
+                                                        if (!blockDownloads && !blockVerify)
+                                                        {
+                                                            try
+                                                            {
+                                                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                                                if (elxClient != null)
+                                                                {
+                                                                    var balance = await elxClient.GetBalance(depositAddr, false);
+                                                                    depositBalance = balance.Confirmed / 100_000_000M;
+                                                                }
+                                                            }
+                                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
+                                                        }
+                                                    }
+
+                                                    decimal ownerBalance = depositBalance + ledgerBalance;
+                                                    if (ownerBalance < amount.Value)
+                                                        return (txResult, $"Insufficient vBTC balance (owner). Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                                                }
+                                                else
+                                                {
+                                                    // Non-owner: just ledger balance
+                                                    if (ledgerBalance < amount.Value)
+                                                        return (txResult, $"Insufficient vBTC balance. Available: {ledgerBalance}, Requested: {amount.Value}");
+
+                                                    if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                                        return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+                                                }
+                                            }
+
                                             break;
                                         }
 
@@ -2159,6 +2285,933 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+            // VBTC V2 Contract Creation - Consensus-level validation
+            // Ensures the contract hasn't already been minted, the data is well-formed,
+            // and the minter has sufficient balance.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        // Parse SC data — MintSmartContractTx creates JArray with Mint() function
+                        string scUID = "";
+                        string function = "";
+                        try
+                        {
+                            var scDataArray = JsonConvert.DeserializeObject<JArray>(txData);
+                            if (scDataArray != null && scDataArray.Count > 0)
+                            {
+                                var scData = scDataArray[0];
+                                function = (string?)scData["Function"] ?? "";
+                                scUID = (string?)scData["ContractUID"] ?? "";
+                            }
+                        }
+                        catch
+                        {
+                            // Try JObject fallback
+                            var jobj = JObject.Parse(txData);
+                            function = jobj["Function"]?.ToObject<string>() ?? "";
+                            scUID = jobj["ContractUID"]?.ToObject<string>() ?? "";
+                        }
+
+                        if (string.IsNullOrEmpty(scUID))
+                            return (txResult, "ContractUID cannot be null for vBTC V2 contract creation.");
+
+                        if (function != "Mint()")
+                            return (txResult, $"Invalid function for vBTC V2 contract creation. Expected: Mint(), Got: {function}");
+
+                        // Duplicate check: ensure this SC hasn't already been minted
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTreiRec != null)
+                            return (txResult, "This vBTC V2 smart contract has already been minted.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_CONTRACT_CREATE transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 contract creation transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 contract creation.");
+                }
+            }
+
+            // VBTC V2 Transfer - Consensus-level validation
+            // Validates sender binding, positive amount, and balance checks.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var scUID = jobj["ContractUID"]?.ToObject<string>();
+                        var fromAddress = jobj["FromAddress"]?.ToObject<string>();
+                        var toAddress = jobj["ToAddress"]?.ToObject<string>();
+                        var amount = jobj["Amount"]?.ToObject<decimal?>();
+
+                        if (string.IsNullOrEmpty(scUID))
+                            return (txResult, "ContractUID cannot be null for vBTC V2 transfer.");
+
+                        if (string.IsNullOrEmpty(fromAddress))
+                            return (txResult, "FromAddress cannot be null for vBTC V2 transfer.");
+
+                        if (string.IsNullOrEmpty(toAddress))
+                            return (txResult, "ToAddress cannot be null for vBTC V2 transfer.");
+
+                        // Sender binding: tx.Data.FromAddress MUST match tx.FromAddress
+                        if (txRequest.FromAddress != fromAddress)
+                            return (txResult, "From address in data must match transaction FromAddress for vBTC V2 transfer.");
+
+                        // Amount validation
+                        if (!amount.HasValue || amount.Value <= 0)
+                            return (txResult, "Amount must be greater than zero for vBTC V2 transfer.");
+
+                        // Balance validation for both owner and non-owner
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTreiRec != null)
+                        {
+                            bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
+
+                            decimal ledgerBalance = 0M;
+                            if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                            {
+                                var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
+                                    .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                                    .ToList();
+
+                                if (transactions.Any())
+                                {
+                                    ledgerBalance = transactions.Sum(x => x.Amount);
+                                }
+                            }
+
+                            if (isOwner)
+                            {
+                                // Owner: get deposit address from state trei contract data (available on ALL nodes)
+                                decimal depositBalance = 0M;
+                                string depositAddr2 = null;
+                                var scMainDecompile2 = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                                if (scMainDecompile2?.Features != null)
+                                {
+                                    var tknzV2 = scMainDecompile2.Features
+                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                    if (tknzV2 != null)
+                                        depositAddr2 = ((TokenizationV2Feature)tknzV2).DepositAddress;
+                                }
+
+                                if (!string.IsNullOrEmpty(depositAddr2))
+                                {
+                                    if (!blockDownloads && !blockVerify)
+                                    {
+                                        try
+                                        {
+                                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                            if (elxClient != null)
+                                            {
+                                                var balance = await elxClient.GetBalance(depositAddr2, false);
+                                                depositBalance = balance.Confirmed / 100_000_000M;
+                                            }
+                                        }
+                                        catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
+                                    }
+                                }
+
+                                decimal ownerBalance = depositBalance + ledgerBalance;
+                                if (ownerBalance < amount.Value)
+                                {
+                                    // During block verification, skip deposit balance check for owner.
+                                    // The block crafter already verified via ElectrumX during mempool admission.
+                                    if (blockVerify)
+                                    {
+                                        // Trust the block crafter's ElectrumX verification
+                                    }
+                                    else
+                                    {
+                                        return (txResult, $"Insufficient vBTC balance (owner) for transfer. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // Non-owner: just ledger balance
+                                if (ledgerBalance < amount.Value)
+                                    return (txResult, $"Insufficient vBTC balance for transfer. Available: {ledgerBalance}, Requested: {amount.Value}");
+
+                                if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                    return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+                            }
+                        }
+                        else
+                        {
+                            return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_TRANSFER transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 transfer transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 transfer.");
+                }
+            }
+
+            // VBTC V2 Validator Registration
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
+                        var ipAddress = jobj["IPAddress"]?.ToObject<string>();
+                        
+                        if (string.IsNullOrEmpty(validatorAddress) || string.IsNullOrEmpty(ipAddress))
+                            return (txResult, "Validator address and IP address cannot be null.");
+                        
+                        // FIND-007 Fix: Validate IP address to prevent SSRF attacks
+                        if (!InputValidationHelper.ValidateValidatorIPAddress(ipAddress, out string ipValidationError))
+                        {
+                            ErrorLogUtility.LogError($"FIND-007 Security: Invalid validator IP address rejected. Address: {validatorAddress}, IP: {ipAddress}, Error: {ipValidationError}", 
+                                "TransactionValidatorService.VerifyTX()");
+                            return (txResult, $"Invalid validator IP address: {ipValidationError}");
+                        }
+                        
+                        if (txRequest.FromAddress != validatorAddress)
+                            return (txResult, "From address must match validator address.");
+                        
+                        if (txRequest.ToAddress != validatorAddress)
+                            return (txResult, "To address must match validator address (self-transaction).");
+                        
+                        if (txRequest.Fee != 0M)
+                            return (txResult, "Validator registration must be a free transaction (Fee = 0).");
+                        
+                        if (txRequest.Amount != 0M)
+                            return (txResult, "Validator registration cannot have an amount.");
+                        
+                        // Anti-spam check: Ensure validator doesn't already have an active record.
+                        // Exception: if the existing record's RegisterTransactionHash matches this TX hash,
+                        // it means this TX was already processed into a block but not yet cleaned from mempool.
+                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                        if (existingValidator != null && existingValidator.IsActive
+                            && existingValidator.RegisterTransactionHash != txRequest.Hash)
+                            return (txResult, "Validator already has an active registration. Cannot register again.");
+                        
+                        // Ensure validator has minimum balance (5000 VFX)
+                        if (from != null && from.Balance < ValidatorService.ValidatorRequiredAmount())
+                            return (txResult, $"Insufficient balance for validator registration. Minimum required: {ValidatorService.ValidatorRequiredAmount()} VFX");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_VALIDATOR_REGISTER transaction: {ex}", 
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate validator registration transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for validator registration.");
+                }
+            }
+
+            // VBTC V2 Validator Exit
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_VALIDATOR_EXIT)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
+                        
+                        if (string.IsNullOrEmpty(validatorAddress))
+                            return (txResult, "Validator address cannot be null.");
+                        
+                        if (txRequest.FromAddress != validatorAddress)
+                            return (txResult, "From address must match validator address.");
+                        
+                        if (txRequest.ToAddress != validatorAddress)
+                            return (txResult, "To address must match validator address (self-transaction).");
+                        
+                        if (txRequest.Fee != 0M)
+                            return (txResult, "Validator exit must be a free transaction (Fee = 0).");
+                        
+                        if (txRequest.Amount != 0M)
+                            return (txResult, "Validator exit cannot have an amount.");
+                        
+                        // Ensure validator actually has an active registration
+                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                        if (existingValidator == null || !existingValidator.IsActive)
+                            return (txResult, "Validator does not have an active registration. Cannot exit.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_VALIDATOR_EXIT transaction: {ex}", 
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate validator exit transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for validator exit.");
+                }
+            }
+
+            // VBTC V2 Validator Heartbeat (Reactivation / IP Update)
+            // Used when a validator comes back online after being marked inactive,
+            // or when the validator's IP address has changed since last registration.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
+                        var ipAddress = jobj["IPAddress"]?.ToObject<string>();
+
+                        if (string.IsNullOrEmpty(validatorAddress) || string.IsNullOrEmpty(ipAddress))
+                            return (txResult, "Validator address and IP address cannot be null.");
+
+                        // FIND-007: Validate IP address to prevent SSRF attacks
+                        if (!InputValidationHelper.ValidateValidatorIPAddress(ipAddress, out string ipValidationError))
+                        {
+                            ErrorLogUtility.LogError($"FIND-007 Security: Invalid validator IP address rejected in HEARTBEAT. Address: {validatorAddress}, IP: {ipAddress}, Error: {ipValidationError}",
+                                "TransactionValidatorService.VerifyTX()");
+                            return (txResult, $"Invalid validator IP address: {ipValidationError}");
+                        }
+
+                        if (txRequest.FromAddress != validatorAddress)
+                            return (txResult, "From address must match validator address.");
+
+                        if (txRequest.ToAddress != validatorAddress)
+                            return (txResult, "To address must match validator address (self-transaction).");
+
+                        if (txRequest.Fee != 0M)
+                            return (txResult, "Validator heartbeat must be a free transaction (Fee = 0).");
+
+                        if (txRequest.Amount != 0M)
+                            return (txResult, "Validator heartbeat cannot have an amount.");
+
+                        // Ensure validator has minimum balance (5000 VFX)
+                        if (from != null && from.Balance < ValidatorService.ValidatorRequiredAmount())
+                            return (txResult, $"Insufficient balance for validator heartbeat. Minimum required: {ValidatorService.ValidatorRequiredAmount()} VFX");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_VALIDATOR_HEARTBEAT transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate validator heartbeat transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for validator heartbeat.");
+                }
+            }
+
+            // FIND-002 FIX: VBTC V2 Withdrawal Request - Consensus-level validation
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var scUID = jobj["ContractUID"]?.ToObject<string>();
+                        var btcAddress = jobj["BTCAddress"]?.ToObject<string>();
+                        var amount = jobj["Amount"]?.ToObject<decimal?>();
+                        var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+
+                        // FIND-002 FIX: Use tx.FromAddress as the requester (IGNORE tx.Data.OwnerAddress)
+                        var requesterAddress = txRequest.FromAddress;
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) || 
+                            !amount.HasValue || !feeRate.HasValue)
+                            return (txResult, "Missing required fields for withdrawal request (ContractUID, BTCAddress, Amount, FeeRate).");
+
+                        // Validate contract exists via state trei (available on ALL nodes, not just local)
+                        var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scState == null)
+                            return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+
+                        // FIND-002 FIX: Check if this user already has an active withdrawal request in database
+                        var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
+                        if (existingRequest != null)
+                            return (txResult, $"User {requesterAddress} already has an active withdrawal request for contract {scUID}. Complete or wait for existing request.");
+
+                        // FIND-002 FIX: Check mempool for duplicate requests from this user for this contract
+                        var mempool = TransactionData.GetPool();
+                        var duplicateInMempool = mempool.Query().Where(x =>
+                            x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
+                            x.FromAddress == requesterAddress &&
+                            x.Hash != txRequest.Hash
+                        ).ToList();
+
+                        foreach (var existingTx in duplicateInMempool)
+                        {
+                            try
+                            {
+                                var existingData = JObject.Parse(existingTx.Data);
+                                var existingScUID = existingData["ContractUID"]?.ToObject<string>();
+                                if (existingScUID == scUID)
+                                {
+                                    return (txResult, $"Duplicate withdrawal request already exists in mempool from {requesterAddress} for contract {scUID}.");
+                                }
+                            }
+                            catch { }
+                        }
+
+                        // Validate balance for requesterAddress (tx.FromAddress) — reuse scState from above
+                        if (scState != null)
+                        {
+                            bool isRequesterOwner = requesterAddress == scState.OwnerAddress;
+                            decimal ledgerBalance = 0M;
+
+                            if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                            {
+                                var transactions = scState.SCStateTreiTokenizationTXes
+                                    .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
+                                    .ToList();
+
+                                if (transactions.Any())
+                                {
+                                    ledgerBalance = transactions.Sum(x => x.Amount);
+                                }
+                            }
+
+                            decimal totalBalance = ledgerBalance;
+                            if (isRequesterOwner)
+                            {
+                                // Get deposit address from state trei contract data (available on ALL nodes)
+                                decimal depositBalance = 0M;
+                                string wdDepositAddr = null;
+                                var scMainWd = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                                if (scMainWd?.Features != null)
+                                {
+                                    var tknzV2Wd = scMainWd.Features
+                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                    if (tknzV2Wd != null)
+                                        wdDepositAddr = ((TokenizationV2Feature)tknzV2Wd).DepositAddress;
+                                }
+
+                                if (!string.IsNullOrEmpty(wdDepositAddr))
+                                {
+                                    if (!blockDownloads)
+                                    {
+                                        try
+                                        {
+                                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                            if (elxClient != null)
+                                            {
+                                                var bal = await elxClient.GetBalance(wdDepositAddr, false);
+                                                depositBalance = bal.Confirmed / 100_000_000M;
+                                            }
+                                        }
+                                        catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
+                                    }
+                                }
+                                totalBalance = depositBalance + ledgerBalance;
+                            }
+
+                            if (totalBalance < amount.Value)
+                            {
+                                // During block verification, skip deposit balance check for the owner.
+                                // The block crafter already verified via ElectrumX during mempool admission.
+                                // Deposit balance is external Bitcoin chain state — if ElectrumX is temporarily
+                                // unavailable during block validation, we trust the crafter's prior verification.
+                                // This matches the v1 TransferCoin() pattern where owner balance is not checked.
+                                if (isRequesterOwner && blockVerify)
+                                {
+                                    // Trust the block crafter's ElectrumX verification
+                                }
+                                else
+                                {
+                                    return (txResult, $"Insufficient vBTC balance. Available: {totalBalance}, Requested: {amount.Value}");
+                                }
+                            }
+                        }
+                        else
+                        {
+                            return (txResult, $"No vBTC state found for contract {scUID}.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_WITHDRAWAL_REQUEST transaction: {ex}", 
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 withdrawal request transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 withdrawal request.");
+                }
+            }
+
+            // FIND-002 FIX: VBTC V2 Withdrawal Complete - Consensus-level validation
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
+            {
+                var txData = txRequest.Data;
+                if (txData != null)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txData);
+                        var scUID = jobj["ContractUID"]?.ToObject<string>();
+                        var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string>();
+                        var btcTxHash = jobj["BTCTransactionHash"]?.ToObject<string>();
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash) || 
+                            string.IsNullOrEmpty(btcTxHash))
+                            return (txResult, "Missing required fields for withdrawal complete (ContractUID, WithdrawalRequestHash, BTCTransactionHash).");
+
+                        // Validate contract exists via state trei (available on ALL nodes)
+                        var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTrei == null)
+                            return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+
+                        // FIND-002 FIX: Look up the withdrawal request by transaction hash.
+                        // NOTE: VBTCWithdrawalRequest is a LOCAL DB record — only the wallet node that created
+                        // the withdrawal request has it. Remote nodes validating this TX via mempool won't have it.
+                        // When not found, fall back to lightweight validation (contract + BTC hash already checked).
+                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                        if (withdrawalRequest != null)
+                        {
+                            // Full validation path (local node has the request record)
+                            // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
+                            if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
+                            {
+                                var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(txRequest.FromAddress);
+                                if (completingValidator == null || !completingValidator.IsActive)
+                                    return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) or an active vBTC validator can complete this withdrawal. Received from: {txRequest.FromAddress}");
+                            }
+
+                            if (withdrawalRequest.IsCompleted)
+                                return (txResult, $"Withdrawal request already completed: {withdrawalRequestHash}");
+                        }
+                        else
+                        {
+                            // Lightweight validation path (remote node — no local withdrawal request record).
+                            // Contract existence already validated above. Just log and allow through.
+                            LogUtility.Log($"[VBTC V2] Withdrawal request not in local DB for hash: {withdrawalRequestHash}. " +
+                                $"Allowing TX through with lightweight validation (contract exists in State Trei).",
+                                "TransactionValidatorService.VerifyTX()");
+                        }
+
+                        // Validate Bitcoin transaction hash format (64 hex chars)
+                        if (btcTxHash.Length != 64 || !System.Text.RegularExpressions.Regex.IsMatch(btcTxHash, "^[0-9a-fA-F]{64}$"))
+                            return (txResult, $"Invalid Bitcoin transaction hash format: {btcTxHash}");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_WITHDRAWAL_COMPLETE transaction: {ex}", 
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 withdrawal complete transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 withdrawal complete.");
+                }
+            }
+
+            // FIND-018 Fix: VBTC V2 Withdrawal Cancel - Consensus-level validation
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+            {
+                if (!string.IsNullOrWhiteSpace(txRequest.Data))
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txRequest.Data);
+                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(scUID))
+                            return (txResult, "ContractUID is required for vBTC V2 withdrawal cancel.");
+                        if (string.IsNullOrEmpty(withdrawalRequestHash))
+                            return (txResult, "WithdrawalRequestHash is required for vBTC V2 withdrawal cancel.");
+
+                        // Validate the withdrawal request exists and belongs to the sender
+                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                        if (withdrawalRequest == null)
+                            return (txResult, $"Withdrawal request not found: {withdrawalRequestHash}");
+                        if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
+                            return (txResult, "Only the original withdrawal requestor can submit a cancellation.");
+                        if (withdrawalRequest.IsCompleted)
+                            return (txResult, "Cannot cancel an already completed/cancelled withdrawal.");
+
+                        // Check for duplicate cancellation
+                        var existingCancel = VBTCWithdrawalCancellation.GetCancellationByWithdrawalHash(withdrawalRequestHash);
+                        if (existingCancel != null)
+                            return (txResult, "A cancellation request already exists for this withdrawal.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_WITHDRAWAL_CANCEL transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 withdrawal cancel transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 withdrawal cancel.");
+                }
+            }
+
+            // FIND-018 Fix: VBTC V2 Withdrawal Vote - Consensus-level validation
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+            {
+                if (!string.IsNullOrWhiteSpace(txRequest.Data))
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(txRequest.Data);
+                        var cancellationUID = jobj["CancellationUID"]?.ToObject<string?>();
+
+                        if (string.IsNullOrEmpty(cancellationUID))
+                            return (txResult, "CancellationUID is required for vBTC V2 withdrawal vote.");
+
+                        // Validate the cancellation exists and is not processed
+                        var cancellation = VBTCWithdrawalCancellation.GetCancellation(cancellationUID);
+                        if (cancellation == null)
+                            return (txResult, $"Cancellation request not found: {cancellationUID}");
+                        if (cancellation.IsProcessed)
+                            return (txResult, "Cannot vote on an already processed cancellation.");
+
+                        // Validate the voter is an active vBTC validator
+                        var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(txRequest.FromAddress);
+                        if (validator == null || !validator.IsActive)
+                            return (txResult, "Only active vBTC validators can vote on cancellations.");
+
+                        // Prevent duplicate votes
+                        if (VBTCWithdrawalCancellation.HasValidatorVoted(cancellationUID, txRequest.FromAddress))
+                            return (txResult, "Validator has already voted on this cancellation.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to validate VBTC_V2_WITHDRAWAL_VOTE transaction: {ex}",
+                            "TransactionValidatorService.VerifyTX()");
+                        return (txResult, "Failed to validate vBTC V2 withdrawal vote transaction.");
+                    }
+                }
+                else
+                {
+                    return (txResult, "Transaction data cannot be null for vBTC V2 withdrawal vote.");
+                }
+            }
+
+            // vBTC V2 Base bridge lock — same balance rules as transparent transfer; LockId must be unique on-chain.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for vBTC V2 bridge lock.");
+
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    var fn = jobj["Function"]?.ToObject<string>();
+                    if (fn != "VBTCBridgeLock()")
+                        return (txResult, "Invalid Function for vBTC V2 bridge lock.");
+
+                    var scUID = jobj["ContractUID"]?.ToObject<string>();
+                    var lockId = jobj["LockId"]?.ToObject<string>();
+                    var amount = jobj["Amount"]?.ToObject<decimal?>();
+                    var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                    var evmDestination = jobj["EvmDestination"]?.ToObject<string>();
+
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId))
+                        return (txResult, "ContractUID and LockId are required for bridge lock.");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Bridge lock must be a self-transaction (from == to).");
+
+                    if (!amount.HasValue || amount.Value <= 0)
+                        return (txResult, "Amount must be greater than zero for bridge lock.");
+
+                    if (!amountSats.HasValue)
+                        return (txResult, "AmountSats is required for bridge lock.");
+
+                    var expectedSats = (long)(amount.Value * 100_000_000M);
+                    if (expectedSats != amountSats.Value)
+                        return (txResult, "AmountSats does not match Amount for bridge lock.");
+
+                    if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
+                        return (txResult, "Invalid EvmDestination for bridge lock.");
+
+                    if (VBTCBridgeLockState.GetByLockId(lockId) != null)
+                        return (txResult, "Bridge LockId already exists on-chain.");
+
+                    var spendCheck = await ValidateVbtcTransparentSpendForBridgeLock(scUID, txRequest.FromAddress, amount.Value, blockVerify, blockDownloads);
+                    if (!spendCheck.Ok)
+                        return (txResult, spendCheck.Message);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_LOCK transaction: {ex}",
+                        "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate vBTC V2 bridge lock transaction.");
+                }
+            }
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for vBTC V2 bridge unlock.");
+
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    var fn = jobj["Function"]?.ToObject<string>();
+                    if (fn != "VBTCBridgeUnlock()")
+                        return (txResult, "Invalid Function for vBTC V2 bridge unlock.");
+
+                    var scUID = jobj["ContractUID"]?.ToObject<string>();
+                    var lockId = jobj["LockId"]?.ToObject<string>();
+                    var amount = jobj["Amount"]?.ToObject<decimal?>();
+                    var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                    var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string>();
+
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId))
+                        return (txResult, "ContractUID and LockId are required for bridge unlock.");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Bridge unlock must be a self-transaction (from == to).");
+
+                    if (!amount.HasValue || amount.Value <= 0 || !amountSats.HasValue)
+                        return (txResult, "Amount and AmountSats are required for bridge unlock.");
+
+                    var expectedSats = (long)(amount.Value * 100_000_000M);
+                    if (expectedSats != amountSats.Value)
+                        return (txResult, "AmountSats does not match Amount for bridge unlock.");
+
+                    if (!IsValidEvmTxHash32(exitBurnTxHash))
+                        return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
+
+                    if (BaseBridgeService.IsBridgeConfigured)
+                    {
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "Bridge unlock requires CasterConsensusVotes array.");
+
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "EXIT"))
+                            return (txResult, "Caster consensus votes invalid or insufficient for VBTCb unlock.");
+
+                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(exitBurnTxHash.Trim());
+                        if (!burnOk)
+                            return (txResult, "Exit burn transaction could not be verified on Base.");
+                    }
+
+                    var rec = VBTCBridgeLockState.GetByLockId(lockId);
+                    if (rec == null)
+                        return (txResult, "Unknown bridge LockId (no prior lock on-chain).");
+
+                    if (rec.IsUnlocked)
+                        return (txResult, "Bridge lock already unlocked.");
+
+                    if (rec.OwnerAddress != txRequest.FromAddress)
+                        return (txResult, "Bridge unlock signer must match original lock owner.");
+
+                    if (rec.SmartContractUID != scUID)
+                        return (txResult, "ContractUID does not match the locked bridge record.");
+
+                    if (rec.AmountSats != amountSats.Value)
+                        return (txResult, "AmountSats does not match the locked bridge record.");
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_UNLOCK transaction: {ex}",
+                        "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate vBTC V2 bridge unlock transaction.");
+                }
+            }
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for vBTC V2 bridge pool unlock.");
+
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    var fn = jobj["Function"]?.ToObject<string>();
+                    if (fn != "VBTCBridgePoolUnlock()")
+                        return (txResult, "Invalid Function for vBTC V2 bridge pool unlock.");
+
+                    var totalAmount = jobj["TotalAmount"]?.ToObject<decimal?>();
+                    var totalAmountSats = jobj["TotalAmountSats"]?.ToObject<long?>();
+                    var vfxDestAddr = jobj["VfxDestinationAddress"]?.ToObject<string>();
+                    var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string>();
+                    var allocations = jobj["Allocations"];
+
+                    if (!totalAmount.HasValue || totalAmount.Value <= 0 || !totalAmountSats.HasValue)
+                        return (txResult, "TotalAmount and TotalAmountSats are required for bridge pool unlock.");
+
+                    var expectedSats = (long)(totalAmount.Value * 100_000_000M);
+                    if (expectedSats != totalAmountSats.Value)
+                        return (txResult, "TotalAmountSats does not match TotalAmount for bridge pool unlock.");
+
+                    if (string.IsNullOrEmpty(vfxDestAddr))
+                        return (txResult, "VfxDestinationAddress is required for bridge pool unlock.");
+
+                    if (!IsValidEvmTxHash32(exitBurnTxHash))
+                        return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Bridge pool unlock must be a self-transaction (from == to).");
+
+                    if (allocations == null || allocations.Type != JTokenType.Array || !allocations.HasValues)
+                        return (txResult, "Allocations array is required for bridge pool unlock.");
+
+                    if (BaseBridgeService.IsBridgeConfigured)
+                    {
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
+
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "POOL_EXIT"))
+                            return (txResult, "Caster consensus votes invalid or insufficient for pool unlock.");
+
+                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(exitBurnTxHash.Trim());
+                        if (!burnOk)
+                            return (txResult, "Exit burn transaction could not be verified on Base.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_POOL_UNLOCK transaction: {ex}",
+                        "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate vBTC V2 bridge pool unlock transaction.");
+                }
+            }
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for bridge exit to BTC.");
+
+                // Bridge exit TXs are broadcast by casters on behalf of Base users and MUST be fee-free.
+                // Any non-zero fee indicates a misconfigured builder (see the prior CompleteWithdrawal bug).
+                if (txRequest.Fee != 0M)
+                    return (txResult, "Bridge exit to BTC must be fee-free (Fee must equal 0).");
+                if (txRequest.Amount != 0M)
+                    return (txResult, "Bridge exit to BTC must carry zero VFX amount.");
+
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    if (jobj["Function"]?.ToObject<string>() != "VBTCBridgeExitToBTC()")
+                        return (txResult, "Invalid Function for bridge exit to BTC.");
+
+                    var scUID = jobj["ContractUID"]?.ToObject<string>();
+                    var lockId = jobj["LockId"]?.ToObject<string>();
+                    var amount = jobj["Amount"]?.ToObject<decimal?>();
+                    var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                    var btcDestination = jobj["BtcDestination"]?.ToObject<string>();
+                    var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId) || !amount.HasValue || !amountSats.HasValue ||
+                        string.IsNullOrEmpty(btcDestination) || string.IsNullOrEmpty(baseBurnTxHash))
+                        return (txResult, "Missing required fields for bridge exit to BTC.");
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Bridge exit to BTC must be a self-transaction (from == to).");
+
+                    if (!IsValidEvmTxHash32(baseBurnTxHash))
+                        return (txResult, "BaseBurnTxHash must be a valid 32-byte hex transaction hash.");
+
+                    if (VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash) != null)
+                        return (txResult, "Duplicate Base burn transaction for bridge exit to BTC.");
+
+                    if (BaseBridgeService.IsBridgeConfigured)
+                    {
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, baseBurnTxHash.Trim(), "BTC_EXIT"))
+                            return (txResult, "Caster consensus votes invalid or insufficient for exit to BTC.");
+                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(baseBurnTxHash.Trim());
+                        if (!burnOk)
+                            return (txResult, "Base burn transaction could not be verified.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_EXIT_TO_BTC: {ex}", "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate bridge exit to BTC transaction.");
+                }
+            }
+
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE
+                || txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+            {
+                if (string.IsNullOrWhiteSpace(txRequest.Data))
+                    return (txResult, "Transaction data cannot be null for bridge exit to BTC complete.");
+
+                // Bridge exit completion TX is broadcast by the caster — must be fee-free and carry no VFX amount.
+                if (txRequest.Fee != 0M)
+                    return (txResult, "Bridge exit to BTC complete must be fee-free (Fee must equal 0).");
+                if (txRequest.Amount != 0M)
+                    return (txResult, "Bridge exit to BTC complete must carry zero VFX amount.");
+
+                try
+                {
+                    var jobj = JObject.Parse(txRequest.Data);
+                    var fnName = jobj["Function"]?.ToObject<string>();
+                    if (fnName != "VBTCBridgeExitToBTCComplete()" && fnName != "VBTCBridgeExitToBTCFail()")
+                        return (txResult, "Invalid Function for bridge exit to BTC complete/fail.");
+
+                    var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+                    if (string.IsNullOrEmpty(baseBurnTxHash))
+                        return (txResult, "BaseBurnTxHash is required.");
+
+                    // COMPLETE requires BtcTxHash; FAIL requires FailedAllocations
+                    if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                    {
+                        var btcTxHash = jobj["BtcTxHash"]?.ToObject<string>();
+                        if (string.IsNullOrEmpty(btcTxHash))
+                            return (txResult, "BtcTxHash is required for bridge exit complete.");
+                    }
+                    else // FAIL
+                    {
+                        var failedAllocs = jobj["FailedAllocations"];
+                        if (failedAllocs == null || failedAllocs.Type != JTokenType.Array || !failedAllocs.HasValues)
+                            return (txResult, "FailedAllocations array is required for bridge exit fail.");
+                    }
+
+                    if (txRequest.FromAddress != txRequest.ToAddress)
+                        return (txResult, "Must be a self-transaction (from == to).");
+
+                    var st = VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash);
+                    if (st == null || st.IsComplete)
+                        return (txResult, "No pending bridge exit to BTC for this burn hash.");
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE: {ex}", "TransactionValidatorService.VerifyTX()");
+                    return (txResult, "Failed to validate bridge exit to BTC complete transaction.");
+                }
+            }
+
             if (txRequest.FromAddress.StartsWith("xRBX") && runReserveCheck)
             {
                 if (txRequest.TransactionType != TransactionType.TX && 
@@ -2233,6 +3286,94 @@ namespace ReserveBlockCore.Services
                 }
             }
 
+        }
+
+        private static bool IsValidEvmTxHash32(string? h)
+        {
+            if (string.IsNullOrEmpty(h)) return false;
+            var hex = h.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? h.Substring(2) : h;
+            if (hex.Length != 64) return false;
+            foreach (var c in hex)
+            {
+                if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F'))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>Same transparent balance rules as <see cref="TransactionType.VBTC_V2_TRANSFER"/> for a bridge lock debit.</summary>
+        private static async Task<(bool Ok, string Message)> ValidateVbtcTransparentSpendForBridgeLock(
+            string scUID,
+            string fromAddress,
+            decimal amount,
+            bool blockVerify,
+            bool blockDownloads)
+        {
+            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+            if (scStateTreiRec == null)
+                return (false, $"vBTC V2 contract not found in state trei: {scUID}");
+
+            bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
+
+            decimal ledgerBalance = 0M;
+            if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+            {
+                var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
+                    .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                    .ToList();
+
+                if (transactions.Any())
+                    ledgerBalance = transactions.Sum(x => x.Amount);
+            }
+
+            if (isOwner)
+            {
+                decimal depositBalance = 0M;
+                string? depositAddr2 = null;
+                var scMainDecompile2 = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                if (scMainDecompile2?.Features != null)
+                {
+                    var tknzV2 = scMainDecompile2.Features
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures).FirstOrDefault();
+                    if (tknzV2 != null)
+                        depositAddr2 = ((TokenizationV2Feature)tknzV2).DepositAddress;
+                }
+
+                if (!string.IsNullOrEmpty(depositAddr2))
+                {
+                    if (!blockDownloads && !blockVerify)
+                    {
+                        try
+                        {
+                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                            if (elxClient != null)
+                            {
+                                var balance = await elxClient.GetBalance(depositAddr2, false);
+                                depositBalance = balance.Confirmed / 100_000_000M;
+                            }
+                        }
+                        catch { /* ElectrumX unavailable */ }
+                    }
+                }
+
+                decimal ownerBalance = depositBalance + ledgerBalance;
+                if (ownerBalance < amount)
+                {
+                    if (!blockVerify)
+                        return (false, $"Insufficient vBTC balance (owner) for bridge lock. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount}");
+                }
+            }
+            else
+            {
+                if (ledgerBalance < amount)
+                    return (false, $"Insufficient vBTC balance for bridge lock. Available: {ledgerBalance}, Requested: {amount}");
+
+                if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                    return (false, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+            }
+
+            return (true, "");
         }
 
         public static async Task<bool> VerifyTXSize(Transaction txRequest)

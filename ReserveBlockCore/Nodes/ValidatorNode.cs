@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using Newtonsoft.Json;
 using ReserveBlockCore.Bitcoin.ElectrumX;
@@ -88,7 +88,15 @@ namespace ReserveBlockCore.Nodes
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 var delay = Task.Delay(new TimeSpan(0, 0, 5));
-                if ((Globals.StopAllTimers || !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+                // FIX: Allow block generation even if Globals.Nodes is empty, as long as
+                // we have NetworkValidators or BlockCasters. The validator needs to keep
+                // NextValidatorBlock current so casters can fetch blocks via VerifyBlock.
+                if (Globals.StopAllTimers || !Globals.IsChainSynced)
+                {
+                    await delay;
+                    continue;
+                }
+                if (Globals.Nodes.Count == 0 && Globals.NetworkValidators.Count == 0 && Globals.BlockCasters.Count == 0)
                 {
                     await delay;
                     continue;
@@ -117,9 +125,12 @@ namespace ReserveBlockCore.Nodes
                             continue;
                         }
                     }
+                    var totalVals = !Globals.IsBootstrapMode && ValidatorSnapshotService.CurrentSnapshot.Count > 0
+                        ? ValidatorSnapshotService.CurrentSnapshot.Count
+                        : Globals.NetworkValidators.Count;
                     var block = await BlockchainData.CraftBlock_V5(
                                                     Globals.ValidatorAddress,
-                                                    Globals.NetworkValidators.Count(),
+                                                    totalVals,
                                                     proof.Item2, nextHeight, false, true);
 
                     if (block != null)
@@ -159,8 +170,15 @@ namespace ReserveBlockCore.Nodes
 
         public static async Task GetBlockcasters()
         {
-            if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+            if (Globals.StopAllTimers && !Globals.IsChainSynced)
+                return;
+            // Hardcoded bootstrap caster list does not require P2P; allow injection while Nodes is still empty.
+            if (Globals.Nodes.Count == 0 && !SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
+                return;
+
+            if (!SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
             {
+                Globals.SyncKnownCastersFromBlockCasters();
                 return;
             }
 
@@ -245,7 +263,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "144.126.156.102",
+                            PeerIP = "40.160.233.196",
                             FailCount = 0,
                             IsValidator = true,
                             ValidatorAddress = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
@@ -255,7 +273,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "66.94.124.2",
+                            PeerIP = "40.160.225.225",
                             FailCount = 0,
                             IsValidator = true,
                             ValidatorAddress = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
@@ -265,7 +283,7 @@ namespace ReserveBlockCore.Nodes
                         {
                             IsIncoming = false,
                             IsOutgoing = true,
-                            PeerIP = "66.94.124.3",
+                            PeerIP = "40.160.239.46",
                             FailCount = 0,
                             IsValidator = true,
                             ValidatorAddress = "xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi",
@@ -276,15 +294,133 @@ namespace ReserveBlockCore.Nodes
                 
             }
 
+            // EVICTION-AWARE: Before blindly injecting hardcoded bootstrap peers, check if the
+            // chain is already running with live casters. If so, fetch the REAL caster list from
+            // peers instead of using the hardcoded list. This prevents a previously-evicted
+            // bootstrap caster from re-adding itself and creating a 6/5 overflow.
+            var bootstrapIPs = peerList
+                .Where(p => !string.IsNullOrEmpty(p.PeerIP) && p.PeerIP != Globals.ReportedIP)
+                .Select(p => p.PeerIP!)
+                .ToList();
+
+            if (Globals.IsChainSynced || Globals.LastBlock.Height > 0)
+            {
+                // Chain is running — try to get the live caster list from peers first
+                var liveCasters = await CasterDiscoveryService.FetchLiveCasterListFromPeersAsync(bootstrapIPs);
+                if (liveCasters != null && liveCasters.Count > 0)
+                {
+                    // Peers are reachable and have a live caster list — use THAT instead of hardcoded.
+                    // Check if we are in the live list before adding ourselves.
+                    var selfInLiveList = liveCasters.Any(c => c.ValidatorAddress == Globals.ValidatorAddress);
+
+                    CasterLogUtility.Log(
+                        $"GetBlockcasters EVICTION-AWARE: live list has {liveCasters.Count} casters. " +
+                        $"Self ({Globals.ValidatorAddress}) in live list: {selfInLiveList}",
+                        "EVICTION-AWARE");
+
+                    // Replace BlockCasters with live list (respecting MaxCasters)
+                    foreach (var liveCaster in liveCasters)
+                    {
+                        if (liveCaster != null && !string.IsNullOrEmpty(liveCaster.ValidatorAddress))
+                        {
+                            if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == liveCaster.ValidatorAddress))
+                            {
+                                CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(liveCaster);
+                            }
+                        }
+                    }
+
+                    // If we're NOT in the live list, do NOT add self — we were evicted
+                    if (!selfInLiveList && Globals.IsLocalBootstrapCaster)
+                    {
+                        Globals.IsBlockCaster = false;
+                        CasterLogUtility.Log(
+                            $"GetBlockcasters EVICTION-AWARE: self NOT in live caster list — standing down. " +
+                            $"Will wait for re-promotion through normal flow.",
+                            "EVICTION-AWARE");
+                        ConsoleWriterService.OutputValCaster(
+                            $"[EVICTION-AWARE] Bootstrap caster {Globals.ValidatorAddress} not in peer caster lists. " +
+                            $"Standing down to regular validator.");
+                    }
+
+                    Globals.SyncKnownCastersFromBlockCasters();
+                    return;
+                }
+
+                // No peers responded — fall through to hardcoded injection (cold start / all peers down)
+                CasterLogUtility.Log(
+                    "GetBlockcasters EVICTION-AWARE: no peers responded to live caster query — using hardcoded fallback",
+                    "EVICTION-AWARE");
+            }
+
+            // Cold start or no peers reachable — use hardcoded list with MaxCasters cap
             foreach (var caster in peerList)
             {
                 if (caster != null)
                 {
-                    var nCaster = Globals.BlockCasters.Where(x => x.ValidatorAddress == caster.ValidatorAddress).FirstOrDefault();
-                    if (nCaster == null)
-                        Globals.BlockCasters.Add(caster);
+                    if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == caster.ValidatorAddress))
+                    {
+                        // Use atomic add to enforce MaxCasters cap
+                        CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(caster);
+                    }
                 }
             }
+
+            Globals.SyncKnownCastersFromBlockCasters();
+        }
+
+        /// <summary>Phase 2: request the same height from two casters; require matching hash when both respond.</summary>
+        /// <summary>
+        /// CASTER-SYNC-FIX: Enhanced block fetch — queries ALL reachable casters in parallel
+        /// and requires a supermajority to agree on the same block hash.
+        /// Previously only checked 2 casters, allowing split-brain when they disagreed.
+        /// </summary>
+        public static async Task<Block?> FetchBlockWithRedundantCasterAgreementAsync(long height, string winnerAddress)
+        {
+            var peers = Globals.BlockCasters.Where(x => !string.IsNullOrEmpty(x.PeerIP)).ToList();
+            if (peers.Count == 0)
+                return null;
+
+            // Fetch from ALL casters in parallel
+            var fetchTasks = peers.Select(async peer =>
+            {
+                try
+                {
+                    var block = await CasterBlockFetch.TryFetchBlockAsync(peer, height, winnerAddress);
+                    if (block != null && block.Validator == winnerAddress)
+                        return (block, peer.PeerIP);
+                }
+                catch { }
+                return ((Block?)null, peer.PeerIP);
+            }).ToList();
+
+            var results = await Task.WhenAll(fetchTasks);
+            var validResults = results.Where(r => r.Item1 != null).ToList();
+
+            if (validResults.Count == 0)
+                return null;
+
+            // Group by hash and find the supermajority
+            var requiredAgreement = Math.Max(2, peers.Count / 2 + 1);
+            var hashGroups = validResults
+                .GroupBy(r => r.Item1!.Hash)
+                .OrderByDescending(g => g.Count())
+                .ToList();
+
+            var bestGroup = hashGroups.First();
+            if (bestGroup.Count() >= requiredAgreement)
+            {
+                // Supermajority agrees on this hash
+                return bestGroup.First().Item1;
+            }
+
+            // If only one caster responded, accept it (better than nothing)
+            if (validResults.Count == 1)
+                return validResults[0].Item1;
+
+            // No supermajority — return null to signal disagreement
+            ConsoleWriterService.OutputValCaster($"[FetchBlock] No hash agreement at height {height}: {string.Join(", ", hashGroups.Select(g => $"{g.Key?[..Math.Min(8, g.Key?.Length ?? 0)]}={g.Count()}"))}");
+            return null;
         }
 
         #endregion
@@ -468,6 +604,9 @@ namespace ReserveBlockCore.Nodes
                 case "7":
                     _ = ReceiveConfirmedBlock(data);
                     break;
+                case "FC":
+                    _ = ReceiveForkCorrection(data, ipAddress);
+                    break;
                 case "7777":
                     _ = TxMessage(data);
                     break;
@@ -488,6 +627,7 @@ namespace ReserveBlockCore.Nodes
                 Globals.ReportedIPs[IP]++;
             else
                 Globals.ReportedIPs[IP] = 1;
+            P2P.P2PClient.TryAutoUpdateReportedIP();
         }
 
         //2
@@ -577,6 +717,43 @@ namespace ReserveBlockCore.Nodes
             var lastBlockHeight = Globals.LastBlock.Height;
             if (lastBlockHeight < nextBlock.Height)
             {
+                string? agreedHashForGate = null;
+                Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
+
+                if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                    && string.IsNullOrEmpty(agreedHashForGate))
+                {
+                    var spin = Stopwatch.StartNew();
+                    while (spin.ElapsedMilliseconds < 300 && string.IsNullOrEmpty(agreedHashForGate))
+                    {
+                        if (Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out var h) && !string.IsNullOrEmpty(h))
+                        {
+                            agreedHashForGate = h;
+                            break;
+                        }
+                        await Task.Delay(10);
+                    }
+                }
+
+                if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                    && string.IsNullOrEmpty(agreedHashForGate))
+                {
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting height {nextBlock.Height}: no caster-agreed hash yet.");
+                    return;
+                }
+
+                if (!string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
+                {
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting block {nextBlock.Height}: hash does not match caster-agreed value.");
+                    return;
+                }
+
+                if (nextBlock.Height != Globals.LastBlock.Height + 1)
+                {
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting height {nextBlock.Height}: expected next height {Globals.LastBlock.Height + 1}.");
+                    return;
+                }
+
                 var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
                 if (result)
                 {
@@ -670,6 +847,7 @@ namespace ReserveBlockCore.Nodes
                                 try
                                 {
                                     mempool.DeleteManySafe(x => x.Hash == transaction.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
                                 }
                                 catch (Exception ex)
                                 {
@@ -700,6 +878,31 @@ namespace ReserveBlockCore.Nodes
             }
         }
 
+        //FC — Fork Correction from caster
+        /// <summary>
+        /// PHASE 2: Handles incoming fork correction messages from casters.
+        /// When a caster detects a hash divergence via SyncBlockHashWithPeersAsync and
+        /// corrects its own block, it broadcasts the canonical block to all connected
+        /// validators. This handler delegates to ForkCorrectionService for validation
+        /// and application.
+        /// </summary>
+        private static async Task ReceiveForkCorrection(string data, string casterIP)
+        {
+            if (string.IsNullOrEmpty(data)) return;
+            try
+            {
+                var correction = JsonConvert.DeserializeAnonymousType(data, new { Height = 0L, BlockJson = "" });
+                if (correction != null && correction.Height > 0 && !string.IsNullOrEmpty(correction.BlockJson))
+                {
+                    await ForkCorrectionService.HandleForkCorrectionAsync(correction.Height, correction.BlockJson, casterIP ?? "unknown");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[ForkCorrection] Error processing correction from {casterIP}: {ex.Message}", "ValidatorNode");
+            }
+        }
+
         //9999
         public static async Task FailedToConnect(string data)
         {
@@ -727,6 +930,13 @@ namespace ReserveBlockCore.Nodes
                 try
                 {
                     if (Globals.StopAllTimers && !Globals.IsChainSynced)
+                    {
+                        await delay;
+                        continue;
+                    }
+
+                    // Don't notify explorer if ports haven't been verified open
+                    if (!Globals.PortsOpened)
                     {
                         await delay;
                         continue;
@@ -875,7 +1085,7 @@ namespace ReserveBlockCore.Nodes
 
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                SkipIPs.Add("66.94.124.2");
+                SkipIPs.Add("40.160.225.225");
             }
 
             var peerList = peerDB.Find(x => x.IsValidator).ToArray()

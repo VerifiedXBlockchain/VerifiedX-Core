@@ -18,12 +18,13 @@ namespace ReserveBlockCore.Services
                 var scUID = scMain.SmartContractUID;
                 var features = "";
                 var featuresList = scMain.Features;
-                StringBuilder strRoyaltyBld = new StringBuilder();
-                StringBuilder strEvolveBld = new StringBuilder();
-                StringBuilder strMultiAssetBld = new StringBuilder();
-                StringBuilder strTokenBld = new StringBuilder();
-                StringBuilder strTokenizationBld = new StringBuilder();
-                var isToken = false;
+            StringBuilder strRoyaltyBld = new StringBuilder();
+            StringBuilder strEvolveBld = new StringBuilder();
+            StringBuilder strMultiAssetBld = new StringBuilder();
+            StringBuilder strTokenBld = new StringBuilder();
+            StringBuilder strTokenizationBld = new StringBuilder();
+            StringBuilder strTokenizationV2Bld = new StringBuilder();
+            var isToken = false;
 
                 var appendChar = "\"|->\"";
 
@@ -206,6 +207,17 @@ namespace ReserveBlockCore.Services
                             strBuild = tokenizationSource.Item1;
                             strTokenizationBld = tokenizationSource.Item2;
                         }
+                        else if(feature.FeatureName == FeatureName.TokenizationV2)
+                        {
+                            var tokenizationV2 = ((TokenizationV2Feature)feature.FeatureFeatures);
+                            feature.FeatureFeatures = tokenizationV2;
+
+                            Flist.Add(feature);
+
+                            var tokenizationV2Source = await TokenizationV2SourceGenerator.Build(tokenizationV2, strBuild);
+                            strBuild = tokenizationV2Source.Item1;
+                            strTokenizationV2Bld = tokenizationV2Source.Item2;
+                        }
                         else
                         {
                             //do nothing
@@ -270,6 +282,18 @@ namespace ReserveBlockCore.Services
                                 var tokenizationSource = await TokenizationSourceGenerator.Build(tokenization, strBuild);
                                 strBuild = tokenizationSource.Item1;
                                 strTokenizationBld = tokenizationSource.Item2;
+                            }
+
+                            if (x.FeatureName == FeatureName.TokenizationV2)
+                            {
+                                var tokenizationV2 = ((TokenizationV2Feature)x.FeatureFeatures);
+                                x.FeatureFeatures = tokenizationV2;
+
+                                Flist.Add(x);
+
+                                var tokenizationV2Source = await TokenizationV2SourceGenerator.Build(tokenizationV2, strBuild);
+                                strBuild = tokenizationV2Source.Item1;
+                                strTokenizationV2Bld = tokenizationV2Source.Item2;
                             }
 
                             if (x.FeatureName == FeatureName.Evolving)
@@ -462,6 +486,10 @@ namespace ReserveBlockCore.Services
                     if (featuresList.Exists(x => x.FeatureName == FeatureName.Tokenization))
                     {
                         strBuild.Append(strTokenizationBld);
+                    }
+                    if (featuresList.Exists(x => x.FeatureName == FeatureName.TokenizationV2))
+                    {
+                        strBuild.Append(strTokenizationV2Bld);
                     }
                 }
 
