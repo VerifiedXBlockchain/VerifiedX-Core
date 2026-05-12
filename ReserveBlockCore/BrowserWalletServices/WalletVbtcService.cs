@@ -102,6 +102,13 @@ namespace ReserveBlockCore.BrowserWalletServices
                 return (false, result.ErrorMessage, null, null);
         }
 
+        public static async Task<(bool success, string message)> CancelWithdrawal(
+            string scUID, string ownerAddress, string requestHash)
+        {
+            var result = await Bitcoin.Services.VBTCService.CancelWithdrawal(scUID, ownerAddress, requestHash);
+            return (result.Item1, result.Item2);
+        }
+
         public static object GetWithdrawStatus(string scUID)
         {
             var contract = VBTCContractV2.GetContract(scUID);

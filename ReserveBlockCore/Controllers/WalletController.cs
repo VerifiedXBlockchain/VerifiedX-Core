@@ -139,6 +139,21 @@ namespace ReserveBlockCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
+        [HttpPost("api/vbtc/withdraw/cancel")]
+        public async Task<IActionResult> VBTCWithdrawCancel([FromBody] VBTCWDCancel req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.OwnerAddress) ||
+                    string.IsNullOrWhiteSpace(req.RequestHash))
+                    return BadRequest(new { success = false, message = "scUID, ownerAddress, and requestHash are required." });
+
+                var (success, message) = await WalletVbtcService.CancelWithdrawal(req.ScUID, req.OwnerAddress, req.RequestHash);
+                return Ok(new { success, message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
         [HttpGet("api/vbtc/withdraw/status/{scUID}")]
         public IActionResult VBTCWithdrawStatus(string scUID)
         {

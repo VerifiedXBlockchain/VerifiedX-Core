@@ -887,17 +887,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // ============================================================
 
                 // Use validator address or first available account for transaction creation
-                string fromAddress = !string.IsNullOrEmpty(Globals.ValidatorAddress) ? Globals.ValidatorAddress : null;
-                if (string.IsNullOrEmpty(fromAddress))
-                {
-                    var accounts = AccountData.GetAccounts();
-                    if (accounts == null || accounts.Count() == 0)
-                    {
-                        SCLogUtility.Log($"No accounts available to create completion transaction", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, btcTxHash, "No accounts available to create completion transaction");
-                    }
-                    fromAddress = accounts.FindAll().First().Address;
-                }
+                string fromAddress = withdrawalRequest.RequestorAddress;
 
                 var account = AccountData.GetSingleAccount(fromAddress);
                 if (account == null)
@@ -988,6 +978,115 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 SCLogUtility.Log($"vBTC V2 Withdrawal Complete Error: {ex.Message}", "VBTCService.CompleteWithdrawal()");
                 return (false, string.Empty, string.Empty, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Cancel an active withdrawal request for a vBTC V2 contract.
+        /// Only the original requestor can cancel their own withdrawal.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <param name="requestorAddress">Address that originally requested the withdrawal</param>
+        /// <param name="withdrawalRequestHash">Hash of the withdrawal request transaction to cancel</param>
+        /// <returns>Success flag and message</returns>
+        public static async Task<(bool, string)> CancelWithdrawal(string scUID, string requestorAddress, string withdrawalRequestHash)
+        {
+            try
+            {
+                // Get account and validate
+                var account = AccountData.GetSingleAccount(requestorAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {requestorAddress}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"Account not found: {requestorAddress}");
+                }
+
+                // Verify the withdrawal request exists and belongs to this user
+                var existingRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (existingRequest == null)
+                {
+                    SCLogUtility.Log($"Withdrawal request not found: {withdrawalRequestHash}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"Withdrawal request not found: {withdrawalRequestHash}");
+                }
+
+                if (existingRequest.RequestorAddress != requestorAddress)
+                {
+                    SCLogUtility.Log($"Requestor address mismatch. Expected: {existingRequest.RequestorAddress}, Got: {requestorAddress}", "VBTCService.CancelWithdrawal()");
+                    return (false, "Only the original withdrawal requestor can cancel this withdrawal.");
+                }
+
+                if (existingRequest.IsCompleted)
+                {
+                    SCLogUtility.Log($"Withdrawal already completed/cancelled: {withdrawalRequestHash}", "VBTCService.CancelWithdrawal()");
+                    return (false, "Cannot cancel an already completed or cancelled withdrawal.");
+                }
+
+                // Create transaction data
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalCancel()",
+                    ContractUID = scUID,
+                    WithdrawalRequestHash = withdrawalRequestHash
+                });
+
+                // Build transaction — self-transaction from the requestor
+                var cancelTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = requestorAddress,
+                    ToAddress = requestorAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(requestorAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL,
+                    Data = txData
+                };
+
+                cancelTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(cancelTx);
+
+                // Build and sign transaction
+                cancelTx.Build();
+                var txHash = cancelTx.Hash;
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {requestorAddress}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"Private key was null for account {requestorAddress}");
+                }
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                }
+
+                cancelTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(cancelTx);
+                if (result.Item1)
+                {
+                    await TransactionData.AddTxToWallet(cancelTx, true);
+                    await AccountData.UpdateLocalBalance(requestorAddress, cancelTx.Fee + cancelTx.Amount);
+                    await TransactionData.AddToPool(cancelTx);
+                    await P2PClient.SendTXMempool(cancelTx);
+                    SCLogUtility.Log($"vBTC V2 Withdrawal Cancel TX Success. SCUID: {scUID}, TxHash: {cancelTx.Hash}", "VBTCService.CancelWithdrawal()");
+                    return (true, cancelTx.Hash);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Withdrawal Cancel TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Withdrawal Cancel Error: {ex.Message}", "VBTCService.CancelWithdrawal()");
+                return (false, $"Error: {ex.Message}");
             }
         }
 
