@@ -1,7 +1,7 @@
 const { ethers, upgrades } = require("hardhat");
 
 async function main() {
-    console.log("=== VBTCbV3 Deployment to Base Sepolia ===\n");
+    console.log("=== vBTCb Deployment to Base Mainnet ===\n");
 
     const [deployer] = await ethers.getSigners();
     console.log("Deployer address:", deployer.address);
@@ -19,9 +19,9 @@ async function main() {
     // Get them from: GET http://<validator-ip>:<port>/wallet/api/base-address/<vfxAddress>
     // ============================================================
     const initialValidators = [
-        "0xb54c87485040f60c8935C4525CbC16ab9D8694d4",  // Validator 1 Base Address
-        "0x417C81B2ff3695536f662805fA7dC472811DD471",  // Validator 2 Base Address
-        "0x17Eb720C218d611c8EBe713E0908c214328ef886",  // Validator 3 Base Address
+        "0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6",  // Validator 1 Base Address
+        "0x95bDa4f2009A2998871c0BA3852Dc62617672Ed7",  // Validator 2 Base Address
+        "0x5C44Cf6E3a022a49904e6139a49ae72866c02440",  // Validator 3 Base Address
     ];
 
     console.log("Initial validators:");
@@ -29,11 +29,11 @@ async function main() {
     console.log();
 
     // Deploy as UUPS proxy
-    const VBTCbV3 = await ethers.getContractFactory("VBTCbV3");
+    const vBTCb = await ethers.getContractFactory("vBTCb");
     
-    console.log("Deploying VBTCbV3 as UUPS proxy...");
+    console.log("Deploying vBTCb as UUPS proxy...");
     const proxy = await upgrades.deployProxy(
-        VBTCbV3,
+        vBTCb,
         [
             "Verified Bitcoin on Base",  // name
             "vBTC.b",                    // symbol
@@ -78,7 +78,7 @@ async function main() {
         console.warn(
             "\nCould not read contract state yet (often public RPC lag). Deployment tx already succeeded — confirm on BaseScan:"
         );
-        console.warn("  https://sepolia.basescan.org/address/" + proxyAddress);
+        console.warn("  https://basescan.org/address/" + proxyAddress);
         console.warn("Underlying error:", lastErr.message || lastErr);
     } else {
         console.log("\nContract state:");
@@ -93,7 +93,7 @@ async function main() {
     console.log("1. Set this environment variable on ALL VFX nodes:");
     console.log(`   set BASE_BRIDGE_V3_CONTRACT=${proxyAddress}`);
     console.log("2. Restart all VFX nodes");
-    console.log("3. Verify on BaseScan: https://sepolia.basescan.org/address/" + proxyAddress);
+    console.log("3. Verify on BaseScan: https://basescan.org/address/" + proxyAddress);
 }
 
 main()

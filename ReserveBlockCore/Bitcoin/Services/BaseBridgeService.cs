@@ -20,7 +20,7 @@ namespace ReserveBlockCore.Bitcoin.Services
     public static class BaseBridgeService
     {
         // ── Configuration (set from config.txt via ProcessConfig) ──
-        public static string BaseRpcUrl { get; set; } = "https://sepolia.base.org";
+        public static string BaseRpcUrl { get; set; } = "https://mainnet.base.org";
         public static string BaseRpcUrl2 { get; set; } = "";
         public static string BaseRpcUrl3 { get; set; } = "";
 
@@ -43,7 +43,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             set => ContractAddress = value;
         }
 
-        public static int BaseChainId { get; set; } = 84532; // default until LoadConfig
+        public static int BaseChainId { get; set; } = 8453; // default until LoadConfig
 
         /// <summary>RPC + contract configured.</summary>
         public static bool IsEnabled => IsBridgeConfigured && !string.IsNullOrWhiteSpace(BaseRpcUrl);

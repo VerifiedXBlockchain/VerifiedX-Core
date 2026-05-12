@@ -629,7 +629,7 @@ namespace ReserveBlockCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (mainnet — set BaseBridgeContract to your proxy)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://mainnet.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x0000000000000000000000000000000000000000");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=8453");
                 }
                 else if(Globals.IsCustomTestNet) //devnet

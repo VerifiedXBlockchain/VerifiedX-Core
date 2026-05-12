@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /**
- * @title VBTCbV3 - Verified Bitcoin on Base (Production)
+ * @title vBTCb - Verified Bitcoin on Base (Production)
  * @notice Multi-sig verified ERC-20 for vBTC bridged from VFX. No owner; upgrades via validator multi-sig.
  * @dev Deploy behind an ERC1967 UUPS proxy. Initializer seeds the validator registry.
  *
@@ -16,7 +16,7 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
  *   to support pool-based unlocks (fungible exit — any holder can exit, not just original locker)
  * - Added VfxExitBurned event with vfxDestinationAddress instead of lockId
  */
-contract VBTCbV3 is ERC20Upgradeable, UUPSUpgradeable {
+contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
 
@@ -321,7 +321,7 @@ contract VBTCbV3 is ERC20Upgradeable, UUPSUpgradeable {
 
     function _authorizeUpgrade(address newImplementation) internal override {
         newImplementation; // silence
-        require(_upgradeAuthorized, "VBTCbV3: use upgradeWithValidatorApproval");
+        require(_upgradeAuthorized, "vBTCb: use upgradeWithValidatorApproval");
         _upgradeAuthorized = false;
     }
 
