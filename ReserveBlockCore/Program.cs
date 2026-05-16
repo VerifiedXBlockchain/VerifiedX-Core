@@ -383,6 +383,35 @@ namespace ReserveBlockCore
                 }
             });
 
+            // FROST FFI: Verify native library presence and full functionality (background — non-blocking)
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    var frostResult = FrostFFICheckUtility.RunFullCheck();
+                    Globals.FrostFFIAvailable = frostResult.AllChecksPassed;
+                    Globals.FrostFFIVersion = frostResult.LibraryVersion;
+                    Globals.FrostFFICheckSummary = frostResult.Summary;
+                    LogUtility.Log(frostResult.Summary, "FrostFFICheck");
+                    if (frostResult.AllChecksPassed)
+                    {
+                        Console.WriteLine($"[FROST FFI] Health check PASSED — all functions verified (v{frostResult.LibraryVersion})");
+                    }
+                    else
+                    {
+                        Console.WriteLine("[FROST FFI] Health check FAILED — see logs for details");
+                        ErrorLogUtility.LogError($"FROST FFI check failed: {string.Join("; ", frostResult.Errors)}", "FrostFFICheck");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Globals.FrostFFIAvailable = false;
+                    Globals.FrostFFICheckSummary = $"FROST FFI check error: {ex.Message}";
+                    ErrorLogUtility.LogError($"FROST FFI check error: {ex}", "FrostFFICheck");
+                    Console.WriteLine($"[FROST FFI] Health check ERROR: {ex.Message}");
+                }
+            });
+
             await DbContext.CheckPoint(); //checkpoints db log files
 
             // STARTUP REVERT: If revertblock=N was passed, delete all blocks/headers above N

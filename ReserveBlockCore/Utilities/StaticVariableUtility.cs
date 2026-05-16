@@ -356,6 +356,17 @@ namespace ReserveBlockCore.Utilities
             strBld.AppendLine(lastSyncTime);
             strBld.AppendLine("---------------------------------------------------------------------");
 
+            strBld.AppendLine("-------------------------------FROST FFI Status----------------------");
+            strBld.AppendLine($"FROST FFI Available: {Globals.FrostFFIAvailable}");
+            strBld.AppendLine("---------------------------------------------------------------------");
+            strBld.AppendLine($"FROST FFI Version: {Globals.FrostFFIVersion}");
+            strBld.AppendLine("---------------------------------------------------------------------");
+            if (!string.IsNullOrEmpty(Globals.FrostFFICheckSummary))
+            {
+                strBld.AppendLine(Globals.FrostFFICheckSummary);
+                strBld.AppendLine("---------------------------------------------------------------------");
+            }
+
             return strBld.ToString();
         }
 

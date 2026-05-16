@@ -278,6 +278,9 @@ namespace ReserveBlockCore
         public static bool IsValidatorPortOpen = false;
         public static bool IsValidatorAPIPortOpen = false;
         public static bool IsFROSTAPIPortOpen = false;
+        public static bool FrostFFIAvailable = false;
+        public static string FrostFFIVersion = "Unknown";
+        public static string FrostFFICheckSummary = "";
         public static bool PortsOpened = false;
 
         /// <summary>Ethereum/Base address derived from this node's validator private key (empty if not a validator).</summary>
