@@ -108,8 +108,8 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         /// <summary>Maximum concurrent signing sessions allowed</summary>
         public const int MAX_SIGNING_SESSIONS = 50;
         
-        /// <summary>Maximum number of participant addresses per session</summary>
-        public const int MAX_PARTICIPANTS = 20;
+        /// <summary>Maximum number of participant addresses per session (supports mainnet scale)</summary>
+        public const int MAX_PARTICIPANTS = 200;
         
         /// <summary>Minimum required threshold percentage</summary>
         public const int MIN_THRESHOLD = 51;
@@ -120,8 +120,8 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         /// <summary>Maximum session ID length</summary>
         public const int MAX_SESSION_ID_LENGTH = 100;
         
-        /// <summary>Maximum commitment/share data length in characters (FIND-014: bound data before FFI)</summary>
-        public const int MAX_COMMITMENT_DATA_LENGTH = 4096;
+        /// <summary>Maximum commitment/share data length in characters (FIND-014: bound data before FFI, scaled for 200 participants)</summary>
+        public const int MAX_COMMITMENT_DATA_LENGTH = 32768;
         
         public static ConcurrentDictionary<string, DKGSession> DKGSessions { get; } = new();
         public static ConcurrentDictionary<string, SigningSession> SigningSessions { get; } = new();

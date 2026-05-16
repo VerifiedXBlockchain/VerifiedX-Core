@@ -28,8 +28,8 @@ namespace ReserveBlockCore.Bitcoin.FROST
             services.AddMvc();
             services.Configure<FormOptions>(x =>
             {
-                x.ValueLengthLimit = 4 * 1024 * 1024; // 4 MB
-                x.MultipartBodyLengthLimit = 4 * 1024 * 1024; // 4 MB
+                x.ValueLengthLimit = 8 * 1024 * 1024; // 8 MB (scaled for up to 200 FROST participants)
+                x.MultipartBodyLengthLimit = 8 * 1024 * 1024; // 8 MB
             });
         }
 

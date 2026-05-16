@@ -227,22 +227,23 @@ namespace ReserveBlockCore.Bitcoin.Services
                         {
                             ErrorLogUtility.LogError($"FIND-007 Security (HTTP Client): Blocked HTTP call to invalid validator IP. Address: {validator.ValidatorAddress}, IP: {validator.IPAddress}, Error: {ipError}", 
                                 "FrostMPCService.BroadcastDKGStart");
-                            return false;
+                            return (false, "Top");
                         }
                         
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/start";
                         var response = await _httpClient.PostAsJsonAsync(url, startRequest);
-                        return response.IsSuccessStatusCode;
+                        var rBody = await response.Content.ReadAsStringAsync();
+                        return (response.IsSuccessStatusCode, rBody);
                     }
                     catch (Exception ex)
                     {
                         LogUtility.Log($"[FROST MPC] Failed to contact validator {validator.ValidatorAddress}: {ex.Message}", "FrostMPCService.BroadcastDKGStart");
-                        return false;
+                        return (false, $"[FROST MPC] Failed to contact validator {validator.ValidatorAddress}: {ex.Message}");
                     }
                 });
 
                 var results = await Task.WhenAll(tasks);
-                successCount = results.Count(r => r);
+                successCount = results.Count(r => r.Item1);
 
                 var requiredCount = GetRequiredValidatorCount(validators.Count, threshold);
                 LogUtility.Log($"[FROST MPC] DKG Start broadcast: {successCount}/{validators.Count} responded (required: {requiredCount})", "FrostMPCService.BroadcastDKGStart");
