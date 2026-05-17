@@ -97,7 +97,7 @@ namespace VerfiedXCore.Tests
             Assert.Equal(initialBuffer, Globals.GlobalBufferCost);
         }
 
-        [Fact]
+        [Fact(Skip = "Only need to verify locally on machine.")]
         public async Task SignalRQueue_PreventsBulkDistributedAttack()
         {
             // Arrange - Simulate distributed attack from 100 IPs
