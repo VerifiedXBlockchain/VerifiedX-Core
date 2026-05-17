@@ -24,6 +24,15 @@ namespace ReserveBlockCore.Models
         /// <summary>Block height at which this validator was first added to NetworkValidators.
         /// Used for maturity gating — prevents premature caster promotion of freshly-connected nodes.</summary>
         public long FirstSeenAtHeight { get; set; }
+
+        /// <summary>Last block height reported by this validator via GetBlockHeight HTTP call.
+        /// Used by the height gate to exclude still-syncing validators from proof generation
+        /// and winner selection. Updated by VerifyWinnerAvailability and proof generation.</summary>
+        public long LastKnownHeight { get; set; }
+
+        /// <summary>Unix timestamp (seconds) when LastKnownHeight was last updated.
+        /// Height cache expires after HEIGHT_CACHE_TTL_SECONDS to force re-check.</summary>
+        public long LastHeightCheckTime { get; set; }
         
         // HAL-11 Security enhancements
         public long AdvertisementTimestamp { get; set; }

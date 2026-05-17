@@ -15,6 +15,15 @@ namespace ReserveBlockCore.Utilities
         private static long _proofCacheHeight = long.MinValue;
         private static List<Proof>? _allProofsCache;
 
+        /// <summary>HEIGHT-GATE: Maximum number of blocks a validator can be behind chain tip
+        /// and still be eligible for proof generation and winner selection. Validators further
+        /// behind are still syncing and cannot produce blocks at the current height.</summary>
+        public const int HEIGHT_GATE_MAX_BEHIND = 5;
+
+        /// <summary>HEIGHT-GATE: How long (in seconds) to cache a validator's reported height
+        /// before re-checking via HTTP. Short TTL ensures we detect when validators finish syncing.</summary>
+        public const int HEIGHT_CACHE_TTL_SECONDS = 60;
+
         /// <summary>STALL-HEAL: Consecutive round failures at the same height. Set by consensus loop, read by VersionGate.</summary>
         public static volatile int StallRoundFailCount = 0;
         /// <summary>STALL-HEAL: Height at which stall counting started.</summary>
@@ -649,6 +658,88 @@ namespace ReserveBlockCore.Utilities
 
         }
 
+        /// <summary>
+        /// HEIGHT-GATE: Checks a remote validator's block height via the GetBlockHeight HTTP endpoint.
+        /// Returns the peer's reported height, or -1 on failure. Caches the result on the
+        /// NetworkValidator entry so subsequent calls within HEIGHT_CACHE_TTL_SECONDS don't
+        /// make redundant HTTP calls.
+        /// </summary>
+        public static async Task<long> CheckValidatorHeightAsync(string validatorAddress, string cleanIP)
+        {
+            // Check cache first
+            var now = TimeUtil.GetTime();
+            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var nv)
+                && nv.LastHeightCheckTime > 0
+                && (now - nv.LastHeightCheckTime) < HEIGHT_CACHE_TTL_SECONDS
+                && nv.LastKnownHeight > 0)
+            {
+                return nv.LastKnownHeight;
+            }
+
+            try
+            {
+                using var client = Globals.HttpClientFactory.CreateClient();
+                var hgTimeout = IsStalling ? 1500 : 2000;
+                var heightUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetBlockHeight";
+                var heightResp = await client.GetAsync(heightUri).WaitAsync(TimeSpan.FromMilliseconds(hgTimeout));
+
+                if (heightResp != null && heightResp.IsSuccessStatusCode)
+                {
+                    var heightStr = await heightResp.Content.ReadAsStringAsync();
+                    if (long.TryParse(heightStr?.Trim(), out var peerHeight) && peerHeight > 0)
+                    {
+                        // Cache on the NetworkValidator entry
+                        if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var nvUpdate))
+                        {
+                            nvUpdate.LastKnownHeight = peerHeight;
+                            nvUpdate.LastHeightCheckTime = now;
+                        }
+                        return peerHeight;
+                    }
+                }
+            }
+            catch
+            {
+                // Timeout or network error — can't determine height
+            }
+
+            return -1;
+        }
+
+        /// <summary>
+        /// HEIGHT-GATE: Checks whether a validator is close enough to chain tip to produce blocks.
+        /// Returns true if at height or within HEIGHT_GATE_MAX_BEHIND blocks of chain tip.
+        /// Returns true (pass) if height cannot be determined (fail-open to not break consensus
+        /// for validators that don't have the endpoint yet).
+        /// </summary>
+        public static async Task<bool> IsValidatorAtHeight(string validatorAddress, string cleanIP, long chainTip)
+        {
+            var peerHeight = await CheckValidatorHeightAsync(validatorAddress, cleanIP);
+            if (peerHeight < 0)
+            {
+                // Can't determine height — fail open so we don't break consensus for older nodes
+                // that may not have the GetBlockHeight endpoint.
+                CasterLogUtility.Log(
+                    $"HeightGate: {validatorAddress} at {cleanIP} — height check unavailable (fail-open).",
+                    "HEIGHTGATE");
+                return true;
+            }
+
+            var behind = chainTip - peerHeight;
+            if (behind > HEIGHT_GATE_MAX_BEHIND)
+            {
+                CasterLogUtility.Log(
+                    $"HeightGate: REJECT {validatorAddress} at {cleanIP} — peerHeight={peerHeight} chainTip={chainTip} behind={behind} (max={HEIGHT_GATE_MAX_BEHIND}). Validator still syncing.",
+                    "HEIGHTGATE");
+                return false;
+            }
+
+            CasterLogUtility.Log(
+                $"HeightGate: PASS {validatorAddress} at {cleanIP} — peerHeight={peerHeight} chainTip={chainTip} behind={behind}.",
+                "HEIGHTGATE");
+            return true;
+        }
+
         public static async Task<(bool, Block?)> VerifyWinnerAvailability(Proof winningProof, long nextBlock)
         {
             using (var client = Globals.HttpClientFactory.CreateClient())
@@ -746,6 +837,28 @@ namespace ReserveBlockCore.Utilities
                         // STALL-HEAL: Clear proof cache so this validator is immediately excluded from next round
                         ClearProofGenerationCache();
                         return (false, null);
+                    }
+
+                    // HEIGHT-GATE: After version gate passes, check the validator's block height.
+                    // A validator running the right version but still syncing (far behind chain tip)
+                    // will pass the version gate but fail to produce blocks, wasting ~10s per round
+                    // on block fetch retries. This gate catches that case early.
+                    // NOTE: This is NOT skipped by the "recently seen" optimization — a validator
+                    // can be recently seen (version OK) but still syncing. The height check uses
+                    // its own cache (HEIGHT_CACHE_TTL_SECONDS) to avoid excessive HTTP calls.
+                    {
+                        var chainTip = Globals.LastBlock.Height;
+                        var heightOk = await IsValidatorAtHeight(winningProof.Address, cleanIP, chainTip);
+                        if (!heightOk)
+                        {
+                            // Validator is still syncing — exclude from future proof rounds
+                            if (Globals.NetworkValidators.TryGetValue(winningProof.Address, out var nvHeightFail))
+                            {
+                                nvHeightFail.CheckFailCount = 4;
+                            }
+                            ClearProofGenerationCache();
+                            return (false, null);
+                        }
                     }
 
                     var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
