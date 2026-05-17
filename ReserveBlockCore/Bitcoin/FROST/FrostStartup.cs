@@ -627,6 +627,21 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             var remappedCommitments = btreeMap.ToString(Newtonsoft.Json.Formatting.None);
                             LogUtility.Log($"[FROST] Round 2 BTreeMap built with {btreeMap.Count} entries for session {sessionId}", "FrostStartup.DKGRound2");
 
+                            // Pre-validate: FROST part2() requires exactly (maxSigners - 1) other participants' commitments.
+                            // If the count doesn't match, the FFI will return opaque error -4. Catch it early with a clear message.
+                            var expectedCommitmentCount = session.ParticipantAddresses.Count - 1; // maxSigners minus self
+                            if (btreeMap.Count != expectedCommitmentCount)
+                            {
+                                var errorMsg = $"FROST DKG Round 2 commitment count mismatch: expected {expectedCommitmentCount} " +
+                                    $"(maxSigners={session.ParticipantAddresses.Count} minus self), got {btreeMap.Count}. " +
+                                    $"This means {expectedCommitmentCount - btreeMap.Count} participant(s) did not complete Round 1. " +
+                                    $"The coordinator should retry with only the confirmed participants.";
+                                ErrorLogUtility.LogError(errorMsg, "FrostStartup.DKGRound2");
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = errorMsg }));
+                                return;
+                            }
+
                             // Call FROST native library to generate shares for other participants
                             var (sharesJson, round2Secret, errorCode) = FrostNative.DKGRound2GenerateShares(
                                 session.Round1SecretPackage, remappedCommitments);
