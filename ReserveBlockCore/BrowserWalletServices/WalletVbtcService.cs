@@ -39,10 +39,16 @@ namespace ReserveBlockCore.BrowserWalletServices
                 if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                 {
                     var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == address || x.ToAddress == address)
-                        .ToList();
-                    if (transactions.Any())
-                        ledgerBalance = transactions.Sum(x => x.Amount);
+                        .Where(x => x.FromAddress == address || x.ToAddress == address);
+
+                    // For owners, exclude burn entries (ToAddress == "-") to avoid double-counting
+                    // with the deposit address balance that already reflects withdrawals
+                    if (isOwner)
+                        transactions = transactions.Where(x => x.ToAddress != "-");
+
+                    var txList = transactions.ToList();
+                    if (txList.Any())
+                        ledgerBalance = txList.Sum(x => x.Amount);
                 }
 
                 decimal totalBalance = ledgerBalance;

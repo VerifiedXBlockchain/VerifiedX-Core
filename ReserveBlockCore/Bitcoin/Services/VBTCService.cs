@@ -104,6 +104,30 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
 
                 // Owner: must verify actual BTC deposit balance to prevent inflation.
+                // Recalculate owner's ledger balance excluding burn entries (ToAddress == "-")
+                // to avoid double-counting with ElectrumX balance that already reflects withdrawals.
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var ownerTransactions = scState.SCStateTreiTokenizationTXes
+                        .Where(x => (x.FromAddress == fromAddress || x.ToAddress == fromAddress) && x.ToAddress != "-")
+                        .ToList();
+
+                    if (ownerTransactions.Any())
+                    {
+                        var received = ownerTransactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
+                        var sent = ownerTransactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
+                        ledgerBalance = received + sent;
+                    }
+                    else
+                    {
+                        ledgerBalance = 0M;
+                    }
+                }
+                else
+                {
+                    ledgerBalance = 0M;
+                }
+
                 // Query Electrum for real-time balance of the deposit address.
                 decimal btcDepositBalance = 0M;
                 if (!string.IsNullOrEmpty(depositAddress))
