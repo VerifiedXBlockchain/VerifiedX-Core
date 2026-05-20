@@ -250,6 +250,25 @@ namespace ReserveBlockCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
+        /// <summary>
+        /// Force retry a stuck bridge mint. Reconstructs the local tracking record from on-chain
+        /// consensus state if missing, checks the Base contract to see if already minted, then
+        /// collects fresh validator attestations and submits mintWithProof on Base.
+        /// </summary>
+        [HttpPost("api/vbtc/bridge/forceRetry/{lockId}/{ownerAddress}")]
+        public async Task<IActionResult> VBTCBridgeForceRetry(string lockId, string ownerAddress)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(lockId) || string.IsNullOrWhiteSpace(ownerAddress))
+                    return BadRequest(new { success = false, message = "lockId and ownerAddress are required." });
+
+                var result = await WalletVbtcService.ForceRetryBridgeMint(lockId, ownerAddress);
+                return Ok(result);
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
         [HttpGet("api/vbtc/bridge/base-balance/{evmAddress}")]
         public async Task<IActionResult> VBTCBaseBalance(string evmAddress)
         {

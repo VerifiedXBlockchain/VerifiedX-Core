@@ -194,6 +194,24 @@ namespace ReserveBlockCore.BrowserWalletServices
         }
 
         /// <summary>
+        /// Force retry a stuck bridge mint. Reconstructs the local BridgeLockRecord from on-chain
+        /// consensus state if missing, skips the wait-for-confirmation step, and goes straight to
+        /// collecting validator attestations and submitting mintWithProof on Base.
+        /// </summary>
+        public static async Task<object> ForceRetryBridgeMint(string lockId, string ownerAddress)
+        {
+            try
+            {
+                var result = await Bitcoin.Services.UserBridgeMintService.ForceRetryMintForLock(lockId, ownerAddress);
+                return new { success = result.Success, message = result.Message };
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, message = $"Error force-retrying mint: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
         /// Pre-flight info for the Bridge to Base modal.
         /// Returns derived Base address, ETH balance, vBTC.b balance, available vBTC, and bridge config status.
         /// </summary>

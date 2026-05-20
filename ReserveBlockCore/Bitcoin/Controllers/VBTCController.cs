@@ -2353,11 +2353,45 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     ? VBTCContractV2.GetAllContracts()
                     : VBTCContractV2.GetContractsByOwner(address);
 
+                var contractList = contracts ?? new List<VBTCContractV2>();
+
+                // Enrich each contract with Name/Description from SmartContractMain
+                var enriched = contractList.Select(c =>
+                {
+                    var scMain = SmartContractMain.SmartContractData.GetSmartContract(c.SmartContractUID);
+                    return new
+                    {
+                        c.SmartContractUID,
+                        c.OwnerAddress,
+                        c.DepositAddress,
+                        c.Balance,
+                        c.ValidatorAddressesSnapshot,
+                        c.FrostGroupPublicKey,
+                        c.FrostPubkeyPackage,
+                        c.RequiredThreshold,
+                        c.DKGProof,
+                        c.ProofBlockHeight,
+                        c.LastValidatorActivityBlock,
+                        c.TotalRegisteredValidators,
+                        c.OriginalThreshold,
+                        c.WithdrawalStatus,
+                        c.ActiveWithdrawalBTCDestination,
+                        c.ActiveWithdrawalAmount,
+                        c.ActiveWithdrawalRequestHash,
+                        c.WithdrawalRequestBlock,
+                        c.ActiveWithdrawalFeeRate,
+                        c.ActiveWithdrawalRequestTime,
+                        c.WithdrawalHistory,
+                        Name = scMain?.Name ?? "",
+                        Description = scMain?.Description ?? "",
+                    };
+                }).ToList();
+
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Contract list retrieved",
-                    Contracts = contracts ?? new List<VBTCContractV2>()
+                    Contracts = enriched
                 });
             }
             catch (Exception ex)

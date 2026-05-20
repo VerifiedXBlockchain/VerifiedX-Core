@@ -1114,18 +1114,35 @@ function loadBridgeHistory(){
     var locks=data.Locks||data.locks||data;
     if(!locks||!locks.length){el('bridge-history-section').style.display='none';return;}
     el('bridge-history-section').style.display='block';
+    var finalStatuses={'Minted':1,'MintedOnBase':1,'Unlocked':1,'UnlockedOnVFX':1,'BTCExitComplete':1,'Redeemed':1};
     var rows=locks.map(function(lk){
       var st=lk.Status||lk.status||'Unknown';
-      var sCls=st==='Minted'?'badge-ok':st==='Failed'?'badge-fail':'badge-pend';
-      return '<tr><td><code class=""muted"" style=""cursor:pointer;word-break:break-all"" title=""Click to copy"" onclick=""navigator.clipboard.writeText(this.textContent)"">'+(lk.LockId||lk.lockId||'')+'</code></td>'+
+      var sCls=st==='Minted'||st==='MintedOnBase'?'badge-ok':st==='Failed'?'badge-fail':'badge-pend';
+      var lid=lk.LockId||lk.lockId||'';
+      var actCol='--';
+      if(!finalStatuses[st]){
+        actCol='<button class=""act-btn sec"" style=""padding:4px 10px;font-size:11px"" onclick=""doForceRetryBridge(\''+esc(lid)+'\')""  title=""Force retry: re-collect attestations and re-submit mint"">&#128260; Retry</button>';
+      }
+      return '<tr><td><code class=""muted"" style=""cursor:pointer;word-break:break-all"" title=""Click to copy"" onclick=""navigator.clipboard.writeText(this.textContent)"">'+lid+'</code></td>'+
         '<td>'+fmtBal(lk.Amount||lk.amount||0)+' vBTC</td>'+
         '<td><code class=""muted"" title=""'+esc(lk.EvmDestination||lk.evmDestination||'')+'"">'+ shn(lk.EvmDestination||lk.evmDestination||'',14)+'</code></td>'+
         '<td><span class=""badge '+sCls+'"">'+esc(st)+'</span></td>'+
-        '<td>'+(lk.BaseTxHash||lk.baseTxHash?'<code class=""muted"">'+shn(lk.BaseTxHash||lk.baseTxHash,12)+'</code>':'--')+'</td></tr>';
+        '<td>'+(lk.BaseTxHash||lk.baseTxHash?'<code class=""muted"">'+shn(lk.BaseTxHash||lk.baseTxHash,12)+'</code>':'--')+'</td>'+
+        '<td>'+actCol+'</td></tr>';
     }).join('');
-    el('bridge-hist-content').innerHTML='<div class=""tbl-wrap""><table class=""dtbl""><thead><tr><th>Lock ID</th><th>Amount</th><th>EVM Dest</th><th>Status</th><th>Base TX</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    el('bridge-hist-content').innerHTML='<div class=""tbl-wrap""><table class=""dtbl""><thead><tr><th>Lock ID</th><th>Amount</th><th>EVM Dest</th><th>Status</th><th>Base TX</th><th>Actions</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   }).catch(function(){el('bridge-history-section').style.display='none';});
 }
+window.doForceRetryBridge=function(lockId){
+  if(!selAddr){alert('No account selected.');return;}
+  if(!confirm('Force retry bridge mint for lock '+lockId+'?\n\nThis will re-collect validator attestations and re-submit mintWithProof on Base. You will pay gas.'))return;
+  fetch('/wallet/api/vbtc/bridge/forceRetry/'+encodeURIComponent(lockId)+'/'+encodeURIComponent(selAddr),{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.success){alert('Force retry started! '+d.message);loadBridgeHistory();}
+      else{alert('Force retry failed: '+(d.message||'Unknown error'));}
+    }).catch(function(e){alert('Request failed: '+e);});
+};
 var _bridgePollTimer=null;
 function startBridgePoll(){if(_bridgePollTimer)clearInterval(_bridgePollTimer);_bridgePollTimer=setInterval(function(){loadBridgeHistory();},15000);}
 function stopBridgePoll(){if(_bridgePollTimer){clearInterval(_bridgePollTimer);_bridgePollTimer=null;}}

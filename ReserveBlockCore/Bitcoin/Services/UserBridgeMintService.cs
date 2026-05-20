@@ -375,6 +375,210 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Force retry a stuck bridge mint. Handles two scenarios:
+        /// <para><b>Case A — Lock TX was mined (on-chain):</b> Skips wait, goes straight to
+        /// attestation collection + mintWithProof submission.</para>
+        /// <para><b>Case B — Lock TX was never mined (e.g. mempool deleted):</b> Re-creates and
+        /// re-broadcasts the VFX bridge lock TX using the same lock ID, then runs the full
+        /// WaitCollectAndMint flow.</para>
+        /// Also checks the Base contract to avoid double-minting if the lock was already used.
+        /// </summary>
+        public static async Task<(bool Success, string Message)> ForceRetryMintForLock(string lockId, string ownerAddress)
+        {
+            try
+            {
+                if (!BaseBridgeService.IsBridgeConfigured)
+                    return (false, "Base bridge not configured. Set BaseBridgeContract in config.");
+
+                // 1. Check if the lock has already been minted on the Base contract (avoid wasting gas)
+                try
+                {
+                    foreach (var rpcUrl in BaseBridgeService.RpcUrlCandidates())
+                    {
+                        try
+                        {
+                            var web3 = new Nethereum.Web3.Web3(rpcUrl);
+                            var contract = web3.Eth.GetContract(BaseBridgeService.CONTRACT_ABI, BaseBridgeService.ContractAddress);
+                            var isUsedFunc = contract.GetFunction("isLockIdUsed");
+                            var alreadyUsed = await isUsedFunc.CallAsync<bool>(lockId);
+                            if (alreadyUsed)
+                            {
+                                var existingRec = BridgeLockRecord.GetByLockId(lockId);
+                                if (existingRec != null && existingRec.Status != BridgeLockStatus.Minted && existingRec.Status != BridgeLockStatus.MintedOnBase)
+                                    BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Minted);
+                                return (false, $"Lock {lockId} has already been minted on the Base contract. No action needed.");
+                            }
+                            break;
+                        }
+                        catch { /* try next RPC */ }
+                    }
+                }
+                catch { /* non-fatal */ }
+
+                // 2. Derive Base address + check ETH for gas
+                var userBaseAddress = ValidatorEthKeyService.DeriveBaseAddressFromAccount(ownerAddress);
+                if (string.IsNullOrEmpty(userBaseAddress))
+                    return (false, "Cannot derive Base address from your account. Private key may be missing.");
+
+                var (ethOk, ethBal, _) = await BaseBridgeService.GetEthBalanceAsync(userBaseAddress);
+                if (!ethOk || ethBal <= 0)
+                    return (false, $"Your Base address ({userBaseAddress}) has no ETH for gas. Fund it before retrying.");
+
+                // 3. Check consensus state — is the lock already on-chain?
+                var consensusLock = VBTCBridgeLockState.GetByLockId(lockId);
+
+                if (consensusLock != null)
+                {
+                    // ═══ CASE A: Lock TX was mined — skip straight to attestation + mint ═══
+                    if (consensusLock.OwnerAddress != ownerAddress)
+                        return (false, "You are not the owner of this lock.");
+
+                    var record = BridgeLockRecord.GetByLockId(lockId);
+                    if (record == null)
+                    {
+                        LogUtility.Log($"[UserBridgeMint] ForceRetry CaseA: Reconstructing BridgeLockRecord from consensus state for lock {lockId}",
+                            "UserBridgeMintService.ForceRetryMintForLock");
+                        record = new BridgeLockRecord
+                        {
+                            LockId = lockId,
+                            SmartContractUID = consensusLock.SmartContractUID,
+                            OwnerAddress = consensusLock.OwnerAddress,
+                            Amount = consensusLock.Amount,
+                            AmountSats = consensusLock.AmountSats,
+                            EvmDestination = consensusLock.EvmDestination,
+                            VfxLockTxHash = consensusLock.LockTxHash,
+                            VfxLockConfirmedOnChain = true,
+                            VfxLockBlockHeight = Globals.LastBlock.Height,
+                            Status = BridgeLockStatus.Locked,
+                            CreatedAtUtc = consensusLock.LockTimestamp > 0 ? consensusLock.LockTimestamp : TimeUtil.GetTime()
+                        };
+                        BridgeLockRecord.Save(record);
+                    }
+
+                    record.Status = BridgeLockStatus.Locked;
+                    record.ErrorMessage = null;
+                    record.VfxLockConfirmedOnChain = true;
+                    if (record.VfxLockBlockHeight <= 0)
+                        record.VfxLockBlockHeight = Globals.LastBlock.Height;
+                    BridgeLockRecord.Save(record);
+
+                    LogUtility.Log($"[UserBridgeMint] ForceRetry CaseA (on-chain) for lock {lockId}, owner={ownerAddress}, amount={record.Amount}",
+                        "UserBridgeMintService.ForceRetryMintForLock");
+
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await CollectAndMintDirect(record, ownerAddress, userBaseAddress);
+                        }
+                        catch (Exception ex)
+                        {
+                            LogUtility.Log($"[UserBridgeMint] ForceRetry CaseA error for lock {lockId}: {ex.Message}",
+                                "UserBridgeMintService.ForceRetryMintForLock");
+                            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed,
+                                errorMessage: $"Force retry failed: {ex.Message}");
+                        }
+                    });
+
+                    return (true, $"Lock {lockId} found on-chain. Collecting validator signatures and submitting mint on Base. Check bridge history for status.");
+                }
+                else
+                {
+                    // ═══ CASE B: Lock TX was never mined — re-create and re-broadcast it ═══
+                    var record = BridgeLockRecord.GetByLockId(lockId);
+                    if (record == null)
+                        return (false, $"Lock {lockId} not found on-chain and no local BridgeLockRecord exists. Cannot retry.");
+
+                    if (record.OwnerAddress != ownerAddress)
+                        return (false, "You are not the owner of this lock.");
+
+                    LogUtility.Log($"[UserBridgeMint] ForceRetry CaseB (NOT on-chain): Re-creating lock TX for {lockId}, scUID={record.SmartContractUID}, amount={record.Amount}, evmDest={record.EvmDestination}",
+                        "UserBridgeMintService.ForceRetryMintForLock");
+
+                    // Re-create and broadcast the VFX bridge lock TX with the same lock ID
+                    var lockResult = await VBTCService.CreateBridgeLockTx(
+                        record.SmartContractUID, ownerAddress, record.Amount, record.EvmDestination,
+                        lockIdOverride: lockId);
+
+                    if (!lockResult.Success)
+                        return (false, $"Failed to re-create lock TX: {lockResult.TxHashOrError}");
+
+                    // Update the local record with the new TX hash
+                    record.VfxLockTxHash = lockResult.TxHashOrError;
+                    record.VfxLockConfirmedOnChain = false;
+                    record.Status = BridgeLockStatus.Locked;
+                    record.ErrorMessage = null;
+                    BridgeLockRecord.Save(record);
+
+                    LogUtility.Log($"[UserBridgeMint] ForceRetry CaseB: Lock TX re-broadcast for {lockId}, newTxHash={lockResult.TxHashOrError}",
+                        "UserBridgeMintService.ForceRetryMintForLock");
+
+                    // Run the full flow: wait for on-chain confirmation → collect attestations → mint
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await WaitCollectAndMint(record, ownerAddress, userBaseAddress);
+                        }
+                        catch (Exception ex)
+                        {
+                            LogUtility.Log($"[UserBridgeMint] ForceRetry CaseB error for lock {lockId}: {ex.Message}",
+                                "UserBridgeMintService.ForceRetryMintForLock");
+                            BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.Failed,
+                                errorMessage: $"Force retry failed: {ex.Message}");
+                        }
+                    });
+
+                    return (true, $"Lock TX re-broadcast for {lockId} (tx: {lockResult.TxHashOrError}). Waiting for VFX confirmation, then collecting attestations and minting on Base. Check bridge history for status.");
+                }
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Collect attestations and submit mintWithProof directly — skips the WaitForBridgeLockInState step.
+        /// Used by ForceRetryMintForLock when we already know the lock is confirmed on-chain.
+        /// </summary>
+        private static async Task CollectAndMintDirect(BridgeLockRecord record, string ownerAddress, string userBaseAddress)
+        {
+            var lockId = record.LockId;
+
+            // Collect validator attestation signatures
+            var requiredSigs = await BaseBridgeService.GetRequiredMintSignaturesFromChainAsync();
+            var contractAddress = BaseBridgeService.ContractAddress;
+            var chainId = (long)BaseBridgeService.BaseChainId;
+            var nonce = record.VfxLockBlockHeight;
+
+            record.MintNonce = nonce;
+            record.RequiredSignatures = requiredSigs;
+            record.Status = BridgeLockStatus.AttestationPending;
+            BridgeLockRecord.Save(record);
+
+            LogUtility.Log($"[UserBridgeMint] ForceRetry: Collecting attestations for {lockId}. Need {requiredSigs} signatures.", "UserBridgeMintService");
+
+            var signatures = await CollectValidatorSignatures(record, nonce, chainId, contractAddress, requiredSigs);
+
+            if (signatures == null || signatures.Count < requiredSigs)
+            {
+                var msg = $"Could not collect enough validator signatures ({signatures?.Count ?? 0}/{requiredSigs}).";
+                BridgeLockRecord.UpdateStatus(lockId, BridgeLockStatus.AttestationPending, errorMessage: msg);
+                LogUtility.Log($"[UserBridgeMint] ForceRetry: {msg} Lock: {lockId}", "UserBridgeMintService");
+                return;
+            }
+
+            record.ValidatorSignatures = signatures;
+            record.Status = BridgeLockStatus.AttestationReady;
+            BridgeLockRecord.Save(record);
+            LogUtility.Log($"[UserBridgeMint] ForceRetry: Attestations ready for {lockId}: {signatures.Count}/{requiredSigs}", "UserBridgeMintService");
+
+            // Submit mintWithProof using user's own ETH key
+            await SubmitMintWithProofAsUser(record, ownerAddress, userBaseAddress);
+        }
+
+        /// <summary>
         /// Manual retry: collect attestations and submit mint for an existing lock.
         /// Used when a previous attempt failed or timed out.
         /// </summary>
