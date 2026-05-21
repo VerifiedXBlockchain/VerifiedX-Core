@@ -514,7 +514,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/shares/{sessionId}";
                         var content = new StringContent(redistributePayload, Encoding.UTF8, "application/json");
-                        var response = await _httpClient.PostAsync(url, content);
+                        var response = await _ceremonyHttpClient.PostAsync(url, content);
 
                         if (response.IsSuccessStatusCode)
                         {
