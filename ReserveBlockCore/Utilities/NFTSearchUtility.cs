@@ -10,7 +10,7 @@ namespace ReserveBlockCore.Utilities
             List<SmartContractMain> scMainList = new List<SmartContractMain>();
             var scs = SmartContractMain.SmartContractData.GetSCs()
                     .Find(x => x.Features == null ||
-                        !x.Features.Where(y => y != null && y.FeatureName == FeatureName.Tokenization).Any())
+                        !x.Features.Where(y => y != null && (y.FeatureName == FeatureName.Tokenization || y.FeatureName == FeatureName.TokenizationV2)).Any())
                     .ToList();
 
             if (isMinted)
