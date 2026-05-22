@@ -1,9 +1,11 @@
 using System.Diagnostics.CodeAnalysis;
 using ReserveBlockCore.Data;
+using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.P2P;
 using ReserveBlockCore.Services;
+using ReserveBlockCore.Utilities;
 
 namespace ReserveBlockCore.Privacy
 {
@@ -232,6 +234,9 @@ namespace ReserveBlockCore.Privacy
                 return result;
             }
 
+            // Track incoming privacy TXs to create local TX records for the receiver
+            var incomingPrivacyTxRecords = new List<(Transaction tx, string senderAddress, decimal noteAmount, long blockHeight)>();
+
             ShieldedWalletLock.Wait(zfxAddress);
             try
             {
@@ -387,6 +392,13 @@ namespace ReserveBlockCore.Privacy
                         if (!w.ShieldedBalances.ContainsKey(key))
                             w.ShieldedBalances[key] = 0;
                         w.ShieldedBalances[key] += note.Amount;
+
+                        // Track incoming privacy TX for local record creation
+                        if (PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
+                        {
+                            string senderAddr = payload.TransparentInput ?? "zfx_private";
+                            incomingPrivacyTxRecords.Add((tx, senderAddr, note.Amount, block.Height));
+                        }
                     }
                 }
             }
@@ -405,6 +417,23 @@ namespace ReserveBlockCore.Privacy
                 ShieldedWalletLock.Release(zfxAddress);
             }
 
+            // Save incoming privacy TX records for the receiver (outside of wallet lock)
+            if (incomingPrivacyTxRecords.Count > 0 && !string.IsNullOrEmpty(w.TransparentSourceAddress))
+            {
+                _ = Task.Run(async () =>
+                {
+                    foreach (var (tx, senderAddr, amount, height) in incomingPrivacyTxRecords)
+                    {
+                        try
+                        {
+                            await SaveIncomingPrivacyTxLocally(
+                                tx, w.TransparentSourceAddress, senderAddr, amount, height);
+                        }
+                        catch { /* logged inside helper */ }
+                    }
+                });
+            }
+
             return result;
         }
 
@@ -419,6 +448,104 @@ namespace ReserveBlockCore.Privacy
             public long LastScannedBlock { get; set; }
             public Dictionary<string, decimal>? FinalBalance { get; set; }
             public int FinalUnspentCount { get; set; }
+        }
+
+        /// <summary>
+        /// Saves a privacy transaction as a local wallet TX record so it appears in
+        /// GetAllLocalTX / GetPendingLocalTX / GetSuccessfulLocalTX endpoints.
+        /// The record uses user-facing addresses (zfx_ or transparent) rather than the
+        /// on-chain ShieldedPoolAddress so it can be found by address-based queries.
+        /// </summary>
+        public static async Task SavePrivacyTxLocally(
+            Transaction onChainTx,
+            string fromAddress,
+            string toAddress,
+            decimal displayAmount,
+            TransactionStatus status = TransactionStatus.Pending,
+            long height = 0)
+        {
+            try
+            {
+                var localTx = new Transaction
+                {
+                    Hash = onChainTx.Hash,
+                    FromAddress = fromAddress,
+                    ToAddress = toAddress,
+                    Amount = displayAmount.ToNormalizeDecimal(),
+                    Fee = onChainTx.Fee,
+                    Nonce = onChainTx.Nonce,
+                    Timestamp = onChainTx.Timestamp,
+                    TransactionType = onChainTx.TransactionType,
+                    TransactionStatus = status,
+                    Height = height,
+                    Signature = onChainTx.Signature,
+                    Data = onChainTx.Data
+                };
+
+                var txDb = TransactionData.GetAll();
+                var existing = txDb.FindOne(x => x.Hash == localTx.Hash);
+                if (existing == null)
+                {
+                    await txDb.InsertSafeAsync(localTx);
+                }
+                else if (status != TransactionStatus.Pending)
+                {
+                    // Update existing record (e.g. Pending → Success)
+                    existing.TransactionStatus = status;
+                    existing.Height = height;
+                    await txDb.UpdateSafeAsync(existing);
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(
+                    $"Failed to save privacy TX locally: {ex.Message}",
+                    "PrivacyApiHelper.SavePrivacyTxLocally()");
+            }
+        }
+
+        /// <summary>
+        /// Saves an incoming privacy transaction record for the receiver.
+        /// Only creates the record if one doesn't already exist for this hash.
+        /// </summary>
+        public static async Task SaveIncomingPrivacyTxLocally(
+            Transaction onChainTx,
+            string receiverTransparentAddress,
+            string senderAddress,
+            decimal noteAmount,
+            long blockHeight)
+        {
+            try
+            {
+                var txDb = TransactionData.GetAll();
+                var existing = txDb.FindOne(x => x.Hash == onChainTx.Hash);
+                if (existing != null)
+                    return; // Already tracked (sender or previous scan)
+
+                var localTx = new Transaction
+                {
+                    Hash = onChainTx.Hash,
+                    FromAddress = senderAddress,
+                    ToAddress = receiverTransparentAddress,
+                    Amount = noteAmount.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
+                    Nonce = 0,
+                    Timestamp = onChainTx.Timestamp,
+                    TransactionType = onChainTx.TransactionType,
+                    TransactionStatus = TransactionStatus.Success,
+                    Height = blockHeight,
+                    Signature = onChainTx.Signature,
+                    Data = onChainTx.Data
+                };
+
+                await txDb.InsertSafeAsync(localTx);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(
+                    $"Failed to save incoming privacy TX locally: {ex.Message}",
+                    "PrivacyApiHelper.SaveIncomingPrivacyTxLocally()");
+            }
         }
 
         /// <summary>Approximate VFX shielded balance for co-shield UX warnings.</summary>

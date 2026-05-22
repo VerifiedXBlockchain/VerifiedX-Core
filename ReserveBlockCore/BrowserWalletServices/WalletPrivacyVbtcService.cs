@@ -79,6 +79,14 @@ namespace ReserveBlockCore.BrowserWalletServices
             tx.Signature = sig;
 
             var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+
+            // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+            if (broadcastOk)
+            {
+                await PrivacyApiHelper.SavePrivacyTxLocally(
+                    tx, fromAddress, zfxAddress, amount, TransactionStatus.Pending);
+            }
+
             return new { success = broadcastOk, hash = tx.Hash, type = "VBTC_SHIELD", amount, fromAddress, zfxAddress, scUID, detail = json };
         }
 
@@ -152,6 +160,13 @@ namespace ReserveBlockCore.BrowserWalletServices
                 PrivacyApiHelper.UnmarkInputsSpentLocally(zfxAddress, new[] { vfxFeeInput }, "VFX");
             }
 
+            // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+            if (broadcastOk)
+            {
+                await PrivacyApiHelper.SavePrivacyTxLocally(
+                    tx!, zfxAddress, toAddress, amount, TransactionStatus.Pending);
+            }
+
             return new { success = broadcastOk, hash = tx!.Hash, type = "VBTC_UNSHIELD", amount, zfxAddress, toAddress, scUID, detail = json };
         }
 
@@ -223,6 +238,13 @@ namespace ReserveBlockCore.BrowserWalletServices
                 // Rollback: unmark spent inputs on broadcast failure
                 PrivacyApiHelper.UnmarkInputsSpentLocally(fromZfxAddress, inputs, asset);
                 PrivacyApiHelper.UnmarkInputsSpentLocally(fromZfxAddress, new[] { vfxFeeInput }, "VFX");
+            }
+
+            // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+            if (broadcastOk)
+            {
+                await PrivacyApiHelper.SavePrivacyTxLocally(
+                    tx!, fromZfxAddress, toZfxAddress, amount, TransactionStatus.Pending);
             }
 
             return new { success = broadcastOk, hash = tx!.Hash, type = "VBTC_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, scUID, detail = json };

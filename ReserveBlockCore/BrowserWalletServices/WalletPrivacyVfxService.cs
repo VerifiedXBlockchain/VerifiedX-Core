@@ -107,6 +107,14 @@ namespace ReserveBlockCore.BrowserWalletServices
             tx.Signature = sig;
 
             var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+
+            // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+            if (broadcastOk)
+            {
+                await PrivacyApiHelper.SavePrivacyTxLocally(
+                    tx, fromAddress, zfxAddress, amount, TransactionStatus.Pending);
+            }
+
             return new { success = broadcastOk, hash = tx.Hash, type = "VFX_SHIELD", amount, fromAddress, zfxAddress, detail = json };
         }
 
@@ -143,6 +151,14 @@ namespace ReserveBlockCore.BrowserWalletServices
                 return new { success = false, message = buildErr ?? "Failed to build unshield TX." };
 
             var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+            // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+            if (broadcastOk)
+            {
+                await PrivacyApiHelper.SavePrivacyTxLocally(
+                    tx!, zfxAddress, toAddress, amount, TransactionStatus.Pending);
+            }
+
             return new { success = broadcastOk, hash = tx!.Hash, type = "VFX_UNSHIELD", amount, zfxAddress, toAddress, detail = json };
         }
 
@@ -179,6 +195,14 @@ namespace ReserveBlockCore.BrowserWalletServices
                 return new { success = false, message = buildErr ?? "Failed to build private transfer TX." };
 
             var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+
+            // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+            if (broadcastOk)
+            {
+                await PrivacyApiHelper.SavePrivacyTxLocally(
+                    tx!, fromZfxAddress, toZfxAddress, amount, TransactionStatus.Pending);
+            }
+
             return new { success = broadcastOk, hash = tx!.Hash, type = "VFX_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, detail = json };
         }
 

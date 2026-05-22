@@ -1,3 +1,4 @@
+using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.Utilities;
@@ -62,6 +63,9 @@ namespace ReserveBlockCore.Privacy
 
             // Track which wallets were modified so we only persist those
             var modifiedWallets = new HashSet<string>(StringComparer.Ordinal);
+
+            // Track incoming privacy TXs to create local TX records for the receiver
+            var incomingPrivacyTxRecords = new List<(Transaction tx, string receiverTransparentAddress, string senderAddress, decimal noteAmount, long blockHeight)>();
 
             // Acquire per-wallet locks to prevent concurrent API writes from clobbering state
             var lockedAddresses = new List<string>(walletKeys.Count);
@@ -310,6 +314,17 @@ namespace ReserveBlockCore.Privacy
 
                         modifiedWallets.Add(w.ShieldedAddress);
 
+                        // Create a local TX record for the receiver if this is a privacy TX
+                        // and the note is addressed to this wallet (not a change output back to sender)
+                        if (PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)
+                            && !string.IsNullOrEmpty(w.TransparentSourceAddress))
+                        {
+                            // Determine a user-friendly sender address from the payload
+                            string senderAddr = payload.TransparentInput ?? "zfx_private";
+
+                            incomingPrivacyTxRecords.Add((tx, w.TransparentSourceAddress, senderAddr, note.Amount, block.Height));
+                        }
+
                         // Note matched this wallet — no need to try other wallets for this output
                         break;
                     }
@@ -340,6 +355,23 @@ namespace ReserveBlockCore.Privacy
                 // Release all per-wallet locks
                 foreach (var addr in lockedAddresses)
                     ShieldedWalletLock.Release(addr);
+            }
+
+            // Save incoming privacy TX records for receivers (outside of wallet locks)
+            if (incomingPrivacyTxRecords.Count > 0)
+            {
+                _ = Task.Run(async () =>
+                {
+                    foreach (var (tx, receiverAddr, senderAddr, amount, height) in incomingPrivacyTxRecords)
+                    {
+                        try
+                        {
+                            await PrivacyApiHelper.SaveIncomingPrivacyTxLocally(
+                                tx, receiverAddr, senderAddr, amount, height);
+                        }
+                        catch { /* logged inside helper */ }
+                    }
+                });
             }
         }
 

@@ -99,7 +99,15 @@ namespace ReserveBlockCore.Controllers
                     return Fail("Signature failed.");
                 tx.Signature = sig;
 
-                var (_, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+                var (broadcastOk, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+
+                // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+                if (broadcastOk)
+                {
+                    await PrivacyApiHelper.SavePrivacyTxLocally(
+                        tx, req.FromAddress, req.RecipientZfxAddress, req.ShieldAmount, TransactionStatus.Pending);
+                }
+
                 return json;
             }
             catch (Exception ex)
@@ -156,6 +164,12 @@ namespace ReserveBlockCore.Controllers
                 {
                     // Rollback: unmark spent inputs on broadcast failure
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
+                }
+                else
+                {
+                    // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+                    await PrivacyApiHelper.SavePrivacyTxLocally(
+                        tx!, req.ZfxAddress, req.TransparentToAddress, req.TransparentAmount, TransactionStatus.Pending);
                 }
 
                 return br.json;
@@ -214,6 +228,12 @@ namespace ReserveBlockCore.Controllers
                 {
                     // Rollback: unmark spent inputs on broadcast failure
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
+                }
+                else
+                {
+                    // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+                    await PrivacyApiHelper.SavePrivacyTxLocally(
+                        tx!, req.ZfxAddress, req.RecipientZfxAddress, req.PaymentAmount, TransactionStatus.Pending);
                 }
 
                 return br.json;
@@ -280,6 +300,12 @@ namespace ReserveBlockCore.Controllers
 
                 if (!br.ok)
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), "VFX");
+                else
+                {
+                    // Save local TX record for consolidation (Z→Z to self)
+                    await PrivacyApiHelper.SavePrivacyTxLocally(
+                        tx!, req.ZfxAddress, w.ShieldedAddress, payment, TransactionStatus.Pending);
+                }
 
                 return br.json;
             }
@@ -752,7 +778,15 @@ namespace ReserveBlockCore.Controllers
                     return Fail("Signature failed.");
                 tx.Signature = sig;
 
-                var (_, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+                var (broadcastOk2, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+
+                // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+                if (broadcastOk2)
+                {
+                    await PrivacyApiHelper.SavePrivacyTxLocally(
+                        tx, req.FromAddress, req.RecipientZfxAddress, req.VbtcAmount, TransactionStatus.Pending);
+                }
+
                 return json;
             }
             catch (Exception ex)
@@ -832,6 +866,12 @@ namespace ReserveBlockCore.Controllers
                 {
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                }
+                else
+                {
+                    // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+                    await PrivacyApiHelper.SavePrivacyTxLocally(
+                        tx!, req.ZfxAddress, req.TransparentToAddress, req.TransparentVbtcAmount, TransactionStatus.Pending);
                 }
 
                 return br.json;
@@ -914,6 +954,12 @@ namespace ReserveBlockCore.Controllers
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
                 }
+                else
+                {
+                    // Save local TX record so it appears in GetPendingLocalTX / GetAllLocalTX immediately
+                    await PrivacyApiHelper.SavePrivacyTxLocally(
+                        tx!, req.ZfxAddress, req.RecipientZfxAddress, req.PaymentAmount, TransactionStatus.Pending);
+                }
 
                 return br.json;
             }
@@ -995,6 +1041,12 @@ namespace ReserveBlockCore.Controllers
                 {
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), asset);
                     PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                }
+                else
+                {
+                    // Save local TX record for vBTC consolidation (Z→Z to self)
+                    await PrivacyApiHelper.SavePrivacyTxLocally(
+                        tx!, req.ZfxAddress, w.ShieldedAddress, sumAmt, TransactionStatus.Pending);
                 }
 
                 return br.json;
