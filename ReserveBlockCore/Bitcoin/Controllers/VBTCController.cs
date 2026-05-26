@@ -1713,6 +1713,156 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// Prepare a complete-withdrawal FROST signing session for a web wallet.
+        /// Returns the exact messages the wallet must sign (same "{sessionId}.{ownerAddress}.{timestamp}" format
+        /// used by PrepareMPCCeremonyRaw). Call this first, sign client-side, then call ExecuteCompleteWithdrawalRaw.
+        /// </summary>
+        [HttpPost("PrepareCompleteWithdrawalRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> PrepareCompleteWithdrawalRaw([FromBody] PrepareCompleteWithdrawalRawPayload payload)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress is required" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID is required" });
+
+                if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "WithdrawalRequestHash is required" });
+
+                // Look up withdrawal request to return details for confirmation
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash);
+                decimal amount = 0;
+                string btcDestination = "";
+                int feeRate = 10;
+
+                if (withdrawalRequest != null)
+                {
+                    if (withdrawalRequest.IsCompleted)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request already completed" });
+
+                    amount = withdrawalRequest.Amount;
+                    btcDestination = withdrawalRequest.BTCDestination ?? "";
+                    feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10;
+                }
+
+                // Generate session ID and timestamps for leader auth messages
+                var sessionId = Guid.NewGuid().ToString();
+                var startTimestamp = TimeUtil.GetTime();
+                var shareDistTimestamp = startTimestamp + 1;
+
+                // Construct the exact messages the web wallet needs to sign
+                var startMessage = $"{sessionId}.{payload.OwnerAddress}.{startTimestamp}";
+                var shareDistMessage = $"{sessionId}.{payload.OwnerAddress}.{shareDistTimestamp}";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Sign both LeaderAuthMessages with your private key (ECDSA secp256k1) and submit via ExecuteCompleteWithdrawalRaw.",
+                    SessionId = sessionId,
+                    OwnerAddress = payload.OwnerAddress,
+                    SmartContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    // Withdrawal details for confirmation
+                    Amount = amount,
+                    BTCDestination = btcDestination,
+                    FeeRate = feeRate,
+                    // Messages to sign
+                    StartMessage = startMessage,
+                    StartTimestamp = startTimestamp,
+                    ShareDistributionMessage = shareDistMessage,
+                    ShareDistributionTimestamp = shareDistTimestamp
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Execute a complete-withdrawal using pre-signed leader authentication from a web wallet.
+        /// The wallet must have called PrepareCompleteWithdrawalRaw first and signed the returned messages.
+        /// Calls VBTCService.CompleteWithdrawal with signOnly=true and the pre-signed leader auth,
+        /// returning the FROST-signed BTC transaction hex for the wallet to broadcast.
+        /// </summary>
+        [HttpPost("ExecuteCompleteWithdrawalRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ExecuteCompleteWithdrawalRaw([FromBody] ExecuteCompleteWithdrawalRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress) || string.IsNullOrEmpty(payload.SmartContractUID) ||
+                    string.IsNullOrEmpty(payload.WithdrawalRequestHash) || string.IsNullOrEmpty(payload.SessionId) ||
+                    string.IsNullOrEmpty(payload.StartSignature) || string.IsNullOrEmpty(payload.ShareDistributionSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "All fields are required: OwnerAddress, SmartContractUID, WithdrawalRequestHash, SessionId, StartSignature, ShareDistributionSignature" });
+
+                // Verify the start signature
+                var startMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.StartTimestamp}";
+                if (!SignatureService.VerifySignature(payload.OwnerAddress, startMessage, payload.StartSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid start signature" });
+
+                // Verify the share distribution signature
+                var shareDistMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.ShareDistributionTimestamp}";
+                if (!SignatureService.VerifySignature(payload.OwnerAddress, shareDistMessage, payload.ShareDistributionSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid share distribution signature" });
+
+                // Timestamp validation (reject if older than 5 minutes)
+                var currentTime = TimeUtil.GetTime();
+                var timeDifference = Math.Abs(currentTime - payload.StartTimestamp);
+                if (timeDifference > 300)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Session timestamp is too old. Difference: {timeDifference}s (max 300)" });
+
+                // Build pre-signed auth object (same pattern as ExecuteMPCCeremonyRaw)
+                var preSignedAuth = new ReserveBlockCore.Bitcoin.FROST.Models.PreSignedLeaderAuth
+                {
+                    StartSignature = payload.StartSignature,
+                    StartTimestamp = payload.StartTimestamp,
+                    ShareDistributionSignature = payload.ShareDistributionSignature,
+                    ShareDistributionTimestamp = payload.ShareDistributionTimestamp
+                };
+
+                // Call CompleteWithdrawal with signOnly=true + preSignedAuth + delegated params
+                var withdrawalResult = await Services.VBTCService.CompleteWithdrawal(
+                    payload.SmartContractUID,
+                    payload.WithdrawalRequestHash,
+                    delegatedAmount: payload.Amount > 0 ? payload.Amount : null,
+                    delegatedBTCDestination: !string.IsNullOrEmpty(payload.BTCDestination) ? payload.BTCDestination : null,
+                    delegatedFeeRate: payload.FeeRate > 0 ? payload.FeeRate : null,
+                    signOnly: true,
+                    preSignedAuth: preSignedAuth
+                );
+
+                if (!withdrawalResult.Success)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = withdrawalResult.ErrorMessage ?? "FROST signing ceremony failed"
+                    });
+                }
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "FROST signing successful. Broadcast the SignedBTCTxHex to the Bitcoin network.",
+                    SignedBTCTxHex = withdrawalResult.BTCTxHash, // In signOnly mode, BTCTxHash contains the signed hex
+                    SmartContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
         /// Cancel withdrawal with pre-signed owner authorization (Raw format)
         /// SECURITY: Verifies owner signature and creates cancellation request for validator voting
         /// </summary>
@@ -3952,6 +4102,33 @@ namespace ReserveBlockCore.Bitcoin.Controllers
     }
 
     // Raw MPC Ceremony Payload Models (for web wallet pre-signed auth)
+
+    // Raw Complete Withdrawal Payload Models (for web wallet pre-signed FROST auth)
+
+    public class PrepareCompleteWithdrawalRawPayload
+    {
+        public string OwnerAddress { get; set; } = "";
+        public string SmartContractUID { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+    }
+
+    public class ExecuteCompleteWithdrawalRawPayload
+    {
+        public string OwnerAddress { get; set; } = "";
+        public string SmartContractUID { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+        public string SessionId { get; set; } = "";
+        public long StartTimestamp { get; set; }
+        public string StartSignature { get; set; } = "";
+        public long ShareDistributionTimestamp { get; set; }
+        public string ShareDistributionSignature { get; set; } = "";
+        /// <summary>Delegated withdrawal amount (BTC). Passed through if local DB doesn't have the withdrawal request.</summary>
+        public decimal Amount { get; set; }
+        /// <summary>Delegated BTC destination address.</summary>
+        public string BTCDestination { get; set; } = "";
+        /// <summary>Delegated fee rate (sats/vB).</summary>
+        public int FeeRate { get; set; }
+    }
 
     public class PrepareMPCCeremonyRawPayload
     {
