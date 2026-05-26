@@ -135,7 +135,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             string ownerAddress,
             List<VBTCValidator> validators,
             int threshold,
-            Action<int, int>? progressCallback = null)
+            Action<int, int>? progressCallback = null,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
@@ -157,7 +158,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 for (int attempt = 0; attempt <= MAX_DKG_START_RETRIES; attempt++)
                 {
                     var (startSuccess, respondingList) = await BroadcastDKGStartWithResponders(
-                        sessionId, ceremonyId, leaderAddress, activeValidators, threshold);
+                        sessionId, ceremonyId, leaderAddress, activeValidators, threshold, preSignedAuth);
 
                     if (!startSuccess || respondingList == null || respondingList.Count == 0)
                     {
@@ -228,7 +229,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Phase 3: DKG Round 2 - Share Distribution
                 progressCallback?.Invoke(2, 50); // Round 2 starting
-                var respondingAddresses = await CoordinateShareDistribution(sessionId, validators, round1Results, leaderAddress);
+                var respondingAddresses = await CoordinateShareDistribution(sessionId, validators, round1Results, leaderAddress, preSignedAuth);
                 if (respondingAddresses == null || respondingAddresses.Count == 0)
                 {
                     LogUtility.Log($"[FROST MPC] DKG Round 2 failed - share distribution error", "FrostMPCService.CoordinateDKGCeremony");
@@ -275,15 +276,31 @@ namespace ReserveBlockCore.Bitcoin.Services
             string ceremonyId,
             string leaderAddress,
             List<VBTCValidator> validators,
-            int threshold)
+            int threshold,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
                 // Sign with leader's key using deterministic message format
                 // Any VFX wallet owner can be the leader — not just validators
-                var timestamp = TimeUtil.GetTime();
-                var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
+                // When preSignedAuth is provided (web wallet flow), use the pre-signed signature
+                // instead of calling AddressSignature() which requires a local private key.
+                long timestamp;
+                string leaderSignature;
+
+                if (preSignedAuth != null && !string.IsNullOrEmpty(preSignedAuth.StartSignature))
+                {
+                    timestamp = preSignedAuth.StartTimestamp;
+                    leaderSignature = preSignedAuth.StartSignature;
+                    LogUtility.Log($"[FROST MPC] Using pre-signed leader auth for DKG start (web wallet flow)", 
+                        "FrostMPCService.BroadcastDKGStartWithResponders");
+                }
+                else
+                {
+                    timestamp = TimeUtil.GetTime();
+                    var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                    leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
+                }
 
                 var startRequest = new FrostDKGStartRequest
                 {
@@ -428,7 +445,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             string sessionId,
             List<VBTCValidator> validators,
             Dictionary<string, string> commitments,
-            string leaderAddress)
+            string leaderAddress,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
@@ -495,9 +513,23 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // Each validator will extract the shares meant for them and auto-finalize DKG
                 // Use the same leaderAddress that was used in BroadcastDKGStart so validators
                 // accept the request (they check leaderAddr == session.LeaderAddress).
-                var timestamp = TimeUtil.GetTime();
-                var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
+                // When preSignedAuth is provided (web wallet flow), use the pre-signed signature.
+                long timestamp;
+                string leaderSignature;
+
+                if (preSignedAuth != null && !string.IsNullOrEmpty(preSignedAuth.ShareDistributionSignature) && preSignedAuth.ShareDistributionTimestamp.HasValue)
+                {
+                    timestamp = preSignedAuth.ShareDistributionTimestamp.Value;
+                    leaderSignature = preSignedAuth.ShareDistributionSignature;
+                    LogUtility.Log($"[FROST MPC] Using pre-signed leader auth for share distribution (web wallet flow)", 
+                        "FrostMPCService.CoordinateShareDistribution");
+                }
+                else
+                {
+                    timestamp = TimeUtil.GetTime();
+                    var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                    leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
+                }
 
                 var redistributePayload = JsonConvert.SerializeObject(new
                 {
@@ -751,7 +783,8 @@ namespace ReserveBlockCore.Bitcoin.Services
             int threshold,
             string? ceremonyId = null,
             string? coordinatorAddress = null,
-            string? withdrawalRequestHash = null)
+            string? withdrawalRequestHash = null,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
@@ -765,7 +798,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}", "FrostMPCService.CoordinateSigningCeremony");
 
                 // Phase 1: Broadcast signing start
-                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId, withdrawalRequestHash);
+                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId, withdrawalRequestHash, preSignedAuth);
                 if (!startSuccess)
                 {
                     LogUtility.Log($"[FROST MPC] Failed to start signing ceremony", "FrostMPCService.CoordinateSigningCeremony");
@@ -818,15 +851,30 @@ namespace ReserveBlockCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             string? ceremonyId = null,
-            string? withdrawalRequestHash = null)
+            string? withdrawalRequestHash = null,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
                 // Sign with leader's key using deterministic message format
                 // Any VFX wallet owner can be the leader — not just validators
-                var timestamp = TimeUtil.GetTime();
-                var signingLeaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var signingLeaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, signingLeaderMessage);
+                // When preSignedAuth is provided (web wallet flow), use the pre-signed signature.
+                long timestamp;
+                string signingLeaderSignature;
+
+                if (preSignedAuth != null && !string.IsNullOrEmpty(preSignedAuth.StartSignature))
+                {
+                    timestamp = preSignedAuth.StartTimestamp;
+                    signingLeaderSignature = preSignedAuth.StartSignature;
+                    LogUtility.Log($"[FROST MPC] Using pre-signed leader auth for signing start (web wallet flow)", 
+                        "FrostMPCService.BroadcastSigningStart");
+                }
+                else
+                {
+                    timestamp = TimeUtil.GetTime();
+                    var signingLeaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                    signingLeaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, signingLeaderMessage);
+                }
 
                 var startRequest = new FrostSigningStartRequest
                 {

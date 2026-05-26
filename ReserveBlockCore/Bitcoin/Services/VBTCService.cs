@@ -649,7 +649,8 @@ namespace ReserveBlockCore.Bitcoin.Services
         public static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage)> CompleteWithdrawal(
             string scUID, string withdrawalRequestHash,
             decimal? delegatedAmount = null, string? delegatedBTCDestination = null, int? delegatedFeeRate = null,
-            bool signOnly = false)
+            bool signOnly = false,
+            FROST.Models.PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
@@ -885,7 +886,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     adjustedThreshold,
                     broadcast: !signOnly,
                     coordinatorAddress: coordinatorAddress,
-                    withdrawalRequestHash: withdrawalRequestHash  // FIND-028: Validator-side dedup
+                    withdrawalRequestHash: withdrawalRequestHash,  // FIND-028: Validator-side dedup
+                    preSignedAuth: preSignedAuth
                 );
 
                 if (!btcResult.Success)

@@ -1808,6 +1808,766 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
         #endregion
 
+        #region Raw Transaction Endpoints (Web Wallet / External Signer)
+
+        /// <summary>
+        /// In-memory store for unsigned vBTC transactions waiting to be signed externally.
+        /// Keyed by tx Hash. Web wallet signs the Hash offline and submits via SendRaw* endpoints.
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, Transaction> _pendingRawVbtcTxs = new();
+
+        #region Transfer Raw
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_TRANSFER transaction for offline signing.
+        /// Web wallet signs the returned Hash, then submits via SendRawTransferVBTCTx.
+        /// </summary>
+        [HttpPost("GetRawTransferVBTCData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawTransferVBTCData([FromBody] VBTCTransferPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.FromAddress) ||
+                    string.IsNullOrEmpty(payload.ToAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                // Validate balance
+                var balResult = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(payload.SmartContractUID, payload.FromAddress);
+                if (!balResult.success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Balance lookup failed" });
+
+                if (balResult.availableBalance < payload.Amount)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {payload.Amount}" });
+
+                var toAddress = payload.ToAddress.ToAddressNormalize();
+
+                // Build unsigned transaction
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "TransferVBTCV2()",
+                    ContractUID = payload.SmartContractUID,
+                    FromAddress = payload.FromAddress,
+                    ToAddress = toAddress,
+                    Amount = payload.Amount
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.FromAddress,
+                    ToAddress = toAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.FromAddress),
+                    TransactionType = TransactionType.VBTC_V2_TRANSFER,
+                    Data = txData
+                };
+
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+
+                // Store pending
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    ToAddress = tx.ToAddress,
+                    Amount = tx.Amount,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Message = "Sign the Hash field with your private key (ECDSA secp256k1, UTF-8 encoded hash string) and submit via SendRawTransferVBTCTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_TRANSFER transaction.
+        /// </summary>
+        [HttpPost("SendRawTransferVBTCTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawTransferVBTCTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawTransferVBTCData first." });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "vBTC transfer transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Request Withdrawal Raw TX
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_WITHDRAWAL_REQUEST blockchain transaction for offline signing.
+        /// This creates a real blockchain TX (unlike RequestWithdrawalRaw which only saves to local DB).
+        /// </summary>
+        [HttpPost("GetRawRequestWithdrawalTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawRequestWithdrawalTxData([FromBody] VBTCWithdrawalPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.RequestorAddress) ||
+                    string.IsNullOrEmpty(payload.BTCAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                if (payload.FeeRate <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
+
+                // Check for existing active withdrawal
+                var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(payload.RequestorAddress, payload.SmartContractUID);
+                if (existingRequest != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Active withdrawal already exists. Request Hash: {existingRequest.TransactionHash}" });
+
+                // Validate balance
+                var balResult = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(payload.SmartContractUID, payload.RequestorAddress);
+                if (!balResult.success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Balance lookup failed" });
+
+                if (balResult.availableBalance < payload.Amount)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {payload.Amount}" });
+
+                var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
+
+                // Build unsigned transaction
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalRequest()",
+                    ContractUID = payload.SmartContractUID,
+                    RequestorAddress = payload.RequestorAddress,
+                    BTCAddress = btcAddress,
+                    Amount = payload.Amount,
+                    FeeRate = payload.FeeRate
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.RequestorAddress,
+                    ToAddress = payload.RequestorAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.RequestorAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                    Data = txData
+                };
+
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Message = "Sign the Hash field and submit via SendRawRequestWithdrawalTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_WITHDRAWAL_REQUEST transaction.
+        /// </summary>
+        [HttpPost("SendRawRequestWithdrawalTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawRequestWithdrawalTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawRequestWithdrawalTxData first." });
+
+                if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid TX type: {pendingTx.TransactionType}" });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Withdrawal request transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Cancel Withdrawal Raw TX
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_WITHDRAWAL_CANCEL blockchain transaction for offline signing.
+        /// </summary>
+        [HttpPost("GetRawCancelWithdrawalTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawCancelWithdrawalTxData([FromBody] VBTCWithdrawalCancelTxPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.RequestorAddress) ||
+                    string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                // Verify the withdrawal request exists and belongs to this user
+                var existingRequest = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash);
+                if (existingRequest == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Withdrawal request not found: {payload.WithdrawalRequestHash}" });
+
+                if (existingRequest.RequestorAddress != payload.RequestorAddress)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Only the original requestor can cancel." });
+
+                if (existingRequest.IsCompleted)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cannot cancel an already completed withdrawal." });
+
+                // Build unsigned transaction
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalCancel()",
+                    ContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.RequestorAddress,
+                    ToAddress = payload.RequestorAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.RequestorAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL,
+                    Data = txData
+                };
+
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Message = "Sign the Hash field and submit via SendRawCancelWithdrawalTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_WITHDRAWAL_CANCEL transaction.
+        /// </summary>
+        [HttpPost("SendRawCancelWithdrawalTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawCancelWithdrawalTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawCancelWithdrawalTxData first." });
+
+                if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid TX type: {pendingTx.TransactionType}" });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Withdrawal cancel transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region MPC Ceremony Raw (DKG with Pre-Signed Auth)
+
+        /// <summary>
+        /// Prepare an MPC ceremony for web wallet use. Probes validators, generates session IDs,
+        /// and returns the exact messages the web wallet must sign for leader authentication.
+        /// Call this first, sign the messages client-side, then call ExecuteMPCCeremonyRaw.
+        /// </summary>
+        [HttpPost("PrepareMPCCeremonyRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> PrepareMPCCeremonyRaw([FromBody] PrepareMPCCeremonyRawPayload payload)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress is required" });
+
+                // Anti-spam: check for existing active ceremony
+                var existingActive = _ceremonies.Values.FirstOrDefault(c =>
+                    c.OwnerAddress == payload.OwnerAddress && !IsCeremonyTerminal(c.Status));
+                if (existingActive != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Active ceremony already in progress.", ExistingCeremonyId = existingActive.CeremonyId });
+
+                // Probe validators
+                var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                if (allValidators == null || !allValidators.Any())
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available" });
+
+                var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+                if (activeValidators.Count < 3)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient reachable validators ({activeValidators.Count}/{allValidators.Count})" });
+
+                var threshold = 51; // Default base threshold for DKG ceremonies
+
+                // Generate session ID and ceremony ID
+                var sessionId = Guid.NewGuid().ToString();
+                var ceremonyId = Guid.NewGuid().ToString();
+
+                // Generate timestamps for the leader auth messages
+                var startTimestamp = TimeUtil.GetTime();
+                var shareDistTimestamp = startTimestamp + 1; // Slightly different to avoid collision
+
+                // Construct the exact messages the web wallet needs to sign
+                var startMessage = $"{sessionId}.{payload.OwnerAddress}.{startTimestamp}";
+                var shareDistMessage = $"{sessionId}.{payload.OwnerAddress}.{shareDistTimestamp}";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Sign both LeaderAuthMessages with your private key (ECDSA secp256k1) and submit via ExecuteMPCCeremonyRaw.",
+                    CeremonyId = ceremonyId,
+                    SessionId = sessionId,
+                    OwnerAddress = payload.OwnerAddress,
+                    ValidatorCount = activeValidators.Count,
+                    Threshold = threshold,
+                    // Messages to sign
+                    StartMessage = startMessage,
+                    StartTimestamp = startTimestamp,
+                    ShareDistributionMessage = shareDistMessage,
+                    ShareDistributionTimestamp = shareDistTimestamp
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Execute an MPC ceremony using pre-signed leader authentication.
+        /// The web wallet must have called PrepareMPCCeremonyRaw first and signed the returned messages.
+        /// </summary>
+        [HttpPost("ExecuteMPCCeremonyRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ExecuteMPCCeremonyRaw([FromBody] ExecuteMPCCeremonyRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress) || string.IsNullOrEmpty(payload.CeremonyId) ||
+                    string.IsNullOrEmpty(payload.SessionId) || string.IsNullOrEmpty(payload.StartSignature) ||
+                    string.IsNullOrEmpty(payload.ShareDistributionSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "All fields are required" });
+
+                // Verify the start signature is valid for the owner address
+                var startMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.StartTimestamp}";
+                if (!SignatureService.VerifySignature(payload.OwnerAddress, startMessage, payload.StartSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid start signature" });
+
+                // Verify the share distribution signature
+                var shareDistMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.ShareDistributionTimestamp}";
+                if (!SignatureService.VerifySignature(payload.OwnerAddress, shareDistMessage, payload.ShareDistributionSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid share distribution signature" });
+
+                // Anti-spam checks
+                var existingActive = _ceremonies.Values.FirstOrDefault(c =>
+                    c.OwnerAddress == payload.OwnerAddress && !IsCeremonyTerminal(c.Status));
+                if (existingActive != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Active ceremony already in progress.", ExistingCeremonyId = existingActive.CeremonyId });
+
+                var activeCeremonyCount = _ceremonies.Values.Count(c => !IsCeremonyTerminal(c.Status));
+                if (activeCeremonyCount >= MaxConcurrentCeremonies)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Maximum concurrent ceremony limit reached." });
+
+                // Create ceremony state
+                var ceremony = new MPCCeremonyState
+                {
+                    CeremonyId = payload.CeremonyId,
+                    OwnerAddress = payload.OwnerAddress,
+                    Status = CeremonyStatus.Initiated,
+                    InitiatedTimestamp = TimeUtil.GetTime(),
+                    RequiredThreshold = 51,
+                    ProgressPercentage = 0,
+                    CurrentRound = 0
+                };
+
+                if (!_ceremonies.TryAdd(payload.CeremonyId, ceremony))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create ceremony" });
+
+                // Build pre-signed auth object
+                var preSignedAuth = new ReserveBlockCore.Bitcoin.FROST.Models.PreSignedLeaderAuth
+                {
+                    StartSignature = payload.StartSignature,
+                    StartTimestamp = payload.StartTimestamp,
+                    ShareDistributionSignature = payload.ShareDistributionSignature,
+                    ShareDistributionTimestamp = payload.ShareDistributionTimestamp
+                };
+
+                // Start background DKG with pre-signed auth
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        ceremony.Status = CeremonyStatus.ValidatingValidators;
+                        ceremony.ProgressPercentage = 5;
+
+                        var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                        if (allValidators == null || !allValidators.Any())
+                        {
+                            ceremony.Status = CeremonyStatus.Failed;
+                            ceremony.ErrorMessage = "No active validators available.";
+                            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                            return;
+                        }
+
+                        var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+                        if (activeValidators.Count < 3)
+                        {
+                            ceremony.Status = CeremonyStatus.Failed;
+                            ceremony.ErrorMessage = $"Insufficient reachable validators ({activeValidators.Count}).";
+                            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                            return;
+                        }
+
+                        ceremony.ProgressPercentage = 15;
+                        ceremony.Status = CeremonyStatus.Round1InProgress;
+
+                        var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                            payload.CeremonyId,
+                            payload.OwnerAddress,
+                            activeValidators,
+                            ceremony.RequiredThreshold,
+                            (round, percentage) =>
+                            {
+                                ceremony.CurrentRound = round;
+                                ceremony.ProgressPercentage = percentage;
+                                if (round == 1) ceremony.Status = CeremonyStatus.Round1InProgress;
+                                else if (round == 2) ceremony.Status = CeremonyStatus.Round2InProgress;
+                                else if (round == 3) ceremony.Status = CeremonyStatus.Round3InProgress;
+                            },
+                            preSignedAuth);
+
+                        if (dkgResult == null)
+                        {
+                            ceremony.Status = CeremonyStatus.Failed;
+                            ceremony.ErrorMessage = "FROST DKG ceremony failed";
+                            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                            return;
+                        }
+
+                        ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+                        ceremony.DepositAddress = dkgResult.TaprootAddress;
+                        ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
+                        ceremony.DKGProof = dkgResult.DKGProof;
+                        ceremony.ProofBlockHeight = Globals.LastBlock.Height;
+                        ceremony.Status = CeremonyStatus.Completed;
+                        ceremony.ProgressPercentage = 100;
+                        ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    }
+                    catch (Exception ex)
+                    {
+                        ceremony.Status = CeremonyStatus.Failed;
+                        ceremony.ErrorMessage = ex.Message;
+                        ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    }
+                });
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "MPC ceremony initiated with pre-signed auth. Poll GetCeremonyStatus for progress.",
+                    CeremonyId = payload.CeremonyId,
+                    Status = ceremony.Status.ToString()
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Create Contract Raw TX
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_CONTRACT_CREATE transaction for offline signing.
+        /// Requires a completed MPC ceremony. Unlike CreateVBTCContractRaw which signs internally,
+        /// this returns the unsigned TX hash for the web wallet to sign.
+        /// </summary>
+        [HttpPost("GetRawCreateContractTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawCreateContractTxData([FromBody] VBTCContractRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress) || string.IsNullOrEmpty(payload.Name) || string.IsNullOrEmpty(payload.CeremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress, Name, and CeremonyId are required" });
+
+                // Verify owner signature
+                if (!string.IsNullOrEmpty(payload.OwnerSignature) && !string.IsNullOrEmpty(payload.UniqueId))
+                {
+                    var signatureData = $"{payload.OwnerAddress}{payload.Name}{payload.Description}{payload.Ticker}{payload.CeremonyId}{payload.Timestamp}{payload.UniqueId}";
+                    if (!SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature))
+                        return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
+                }
+
+                // Retrieve and validate ceremony
+                if (!_ceremonies.TryGetValue(payload.CeremonyId, out var ceremony))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony not found." });
+
+                if (ceremony.Status != CeremonyStatus.Completed)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Ceremony not complete. Status: {ceremony.Status}" });
+
+                if (ceremony.OwnerAddress != payload.OwnerAddress)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address mismatch." });
+
+                var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
+                    ? ceremony.RemoteCeremonyId : payload.CeremonyId;
+
+                // Create the smart contract object
+                var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
+
+                var tokenizationV2Feature = new TokenizationV2Feature
+                {
+                    AssetName = payload.Name,
+                    AssetTicker = payload.Ticker ?? "vBTC",
+                    DepositAddress = ceremony.DepositAddress!,
+                    Version = 2,
+                    ValidatorAddressesSnapshot = ceremony.ValidatorSnapshot,
+                    FrostGroupPublicKey = ceremony.FrostGroupPublicKey!,
+                    RequiredThreshold = 51,
+                    DKGProof = ceremony.DKGProof!,
+                    ProofBlockHeight = Globals.LastBlock.Height,
+                    CeremonyId = effectiveCeremonyId,
+                    ImageBase = payload.ImageBase
+                };
+
+                var scMain = new SmartContractMain
+                {
+                    SmartContractUID = scUID,
+                    Name = payload.Name,
+                    Description = payload.Description,
+                    MinterAddress = payload.OwnerAddress,
+                    MinterName = payload.OwnerAddress,
+                    SmartContractAsset = new SmartContractAsset
+                    {
+                        Name = "vbtc_v2_token",
+                        Location = "default",
+                        AssetAuthorName = payload.OwnerAddress,
+                        FileSize = 0
+                    },
+                    Features = new List<SmartContractFeatures>
+                    {
+                        new SmartContractFeatures
+                        {
+                            FeatureName = FeatureName.TokenizationV2,
+                            FeatureFeatures = tokenizationV2Feature
+                        }
+                    }
+                };
+
+                // Write and save smart contract
+                var result = await SmartContractWriterService.WriteSmartContract(scMain);
+                if (string.IsNullOrWhiteSpace(result.Item1))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to generate smart contract code" });
+
+                SmartContractMain.SmartContractData.SaveSmartContract(result.Item2, result.Item1);
+                await VBTCContractV2.SaveSmartContract(result.Item2, result.Item1, payload.OwnerAddress);
+
+                // Build unsigned deploy TX (instead of calling MintSmartContractTx which signs internally)
+                var txData = JsonConvert.SerializeObject(new[]
+                {
+                    new { Function = "Mint()", ContractUID = scUID, Data = result.Item1 }
+                });
+
+                var deployTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.OwnerAddress,
+                    ToAddress = payload.OwnerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.OwnerAddress),
+                    TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE,
+                    Data = txData
+                };
+
+                deployTx.Fee = FeeCalcService.CalculateTXFee(deployTx);
+                deployTx.Build();
+
+                _pendingRawVbtcTxs[deployTx.Hash] = deployTx;
+
+                // Don't consume ceremony yet — wait until TX is signed and broadcast
+                // Store ceremony mapping so SendRawCreateContractTx can clean up
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = deployTx.Hash,
+                    SmartContractUID = scUID,
+                    DepositAddress = ceremony.DepositAddress,
+                    CeremonyId = payload.CeremonyId,
+                    Timestamp = deployTx.Timestamp,
+                    Fee = deployTx.Fee,
+                    Nonce = deployTx.Nonce,
+                    Message = "Sign the Hash field and submit via SendRawCreateContractTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_CONTRACT_CREATE transaction.
+        /// </summary>
+        [HttpPost("SendRawCreateContractTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawCreateContractTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}." });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                // Mark contract as published
+                try
+                {
+                    // Extract scUID from TX data
+                    var txDataArr = JsonConvert.DeserializeObject<dynamic[]>(pendingTx.Data);
+                    if (txDataArr != null && txDataArr.Length > 0)
+                    {
+                        string contractUID = txDataArr[0].ContractUID;
+                        if (!string.IsNullOrEmpty(contractUID))
+                            await TokenizedBitcoin.SetTokenContractIsPublished(contractUID);
+                    }
+                }
+                catch { /* Best-effort publish marking */ }
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "vBTC contract creation transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #endregion
+
         #region Balance & Status
 
         /// <summary>
@@ -3168,6 +3928,45 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public long Timestamp { get; set; }
         public string UniqueId { get; set; }
         public string OwnerSignature { get; set; }       // VFX signature
+    }
+
+    // Raw TX Submission Model (for all GetRaw*/SendRaw* endpoint pairs)
+
+    public class RawVBTCTxSubmission
+    {
+        /// <summary>TX hash that was returned by GetRaw*Data (the value the client signed).</summary>
+        public string Hash { get; set; } = "";
+        /// <summary>ECDSA base64 signature over UTF8(Hash).</summary>
+        public string Signature { get; set; } = "";
+        /// <summary>Hex-encoded secp256k1 public key of the signing account.</summary>
+        public string PublicKey { get; set; } = "";
+    }
+
+    // Raw Withdrawal Cancel TX Payload
+
+    public class VBTCWithdrawalCancelTxPayload
+    {
+        public string SmartContractUID { get; set; } = "";
+        public string RequestorAddress { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+    }
+
+    // Raw MPC Ceremony Payload Models (for web wallet pre-signed auth)
+
+    public class PrepareMPCCeremonyRawPayload
+    {
+        public string OwnerAddress { get; set; } = "";
+    }
+
+    public class ExecuteMPCCeremonyRawPayload
+    {
+        public string OwnerAddress { get; set; } = "";
+        public string CeremonyId { get; set; } = "";
+        public string SessionId { get; set; } = "";
+        public long StartTimestamp { get; set; }
+        public string StartSignature { get; set; } = "";
+        public long ShareDistributionTimestamp { get; set; }
+        public string ShareDistributionSignature { get; set; } = "";
     }
 
     // Base Bridge Payload Models

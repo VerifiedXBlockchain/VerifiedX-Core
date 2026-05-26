@@ -136,6 +136,38 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public int Threshold { get; set; }
     }
 
+    /// <summary>
+    /// Pre-signed leader authentication for web wallet / external signer flows.
+    /// When provided to FROST ceremony methods, the pre-signed signatures are used
+    /// instead of calling AddressSignature() which requires a local private key.
+    /// </summary>
+    public class PreSignedLeaderAuth
+    {
+        /// <summary>
+        /// Pre-signed signature for the DKG/signing start broadcast.
+        /// Message format: "{sessionId}.{leaderAddress}.{timestamp}"
+        /// </summary>
+        public string StartSignature { get; set; } = "";
+
+        /// <summary>
+        /// Timestamp used when generating the start signature.
+        /// Must match the timestamp embedded in StartSignature.
+        /// </summary>
+        public long StartTimestamp { get; set; }
+
+        /// <summary>
+        /// Pre-signed signature for DKG share distribution (Round 2).
+        /// Only needed for DKG ceremonies. Message format: "{sessionId}.{leaderAddress}.{timestamp}"
+        /// </summary>
+        public string? ShareDistributionSignature { get; set; }
+
+        /// <summary>
+        /// Timestamp used when generating the share distribution signature.
+        /// Only needed for DKG ceremonies.
+        /// </summary>
+        public long? ShareDistributionTimestamp { get; set; }
+    }
+
     #endregion
 
     #region Session Management
