@@ -140,12 +140,14 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                var sessionId = Guid.NewGuid().ToString();
+                // Reuse the pre-signed session ID if provided (web wallet flow), otherwise generate a new one.
+                // The pre-signed signatures embed this session ID in the message, so it MUST match.
+                var sessionId = !string.IsNullOrEmpty(preSignedAuth?.SessionId) ? preSignedAuth.SessionId : Guid.NewGuid().ToString();
                 // Use the owner's address as the leader — any VFX address can coordinate
                 var leaderAddress = ownerAddress;
                 var activeValidators = validators;
 
-                LogUtility.Log($"[FROST MPC] Starting DKG ceremony. Ceremony: {ceremonyId}, Session: {sessionId}, Validators: {activeValidators.Count}, Threshold: {threshold}%", "FrostMPCService.CoordinateDKGCeremony");
+                LogUtility.Log($"[FROST MPC] Starting DKG ceremony. Ceremony: {ceremonyId}, Session: {sessionId}, Validators: {activeValidators.Count}, Threshold: {threshold}%, PreSignedSession: {preSignedAuth?.SessionId != null}", "FrostMPCService.CoordinateDKGCeremony");
 
                 // Phase 1: Broadcast DKG start to all validators with retry for participant convergence.
                 // FROST DKG requires ALL n participants to complete every round. If some validators
@@ -788,14 +790,16 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                var sessionId = Guid.NewGuid().ToString();
+                // Reuse the pre-signed session ID if provided (web wallet flow), otherwise generate a new one.
+                // The pre-signed signatures embed this session ID in the message, so it MUST match.
+                var sessionId = !string.IsNullOrEmpty(preSignedAuth?.SessionId) ? preSignedAuth.SessionId : Guid.NewGuid().ToString();
                 // Use provided coordinator address, fall back to validator address, then first validator
                 // Note: Globals.ValidatorAddress is "" (not null) for non-validators, so ?? won't fall through
                 var leaderAddress = !string.IsNullOrEmpty(coordinatorAddress) ? coordinatorAddress
                     : !string.IsNullOrEmpty(Globals.ValidatorAddress) ? Globals.ValidatorAddress
                     : validators.First().ValidatorAddress;
 
-                LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}", "FrostMPCService.CoordinateSigningCeremony");
+                LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}, PreSignedSession: {preSignedAuth?.SessionId != null}", "FrostMPCService.CoordinateSigningCeremony");
 
                 // Phase 1: Broadcast signing start
                 var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId, withdrawalRequestHash, preSignedAuth);

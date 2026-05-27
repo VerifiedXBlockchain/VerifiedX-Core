@@ -144,6 +144,13 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
     public class PreSignedLeaderAuth
     {
         /// <summary>
+        /// The session ID the web wallet signed over. When set, CoordinateDKGCeremony /
+        /// CoordinateSigningCeremony reuse this instead of generating a new Guid,
+        /// ensuring the leader message matches the pre-signed signature.
+        /// </summary>
+        public string? SessionId { get; set; }
+
+        /// <summary>
         /// Pre-signed signature for the DKG/signing start broadcast.
         /// Message format: "{sessionId}.{leaderAddress}.{timestamp}"
         /// </summary>

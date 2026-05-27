@@ -1821,6 +1821,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 // Build pre-signed auth object (same pattern as ExecuteMPCCeremonyRaw)
                 var preSignedAuth = new ReserveBlockCore.Bitcoin.FROST.Models.PreSignedLeaderAuth
                 {
+                    SessionId = payload.SessionId,
                     StartSignature = payload.StartSignature,
                     StartTimestamp = payload.StartTimestamp,
                     ShareDistributionSignature = payload.ShareDistributionSignature,
@@ -2441,6 +2442,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 // Build pre-signed auth object
                 var preSignedAuth = new ReserveBlockCore.Bitcoin.FROST.Models.PreSignedLeaderAuth
                 {
+                    SessionId = payload.SessionId,
                     StartSignature = payload.StartSignature,
                     StartTimestamp = payload.StartTimestamp,
                     ShareDistributionSignature = payload.ShareDistributionSignature,
