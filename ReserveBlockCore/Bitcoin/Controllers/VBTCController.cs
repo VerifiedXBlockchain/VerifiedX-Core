@@ -15,6 +15,7 @@ using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using FrostBlacklist = ReserveBlockCore.Bitcoin.Services.FrostContractBlacklist;
 using System.Collections.Concurrent;
+using System.Text;
 
 namespace ReserveBlockCore.Bitcoin.Controllers
 {
@@ -2625,9 +2626,19 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 await VBTCContractV2.SaveSmartContract(result.Item2, result.Item1, payload.OwnerAddress);
 
                 // Build unsigned deploy TX (instead of calling MintSmartContractTx which signs internally)
+                // Compress and Base64 encode the Trillium code (same as NFT mint pipeline)
+                var bytes = Encoding.Unicode.GetBytes(result.Item1);
+                var scBase64 = bytes.ToCompress().ToBase64();
+                var defaultMD5 = "defaultvBTC.png::150b90aa9d06f7e4fc5703ca6d7f01db";
+                string? md5List = null;
+                if (scMain.SmartContractAsset.Location != "default")
+                    md5List = await MD5Utility.GetMD5FromSmartContract(scMain);
+                else
+                    md5List = defaultMD5;
+
                 var txData = JsonConvert.SerializeObject(new[]
                 {
-                    new { Function = "Mint()", ContractUID = scUID, Data = result.Item1 }
+                    new { Function = "Mint()", ContractUID = scUID, Data = scBase64, MD5List = md5List }
                 });
 
                 var deployTx = new Transaction
