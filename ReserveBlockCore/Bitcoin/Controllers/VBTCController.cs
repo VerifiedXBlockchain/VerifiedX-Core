@@ -2600,6 +2600,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     Description = payload.Description,
                     MinterAddress = payload.OwnerAddress,
                     MinterName = payload.OwnerAddress,
+                    SCVersion = Globals.SCVersion,
                     SmartContractAsset = new SmartContractAsset
                     {
                         Name = "vbtc_v2_token",
