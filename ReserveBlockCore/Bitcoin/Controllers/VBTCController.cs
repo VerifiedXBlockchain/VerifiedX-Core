@@ -1628,10 +1628,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Complete withdrawal with pre-signed validator authorization (Raw format)
-        /// SECURITY: Verifies validator signature and coordinates FROST signing
+        /// Complete withdrawal with pre-signed owner authorization (Raw format)
+        /// SECURITY: Verifies owner signature, timestamp validation, and replay attack prevention
         /// </summary>
-        /// <param name="payload">Raw completion request with validator signature</param>
+        /// <param name="payload">Raw completion request with owner signature</param>
         /// <returns>Bitcoin transaction hash if successful</returns>
         [HttpPost("CompleteWithdrawalRaw")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
@@ -1649,16 +1649,16 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request hash cannot be null" });
 
-                if (string.IsNullOrEmpty(payload.ValidatorAddress))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator address cannot be null" });
+                if (string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
 
                 if (string.IsNullOrEmpty(payload.UniqueId))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Unique ID cannot be null" });
 
-                if (string.IsNullOrEmpty(payload.ValidatorSignature))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator signature cannot be null" });
+                if (string.IsNullOrEmpty(payload.OwnerSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner signature cannot be null" });
 
-                // 2. Timestamp validation
+                // 2. Timestamp validation (reject if older than 5 minutes)
                 var currentTime = TimeUtil.GetTime();
                 var timeDifference = Math.Abs(currentTime - payload.Timestamp);
                 if (timeDifference > 300)
@@ -1666,22 +1666,15 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
                 }
 
-                // 3. Verify validator is active and eligible
-                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
-                if (validator == null || !validator.IsActive)
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
-                }
-
-                // 4. Verify validator signature (VFX signature over request data)
-                var signatureData = $"{payload.SmartContractUID}{payload.WithdrawalRequestHash}{payload.ValidatorAddress}{payload.Timestamp}{payload.UniqueId}";
-                var isValidSignature = SignatureService.VerifySignature(payload.ValidatorAddress, signatureData, payload.ValidatorSignature);
+                // 3. Verify owner signature (VFX signature over request data)
+                var signatureData = $"{payload.SmartContractUID}{payload.WithdrawalRequestHash}{payload.OwnerAddress}{payload.Timestamp}{payload.UniqueId}";
+                var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
                 if (!isValidSignature)
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid validator signature" });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
                 }
 
-                // Unified MPC: execute FROST withdrawal locally (owner signs with AddressSignature)
+                // Execute FROST withdrawal
                 var withdrawalResult = await Services.VBTCService.CompleteWithdrawal(
                     payload.SmartContractUID,
                     payload.WithdrawalRequestHash
@@ -2200,6 +2193,129 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 await P2P.P2PClient.SendTXMempool(pendingTx);
 
                 return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Withdrawal request transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Complete Withdrawal Raw TX
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_WITHDRAWAL_COMPLETE blockchain transaction for offline signing.
+        /// This is the final step in the web wallet withdrawal flow — after the wallet has broadcast
+        /// the FROST-signed BTC transaction, it calls this to record the completion on the VFX chain.
+        /// No local account lookup is performed; the wallet signs the TX offline.
+        /// </summary>
+        [HttpPost("GetRawCompleteWithdrawalTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawCompleteWithdrawalTxData([FromBody] RawCompleteWithdrawalTxPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID is required" });
+
+                if (string.IsNullOrEmpty(payload.FromAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress is required" });
+
+                if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "WithdrawalRequestHash is required" });
+
+                if (string.IsNullOrEmpty(payload.BTCTransactionHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "BTCTransactionHash is required" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                if (string.IsNullOrEmpty(payload.BTCDestination))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "BTCDestination is required" });
+
+                // Build transaction data (same format as VBTCService.CompleteWithdrawal uses)
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalComplete()",
+                    ContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    BTCTransactionHash = payload.BTCTransactionHash,
+                    Amount = payload.Amount,
+                    Destination = payload.BTCDestination
+                });
+
+                // Build unsigned transaction — self-transaction recording the withdrawal completion
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.FromAddress,
+                    ToAddress = payload.FromAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.FromAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
+                    Data = txData
+                };
+
+                // Withdrawal-complete transactions are fee-free (matches VBTCService.CompleteWithdrawal)
+                tx.Fee = 0M.ToNormalizeDecimal();
+                tx.Build();
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Message = "Sign the Hash field with your private key (ECDSA secp256k1) and submit via SendRawCompleteWithdrawalTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_WITHDRAWAL_COMPLETE transaction.
+        /// This records the withdrawal completion on the VFX chain after the BTC transaction has been broadcast.
+        /// </summary>
+        [HttpPost("SendRawCompleteWithdrawalTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawCompleteWithdrawalTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawCompleteWithdrawalTxData first." });
+
+                if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid TX type: {pendingTx.TransactionType}" });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Withdrawal completion transaction broadcast successfully." });
             }
             catch (Exception ex)
             {
@@ -4076,10 +4192,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
     {
         public string SmartContractUID { get; set; }
         public string WithdrawalRequestHash { get; set; }
-        public string ValidatorAddress { get; set; }     // Validator initiating completion
+        public string OwnerAddress { get; set; }         // Owner requesting completion
         public long Timestamp { get; set; }
         public string UniqueId { get; set; }
-        public string ValidatorSignature { get; set; }   // FROST signature proof
+        public string OwnerSignature { get; set; }       // VFX signature over request data
     }
 
     public class VBTCCancellationRawPayload
@@ -4104,6 +4220,22 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public string Signature { get; set; } = "";
         /// <summary>Hex-encoded secp256k1 public key of the signing account.</summary>
         public string PublicKey { get; set; } = "";
+    }
+
+    // Raw Complete Withdrawal TX Payload (for web wallet — records VFX withdrawal completion after BTC broadcast)
+
+    public class RawCompleteWithdrawalTxPayload
+    {
+        public string SmartContractUID { get; set; } = "";
+        /// <summary>The withdrawal requestor's VFX address (FromAddress for the completion TX).</summary>
+        public string FromAddress { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+        /// <summary>The BTC transaction hash from the FROST signing result (after wallet broadcasts to Bitcoin).</summary>
+        public string BTCTransactionHash { get; set; } = "";
+        /// <summary>Withdrawal amount in BTC.</summary>
+        public decimal Amount { get; set; }
+        /// <summary>BTC destination address.</summary>
+        public string BTCDestination { get; set; } = "";
     }
 
     // Raw Withdrawal Cancel TX Payload
