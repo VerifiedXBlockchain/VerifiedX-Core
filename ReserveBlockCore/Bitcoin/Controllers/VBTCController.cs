@@ -1628,85 +1628,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Complete withdrawal with pre-signed owner authorization (Raw format)
-        /// SECURITY: Verifies owner signature, timestamp validation, and replay attack prevention
-        /// </summary>
-        /// <param name="payload">Raw completion request with owner signature</param>
-        /// <returns>Bitcoin transaction hash if successful</returns>
-        [HttpPost("CompleteWithdrawalRaw")]
-        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> CompleteWithdrawalRaw([FromBody] VBTCWithdrawalCompleteRawPayload payload)
-        {
-            try
-            {
-                if (payload == null)
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
-
-                // 1. Validate required fields
-                if (string.IsNullOrEmpty(payload.SmartContractUID))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID cannot be null" });
-
-                if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request hash cannot be null" });
-
-                if (string.IsNullOrEmpty(payload.OwnerAddress))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
-
-                if (string.IsNullOrEmpty(payload.UniqueId))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Unique ID cannot be null" });
-
-                if (string.IsNullOrEmpty(payload.OwnerSignature))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner signature cannot be null" });
-
-                // 2. Timestamp validation (reject if older than 5 minutes)
-                var currentTime = TimeUtil.GetTime();
-                var timeDifference = Math.Abs(currentTime - payload.Timestamp);
-                if (timeDifference > 300)
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
-                }
-
-                // 3. Verify owner signature (VFX signature over request data)
-                var signatureData = $"{payload.SmartContractUID}{payload.WithdrawalRequestHash}{payload.OwnerAddress}{payload.Timestamp}{payload.UniqueId}";
-                var isValidSignature = SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature);
-                if (!isValidSignature)
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
-                }
-
-                // Execute FROST withdrawal
-                var withdrawalResult = await Services.VBTCService.CompleteWithdrawal(
-                    payload.SmartContractUID,
-                    payload.WithdrawalRequestHash
-                );
-
-                if (!withdrawalResult.Success)
-                {
-                    return JsonConvert.SerializeObject(new
-                    {
-                        Success = false,
-                        Message = withdrawalResult.ErrorMessage ?? "FROST signing ceremony failed"
-                    });
-                }
-
-                return JsonConvert.SerializeObject(new
-                {
-                    Success = true,
-                    Message = "Raw withdrawal completed successfully via FROST signing",
-                    BTCTransactionHash = withdrawalResult.BTCTxHash,
-                    VFXTransactionHash = withdrawalResult.VFXTxHash,
-                    Status = "Pending_BTC",
-                    SmartContractUID = payload.SmartContractUID,
-                    WithdrawalRequestHash = payload.WithdrawalRequestHash
-                });
-            }
-            catch (Exception ex)
-            {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
-            }
-        }
-
-        /// <summary>
         /// Prepare a complete-withdrawal FROST signing session for a web wallet.
         /// Returns the exact messages the wallet must sign (same "{sessionId}.{ownerAddress}.{timestamp}" format
         /// used by PrepareMPCCeremonyRaw). Call this first, sign client-side, then call ExecuteCompleteWithdrawalRaw.
@@ -4186,16 +4107,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public string UniqueId { get; set; }             // Unique request ID (prevents replay)
         public string VFXSignature { get; set; }         // Signature of request data
         public bool IsTest { get; set; }                 // Testnet flag
-    }
-
-    public class VBTCWithdrawalCompleteRawPayload
-    {
-        public string SmartContractUID { get; set; }
-        public string WithdrawalRequestHash { get; set; }
-        public string OwnerAddress { get; set; }         // Owner requesting completion
-        public long Timestamp { get; set; }
-        public string UniqueId { get; set; }
-        public string OwnerSignature { get; set; }       // VFX signature over request data
     }
 
     public class VBTCCancellationRawPayload
