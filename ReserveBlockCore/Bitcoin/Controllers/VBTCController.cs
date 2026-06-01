@@ -1254,6 +1254,99 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             return await Services.VBTCService.TransferOwnership(scUID, toAddress);
         }
 
+        /// <summary>
+        /// Get vBTC V2 ownership transfer TX data for raw transaction building (web wallet).
+        /// This is the vBTC equivalent of TXV1Controller.GetNFTTransferData.
+        /// 
+        /// Web wallet flow:
+        ///   Step 1: GET /txapi/txV1/CreateBeaconUploadRequest/{scUID}/{toAddress}/{signature} → { Locator }
+        ///   Step 2: GET /vbtcapi/vbtc/GetVBTCOwnershipTransferData/{scUID}/{toAddress}/{locator} → TX data (this endpoint)
+        ///   Step 3: Build raw TX with Type=TKNZ_TX, Amount=0, Data=payload from Step 2
+        ///           POST /txapi/txV1/GetRawTxFee → fee
+        ///           POST /txapi/txV1/GetTxHash → hash
+        ///           Client signs hash
+        ///           POST /txapi/txV1/SendRawTransaction → broadcast
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <param name="toAddress">New owner address</param>
+        /// <param name="locator">Beacon locator from CreateBeaconUploadRequest</param>
+        /// <returns>TX data JSON payload for raw transaction</returns>
+        [HttpGet("GetVBTCOwnershipTransferData/{scUID}/{toAddress}/{**locator}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetVBTCOwnershipTransferData(string scUID, string toAddress, string locator)
+        {
+            try
+            {
+                toAddress = toAddress.ToAddressNormalize();
+
+                // 1. Load smart contract state
+                var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTrei == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract state not found." });
+
+                // 2. Load vBTC V2 contract
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"vBTC V2 contract not found: {scUID}" });
+
+                // 3. Generate SC in memory from state data
+                var sc = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
+                if (sc == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to generate smart contract from state data." });
+
+                // 4. Validate TokenizationV2 feature exists
+                if (sc.Features == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Contract has no features: {scUID}" });
+
+                var tknzFeature = sc.Features
+                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                    .Select(x => x.FeatureFeatures)
+                    .FirstOrDefault();
+
+                if (tknzFeature == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Contract missing TokenizationV2 feature: {scUID}" });
+
+                // 5. Validate balance > 0 (cannot transfer an empty contract)
+                decimal availableBalance = vbtcContract.Balance;
+                if (scStateTrei.SCStateTreiTokenizationTXes != null)
+                {
+                    var ownerTxes = scStateTrei.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == scStateTrei.OwnerAddress || x.ToAddress == scStateTrei.OwnerAddress)
+                        .ToList();
+
+                    if (ownerTxes.Any())
+                    {
+                        var ledgerDelta = ownerTxes.Sum(x => x.Amount);
+                        availableBalance = vbtcContract.Balance + ledgerDelta;
+                    }
+                }
+
+                if (availableBalance <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cannot transfer a token with zero balance." });
+
+                // 6. Build TX data payload (same structure as NFT Transfer)
+                var newSCInfo = new[]
+                {
+                    new
+                    {
+                        Function = "Transfer()",
+                        ContractUID = sc.SmartContractUID,
+                        ToAddress = toAddress,
+                        Data = scStateTrei.ContractData,
+                        Locators = locator,
+                        MD5List = scStateTrei.MD5List
+                    }
+                };
+
+                var txData = JsonConvert.SerializeObject(newSCInfo);
+                return txData;
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
         #endregion
 
         #region Withdrawal Operations
