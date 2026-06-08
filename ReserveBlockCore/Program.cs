@@ -725,9 +725,12 @@ namespace ReserveBlockCore
                     });
                 });
 
-            var errorLog = builder.Services.GetRequiredService<ErrorLog>();
-            VFXLogging.Initialize(errorLog);
-
+            if (useElmah)
+            {
+                var errorLog = builder.Services.GetRequiredService<ErrorLog>();
+                VFXLogging.Initialize(errorLog);
+            }
+            
             _ = builder.RunAsync();
             _ = builder2.RunConsoleAsync();
 
