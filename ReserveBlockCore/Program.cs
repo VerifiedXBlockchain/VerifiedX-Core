@@ -675,14 +675,19 @@ namespace ReserveBlockCore
             while (Globals.StopAllTimers || Globals.BlocksDownloadSlim.CurrentCount == 0)
                 await Task.Delay(20);
 
+            bool useElmah = false;
             string dbPath = GetPathUtility.GetDatabasePath();
             //for web API using Kestrel
             var builder = Host.CreateDefaultBuilder(args)
                 .ConfigureServices((context, services) => { 
-                services.AddElmah<XmlFileErrorLog>(options =>
-                {
-                    options.LogPath = Path.Combine(dbPath, "elmah.xml");
-                });
+
+                if(useElmah)
+                    {
+                        services.AddElmah<XmlFileErrorLog>(options =>
+                        {
+                            options.LogPath = Path.Combine(dbPath, "elmah.xml");
+                        });
+                    }
                 })
                 .ConfigureWebHostDefaults(webBuilder =>
                 {

@@ -147,6 +147,19 @@ namespace ReserveBlockCore.Utilities
                             $"{caller}.ForkRecovery");
                     }
 
+                    // FORK-FIX: Clear all non-permanent bans before attempting block downloads.
+                    // During forks, validators get banned for hash mismatches, and ReleasePeer()
+                    // removes them from Globals.Nodes. This leaves the node with no peers to
+                    // download blocks from, causing recovery to silently fail. By clearing bans
+                    // first, we allow those peers to reconnect and serve blocks.
+                    LogUtility.Log(
+                        $"[{caller}] FORK-RECOVERY: Clearing bans to allow peer reconnection for block downloads...",
+                        $"{caller}.ForkRecovery");
+                    BanService.UnbanAllForForkRecovery();
+
+                    // Give peers a moment to reconnect after unbanning
+                    await Task.Delay(2000);
+
                     // Step 3: Download the correct blocks from peers
                     LogUtility.Log(
                         $"[{caller}] FORK-RECOVERY: Downloading correct blocks from peers...",

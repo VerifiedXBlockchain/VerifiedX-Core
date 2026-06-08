@@ -24,6 +24,21 @@ namespace ReserveBlockCore.Services
         }
 
         /// <summary>
+        /// FORK-FIX: Checks whether the given IP belongs to a known network validator.
+        /// Validator IPs should not be banned during fork events — they hold the correct
+        /// chain state needed for recovery.
+        /// </summary>
+        public static bool IsValidatorIP(string ipAddress)
+        {
+            if (string.IsNullOrEmpty(ipAddress))
+                return false;
+            var normalized = ipAddress.Replace("::ffff:", "");
+            return Globals.NetworkValidators.Any(kvp =>
+                !string.IsNullOrEmpty(kvp.Value.IPAddress) &&
+                kvp.Value.IPAddress.Replace("::ffff:", "") == normalized);
+        }
+
+        /// <summary>
         /// Unbans all IPs that belong to active block casters.
         /// Called periodically from MonitorCasters and RunUnban to prevent
         /// consensus deadlocks caused by caster-to-caster bans.
@@ -53,6 +68,72 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        /// <summary>
+        /// FORK-FIX: Unbans all IPs that belong to known network validators.
+        /// Validator IPs should not remain banned — they are needed for block
+        /// downloads during fork recovery. Called periodically from RunUnban
+        /// and explicitly during fork recovery.
+        /// </summary>
+        public static void UnbanValidatorIPs()
+        {
+            try
+            {
+                var validatorIPs = Globals.NetworkValidators.Values.ToList()
+                    .Where(v => !string.IsNullOrEmpty(v.IPAddress))
+                    .Select(v => v.IPAddress!.Replace("::ffff:", ""))
+                    .Where(ip => !string.IsNullOrEmpty(ip))
+                    .Distinct()
+                    .ToList();
+
+                foreach (var ip in validatorIPs)
+                {
+                    if (Globals.BannedIPs.ContainsKey(ip))
+                    {
+                        UnbanPeer(ip);
+                        BanLogUtility.Log($"Auto-unbanned validator IP: {ip} (validator IPs must not stay banned)", "BanService.UnbanValidatorIPs");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"UnbanValidatorIPs error: {ex.Message}", "BanService.UnbanValidatorIPs()");
+            }
+        }
+
+        /// <summary>
+        /// FORK-RECOVERY: Clears all non-permanent bans to allow block downloads
+        /// from peers during fork recovery. This is the nuclear option — called only
+        /// when the node is stuck on a minority fork and needs to re-sync.
+        /// </summary>
+        public static void UnbanAllForForkRecovery()
+        {
+            try
+            {
+                var bannedIPs = Globals.BannedIPs.Keys.ToList();
+                int unbannedCount = 0;
+
+                foreach (var ip in bannedIPs)
+                {
+                    if (Globals.BannedIPs.TryGetValue(ip, out var peer) && peer != null && peer.IsPermaBanned)
+                        continue; // Leave perma-banned IPs alone
+
+                    UnbanPeer(ip);
+                    unbannedCount++;
+                }
+
+                if (unbannedCount > 0)
+                {
+                    LogUtility.Log(
+                        $"FORK-RECOVERY: Unbanned {unbannedCount} peers to allow block downloads during recovery.",
+                        "BanService.UnbanAllForForkRecovery");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"UnbanAllForForkRecovery error: {ex.Message}", "BanService.UnbanAllForForkRecovery()");
+            }
+        }
+
         public static void BanPeer(string ipAddress, string message, string location)
         {
             if (Globals.AdjudicateAccount == null)
@@ -71,6 +152,15 @@ namespace ReserveBlockCore.Services
             if (IsCasterIP(ipAddress))
             {
                 BanLogUtility.Log($"BanPeer SKIPPED — {ipAddress} is an active caster IP. Reason: {message}", location);
+                return;
+            }
+
+            // FORK-FIX: Never ban known validator IPs — they hold the correct chain
+            // state needed for fork recovery. Banning them prevents block downloads
+            // and causes the node to get permanently stuck on a minority fork.
+            if (IsValidatorIP(ipAddress))
+            {
+                BanLogUtility.Log($"BanPeer SKIPPED — {ipAddress} is a known validator IP. Reason: {message}", location);
                 return;
             }
 
@@ -282,6 +372,10 @@ namespace ReserveBlockCore.Services
             // This is a safety net for any caster IPs that were banned before Fix 1 was deployed,
             // or that were banned via a code path that bypasses BanPeer (e.g., direct dictionary insert).
             UnbanCasterIPs();
+
+            // FORK-FIX: Also unban validator IPs — they should never stay banned as they
+            // are needed for block downloads and fork recovery.
+            UnbanValidatorIPs();
 
             try
             {
