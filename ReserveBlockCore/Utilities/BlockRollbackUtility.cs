@@ -6,6 +6,9 @@ namespace ReserveBlockCore.Utilities
 {
     public class BlockRollbackUtility
     {
+        /// <summary>RE-ENTRANCY GUARD: Prevents ResetTreis from being triggered while already running.</summary>
+        private static volatile bool _isResetTreisRunning = false;
+
         /// <summary>
         /// Full chain rescan rollback — deletes blocks above newHeight, nukes all state,
         /// and replays the entire blockchain from genesis.
@@ -311,6 +314,16 @@ namespace ReserveBlockCore.Utilities
         /// </summary>
         public static async Task<bool> ResetTreis()
         {
+            // RE-ENTRANCY GUARD: If ResetTreis is already running, reject the new request.
+            // This prevents the infinite wipe→replay→wipe loop that occurs when TX-validation
+            // failures keep triggering ResetTreis while a previous ResetTreis is still replaying 6.6M blocks.
+            if (_isResetTreisRunning)
+            {
+                Console.WriteLine("[ResetTreis] BLOCKED: ResetTreis is already running. Ignoring duplicate request.");
+                return false;
+            }
+
+            _isResetTreisRunning = true;
             try
             {
                 Console.WriteLine("[ResetTreis] Starting full chain state rebuild...");
@@ -609,6 +622,10 @@ namespace ReserveBlockCore.Utilities
                 Console.WriteLine($"[ResetTreis] CRITICAL ERROR: {ex.Message}");
                 Console.WriteLine($"[ResetTreis] Stack trace: {ex.StackTrace}");
                 return false;
+            }
+            finally
+            {
+                _isResetTreisRunning = false;
             }
         }
     }
