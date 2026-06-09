@@ -31,6 +31,14 @@ namespace ReserveBlockCore.Services
         /// <summary>After this many consecutive PREVHASH-MISMATCH rejections at the same expected height, trigger fork recovery.</summary>
         public const int PREVHASH_MISMATCH_RECOVERY_THRESHOLD = 3;
 
+        /// <summary>FORK-FIX: Consecutive HEIGHT-GAP detections trigger automatic fork recovery.
+        /// This handles the case where the node is stuck at height N and only receives blocks at N+2 or higher,
+        /// meaning block N+1 was on a minority fork that no peer can serve anymore.</summary>
+        private static long _heightGapExpectedHeight = -1;
+        private static int _heightGapCount = 0;
+        /// <summary>After this many consecutive HEIGHT-GAP rejections at the same expected height, trigger fork recovery.</summary>
+        public const int HEIGHT_GAP_RECOVERY_THRESHOLD = 3;
+
         public static void UpdateMemBlocks(Block block)
         {
             foreach (var trans in block.Transactions)
@@ -447,10 +455,91 @@ namespace ReserveBlockCore.Services
                     // Don't reject if validateOnly (preflight) — only enforce on actual commit
                     if (!validateOnly)
                     {
+                        var expectedHeight = Globals.LastBlock.Height + 1;
                         LogUtility.Log(
                             $"[ValidateBlock] HEIGHT-GAP: Rejecting block at height {block.Height}, " +
-                            $"expected {Globals.LastBlock.Height + 1}. LastBlock.Hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                            $"expected {expectedHeight}. LastBlock.Hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
                             "BlockValidatorService");
+
+                        // FORK-FIX: Track consecutive HEIGHT-GAP rejections where peers are ahead.
+                        // If the node is stuck at height N and only receives blocks at N+2 or higher,
+                        // it means block N+1 was on a minority fork that no peer can serve anymore.
+                        // After HEIGHT_GAP_RECOVERY_THRESHOLD consecutive gaps at the same expected height,
+                        // trigger automatic rollback + resync to find a common ancestor.
+                        if (block.Height > expectedHeight)
+                        {
+                            if (_heightGapExpectedHeight == expectedHeight)
+                            {
+                                _heightGapCount++;
+                            }
+                            else
+                            {
+                                _heightGapExpectedHeight = expectedHeight;
+                                _heightGapCount = 1;
+                            }
+
+                            LogUtility.Log(
+                                $"[ValidateBlock] FORK-DETECT: HEIGHT-GAP count={_heightGapCount}/{HEIGHT_GAP_RECOVERY_THRESHOLD} " +
+                                $"at expected height {expectedHeight}. Received block at {block.Height}. " +
+                                $"Our tip hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                "BlockValidatorService");
+
+                            if (_heightGapCount >= HEIGHT_GAP_RECOVERY_THRESHOLD)
+                            {
+                                LogUtility.Log(
+                                    $"[ValidateBlock] FORK-RECOVERY-TRIGGER: {_heightGapCount} consecutive HEIGHT-GAP " +
+                                    $"at expected height {expectedHeight} (receiving blocks at {block.Height}+). " +
+                                    $"Local chain is missing block(s) that peers have moved past. " +
+                                    $"Triggering automatic rollback + resync.",
+                                    "BlockValidatorService");
+
+                                // Reset counter before recovery to prevent re-triggering during the recovery process
+                                _heightGapCount = 0;
+                                _heightGapExpectedHeight = -1;
+
+                                // Calculate rollback depth: we need to go back far enough to find
+                                // a common ancestor. The gap size gives us a hint — roll back at least
+                                // the gap plus one extra block to ensure we reach shared history.
+                                var gapSize = (int)(block.Height - expectedHeight);
+                                var rollbackDepth = Math.Min(gapSize + 1, 10); // Cap at 10 to avoid excessive rollback
+
+                                // Fire-and-forget recovery — must release the semaphore first so the recovery
+                                // can re-enter ValidateBlock after rollback + download.
+                                _ = Task.Run(async () =>
+                                {
+                                    try
+                                    {
+                                        // Small delay to let the semaphore release in the finally block
+                                        await Task.Delay(100);
+                                        var recovered = await ForkRecoveryUtility.RecoverAsync(
+                                            Globals.LastBlock.Height,
+                                            "BlockValidatorService.HEIGHT-GAP",
+                                            rollbackDepth);
+                                        if (recovered)
+                                        {
+                                            LogUtility.Log(
+                                                $"[ValidateBlock] FORK-RECOVERY-SUCCESS: Recovered from HEIGHT-GAP fork. " +
+                                                $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                                "BlockValidatorService");
+                                        }
+                                        else
+                                        {
+                                            LogUtility.Log(
+                                                $"[ValidateBlock] FORK-RECOVERY-PARTIAL: HEIGHT-GAP recovery returned false. " +
+                                                $"Tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                                "BlockValidatorService");
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        LogUtility.Log(
+                                            $"[ValidateBlock] FORK-RECOVERY-ERROR: HEIGHT-GAP recovery failed: {ex.Message}",
+                                            "BlockValidatorService");
+                                    }
+                                });
+                            }
+                        }
+
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-heightGap");
                         return result;
                     }
