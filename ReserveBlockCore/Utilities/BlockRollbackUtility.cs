@@ -9,6 +9,9 @@ namespace ReserveBlockCore.Utilities
         /// <summary>RE-ENTRANCY GUARD: Prevents ResetTreis from being triggered while already running.</summary>
         private static volatile bool _isResetTreisRunning = false;
 
+        /// <summary>Public accessor so other services can check if a full state rebuild is in progress.</summary>
+        public static bool IsResetTreisRunning => _isResetTreisRunning;
+
         /// <summary>
         /// Full chain rescan rollback — deletes blocks above newHeight, nukes all state,
         /// and replays the entire blockchain from genesis.
@@ -324,9 +327,19 @@ namespace ReserveBlockCore.Utilities
             }
 
             _isResetTreisRunning = true;
+            // CRITICAL FIX: Set IsResyncing to block ALL block validation during the entire
+            // state rebuild. Without this, ResetTreis wipes the state trie (Step 1) but
+            // ValidateBlock keeps running on incoming P2P blocks, sees empty state → 
+            // "new account with no balance" → triggers MORE recovery attempts → infinite loop.
+            // The state trie stays EMPTY because concurrent validation corrupts the replay.
+            var wasResyncing = Globals.IsResyncing;
+            var wasStopTimers = Globals.StopAllTimers;
+            Globals.IsResyncing = true;
+            Globals.StopAllTimers = true;
             try
             {
                 Console.WriteLine("[ResetTreis] Starting full chain state rebuild...");
+                Console.WriteLine("[ResetTreis] IsResyncing=true — all block validation suspended during rebuild.");
 
                 // ═══════════════════════════════════════════════════════════════
                 // STEP 1: Wipe all chain-derived state databases
@@ -634,6 +647,10 @@ namespace ReserveBlockCore.Utilities
             finally
             {
                 _isResetTreisRunning = false;
+                // Restore IsResyncing — allow block validation to resume now that state is rebuilt
+                Globals.IsResyncing = wasResyncing;
+                Globals.StopAllTimers = wasStopTimers;
+                Console.WriteLine("[ResetTreis] IsResyncing restored — block validation can resume.");
             }
         }
     }
