@@ -254,7 +254,9 @@ namespace ReserveBlockCore.Services
                             //ErrorLogUtility.LogError("Banned IP address: " + ipAddress + " at height " + height, "ValidateBlocks");
                             //if (Globals.Nodes.TryRemove(ipAddress, out var node) && node.Connection != null)
                             //    await node.Connection.DisposeAsync();
-                            ConsoleWriterService.Output($"Block: {block.Height} was rejected from: {block.Validator}");
+                            // Suppress spam during full state rebuild — blocks are expected to be rejected
+                            if (!BlockRollbackUtility.IsResetTreisRunning)
+                                ConsoleWriterService.Output($"Block: {block.Height} was rejected from: {block.Validator}");
                             //ErrorLogUtility.LogError($"Block: {block.Height} was rejected from: {block.Validator}", "ValidateBlocks");
                         }
                         else

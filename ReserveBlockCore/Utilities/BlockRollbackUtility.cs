@@ -1,6 +1,7 @@
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Services;
+using LiteDB;
 
 namespace ReserveBlockCore.Utilities
 {
@@ -636,12 +637,29 @@ namespace ReserveBlockCore.Utilities
                 Console.WriteLine($"[ResetTreis] Step 4 complete — wallet resynced for {walletAccounts.Count} accounts.");
                 Console.WriteLine($"[ResetTreis] Full chain state rebuild COMPLETE. Processed {processedCount} blocks with {failCount} failures.");
 
+                // ═══════════════════════════════════════════════════════════════
+                // STEP 5: Write StateTreiStatus flag — this MUST be the last step.
+                // If the node crashes before this point, the flag stays missing,
+                // and the next startup will detect the dirty state and re-run ResetTreis.
+                // ═══════════════════════════════════════════════════════════════
+                if (failCount == 0)
+                {
+                    StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                    Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to SYNCED at height {Globals.LastBlock.Height}.");
+                }
+                else
+                {
+                    StateTreiStatusService.SetFailed($"ResetTreis completed with {failCount} block replay failures.");
+                    Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to FAILED ({failCount} replay errors).");
+                }
+
                 return failCount == 0;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[ResetTreis] CRITICAL ERROR: {ex.Message}");
                 Console.WriteLine($"[ResetTreis] Stack trace: {ex.StackTrace}");
+                StateTreiStatusService.SetFailed($"ResetTreis exception: {ex.Message}");
                 return false;
             }
             finally
