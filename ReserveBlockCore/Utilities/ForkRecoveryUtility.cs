@@ -164,7 +164,21 @@ namespace ReserveBlockCore.Utilities
                     LogUtility.Log(
                         $"[{caller}] FORK-RECOVERY: Downloading correct blocks from peers...",
                         $"{caller}.ForkRecovery");
-                    try { await BlockDownloadService.GetAllBlocks(); } catch { }
+                    try 
+                    { 
+                        await BlockDownloadService.GetAllBlocks(); 
+                        LogUtility.Log(
+                            $"[{caller}] FORK-RECOVERY: Block download completed. " +
+                            $"New height={Globals.LastBlock.Height}",
+                            $"{caller}.ForkRecovery");
+                    } 
+                    catch (Exception blockDownloadEx)
+                    {
+                        LogUtility.Log(
+                            $"[{caller}] FORK-RECOVERY: Block download failed: {blockDownloadEx.Message}. " +
+                            $"This may indicate no peers available or API issues.",
+                            $"{caller}.ForkRecovery");
+                    }
 
                     // Step 4: Reset stuck tracking
                     _lastObservedHeight = -1;

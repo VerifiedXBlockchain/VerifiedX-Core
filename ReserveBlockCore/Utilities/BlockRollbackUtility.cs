@@ -342,14 +342,15 @@ namespace ReserveBlockCore.Utilities
                 stateTrei.DeleteAllSafe();
                 worldTrei.DeleteAllSafe();
 
-                // Smart contract state — drop all collections in the SC state DB
+                // Smart contract state — clear all collections (preserve structure)
                 try
                 {
                     if (DbContext.DB_SmartContractStateTrei != null)
                     {
                         foreach (var name in DbContext.DB_SmartContractStateTrei.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_SmartContractStateTrei.DropCollection(name);
+                            var coll = DbContext.DB_SmartContractStateTrei.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -358,14 +359,15 @@ namespace ReserveBlockCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe SmartContractStateTrei: {ex.Message}");
                 }
 
-                // DecShop state — drop all collections in the DecShop state DB
+                // DecShop state — clear all collections (preserve structure)
                 try
                 {
                     if (DbContext.DB_DecShopStateTrei != null)
                     {
                         foreach (var name in DbContext.DB_DecShopStateTrei.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_DecShopStateTrei.DropCollection(name);
+                            var coll = DbContext.DB_DecShopStateTrei.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -429,14 +431,17 @@ namespace ReserveBlockCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe Mempool: {ex.Message}");
                 }
 
-                // vBTC / Bitcoin state databases — wipe all collections
+                // vBTC / Bitcoin state databases — clear all collections (preserve structure)
+                // CRITICAL FIX: Use DeleteAll() instead of DropCollection() to avoid
+                // leaving AccountStateTrei and other collections empty after replay
                 try
                 {
                     if (DbContext.DB_vBTC != null)
                     {
                         foreach (var name in DbContext.DB_vBTC.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_vBTC.DropCollection(name);
+                            var coll = DbContext.DB_vBTC.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -451,7 +456,8 @@ namespace ReserveBlockCore.Utilities
                     {
                         foreach (var name in DbContext.DB_TokenizedWithdrawals.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_TokenizedWithdrawals.DropCollection(name);
+                            var coll = DbContext.DB_TokenizedWithdrawals.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -466,7 +472,8 @@ namespace ReserveBlockCore.Utilities
                     {
                         foreach (var name in DbContext.DB_VBTCWithdrawalRequests.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_VBTCWithdrawalRequests.DropCollection(name);
+                            var coll = DbContext.DB_VBTCWithdrawalRequests.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -475,14 +482,15 @@ namespace ReserveBlockCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_VBTCWithdrawalRequests: {ex.Message}");
                 }
 
-                // Shares
+                // Shares — clear all collections (preserve structure)
                 try
                 {
                     if (DbContext.DB_Shares != null)
                     {
                         foreach (var name in DbContext.DB_Shares.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_Shares.DropCollection(name);
+                            var coll = DbContext.DB_Shares.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
