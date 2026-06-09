@@ -629,7 +629,12 @@ namespace ReserveBlockCore.Utilities
                 // Stream blocks lazily again — do NOT load all into memory
                 if (walletAddresses.Count > 0)
                 {
+                    Console.WriteLine($"[ResetTreis] Step 4b: Scanning {totalBlocks:N0} blocks for wallet transactions ({walletAddresses.Count} addresses)...");
                     var txData = TransactionData.GetAll();
+                    int scanCount = 0;
+                    int insertedTxCount = 0;
+                    var step4Stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
                     foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                     {
                         foreach (var tx in block.Transactions)
@@ -641,10 +646,24 @@ namespace ReserveBlockCore.Utilities
                                 if (existing == null)
                                 {
                                     txData.InsertSafe(tx);
+                                    insertedTxCount++;
                                 }
                             }
                         }
+                        scanCount++;
+                        if (scanCount % 100000 == 0)
+                        {
+                            double pct = (double)scanCount / totalBlocks * 100.0;
+                            Console.WriteLine($"[ResetTreis] Step 4b: Wallet TX scan {pct:F1}% ({scanCount:N0}/{totalBlocks:N0}) — found {insertedTxCount} TXs so far");
+                        }
                     }
+
+                    step4Stopwatch.Stop();
+                    Console.WriteLine($"[ResetTreis] Step 4b complete — scanned {scanCount:N0} blocks, inserted {insertedTxCount} wallet TXs in {step4Stopwatch.Elapsed:hh\\:mm\\:ss}.");
+                }
+                else
+                {
+                    Console.WriteLine("[ResetTreis] Step 4b: No wallet addresses — skipping TX resync.");
                 }
 
                 // 4c: Clear mempool (already wiped in Step 1, but safety check)
