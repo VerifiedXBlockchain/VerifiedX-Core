@@ -1211,31 +1211,64 @@ namespace ReserveBlockCore.Services
                     var treiStatus = StateTreiStatusService.GetStatus();
                     if (treiStatus == null || !treiStatus.IsSynced)
                     {
-                        var reason = treiStatus == null 
-                            ? "no StateTreiStatus record found (state trie was wiped or never built)" 
-                            : $"IsSynced=false (last failure: {treiStatus.LastFailureReason ?? "unknown"})";
-
-                        Console.WriteLine($"[STARTUP] State trie integrity check FAILED: {reason}");
-                        Console.WriteLine($"[STARTUP] Running full state rebuild (ResetTreis) before block downloads...");
-                        Console.WriteLine($"[STARTUP] This will replay {blockCount} blocks. This may take a while...");
-                        LogUtility.Log(
-                            $"[STARTUP] State trie not synced: {reason}. Running ResetTreis before block downloads.",
-                            "StartupService.DownloadBlocksOnStart");
-
-                        var rebuilt = await BlockRollbackUtility.ResetTreis();
-                        if (rebuilt)
+                        // Check if ResetTreis is already running (triggered by TX failure counter)
+                        // If so, wait for it to finish instead of trying to start another one.
+                        if (BlockRollbackUtility.IsResetTreisRunning)
                         {
-                            Console.WriteLine($"[STARTUP] State rebuild complete. Proceeding with block downloads.");
+                            ConsoleWriterService.Output("[STARTUP] State trie rebuild is already in progress. Waiting for it to complete...");
                             LogUtility.Log(
-                                $"[STARTUP] ResetTreis succeeded. State trie is now synced at height {Globals.LastBlock.Height}.",
+                                "[STARTUP] ResetTreis already running (triggered by TX failure counter). Waiting...",
                                 "StartupService.DownloadBlocksOnStart");
+                            
+                            while (BlockRollbackUtility.IsResetTreisRunning)
+                            {
+                                await Task.Delay(5000); // Check every 5 seconds
+                            }
+
+                            ConsoleWriterService.Output("[STARTUP] State trie rebuild finished. Checking status...");
+
+                            // Re-check status after rebuild completes
+                            var postStatus = StateTreiStatusService.GetStatus();
+                            if (postStatus != null && postStatus.IsSynced)
+                            {
+                                ConsoleWriterService.Output("[STARTUP] State rebuild completed successfully. Proceeding with block downloads.");
+                                LogUtility.Log(
+                                    $"[STARTUP] ResetTreis completed. State trie synced at height {postStatus.LastSyncedHeight}.",
+                                    "StartupService.DownloadBlocksOnStart");
+                            }
+                            else
+                            {
+                                ConsoleWriterService.Output("[STARTUP] WARNING: State rebuild did not fully succeed. Will attempt again...");
+                            }
                         }
                         else
                         {
-                            Console.WriteLine($"[STARTUP] WARNING: State rebuild had errors. Block sync may fail.");
-                            ErrorLogUtility.LogError(
-                                $"[STARTUP] ResetTreis returned false. State may still be inconsistent.",
+                            var reason = treiStatus == null 
+                                ? "no StateTreiStatus record found (state trie was wiped or never built)" 
+                                : $"IsSynced=false (last failure: {treiStatus.LastFailureReason ?? "unknown"})";
+
+                            ConsoleWriterService.Output($"[STARTUP] State trie integrity check FAILED: {reason}");
+                            ConsoleWriterService.Output($"[STARTUP] Running full state rebuild (ResetTreis) before block downloads...");
+                            ConsoleWriterService.Output($"[STARTUP] This will replay {blockCount:N0} blocks. This may take a while...");
+                            LogUtility.Log(
+                                $"[STARTUP] State trie not synced: {reason}. Running ResetTreis before block downloads.",
                                 "StartupService.DownloadBlocksOnStart");
+
+                            var rebuilt = await BlockRollbackUtility.ResetTreis();
+                            if (rebuilt)
+                            {
+                                ConsoleWriterService.Output($"[STARTUP] State rebuild complete. Proceeding with block downloads.");
+                                LogUtility.Log(
+                                    $"[STARTUP] ResetTreis succeeded. State trie is now synced at height {Globals.LastBlock.Height}.",
+                                    "StartupService.DownloadBlocksOnStart");
+                            }
+                            else
+                            {
+                                ConsoleWriterService.Output($"[STARTUP] WARNING: State rebuild had errors. Block sync may fail.");
+                                ErrorLogUtility.LogError(
+                                    $"[STARTUP] ResetTreis returned false. State may still be inconsistent.",
+                                    "StartupService.DownloadBlocksOnStart");
+                            }
                         }
                     }
                     else
