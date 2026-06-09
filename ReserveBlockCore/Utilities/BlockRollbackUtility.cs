@@ -546,14 +546,21 @@ namespace ReserveBlockCore.Utilities
                 // ═══════════════════════════════════════════════════════════════
                 // STEP 3: Replay each block through UpdateTreis (the standard commit path)
                 // ═══════════════════════════════════════════════════════════════
-                ConsoleWriterService.Output("[ResetTreis] Step 3: Replaying blocks through UpdateTreis...");
-                var allBlocks = BlockchainData.GetBlocks().FindAll().OrderBy(b => b.Height).ToList();
+                var blockCollection = BlockchainData.GetBlocks();
+                var totalBlocks = blockCollection.Count();
+                Console.WriteLine($"[ResetTreis] Step 3: Replaying {totalBlocks:N0} blocks through UpdateTreis...");
+                LogUtility.Log($"[ResetTreis] Step 3: Starting replay of {totalBlocks:N0} blocks.", "BlockRollbackUtility.ResetTreis");
+                
+                // CRITICAL: Stream blocks lazily from LiteDB ordered by height.
+                // DO NOT use .FindAll().OrderBy().ToList() — that loads ALL 6.6M blocks into memory
+                // at once, causing OutOfMemory or hour-long delays before the loop even starts.
+                // LiteDB's Query.All("Height", Ascending) returns an IEnumerable that reads one block
+                // at a time from disk, keeping memory usage flat regardless of chain length.
                 int processedCount = 0;
                 int failCount = 0;
-                var failBlocks = new List<Block>();
                 var rebuildStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
-                foreach (var block in allBlocks)
+                foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                 {
                     try
                     {
@@ -567,14 +574,14 @@ namespace ReserveBlockCore.Utilities
                         // Uses Console.WriteLine (not \r overwrite) so output is reliable on all terminals
                         if (processedCount % 10000 == 0)
                         {
-                            double pct = (double)processedCount / allBlocks.Count * 100.0;
+                            double pct = (double)processedCount / totalBlocks * 100.0;
                             var elapsed = rebuildStopwatch.Elapsed;
                             var blocksPerSecond = processedCount / Math.Max(elapsed.TotalSeconds, 1);
-                            var remainingBlocks = allBlocks.Count - processedCount;
+                            var remainingBlocks = totalBlocks - processedCount;
                             var etaSeconds = remainingBlocks / Math.Max(blocksPerSecond, 1);
                             var eta = TimeSpan.FromSeconds(etaSeconds);
 
-                            var progressMsg = $"[ResetTreis] Rebuilding state: {pct:F1}% ({processedCount:N0}/{allBlocks.Count:N0}) — " +
+                            var progressMsg = $"[ResetTreis] Rebuilding state: {pct:F1}% ({processedCount:N0}/{totalBlocks:N0}) — " +
                                 $"Elapsed: {elapsed:hh\\:mm\\:ss} — ETA: ~{eta:hh\\:mm\\:ss}";
                             Console.WriteLine(progressMsg);
                             LogUtility.Log(progressMsg, "BlockRollbackUtility.ResetTreis");
@@ -582,7 +589,6 @@ namespace ReserveBlockCore.Utilities
                     }
                     catch (Exception ex)
                     {
-                        failBlocks.Add(block);
                         failCount++;
                         ErrorLogUtility.LogError($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}", "BlockRollbackUtility.ResetTreis");
                     }
@@ -620,37 +626,34 @@ namespace ReserveBlockCore.Utilities
                 }
 
                 // 4b: Re-populate local TransactionData for wallet addresses
-                var txData = TransactionData.GetAll();
-                foreach (var block in allBlocks)
+                // Stream blocks lazily again — do NOT load all into memory
+                if (walletAddresses.Count > 0)
                 {
-                    foreach (var tx in block.Transactions)
+                    var txData = TransactionData.GetAll();
+                    foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                     {
-                        bool isRelevant = walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress);
-                        if (isRelevant)
+                        foreach (var tx in block.Transactions)
                         {
-                            // Check if already inserted (avoid duplicates)
-                            var existing = txData.FindOne(x => x.Hash == tx.Hash);
-                            if (existing == null)
+                            bool isRelevant = walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress);
+                            if (isRelevant)
                             {
-                                txData.InsertSafe(tx);
+                                var existing = txData.FindOne(x => x.Hash == tx.Hash);
+                                if (existing == null)
+                                {
+                                    txData.InsertSafe(tx);
+                                }
                             }
                         }
                     }
                 }
 
-                // 4c: Clear mempool of any TXs that were included in blocks
+                // 4c: Clear mempool (already wiped in Step 1, but safety check)
                 try
                 {
                     var mempool = TransactionData.GetPool();
                     if (mempool != null && mempool.Count() > 0)
                     {
-                        foreach (var block in allBlocks)
-                        {
-                            foreach (var tx in block.Transactions)
-                            {
-                                mempool.DeleteManySafe(x => x.Hash == tx.Hash);
-                            }
-                        }
+                        mempool.DeleteAllSafe();
                     }
                 }
                 catch { }
