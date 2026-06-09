@@ -563,8 +563,9 @@ namespace ReserveBlockCore.Utilities
                         await StateData.UpdateTreis(block);
                         processedCount++;
 
-                        // Progress display: update console every 500 blocks with percentage + ETA
-                        if (processedCount % 500 == 0)
+                        // Progress display: log every 10,000 blocks with percentage + ETA
+                        // Uses Console.WriteLine (not \r overwrite) so output is reliable on all terminals
+                        if (processedCount % 10000 == 0)
                         {
                             double pct = (double)processedCount / allBlocks.Count * 100.0;
                             var elapsed = rebuildStopwatch.Elapsed;
@@ -573,18 +574,10 @@ namespace ReserveBlockCore.Utilities
                             var etaSeconds = remainingBlocks / Math.Max(blocksPerSecond, 1);
                             var eta = TimeSpan.FromSeconds(etaSeconds);
 
-                            ConsoleWriterService.OutputSameLine(
-                                $"\r[ResetTreis] Rebuilding state: {pct:F1}% ({processedCount:N0}/{allBlocks.Count:N0}) — " +
-                                $"Elapsed: {elapsed:hh\\:mm\\:ss} — ETA: ~{eta:hh\\:mm\\:ss}");
-                        }
-
-                        // Log to rbxlog every 100K blocks for persistent record
-                        if (processedCount % 100000 == 0)
-                        {
-                            double pct = (double)processedCount / allBlocks.Count * 100.0;
-                            LogUtility.Log(
-                                $"[ResetTreis] Progress: {pct:F1}% ({processedCount:N0}/{allBlocks.Count:N0} blocks replayed)",
-                                "BlockRollbackUtility.ResetTreis");
+                            var progressMsg = $"[ResetTreis] Rebuilding state: {pct:F1}% ({processedCount:N0}/{allBlocks.Count:N0}) — " +
+                                $"Elapsed: {elapsed:hh\\:mm\\:ss} — ETA: ~{eta:hh\\:mm\\:ss}";
+                            Console.WriteLine(progressMsg);
+                            LogUtility.Log(progressMsg, "BlockRollbackUtility.ResetTreis");
                         }
                     }
                     catch (Exception ex)
