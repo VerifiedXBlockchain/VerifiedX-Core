@@ -35,6 +35,23 @@ namespace ReserveBlockCore.Utilities
         /// since the fork typically occurs at the tip.</summary>
         public const int ROLLBACK_DEPTH = 1;
 
+        /// <summary>ESCALATION: Tracks consecutive failed recovery attempts.
+        /// When RecoverAsync() returns false (blocks couldn't be validated after rollback+download),
+        /// this counter increments. After ESCALATION_THRESHOLD failures, we skip the rollback approach
+        /// entirely and trigger a full state rebuild via ResetTreis().</summary>
+        private static int _consecutiveRecoveryFailures = 0;
+
+        /// <summary>After this many consecutive RecoverAsync failures, escalate to full ResetTreis.</summary>
+        public const int ESCALATION_THRESHOLD = 3;
+
+        /// <summary>DOWNLOAD-PHASE: Set to true while GetAllBlocks() is running inside RecoverAsync.
+        /// When true, ValidateBlock() should allow blocks through even though IsRecoveryInProgress is set,
+        /// because these blocks are the ones we're downloading as part of recovery.</summary>
+        private static volatile bool _isInDownloadPhase = false;
+
+        /// <summary>Returns true when the recovery is in its download+validate phase and blocks should be allowed through.</summary>
+        public static bool IsInDownloadPhase => _isInDownloadPhase;
+
         /// <summary>
         /// Checks if the node's block height has been stuck and peers report a higher height.
         /// Call this periodically (e.g., from BlockHeightCheckLoop).
@@ -108,14 +125,64 @@ namespace ReserveBlockCore.Utilities
             bool success = false;
             try
             {
+                // ═══════════════════════════════════════════════════════════════
+                // ESCALATION CHECK: If we've failed recovery too many times,
+                // the state trie is likely corrupted and rollback+download won't
+                // help. Escalate to a full state rebuild via ResetTreis().
+                // ═══════════════════════════════════════════════════════════════
+                if (_consecutiveRecoveryFailures >= ESCALATION_THRESHOLD)
+                {
+                    LogUtility.Log(
+                        $"[{caller}] FORK-RECOVERY-ESCALATION: {_consecutiveRecoveryFailures} consecutive " +
+                        $"recovery failures. Rollback+download is not fixing the issue. " +
+                        $"Escalating to full state rebuild via ResetTreis().",
+                        $"{caller}.ForkRecovery");
+                    ConsoleWriterService.Output(
+                        $"[{caller}] FORK-RECOVERY-ESCALATION: State trie appears corrupted after " +
+                        $"{_consecutiveRecoveryFailures} failed recoveries. Starting full state rebuild...");
+
+                    _consecutiveRecoveryFailures = 0; // Reset before rebuild to prevent re-triggering
+
+                    try
+                    {
+                        var rebuilt = await BlockRollbackUtility.ResetTreis();
+                        if (rebuilt)
+                        {
+                            LogUtility.Log(
+                                $"[{caller}] FORK-RECOVERY-ESCALATION: Full state rebuild SUCCEEDED. " +
+                                $"Tip: height={Globals.LastBlock.Height}",
+                                $"{caller}.ForkRecovery");
+                            ConsoleWriterService.Output(
+                                $"[{caller}] FORK-RECOVERY-ESCALATION: State rebuild complete. " +
+                                $"Now at height {Globals.LastBlock.Height}.");
+                            return true;
+                        }
+                        else
+                        {
+                            LogUtility.Log(
+                                $"[{caller}] FORK-RECOVERY-ESCALATION: ResetTreis returned false. " +
+                                $"State may still be inconsistent.",
+                                $"{caller}.ForkRecovery");
+                            return false;
+                        }
+                    }
+                    catch (Exception resetEx)
+                    {
+                        LogUtility.Log(
+                            $"[{caller}] FORK-RECOVERY-ESCALATION: ResetTreis threw exception: {resetEx.Message}",
+                            $"{caller}.ForkRecovery");
+                        return false;
+                    }
+                }
+
                 LogUtility.Log(
                     $"[{caller}] FORK-RECOVERY: Initiating self-heal at height {stuckHeight}. " +
-                    $"Rolling back {blocksToRollback} block(s).",
+                    $"Rolling back {blocksToRollback} block(s). (Failure count: {_consecutiveRecoveryFailures}/{ESCALATION_THRESHOLD})",
                     $"{caller}.ForkRecovery");
                 ConsoleWriterService.Output(
                     $"[{caller}] FORK-RECOVERY: Rolling back {blocksToRollback} block(s) from height {stuckHeight}...");
 
-                // FIX (Issue 2): Manage IsResyncing at the OUTER level only.
+                // Manage IsResyncing at the OUTER level only.
                 // Pass manageIsResyncing=false to RollbackBlocksFast so it doesn't
                 // prematurely clear the flag before BlockDownloadService.GetAllBlocks() runs.
                 var wasResyncing = Globals.IsResyncing;
@@ -161,11 +228,20 @@ namespace ReserveBlockCore.Utilities
                     await Task.Delay(2000);
 
                     // Step 3: Download the correct blocks from peers
+                    // CRITICAL FIX: We must temporarily clear IsResyncing and set the download
+                    // phase flag so that ValidateBlock() allows the downloaded blocks through.
+                    // Without this, ValidateBlock()'s recovery guard silently drops ALL blocks
+                    // because IsResyncing=true, causing recovery to fail every time.
                     LogUtility.Log(
                         $"[{caller}] FORK-RECOVERY: Downloading correct blocks from peers...",
                         $"{caller}.ForkRecovery");
                     try 
                     { 
+                        // Allow block validation during download by clearing IsResyncing
+                        // and signaling we're in the download phase of recovery.
+                        Globals.IsResyncing = false;
+                        _isInDownloadPhase = true;
+                        
                         await BlockDownloadService.GetAllBlocks(); 
                         LogUtility.Log(
                             $"[{caller}] FORK-RECOVERY: Block download completed. " +
@@ -179,12 +255,18 @@ namespace ReserveBlockCore.Utilities
                             $"This may indicate no peers available or API issues.",
                             $"{caller}.ForkRecovery");
                     }
+                    finally
+                    {
+                        // Restore IsResyncing and clear download phase flag
+                        _isInDownloadPhase = false;
+                        Globals.IsResyncing = true; // Re-set until the outer finally restores it
+                    }
 
                     // Step 4: Reset stuck tracking
                     _lastObservedHeight = -1;
                     _stuckCycles = 0;
 
-                    // FIX (Issue 4): Verify recovery actually succeeded.
+                    // Verify recovery actually succeeded.
                     // Check that:
                     //   a) Height has advanced past the stuck point, OR
                     //   b) Height is at the stuck point but the hash has changed (we got the correct block)
@@ -196,13 +278,21 @@ namespace ReserveBlockCore.Utilities
 
                     success = heightAdvanced || hashChanged;
 
-                    if (!success)
+                    if (success)
                     {
+                        // Recovery worked — reset failure escalation counter
+                        _consecutiveRecoveryFailures = 0;
+                    }
+                    else
+                    {
+                        // Recovery failed — increment escalation counter
+                        _consecutiveRecoveryFailures++;
                         LogUtility.Log(
                             $"[{caller}] FORK-RECOVERY: WARNING — recovery did not change chain state. " +
                             $"Pre: height={preRollbackHeight} hash={preRollbackHash?[..Math.Min(16, preRollbackHash?.Length ?? 0)]}. " +
                             $"Post: height={postHeight} hash={postHash?[..Math.Min(16, postHash?.Length ?? 0)]}. " +
-                            $"Stuck counters NOT reset — will retry on next cycle.",
+                            $"Consecutive failures: {_consecutiveRecoveryFailures}/{ESCALATION_THRESHOLD}. " +
+                            $"Will escalate to ResetTreis after {ESCALATION_THRESHOLD} failures.",
                             $"{caller}.ForkRecovery");
                         // Don't reset stuck tracking if recovery didn't actually help —
                         // let the next cycle detect the stuck state and retry.
@@ -231,11 +321,14 @@ namespace ReserveBlockCore.Utilities
                 LogUtility.Log(
                     $"[{caller}] FORK-RECOVERY: Exception during recovery: {ex.Message}",
                     $"{caller}.ForkRecovery");
+                // Increment failure counter on exception too
+                _consecutiveRecoveryFailures++;
                 // Reset stuck tracking even on failure so we don't immediately retry
                 _stuckCycles = 0;
             }
             finally
             {
+                _isInDownloadPhase = false; // Safety: ensure download phase is always cleared
                 Interlocked.Exchange(ref _recoveryInProgress, 0);
             }
 
