@@ -275,7 +275,9 @@ namespace ReserveBlockCore.Services
                             }
                             else
                             {
-                                ConsoleWriterService.OutputSameLine($"\rBlocks Syncing... Current Block: {block.Height} - Speed: {stopwatch1.ElapsedMilliseconds}/ms");
+                                // Suppress sync output during full state rebuild — it's just noise
+                                if (!BlockRollbackUtility.IsResetTreisRunning)
+                                    ConsoleWriterService.OutputSameLine($"\rBlocks Syncing... Current Block: {block.Height} - Speed: {stopwatch1.ElapsedMilliseconds}/ms");
                             }
                                 
                         }
