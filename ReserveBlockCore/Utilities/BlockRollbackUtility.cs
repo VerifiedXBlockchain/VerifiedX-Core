@@ -546,11 +546,12 @@ namespace ReserveBlockCore.Utilities
                 // ═══════════════════════════════════════════════════════════════
                 // STEP 3: Replay each block through UpdateTreis (the standard commit path)
                 // ═══════════════════════════════════════════════════════════════
-                Console.WriteLine("[ResetTreis] Step 3: Replaying blocks through UpdateTreis...");
+                ConsoleWriterService.Output("[ResetTreis] Step 3: Replaying blocks through UpdateTreis...");
                 var allBlocks = BlockchainData.GetBlocks().FindAll().OrderBy(b => b.Height).ToList();
                 int processedCount = 0;
                 int failCount = 0;
                 var failBlocks = new List<Block>();
+                var rebuildStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 foreach (var block in allBlocks)
                 {
@@ -562,18 +563,45 @@ namespace ReserveBlockCore.Utilities
                         await StateData.UpdateTreis(block);
                         processedCount++;
 
-                        if (processedCount % 1000 == 0)
-                            Console.WriteLine($"[ResetTreis] Processed {processedCount}/{allBlocks.Count} blocks...");
+                        // Progress display: update console every 500 blocks with percentage + ETA
+                        if (processedCount % 500 == 0)
+                        {
+                            double pct = (double)processedCount / allBlocks.Count * 100.0;
+                            var elapsed = rebuildStopwatch.Elapsed;
+                            var blocksPerSecond = processedCount / Math.Max(elapsed.TotalSeconds, 1);
+                            var remainingBlocks = allBlocks.Count - processedCount;
+                            var etaSeconds = remainingBlocks / Math.Max(blocksPerSecond, 1);
+                            var eta = TimeSpan.FromSeconds(etaSeconds);
+
+                            ConsoleWriterService.OutputSameLine(
+                                $"\r[ResetTreis] Rebuilding state: {pct:F1}% ({processedCount:N0}/{allBlocks.Count:N0}) — " +
+                                $"Elapsed: {elapsed:hh\\:mm\\:ss} — ETA: ~{eta:hh\\:mm\\:ss}");
+                        }
+
+                        // Log to rbxlog every 100K blocks for persistent record
+                        if (processedCount % 100000 == 0)
+                        {
+                            double pct = (double)processedCount / allBlocks.Count * 100.0;
+                            LogUtility.Log(
+                                $"[ResetTreis] Progress: {pct:F1}% ({processedCount:N0}/{allBlocks.Count:N0} blocks replayed)",
+                                "BlockRollbackUtility.ResetTreis");
+                        }
                     }
                     catch (Exception ex)
                     {
                         failBlocks.Add(block);
                         failCount++;
-                        Console.WriteLine($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}");
+                        ErrorLogUtility.LogError($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}", "BlockRollbackUtility.ResetTreis");
                     }
                 }
 
-                Console.WriteLine($"[ResetTreis] Step 3 complete — replayed {processedCount} blocks ({failCount} failures).");
+                rebuildStopwatch.Stop();
+                var totalTime = rebuildStopwatch.Elapsed;
+                ConsoleWriterService.Output(
+                    $"\r[ResetTreis] Step 3 complete — replayed {processedCount:N0} blocks ({failCount} failures) in {totalTime:hh\\:mm\\:ss}.");
+                LogUtility.Log(
+                    $"[ResetTreis] Step 3 complete — replayed {processedCount:N0} blocks ({failCount} failures) in {totalTime:hh\\:mm\\:ss}.",
+                    "BlockRollbackUtility.ResetTreis");
 
                 // ═══════════════════════════════════════════════════════════════
                 // STEP 4: Resync local wallet from rebuilt state
