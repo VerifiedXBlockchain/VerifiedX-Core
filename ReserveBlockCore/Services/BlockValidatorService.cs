@@ -39,12 +39,14 @@ namespace ReserveBlockCore.Services
         /// <summary>After this many consecutive HEIGHT-GAP rejections at the same expected height, trigger fork recovery.</summary>
         public const int HEIGHT_GAP_RECOVERY_THRESHOLD = 3;
 
-        /// <summary>FORK-FIX: Consecutive TX-validation failures at the same block height trigger automatic state rebuild.
-        /// This handles the case where the state trie is corrupted/wiped and every block at height N+1 fails
-        /// TX validation with "new account with no balance" because the state doesn't match the network.</summary>
-        private static long _txFailHeight = -1;
+        /// <summary>FORK-FIX: Consecutive TX-validation failures trigger automatic state rebuild.
+        /// This handles the case where the state trie is corrupted/wiped and every block fails
+        /// TX validation with "new account with no balance" because the state doesn't match the network.
+        /// IMPORTANT: Tracks failures across ALL heights, not per-height, because when the state trie
+        /// is corrupted, blocks at different heights interleave (6610256, 6610258, 6610259...) and
+        /// a per-height counter would never reach the threshold.</summary>
         private static int _txFailCount = 0;
-        /// <summary>After this many consecutive TX-validation-failure rejections at the same height, trigger full state rebuild.</summary>
+        /// <summary>After this many consecutive TX-validation failures (any height), trigger full state rebuild.</summary>
         public const int TX_FAIL_RECOVERY_THRESHOLD = 10;
 
         public static void UpdateMemBlocks(Block block)
@@ -292,12 +294,22 @@ namespace ReserveBlockCore.Services
             // flood through validation during fork recovery / ResetTreis, generating
             // thousands of log lines, triggering cascading recovery attempts, and
             // corrupting the state trie during rebuild.
+            //
+            // EXCEPTION: During the download phase of fork recovery, blocks MUST be
+            // allowed through — these are the blocks we just downloaded to replace
+            // the rolled-back ones. ForkRecoveryUtility.IsInDownloadPhase signals
+            // that GetAllBlocks() is running inside RecoverAsync() and blocks should
+            // be validated normally.
             // ═══════════════════════════════════════════════════════════════
-            if (Globals.IsResyncing || 
-                ForkRecoveryUtility.IsRecoveryInProgress || 
-                BlockRollbackUtility.IsResetTreisRunning)
+            if (BlockRollbackUtility.IsResetTreisRunning)
             {
-                return false; // Silent drop — no logging, no recovery triggering
+                return false; // Always block during full state rebuild — no exceptions
+            }
+
+            if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress) 
+                && !ForkRecoveryUtility.IsInDownloadPhase)
+            {
+                return false; // Silent drop — recovery is in rollback phase, not download phase
             }
 
             await ValidateBlockSemaphore.WaitAsync();
@@ -305,9 +317,13 @@ namespace ReserveBlockCore.Services
             try
             {
                 // Double-check after acquiring semaphore (recovery may have started while waiting)
-                if (Globals.IsResyncing || 
-                    ForkRecoveryUtility.IsRecoveryInProgress || 
-                    BlockRollbackUtility.IsResetTreisRunning)
+                if (BlockRollbackUtility.IsResetTreisRunning)
+                {
+                    return false;
+                }
+
+                if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress) 
+                    && !ForkRecoveryUtility.IsInDownloadPhase)
                 {
                     return false;
                 }
@@ -1071,33 +1087,25 @@ namespace ReserveBlockCore.Services
 
                         if (rejectBlock)
                         {
-                            // FORK-FIX: Track consecutive TX-validation failures at the same block height.
-                            // If the same block keeps failing TX validation (e.g., because the state trie
-                            // was wiped during a failed recovery and accounts appear as "new with no balance"),
-                            // trigger a full state rebuild after TX_FAIL_RECOVERY_THRESHOLD consecutive failures.
+                            // FORK-FIX: Track consecutive TX-validation failures across ALL heights.
+                            // When the state trie is corrupted/wiped, EVERY block fails TX validation
+                            // with "new account with no balance". Blocks at different heights interleave
+                            // (6610256, 6610258, 6610259...) so we must count ALL failures, not per-height.
+                            // After TX_FAIL_RECOVERY_THRESHOLD consecutive failures, trigger full state rebuild.
                             if (!validateOnly)
                             {
-                                if (_txFailHeight == block.Height)
-                                {
-                                    _txFailCount++;
-                                }
-                                else
-                                {
-                                    _txFailHeight = block.Height;
-                                    _txFailCount = 1;
-                                }
+                                _txFailCount++;
 
                                 if (_txFailCount >= TX_FAIL_RECOVERY_THRESHOLD)
                                 {
                                     LogUtility.Log(
                                         $"[ValidateBlock] STATE-REBUILD-TRIGGER: {_txFailCount} consecutive TX-validation failures " +
-                                        $"at block {block.Height}. Bad TX: {rejectBlockTxHash}. Reason: {rejectBlockReason}. " +
+                                        $"(latest at block {block.Height}). Bad TX: {rejectBlockTxHash}. Reason: {rejectBlockReason}. " +
                                         $"State trie appears corrupted. Triggering full state rebuild (ResetTreis).",
                                         "BlockValidatorService");
 
                                     // Reset counter before recovery
                                     _txFailCount = 0;
-                                    _txFailHeight = -1;
 
                                     // Fire-and-forget full state rebuild
                                     _ = Task.Run(async () =>
@@ -1139,6 +1147,9 @@ namespace ReserveBlockCore.Services
                         }
 
                         result = true;
+
+                        // Block accepted — reset TX failure counter since state trie is working
+                        _txFailCount = 0;
 
                         if (validateOnly)
                             return result;
