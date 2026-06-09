@@ -281,6 +281,17 @@ namespace ReserveBlockCore.Utilities
                         return false;
                     return true;
 
+                // FORK-FIX: Zero-value lifecycle transactions can be safely reversed.
+                // These transactions don't transfer any balance — they only update metadata
+                // in the state trie (nonce, validator registry, etc.). The fast path can
+                // handle them by just reversing the nonce increment without needing a full
+                // chain replay via ResetTreis(). This prevents a catastrophic state wipe
+                // when fork recovery rolls back a block containing these TX types.
+                case TransactionType.VBTC_V2_VALIDATOR_REGISTER:
+                case TransactionType.VBTC_V2_VALIDATOR_EXIT:
+                case TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT:
+                    return true;
+
                 default:
                     // All other types (NFT, ADNR, VOTE, RESERVE, smart contract TXs, etc.)
                     // have complex state side-effects that can't be safely reversed

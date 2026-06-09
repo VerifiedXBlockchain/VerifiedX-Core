@@ -39,6 +39,14 @@ namespace ReserveBlockCore.Services
         /// <summary>After this many consecutive HEIGHT-GAP rejections at the same expected height, trigger fork recovery.</summary>
         public const int HEIGHT_GAP_RECOVERY_THRESHOLD = 3;
 
+        /// <summary>FORK-FIX: Consecutive TX-validation failures at the same block height trigger automatic state rebuild.
+        /// This handles the case where the state trie is corrupted/wiped and every block at height N+1 fails
+        /// TX validation with "new account with no balance" because the state doesn't match the network.</summary>
+        private static long _txFailHeight = -1;
+        private static int _txFailCount = 0;
+        /// <summary>After this many consecutive TX-validation-failure rejections at the same height, trigger full state rebuild.</summary>
+        public const int TX_FAIL_RECOVERY_THRESHOLD = 10;
+
         public static void UpdateMemBlocks(Block block)
         {
             foreach (var trans in block.Transactions)
@@ -1041,6 +1049,69 @@ namespace ReserveBlockCore.Services
 
                         if (rejectBlock)
                         {
+                            // FORK-FIX: Track consecutive TX-validation failures at the same block height.
+                            // If the same block keeps failing TX validation (e.g., because the state trie
+                            // was wiped during a failed recovery and accounts appear as "new with no balance"),
+                            // trigger a full state rebuild after TX_FAIL_RECOVERY_THRESHOLD consecutive failures.
+                            if (!validateOnly)
+                            {
+                                if (_txFailHeight == block.Height)
+                                {
+                                    _txFailCount++;
+                                }
+                                else
+                                {
+                                    _txFailHeight = block.Height;
+                                    _txFailCount = 1;
+                                }
+
+                                if (_txFailCount >= TX_FAIL_RECOVERY_THRESHOLD)
+                                {
+                                    LogUtility.Log(
+                                        $"[ValidateBlock] STATE-REBUILD-TRIGGER: {_txFailCount} consecutive TX-validation failures " +
+                                        $"at block {block.Height}. Bad TX: {rejectBlockTxHash}. Reason: {rejectBlockReason}. " +
+                                        $"State trie appears corrupted. Triggering full state rebuild (ResetTreis).",
+                                        "BlockValidatorService");
+
+                                    // Reset counter before recovery
+                                    _txFailCount = 0;
+                                    _txFailHeight = -1;
+
+                                    // Fire-and-forget full state rebuild
+                                    _ = Task.Run(async () =>
+                                    {
+                                        try
+                                        {
+                                            await Task.Delay(100);
+                                            LogUtility.Log(
+                                                $"[ValidateBlock] STATE-REBUILD: Starting full chain state rebuild via ResetTreis()...",
+                                                "BlockValidatorService");
+                                            var rebuilt = await BlockRollbackUtility.ResetTreis();
+                                            if (rebuilt)
+                                            {
+                                                LogUtility.Log(
+                                                    $"[ValidateBlock] STATE-REBUILD-SUCCESS: Full state rebuild complete. " +
+                                                    $"Tip: height={Globals.LastBlock.Height}",
+                                                    "BlockValidatorService");
+                                            }
+                                            else
+                                            {
+                                                LogUtility.Log(
+                                                    $"[ValidateBlock] STATE-REBUILD-PARTIAL: ResetTreis returned false. " +
+                                                    $"State may still be inconsistent.",
+                                                    "BlockValidatorService");
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            LogUtility.Log(
+                                                $"[ValidateBlock] STATE-REBUILD-ERROR: {ex.Message}",
+                                                "BlockValidatorService");
+                                        }
+                                    });
+                                }
+                            }
+
                             DbContext.Rollback("BlockValidatorService.ValidateBlock()-13", $"Bad TX: {rejectBlockTxHash} | Reason: {rejectBlockReason}");
                             return result;//block rejected due to bad transaction(s)
                         }
