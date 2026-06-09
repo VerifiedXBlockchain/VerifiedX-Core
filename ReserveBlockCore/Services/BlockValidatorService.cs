@@ -286,10 +286,32 @@ namespace ReserveBlockCore.Services
         }
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false)
         {
+            // ═══════════════════════════════════════════════════════════════
+            // RECOVERY GUARD: Silently drop ALL incoming blocks when a recovery
+            // operation is in progress. Without this, hundreds of blocks per second
+            // flood through validation during fork recovery / ResetTreis, generating
+            // thousands of log lines, triggering cascading recovery attempts, and
+            // corrupting the state trie during rebuild.
+            // ═══════════════════════════════════════════════════════════════
+            if (Globals.IsResyncing || 
+                ForkRecoveryUtility.IsRecoveryInProgress || 
+                BlockRollbackUtility.IsResetTreisRunning)
+            {
+                return false; // Silent drop — no logging, no recovery triggering
+            }
+
             await ValidateBlockSemaphore.WaitAsync();
 
             try
             {
+                // Double-check after acquiring semaphore (recovery may have started while waiting)
+                if (Globals.IsResyncing || 
+                    ForkRecoveryUtility.IsRecoveryInProgress || 
+                    BlockRollbackUtility.IsResetTreisRunning)
+                {
+                    return false;
+                }
+
                 if (block?.Height <= Globals.LastBlock.Height)
                     return block.Hash == Globals.LastBlock.Hash;
 
