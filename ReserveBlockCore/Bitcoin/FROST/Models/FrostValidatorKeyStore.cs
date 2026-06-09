@@ -1,4 +1,5 @@
 using LiteDB;
+using ReserveBlockCore.Bitcoin.Services;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.Utilities;
@@ -72,6 +73,28 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
 
                 LogUtility.Log($"[FROST KeyStore] Saved key package for contract {keyStore.SmartContractUID}, validator {keyStore.ValidatorAddress}", 
                     "FrostValidatorKeyStore.SaveKeyPackage");
+
+                // After successful save, broadcast encrypted backup to peers
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var validators = VBTCValidatorRegistry.GetActiveValidators();
+                        if (validators != null && validators.Count > 0)
+                        {
+                            await FrostKeyBackupService.BroadcastBackupToValidators(
+                                keyStore.ValidatorAddress,
+                                keyStore.SmartContractUID,
+                                keyStore,
+                                validators);
+                        }
+                    }
+                    catch (Exception backupEx)
+                    {
+                        ErrorLogUtility.LogError($"Backup broadcast failed: {backupEx.Message}",
+                            "FrostValidatorKeyStore.SaveKeyPackage");
+                    }
+                });
             }
             catch (Exception ex)
             {
@@ -152,6 +175,28 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
                     db.UpdateSafe(record);
                     LogUtility.Log($"[FROST KeyStore] Updated SCUID from {oldUID} → {newSmartContractUID} for validator {record.ValidatorAddress}",
                         "FrostValidatorKeyStore.UpdateSmartContractUID");
+
+                    // After SCUID correction, re-broadcast backup under the new SCUID
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var validators = VBTCValidatorRegistry.GetActiveValidators();
+                            if (validators != null && validators.Count > 0)
+                            {
+                                await FrostKeyBackupService.BroadcastBackupToValidators(
+                                    record.ValidatorAddress,
+                                    newSmartContractUID,
+                                    record,
+                                    validators);
+                            }
+                        }
+                        catch (Exception backupEx)
+                        {
+                            ErrorLogUtility.LogError($"Backup re-broadcast after SCUID update failed: {backupEx.Message}",
+                                "FrostValidatorKeyStore.UpdateSmartContractUID");
+                        }
+                    });
                 }
             }
             catch (Exception ex)
@@ -178,6 +223,23 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
             {
                 ErrorLogUtility.LogError($"Failed to check FROST participant order: {ex.Message}", "FrostValidatorKeyStore.HasValidParticipantOrder");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Get all key packages stored locally (for retroactive backup broadcast)
+        /// </summary>
+        public static List<FrostValidatorKeyStore> GetAllKeyPackages()
+        {
+            try
+            {
+                var db = GetDb();
+                return db.FindAll().ToList();
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to get all FROST key packages: {ex.Message}", "FrostValidatorKeyStore.GetAllKeyPackages");
+                return new List<FrostValidatorKeyStore>();
             }
         }
 

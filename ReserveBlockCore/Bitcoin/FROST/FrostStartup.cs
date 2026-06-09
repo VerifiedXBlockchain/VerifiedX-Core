@@ -8,6 +8,7 @@ using ReserveBlockCore.Bitcoin.FROST.Models;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
+using System.Security.Cryptography;
 
 namespace ReserveBlockCore.Bitcoin.FROST
 {
@@ -2037,6 +2038,259 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             Success = false,
                             Message = $"Error: {ex.Message}"
                         }));
+                    }
+                });
+
+                #endregion
+
+                #region Key Backup Endpoints
+
+                /// <summary>
+                /// POST /frost/backup/store — Store a peer's encrypted FROST key backup.
+                /// Called by the validator that just completed DKG (broadcasts to all peers).
+                /// </summary>
+                endpoints.MapPost("/frost/backup/store", async context =>
+                {
+                    try
+                    {
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var body = await reader.ReadToEndAsync();
+                            var request = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(body);
+
+                            if (request == null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid request body" }));
+                                return;
+                            }
+
+                            var ownerAddress = request["OwnerAddress"]?.ToString();
+                            var smartContractUID = request["SmartContractUID"]?.ToString();
+                            var encryptedBlob = request["EncryptedBlob"]?.ToString();
+                            var plaintextHash = request["PlaintextHash"]?.ToString();
+                            var version = request["Version"]?.ToObject<int>() ?? 1;
+                            var timestamp = request["Timestamp"]?.ToObject<long>() ?? 0;
+                            var signature = request["Signature"]?.ToString();
+
+                            // Validate required fields
+                            if (string.IsNullOrEmpty(ownerAddress) || string.IsNullOrEmpty(smartContractUID) ||
+                                string.IsNullOrEmpty(encryptedBlob) || string.IsNullOrEmpty(signature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Missing required fields" }));
+                                return;
+                            }
+
+                            // Size limit: 16 KB for encrypted blob
+                            if (encryptedBlob.Length > 16 * 1024)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "EncryptedBlob exceeds 16 KB limit" }));
+                                return;
+                            }
+
+                            // Verify timestamp is within ±5 minutes (replay protection)
+                            var now = TimeUtil.GetTime();
+                            if (Math.Abs(now - timestamp) > 300)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Timestamp outside ±5 minute window" }));
+                                return;
+                            }
+
+                            // Verify owner is a registered active validator
+                            var ownerValidator = Services.VBTCValidatorRegistry.GetValidator(ownerAddress);
+                            if (ownerValidator == null || !ownerValidator.IsActive)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Owner is not a registered active validator" }));
+                                return;
+                            }
+
+                            // Verify signature: message = "{OwnerAddress}.{SmartContractUID}.{Timestamp}"
+                            var signMessage = $"{ownerAddress}.{smartContractUID}.{timestamp}";
+                            var sigValid = SignatureService.VerifySignature(ownerAddress, signMessage, signature);
+                            if (!sigValid)
+                            {
+                                ErrorLogUtility.LogError($"Invalid signature for backup store from {ownerAddress}", "FrostStartup.BackupStore");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid signature" }));
+                                return;
+                            }
+
+                            // Store the backup
+                            var backup = new FrostPeerKeyBackup
+                            {
+                                OwnerAddress = ownerAddress,
+                                SmartContractUID = smartContractUID,
+                                EncryptedBlob = encryptedBlob,
+                                PlaintextHash = plaintextHash ?? "",
+                                Version = version,
+                                StoredTimestamp = now
+                            };
+
+                            FrostPeerKeyBackup.SaveBackup(backup);
+
+                            // Compute hash of stored blob for verification by sender
+                            var storedHash = Convert.ToHexString(
+                                SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(encryptedBlob))).ToLower();
+
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                StoredHash = storedHash
+                            }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Backup store error: {ex.Message}", "FrostStartup.BackupStore");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/backup/recover — Return stored encrypted backups to an authenticated requester.
+                /// Called by a wiped validator requesting its own backups.
+                /// </summary>
+                endpoints.MapPost("/frost/backup/recover", async context =>
+                {
+                    try
+                    {
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var body = await reader.ReadToEndAsync();
+                            var request = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(body);
+
+                            if (request == null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid request body" }));
+                                return;
+                            }
+
+                            var requesterAddress = request["RequesterAddress"]?.ToString();
+                            var timestamp = request["Timestamp"]?.ToObject<long>() ?? 0;
+                            var signature = request["Signature"]?.ToString();
+
+                            if (string.IsNullOrEmpty(requesterAddress) || string.IsNullOrEmpty(signature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Missing required fields" }));
+                                return;
+                            }
+
+                            // Verify timestamp is within ±5 minutes
+                            var now = TimeUtil.GetTime();
+                            if (Math.Abs(now - timestamp) > 300)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Timestamp outside ±5 minute window" }));
+                                return;
+                            }
+
+                            // Verify requester is a registered active validator
+                            var requesterValidator = Services.VBTCValidatorRegistry.GetValidator(requesterAddress);
+                            if (requesterValidator == null || !requesterValidator.IsActive)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Requester is not a registered active validator" }));
+                                return;
+                            }
+
+                            // Verify signature: message = "frost-recovery.{RequesterAddress}.{Timestamp}"
+                            var signMessage = $"frost-recovery.{requesterAddress}.{timestamp}";
+                            var sigValid = SignatureService.VerifySignature(requesterAddress, signMessage, signature);
+                            if (!sigValid)
+                            {
+                                ErrorLogUtility.LogError($"Invalid signature for backup recovery from {requesterAddress}", "FrostStartup.BackupRecover");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid signature" }));
+                                return;
+                            }
+
+                            // Retrieve all stored backups for this owner
+                            var backups = FrostPeerKeyBackup.GetBackupsForOwner(requesterAddress);
+
+                            var backupItems = backups.Select(b => new
+                            {
+                                b.SmartContractUID,
+                                b.EncryptedBlob,
+                                b.PlaintextHash,
+                                b.Version
+                            }).ToList();
+
+                            LogUtility.Log($"[FROST Backup] Recovery: returning {backupItems.Count} backup(s) to {requesterAddress}",
+                                "FrostStartup.BackupRecover");
+
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                Backups = backupItems
+                            }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Backup recover error: {ex.Message}", "FrostStartup.BackupRecover");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/backup/check — Lightweight probe to check if a backup already exists.
+                /// Used by the periodic smart re-broadcast to avoid sending full blobs unnecessarily.
+                /// </summary>
+                endpoints.MapPost("/frost/backup/check", async context =>
+                {
+                    try
+                    {
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var body = await reader.ReadToEndAsync();
+                            var request = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(body);
+
+                            if (request == null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { HasBackup = false, HashMatch = false }));
+                                return;
+                            }
+
+                            var ownerAddress = request["OwnerAddress"]?.ToString();
+                            var smartContractUID = request["SmartContractUID"]?.ToString();
+                            var plaintextHash = request["PlaintextHash"]?.ToString();
+
+                            if (string.IsNullOrEmpty(ownerAddress) || string.IsNullOrEmpty(smartContractUID))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { HasBackup = false, HashMatch = false }));
+                                return;
+                            }
+
+                            var existing = FrostPeerKeyBackup.GetBackup(ownerAddress, smartContractUID);
+                            var hasBackup = existing != null;
+                            var hashMatch = hasBackup && !string.IsNullOrEmpty(plaintextHash)
+                                && existing!.PlaintextHash == plaintextHash;
+
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                HasBackup = hasBackup,
+                                HashMatch = hashMatch
+                            }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Backup check error: {ex.Message}", "FrostStartup.BackupCheck");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { HasBackup = false, HashMatch = false }));
                     }
                 });
 
