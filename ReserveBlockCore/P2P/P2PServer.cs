@@ -811,5 +811,37 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
+        #region Send Peers (Peer Discovery)
+        /// <summary>
+        /// Returns a JSON array of up to 20 random peer IPs from this node's Peers DB.
+        /// Used by non-validator nodes to discover additional peers via gossip.
+        /// Only returns peers marked as IsOutgoing (known to have open ports).
+        /// </summary>
+        public async Task<string> SendPeers()
+        {
+            return await SignalRQueue(Context, 2048, async () =>
+            {
+                try
+                {
+                    var peerDB = Peers.GetAll();
+                    var rnd = new Random();
+                    var peers = peerDB.Find(x => x.IsOutgoing == true && x.FailCount < 3)
+                        .ToArray()
+                        .OrderBy(x => rnd.Next())
+                        .Take(20)
+                        .Select(x => x.PeerIP)
+                        .ToList();
+
+                    return JsonConvert.SerializeObject(peers);
+                }
+                catch
+                {
+                    return "[]";
+                }
+            });
+        }
+
+        #endregion
+
     }
 }

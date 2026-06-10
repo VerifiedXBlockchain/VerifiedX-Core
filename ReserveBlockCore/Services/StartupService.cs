@@ -1344,6 +1344,20 @@ namespace ReserveBlockCore.Services
                     Globals.StopAllTimers = false;
                     Globals.IsChainSynced = true;
 
+                    // PEER-DISCOVERY: After sync completes, re-run chain-based peer discovery
+                    // with the most up-to-date blocks to find all active validators.
+                    _ = Task.Run(() =>
+                    {
+                        try
+                        {
+                            PeerDiscoveryService.RunPostSyncDiscovery();
+                        }
+                        catch (Exception pdEx)
+                        {
+                            ErrorLogUtility.LogError($"Post-sync peer discovery failed: {pdEx.Message}", "StartupService.DownloadBlocksOnStart");
+                        }
+                    });
+
                     // VALIDATOR-REJOIN-FIX: Scan recent blocks for HEARTBEAT and REGISTER TXs
                     // to hydrate NetworkValidators from on-chain state. This runs BEFORE the
                     // liveness sweep so returning validators discovered from the blockchain
@@ -1773,9 +1787,35 @@ namespace ReserveBlockCore.Services
                 var delay = Globals.Nodes.Count < startupCount ? Task.Delay(1000) : Task.Delay(10000);
                 try
                 {
+                    // FIX: Periodically clear SkipPeers so temporarily-offline nodes can be retried.
+                    // Without this, a bootstrap node that was offline at startup gets permanently
+                    // skipped for the entire session.
+                    PeerDiscoveryService.ClearSkipPeersIfDue();
+
                     var ConnectedCount = Globals.Nodes.Values.Where(x => x.IsConnected).Count();
                     if(ConnectedCount < Globals.MaxPeers)
+                    {
+                        // Step 1: Chain-based peer discovery — scan on-chain validator data
+                        // to populate the Peers DB with known-good validator IPs.
+                        // This is the primary discovery mechanism (no network calls needed).
+                        PeerDiscoveryService.DiscoverPeersFromChain();
+
+                        // Step 2: Try connecting to peers from the now-enriched Peers DB
                         await P2PClient.ConnectToPeers();
+
+                        // Step 3: If still below MaxPeers, use peer gossip as fallback —
+                        // ask connected nodes for their peer lists.
+                        ConnectedCount = Globals.Nodes.Values.Where(x => x.IsConnected).Count();
+                        if (ConnectedCount < Globals.MaxPeers)
+                        {
+                            var gossipAdded = await PeerDiscoveryService.RequestPeersFromConnectedNodes();
+                            if (gossipAdded > 0)
+                            {
+                                // New peers discovered via gossip — try connecting again
+                                await P2PClient.ConnectToPeers();
+                            }
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
