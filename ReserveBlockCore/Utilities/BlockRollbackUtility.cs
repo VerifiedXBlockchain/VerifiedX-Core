@@ -1,11 +1,18 @@
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Services;
+using LiteDB;
 
 namespace ReserveBlockCore.Utilities
 {
     public class BlockRollbackUtility
     {
+        /// <summary>RE-ENTRANCY GUARD: Prevents ResetTreis from being triggered while already running.</summary>
+        private static volatile bool _isResetTreisRunning = false;
+
+        /// <summary>Public accessor so other services can check if a full state rebuild is in progress.</summary>
+        public static bool IsResetTreisRunning => _isResetTreisRunning;
+
         /// <summary>
         /// Full chain rescan rollback — deletes blocks above newHeight, nukes all state,
         /// and replays the entire blockchain from genesis.
@@ -281,6 +288,17 @@ namespace ReserveBlockCore.Utilities
                         return false;
                     return true;
 
+                // FORK-FIX: Zero-value lifecycle transactions can be safely reversed.
+                // These transactions don't transfer any balance — they only update metadata
+                // in the state trie (nonce, validator registry, etc.). The fast path can
+                // handle them by just reversing the nonce increment without needing a full
+                // chain replay via ResetTreis(). This prevents a catastrophic state wipe
+                // when fork recovery rolls back a block containing these TX types.
+                case TransactionType.VBTC_V2_VALIDATOR_REGISTER:
+                case TransactionType.VBTC_V2_VALIDATOR_EXIT:
+                case TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT:
+                    return true;
+
                 default:
                     // All other types (NFT, ADNR, VOTE, RESERVE, smart contract TXs, etc.)
                     // have complex state side-effects that can't be safely reversed
@@ -300,9 +318,29 @@ namespace ReserveBlockCore.Utilities
         /// </summary>
         public static async Task<bool> ResetTreis()
         {
+            // RE-ENTRANCY GUARD: If ResetTreis is already running, reject the new request.
+            // This prevents the infinite wipe→replay→wipe loop that occurs when TX-validation
+            // failures keep triggering ResetTreis while a previous ResetTreis is still replaying 6.6M blocks.
+            if (_isResetTreisRunning)
+            {
+                Console.WriteLine("[ResetTreis] BLOCKED: ResetTreis is already running. Ignoring duplicate request.");
+                return false;
+            }
+
+            _isResetTreisRunning = true;
+            // CRITICAL FIX: Set IsResyncing to block ALL block validation during the entire
+            // state rebuild. Without this, ResetTreis wipes the state trie (Step 1) but
+            // ValidateBlock keeps running on incoming P2P blocks, sees empty state → 
+            // "new account with no balance" → triggers MORE recovery attempts → infinite loop.
+            // The state trie stays EMPTY because concurrent validation corrupts the replay.
+            var wasResyncing = Globals.IsResyncing;
+            var wasStopTimers = Globals.StopAllTimers;
+            Globals.IsResyncing = true;
+            Globals.StopAllTimers = true;
             try
             {
                 Console.WriteLine("[ResetTreis] Starting full chain state rebuild...");
+                Console.WriteLine("[ResetTreis] IsResyncing=true — all block validation suspended during rebuild.");
 
                 // ═══════════════════════════════════════════════════════════════
                 // STEP 1: Wipe all chain-derived state databases
@@ -318,14 +356,15 @@ namespace ReserveBlockCore.Utilities
                 stateTrei.DeleteAllSafe();
                 worldTrei.DeleteAllSafe();
 
-                // Smart contract state — drop all collections in the SC state DB
+                // Smart contract state — clear all collections (preserve structure)
                 try
                 {
                     if (DbContext.DB_SmartContractStateTrei != null)
                     {
                         foreach (var name in DbContext.DB_SmartContractStateTrei.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_SmartContractStateTrei.DropCollection(name);
+                            var coll = DbContext.DB_SmartContractStateTrei.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -334,14 +373,15 @@ namespace ReserveBlockCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe SmartContractStateTrei: {ex.Message}");
                 }
 
-                // DecShop state — drop all collections in the DecShop state DB
+                // DecShop state — clear all collections (preserve structure)
                 try
                 {
                     if (DbContext.DB_DecShopStateTrei != null)
                     {
                         foreach (var name in DbContext.DB_DecShopStateTrei.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_DecShopStateTrei.DropCollection(name);
+                            var coll = DbContext.DB_DecShopStateTrei.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -405,14 +445,17 @@ namespace ReserveBlockCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe Mempool: {ex.Message}");
                 }
 
-                // vBTC / Bitcoin state databases — wipe all collections
+                // vBTC / Bitcoin state databases — clear all collections (preserve structure)
+                // CRITICAL FIX: Use DeleteAll() instead of DropCollection() to avoid
+                // leaving AccountStateTrei and other collections empty after replay
                 try
                 {
                     if (DbContext.DB_vBTC != null)
                     {
                         foreach (var name in DbContext.DB_vBTC.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_vBTC.DropCollection(name);
+                            var coll = DbContext.DB_vBTC.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -427,7 +470,8 @@ namespace ReserveBlockCore.Utilities
                     {
                         foreach (var name in DbContext.DB_TokenizedWithdrawals.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_TokenizedWithdrawals.DropCollection(name);
+                            var coll = DbContext.DB_TokenizedWithdrawals.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -442,7 +486,8 @@ namespace ReserveBlockCore.Utilities
                     {
                         foreach (var name in DbContext.DB_VBTCWithdrawalRequests.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_VBTCWithdrawalRequests.DropCollection(name);
+                            var coll = DbContext.DB_VBTCWithdrawalRequests.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -451,14 +496,15 @@ namespace ReserveBlockCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_VBTCWithdrawalRequests: {ex.Message}");
                 }
 
-                // Shares
+                // Shares — clear all collections (preserve structure)
                 try
                 {
                     if (DbContext.DB_Shares != null)
                     {
                         foreach (var name in DbContext.DB_Shares.GetCollectionNames().ToList())
                         {
-                            DbContext.DB_Shares.DropCollection(name);
+                            var coll = DbContext.DB_Shares.GetCollection(name);
+                            coll.DeleteAll();
                         }
                     }
                 }
@@ -500,13 +546,21 @@ namespace ReserveBlockCore.Utilities
                 // ═══════════════════════════════════════════════════════════════
                 // STEP 3: Replay each block through UpdateTreis (the standard commit path)
                 // ═══════════════════════════════════════════════════════════════
-                Console.WriteLine("[ResetTreis] Step 3: Replaying blocks through UpdateTreis...");
-                var allBlocks = BlockchainData.GetBlocks().FindAll().OrderBy(b => b.Height).ToList();
+                var blockCollection = BlockchainData.GetBlocks();
+                var totalBlocks = blockCollection.Count();
+                Console.WriteLine($"[ResetTreis] Step 3: Replaying {totalBlocks:N0} blocks through UpdateTreis...");
+                LogUtility.Log($"[ResetTreis] Step 3: Starting replay of {totalBlocks:N0} blocks.", "BlockRollbackUtility.ResetTreis");
+                
+                // CRITICAL: Stream blocks lazily from LiteDB ordered by height.
+                // DO NOT use .FindAll().OrderBy().ToList() — that loads ALL 6.6M blocks into memory
+                // at once, causing OutOfMemory or hour-long delays before the loop even starts.
+                // LiteDB's Query.All("Height", Ascending) returns an IEnumerable that reads one block
+                // at a time from disk, keeping memory usage flat regardless of chain length.
                 int processedCount = 0;
                 int failCount = 0;
-                var failBlocks = new List<Block>();
+                var rebuildStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
-                foreach (var block in allBlocks)
+                foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                 {
                     try
                     {
@@ -516,18 +570,37 @@ namespace ReserveBlockCore.Utilities
                         await StateData.UpdateTreis(block);
                         processedCount++;
 
-                        if (processedCount % 1000 == 0)
-                            Console.WriteLine($"[ResetTreis] Processed {processedCount}/{allBlocks.Count} blocks...");
+                        // Progress display: log every 10,000 blocks with percentage + ETA
+                        // Uses Console.WriteLine (not \r overwrite) so output is reliable on all terminals
+                        if (processedCount % 10000 == 0)
+                        {
+                            double pct = (double)processedCount / totalBlocks * 100.0;
+                            var elapsed = rebuildStopwatch.Elapsed;
+                            var blocksPerSecond = processedCount / Math.Max(elapsed.TotalSeconds, 1);
+                            var remainingBlocks = totalBlocks - processedCount;
+                            var etaSeconds = remainingBlocks / Math.Max(blocksPerSecond, 1);
+                            var eta = TimeSpan.FromSeconds(etaSeconds);
+
+                            var progressMsg = $"[ResetTreis] Rebuilding state: {pct:F1}% ({processedCount:N0}/{totalBlocks:N0}) — " +
+                                $"Elapsed: {elapsed:hh\\:mm\\:ss} — ETA: ~{eta:hh\\:mm\\:ss}";
+                            Console.WriteLine(progressMsg);
+                            LogUtility.Log(progressMsg, "BlockRollbackUtility.ResetTreis");
+                        }
                     }
                     catch (Exception ex)
                     {
-                        failBlocks.Add(block);
                         failCount++;
-                        Console.WriteLine($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}");
+                        ErrorLogUtility.LogError($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}", "BlockRollbackUtility.ResetTreis");
                     }
                 }
 
-                Console.WriteLine($"[ResetTreis] Step 3 complete — replayed {processedCount} blocks ({failCount} failures).");
+                rebuildStopwatch.Stop();
+                var totalTime = rebuildStopwatch.Elapsed;
+                ConsoleWriterService.Output(
+                    $"\r[ResetTreis] Step 3 complete — replayed {processedCount:N0} blocks ({failCount} failures) in {totalTime:hh\\:mm\\:ss}.");
+                LogUtility.Log(
+                    $"[ResetTreis] Step 3 complete — replayed {processedCount:N0} blocks ({failCount} failures) in {totalTime:hh\\:mm\\:ss}.",
+                    "BlockRollbackUtility.ResetTreis");
 
                 // ═══════════════════════════════════════════════════════════════
                 // STEP 4: Resync local wallet from rebuilt state
@@ -553,37 +626,53 @@ namespace ReserveBlockCore.Utilities
                 }
 
                 // 4b: Re-populate local TransactionData for wallet addresses
-                var txData = TransactionData.GetAll();
-                foreach (var block in allBlocks)
+                // Stream blocks lazily again — do NOT load all into memory
+                if (walletAddresses.Count > 0)
                 {
-                    foreach (var tx in block.Transactions)
+                    Console.WriteLine($"[ResetTreis] Step 4b: Scanning {totalBlocks:N0} blocks for wallet transactions ({walletAddresses.Count} addresses)...");
+                    var txData = TransactionData.GetAll();
+                    int scanCount = 0;
+                    int insertedTxCount = 0;
+                    var step4Stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+                    foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                     {
-                        bool isRelevant = walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress);
-                        if (isRelevant)
+                        foreach (var tx in block.Transactions)
                         {
-                            // Check if already inserted (avoid duplicates)
-                            var existing = txData.FindOne(x => x.Hash == tx.Hash);
-                            if (existing == null)
+                            bool isRelevant = walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress);
+                            if (isRelevant)
                             {
-                                txData.InsertSafe(tx);
+                                var existing = txData.FindOne(x => x.Hash == tx.Hash);
+                                if (existing == null)
+                                {
+                                    txData.InsertSafe(tx);
+                                    insertedTxCount++;
+                                }
                             }
                         }
+                        scanCount++;
+                        if (scanCount % 100000 == 0)
+                        {
+                            double pct = (double)scanCount / totalBlocks * 100.0;
+                            Console.WriteLine($"[ResetTreis] Step 4b: Wallet TX scan {pct:F1}% ({scanCount:N0}/{totalBlocks:N0}) — found {insertedTxCount} TXs so far");
+                        }
                     }
+
+                    step4Stopwatch.Stop();
+                    Console.WriteLine($"[ResetTreis] Step 4b complete — scanned {scanCount:N0} blocks, inserted {insertedTxCount} wallet TXs in {step4Stopwatch.Elapsed:hh\\:mm\\:ss}.");
+                }
+                else
+                {
+                    Console.WriteLine("[ResetTreis] Step 4b: No wallet addresses — skipping TX resync.");
                 }
 
-                // 4c: Clear mempool of any TXs that were included in blocks
+                // 4c: Clear mempool (already wiped in Step 1, but safety check)
                 try
                 {
                     var mempool = TransactionData.GetPool();
                     if (mempool != null && mempool.Count() > 0)
                     {
-                        foreach (var block in allBlocks)
-                        {
-                            foreach (var tx in block.Transactions)
-                            {
-                                mempool.DeleteManySafe(x => x.Hash == tx.Hash);
-                            }
-                        }
+                        mempool.DeleteAllSafe();
                     }
                 }
                 catch { }
@@ -591,13 +680,38 @@ namespace ReserveBlockCore.Utilities
                 Console.WriteLine($"[ResetTreis] Step 4 complete — wallet resynced for {walletAccounts.Count} accounts.");
                 Console.WriteLine($"[ResetTreis] Full chain state rebuild COMPLETE. Processed {processedCount} blocks with {failCount} failures.");
 
+                // ═══════════════════════════════════════════════════════════════
+                // STEP 5: Write StateTreiStatus flag — this MUST be the last step.
+                // If the node crashes before this point, the flag stays missing,
+                // and the next startup will detect the dirty state and re-run ResetTreis.
+                // ═══════════════════════════════════════════════════════════════
+                if (failCount == 0)
+                {
+                    StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                    Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to SYNCED at height {Globals.LastBlock.Height}.");
+                }
+                else
+                {
+                    StateTreiStatusService.SetFailed($"ResetTreis completed with {failCount} block replay failures.");
+                    Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to FAILED ({failCount} replay errors).");
+                }
+
                 return failCount == 0;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[ResetTreis] CRITICAL ERROR: {ex.Message}");
                 Console.WriteLine($"[ResetTreis] Stack trace: {ex.StackTrace}");
+                StateTreiStatusService.SetFailed($"ResetTreis exception: {ex.Message}");
                 return false;
+            }
+            finally
+            {
+                _isResetTreisRunning = false;
+                // Restore IsResyncing — allow block validation to resume now that state is rebuilt
+                Globals.IsResyncing = wasResyncing;
+                Globals.StopAllTimers = wasStopTimers;
+                Console.WriteLine("[ResetTreis] IsResyncing restored — block validation can resume.");
             }
         }
     }

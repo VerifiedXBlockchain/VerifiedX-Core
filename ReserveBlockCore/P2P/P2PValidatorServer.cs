@@ -18,6 +18,10 @@ namespace ReserveBlockCore.P2P
         private static readonly object _nonceCleanupLock = new object();
         private static DateTime _lastNonceCleanup = DateTime.UtcNow;
 
+        // FORK-FIX: Rate-limit BANNED-IP-REJECT log messages to prevent log spam and OOM.
+        private static readonly ConcurrentDictionary<string, (DateTime lastLog, int suppressedCount)> _bannedIpLogTracker = new();
+        private const int BANNED_IP_LOG_INTERVAL_SECONDS = 300; // 5 minutes
+
         #region On Connected 
         public override async Task OnConnectedAsync()
         {
@@ -36,9 +40,38 @@ namespace ReserveBlockCore.P2P
                         LogUtility.Log($"CASTER-AUTO-UNBAN: Unbanned caster IP {peerIP} on connection attempt", "P2PValidatorServer.OnConnectedAsync");
                         // Fall through to allow connection
                     }
+                    // FORK-FIX: If the banned IP is a known validator, auto-unban it.
+                    // Validator IPs must not stay banned — they're needed for block downloads during fork recovery.
+                    else if (BanService.IsValidatorIP(peerIP))
+                    {
+                        BanService.UnbanPeer(peerIP);
+                        LogUtility.Log($"VALIDATOR-AUTO-UNBAN: Unbanned validator IP {peerIP} on connection attempt", "P2PValidatorServer.OnConnectedAsync");
+                        // Fall through to allow connection
+                    }
                     else
                     {
-                        LogUtility.Log($"BANNED-IP-REJECT: Rejecting validator connection from banned IP {peerIP}", "P2PValidatorServer.OnConnectedAsync");
+                        // FORK-FIX: Rate-limit ban rejection logging to prevent log spam and OOM.
+                        var banCheckTime = DateTime.UtcNow;
+                        _bannedIpLogTracker.AddOrUpdate(
+                            peerIP,
+                            _ =>
+                            {
+                                LogUtility.Log($"BANNED-IP-REJECT: Rejecting validator connection from banned IP {peerIP}", "P2PValidatorServer.OnConnectedAsync");
+                                return (banCheckTime, 0);
+                            },
+                            (_, existing) =>
+                            {
+                                if ((banCheckTime - existing.lastLog).TotalSeconds >= BANNED_IP_LOG_INTERVAL_SECONDS)
+                                {
+                                    var suppressed = existing.suppressedCount;
+                                    LogUtility.Log(
+                                        $"BANNED-IP-REJECT: Rejecting validator connection from banned IP {peerIP}" +
+                                        (suppressed > 0 ? $" ({suppressed} additional rejections suppressed since last log)" : ""),
+                                        "P2PValidatorServer.OnConnectedAsync");
+                                    return (banCheckTime, 0);
+                                }
+                                return (existing.lastLog, existing.suppressedCount + 1);
+                            });
                         Context.Abort();
                         return;
                     }

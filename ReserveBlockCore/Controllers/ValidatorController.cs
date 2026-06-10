@@ -1363,5 +1363,78 @@ namespace ReserveBlockCore.Controllers
         }
 
         #endregion
+
+        #region FROST Key Backup
+
+        /// <summary>
+        /// Manually trigger FROST key recovery from peer validators.
+        /// Used when a validator's database has been wiped and needs to restore FROST key packages.
+        /// </summary>
+        [HttpPost]
+        [Route("FrostKeyRecover")]
+        public async Task<ActionResult<string>> FrostKeyRecover()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                    return BadRequest(JsonConvert.SerializeObject(new { success = false, error = "Not running as a validator" }));
+
+                var activeValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
+                if (activeValidators == null || activeValidators.Count == 0)
+                    return Ok(JsonConvert.SerializeObject(new { success = false, error = "No active validators found" }));
+
+                var recoveredCount = await Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeers(
+                    Globals.ValidatorAddress, activeValidators);
+
+                return Ok(JsonConvert.SerializeObject(new
+                {
+                    success = recoveredCount > 0,
+                    recoveredKeyPackages = recoveredCount,
+                    message = recoveredCount > 0
+                        ? $"Successfully recovered {recoveredCount} FROST key package(s) from peers"
+                        : "No FROST key backups found on any peer"
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Recovery failed: {ex.Message}" }));
+            }
+        }
+
+        /// <summary>
+        /// Manually trigger retroactive broadcast of all existing FROST key packages to peers.
+        /// Used to distribute backups for keys from already-completed DKG ceremonies.
+        /// </summary>
+        [HttpPost]
+        [Route("FrostKeyBroadcastAll")]
+        public async Task<ActionResult<string>> FrostKeyBroadcastAll()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
+                    return BadRequest(JsonConvert.SerializeObject(new { success = false, error = "Not running as a validator" }));
+
+                var activeValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
+                if (activeValidators == null || activeValidators.Count == 0)
+                    return Ok(JsonConvert.SerializeObject(new { success = false, error = "No active validators found" }));
+
+                var (totalSuccess, totalFail) = await Bitcoin.Services.FrostKeyBackupService.BroadcastAllExistingBackups(
+                    Globals.ValidatorAddress, activeValidators);
+
+                return Ok(JsonConvert.SerializeObject(new
+                {
+                    success = true,
+                    totalSuccessfulPeerStores = totalSuccess,
+                    totalFailedPeerStores = totalFail,
+                    message = $"Retroactive broadcast complete: {totalSuccess} successful, {totalFail} failed"
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Broadcast failed: {ex.Message}" }));
+            }
+        }
+
+        #endregion
     }
 }
