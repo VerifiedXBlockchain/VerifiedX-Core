@@ -328,6 +328,21 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // Validate balance > 0 (including state trei tokenization TXs)
                 //0 balance check remove for ownership transfers
 
+                // Normalize address
+                toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
+                var localAddress = AccountData.GetSingleAccount(toAddress);
+
+                // Default-asset contracts store MD5List as "NA" at mint — there is no media
+                // to ship, so the transfer can skip beacons entirely.
+                var hasMedia = !string.IsNullOrWhiteSpace(scState.MD5List) && scState.MD5List != "NA";
+                if (!hasMedia)
+                {
+                    _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, null, "NA", backupURL, false, null, 0, TransactionType.TKNZ_TX));
+                    var noMediaSuccess = JsonConvert.SerializeObject(new { Success = true, Message = "vBTC V2 Contract Transfer has been started." });
+                    SCLogUtility.Log($"SC Process Completed in CLI (no media, beacons skipped). SCUID: {sc.SmartContractUID}. Response: {noMediaSuccess}", "VBTCService.TransferOwnership()");
+                    return noMediaSuccess;
+                }
+
                 // Check beacons exist
                 if (!Globals.Beacons.Any())
                     return await SCLogUtility.LogAndReturn("Error - You do not have any beacons stored.", "VBTCService.TransferOwnership()", false);
@@ -344,10 +359,6 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var connectedBeacon = Globals.Beacon.Values.Where(x => x.IsConnected).FirstOrDefault();
                 if (connectedBeacon == null)
                     return await SCLogUtility.LogAndReturn("Error - You have lost connection to beacons. Please attempt to resend.", "VBTCService.TransferOwnership()", false);
-
-                // Normalize address
-                toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
-                var localAddress = AccountData.GetSingleAccount(toAddress);
 
                 // Get assets and MD5 list
                 var assets = await NFTAssetFileUtility.GetAssetListFromSmartContract(sc);

@@ -638,44 +638,42 @@ namespace ReserveBlockCore.Controllers
                                 return output;
                             }
                         }
-                        else
+
+                        var connectedBeacon = Globals.Beacon.Values.Where(x => x.IsConnected).FirstOrDefault();
+                        if (connectedBeacon == null)
                         {
-                            var connectedBeacon = Globals.Beacon.Values.Where(x => x.IsConnected).FirstOrDefault();
-                            if (connectedBeacon == null)
+                            output = JsonConvert.SerializeObject(new { Success = false, Message = "You have lost connection to beacons. Please attempt to resend." });
+                            SCLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "TXV1Controller.CreateBeaconUploadRequest()");
+                            return output;
+                        }
+
+                        var assetList = await NFTAssetFileUtility.GetAssetListFromSmartContract(sc);
+                        var md5List = scStateTrei.MD5List;
+
+                        if (assetList == null)
+                            return JsonConvert.SerializeObject(new { Success = false, Message = "Asset List was Null" }); ;
+
+                        var result = await P2PClient.BeaconUploadRequest(connectedBeacon, assetList, sc.SmartContractUID, toAddress, md5List, signature).WaitAsync(new TimeSpan(0, 0, 10));
+                        if (result == true)
+                        {
+                            var aqResult = AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assetList,
+                                AssetQueue.TransferType.Upload);
+                            if (aqResult)
                             {
-                                output = JsonConvert.SerializeObject(new { Success = false, Message = "You have lost connection to beacons. Please attempt to resend." });
-                                SCLogUtility.Log("Error - You have lost connection to beacons. Please attempt to resend.", "TXV1Controller.CreateBeaconUploadRequest()");
-                                return output;
-                            }
+                                //DO TRANSFER HERE
+                                _ = Task.Run(() => BeaconUtility.SendAssets_New(sc.SmartContractUID, assetList, connectedBeacon));
 
-                            var assetList = await NFTAssetFileUtility.GetAssetListFromSmartContract(sc);
-                            var md5List = scStateTrei.MD5List;
-
-                            if (assetList == null)
-                                return JsonConvert.SerializeObject(new { Success = false, Message = "Asset List was Null" }); ;
-
-                            var result = await P2PClient.BeaconUploadRequest(connectedBeacon, assetList, sc.SmartContractUID, toAddress, md5List, signature).WaitAsync(new TimeSpan(0, 0, 10));
-                            if (result == true)
-                            {
-                                var aqResult = AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assetList,
-                                    AssetQueue.TransferType.Upload);
-                                if (aqResult)
-                                {
-                                    //DO TRANSFER HERE
-                                    _ = Task.Run(() => BeaconUtility.SendAssets_New(sc.SmartContractUID, assetList, connectedBeacon));
-
-                                    var success = JsonConvert.SerializeObject(new { Success = true, Message = "NFT Transfer has been started.", Locator = connectedBeacon.Beacons.BeaconLocator });
-                                    return success;
-                                }
-                                else
-                                {
-                                    return JsonConvert.SerializeObject(new { Success = false, Message = "Creating asset queue has failed." });
-                                }
+                                var success = JsonConvert.SerializeObject(new { Success = true, Message = "NFT Transfer has been started.", Locator = connectedBeacon.Beacons.BeaconLocator });
+                                return success;
                             }
                             else
                             {
-                                return JsonConvert.SerializeObject(new { Success = false, Message = "Beacon Upload Request has Failed." });
+                                return JsonConvert.SerializeObject(new { Success = false, Message = "Creating asset queue has failed." });
                             }
+                        }
+                        else
+                        {
+                            return JsonConvert.SerializeObject(new { Success = false, Message = "Beacon Upload Request has Failed." });
                         }
                     }
                 }

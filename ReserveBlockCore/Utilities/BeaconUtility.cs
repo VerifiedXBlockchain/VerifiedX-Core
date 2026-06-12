@@ -121,6 +121,11 @@ namespace ReserveBlockCore.Utilities
                     if (retryCount < 4)
                     {
                         var filePath = NFTAssetFileUtility.NFTAssetPath(assetName, scUID);
+                        if (filePath == "NA")
+                        {
+                            SCLogUtility.Log($"Asset file does not exist locally: {assetName}. Skipping beacon send.", "BeaconUtility.SendAssets_New() - send");
+                            return false;
+                        }
                         var beaconString = locator.ToStringFromBase64();
                         var beacon = JsonConvert.DeserializeObject<BeaconInfo.BeaconInfoJson>(beaconString);
 

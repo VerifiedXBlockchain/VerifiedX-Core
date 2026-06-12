@@ -26,6 +26,9 @@ namespace ReserveBlockCore.Utilities
             {
                 var path = NFTAssetFileUtility.NFTAssetPath(asset, scUID);
 
+                if (path == "NA")
+                    continue; //asset file does not exist locally; hashing the sentinel path would throw
+
                 var checksum = path.ToMD5();
 
                 if(checksumList == "")
