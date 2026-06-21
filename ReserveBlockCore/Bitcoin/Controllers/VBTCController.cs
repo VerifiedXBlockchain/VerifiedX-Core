@@ -665,6 +665,70 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             }
         }
 
+        /// <summary>
+        /// S3C §12: one-click auto-bridge — S3C vBTC → public companion → Base. Returns immediately
+        /// with the gas address + ETH balance so the user funds gas during the BTC-withdrawal window.
+        /// In-memory/best-effort: must run on the node that owns (or will create) the companion.
+        /// </summary>
+        [HttpPost("StartS3CAutoBridge")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> StartS3CAutoBridge([FromBody] S3CAutoBridgePayload payload)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.S3CContractUID) ||
+                    string.IsNullOrEmpty(payload.RequesterAddress) || string.IsNullOrEmpty(payload.EvmDestination) ||
+                    payload.Amount <= 0M)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "S3CContractUID, RequesterAddress, EvmDestination, and a positive Amount are required." }));
+
+                var state = Services.S3CAutoBridgeService.StartAutoBridge(
+                    payload.S3CContractUID, payload.RequesterAddress, payload.Amount, payload.EvmDestination);
+
+                return Task.FromResult(JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    state.OrchestrationId,
+                    state.PublicScUID,
+                    state.PublicDepositAddress,
+                    state.BaseGasAddress,
+                    state.BaseGasEthBalance,
+                    Status = state.Status.ToString()
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+            }
+        }
+
+        /// <summary>
+        /// S3C §12: status of an in-memory auto-bridge orchestration (nothing is persisted, so this
+        /// is the only way to track progress). Returns the current state + amounts + lock id + error.
+        /// </summary>
+        [HttpGet("GetS3CAutoBridgeStatus/{orchestrationId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string GetS3CAutoBridgeStatus(string orchestrationId)
+        {
+            var s = Services.S3CAutoBridgeService.GetStatus(orchestrationId);
+            if (s == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Orchestration not found (it may have been lost on restart — finish via the manual path)." });
+
+            return JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                s.OrchestrationId,
+                Status = s.Status.ToString(),
+                s.PublicScUID,
+                s.PublicDepositAddress,
+                s.BaseGasAddress,
+                s.BaseGasEthBalance,
+                s.RequestedAmount,
+                s.ArrivedAmount,
+                s.LockId,
+                s.Error
+            });
+        }
+
         private async Task ExecuteMPCCeremony(string ceremonyId)
         {
             try
@@ -4186,6 +4250,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public string? CeremonyId { get; set; }
         /// <summary>S3C §5: when minting a public companion, the linked S3C contract's scUID.</summary>
         public string? LinkedContractUID { get; set; }
+    }
+
+    public class S3CAutoBridgePayload
+    {
+        public string S3CContractUID { get; set; }
+        public string RequesterAddress { get; set; }   // holds S3C vBTC, owns/creates the companion, signs
+        public decimal Amount { get; set; }
+        public string EvmDestination { get; set; }     // where vBTC.b mints (0x...)
     }
 
     public class VBTCTransferPayload
