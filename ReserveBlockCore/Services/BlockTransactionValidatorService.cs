@@ -673,12 +673,12 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // FIND-002 FIX: Check if THIS USER already has an active withdrawal request for this contract
-                        // (Per-user tracking, not contract-level)
-                        var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
-                        if (existingRequest != null)
+                        // S3C §0: per-CONTRACT active-withdrawal gate (was per-user). Measure
+                        // expiry against the block's own height so the rule stays deterministic
+                        // under block replay/sync (NOT the chain tip).
+                        if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, blockHeight))
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: User {requesterAddress} already has an active withdrawal request for contract {scUID}", 
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: contract {scUID} already has an active withdrawal",
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;

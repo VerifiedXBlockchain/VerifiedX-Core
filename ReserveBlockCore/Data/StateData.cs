@@ -3235,7 +3235,10 @@ namespace ReserveBlockCore.Data
                     Timestamp = tx.Timestamp,
                     TransactionHash = tx.Hash,
                     Status = VBTCWithdrawalStatus.Requested,
-                    IsCompleted = false
+                    IsCompleted = false,
+                    // S3C §0: stamp the mined block height — the consensus-deterministic value
+                    // all nodes agree on. Drives the per-contract anti-grief expiry gate.
+                    RequestBlockHeight = tx.Height
                 };
 
                 // Save the withdrawal request to the per-user tracking database

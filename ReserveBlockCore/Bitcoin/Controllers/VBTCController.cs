@@ -1639,11 +1639,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Duplicate request detected. This UniqueId has already been processed." });
                 }
 
-                // 4. Check for incomplete withdrawals (only 1 active withdrawal per contract)
-                var hasIncomplete = VBTCWithdrawalRequest.HasIncompleteRequest(payload.VFXAddress, payload.SmartContractUID);
-                if (hasIncomplete)
+                // 4. S3C §0: per-CONTRACT active-withdrawal gate (was per-user). Reject if the
+                // contract already has any active withdrawal (anti-grief expiry inside the check).
+                var hasActive = VBTCWithdrawalRequest.HasActiveContractRequest(payload.SmartContractUID, Globals.LastBlock?.Height ?? 0);
+                if (hasActive)
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "An active withdrawal request already exists for this contract. Complete or cancel it first." });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "A withdrawal is already in progress for this contract; try again once it completes." });
                 }
 
                 // 5. Verify VFX signature
@@ -1685,7 +1686,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     FeeRate = payload.FeeRate,
                     TransactionHash = "", // Will be set when completed
                     IsCompleted = false,
-                    Status = VBTCWithdrawalStatus.Requested
+                    Status = VBTCWithdrawalStatus.Requested,
+                    // S3C §0: local fast-feedback height; corrected to the true mined height by
+                    // StateData when the request TX is processed into a block.
+                    RequestBlockHeight = Globals.LastBlock?.Height ?? 0
                 };
 
                 // 8. Save to database

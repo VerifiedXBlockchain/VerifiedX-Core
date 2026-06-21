@@ -2672,20 +2672,20 @@ namespace ReserveBlockCore.Services
                         if (scState == null)
                             return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
 
-                        // FIND-002 FIX: Check if this user already has an active withdrawal request in database
-                        var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
-                        if (existingRequest != null)
-                            return (txResult, $"User {requesterAddress} already has an active withdrawal request for contract {scUID}. Complete or wait for existing request.");
+                        // S3C §0: per-CONTRACT active-withdrawal gate (was per-user) — rejects if
+                        // the contract already has a mined active request (anti-grief expiry inside).
+                        if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, Globals.LastBlock?.Height ?? 0))
+                            return (txResult, $"A withdrawal is already in progress for contract {scUID}; try again once it completes.");
 
-                        // FIND-002 FIX: Check mempool for duplicate requests from this user for this contract
+                        // S3C §0: per-CONTRACT mempool guard (same-block defense) — reject if ANY
+                        // withdrawal request for this contract, from any requester, is already pending.
                         var mempool = TransactionData.GetPool();
-                        var duplicateInMempool = mempool.Query().Where(x =>
+                        var pendingWithdrawals = mempool.Query().Where(x =>
                             x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
-                            x.FromAddress == requesterAddress &&
                             x.Hash != txRequest.Hash
                         ).ToList();
 
-                        foreach (var existingTx in duplicateInMempool)
+                        foreach (var existingTx in pendingWithdrawals)
                         {
                             try
                             {
@@ -2693,7 +2693,7 @@ namespace ReserveBlockCore.Services
                                 var existingScUID = existingData["ContractUID"]?.ToObject<string>();
                                 if (existingScUID == scUID)
                                 {
-                                    return (txResult, $"Duplicate withdrawal request already exists in mempool from {requesterAddress} for contract {scUID}.");
+                                    return (txResult, $"A withdrawal request for contract {scUID} is already pending in the mempool.");
                                 }
                             }
                             catch { }

@@ -753,6 +753,11 @@ namespace ReserveBlockCore.Services
                         // Initialize dictionary with current state nonces for all addresses in block
                         var processedNonces = new Dictionary<string, long>();
                         var blockPrivateNullifierKeys = new HashSet<string>();
+                        // S3C §0: block-scoped per-contract withdrawal serialization. Per-tx
+                        // validation can't see sibling txs, so a malicious producer could place two
+                        // VBTC_V2_WITHDRAWAL_REQUESTs for the same contract in one block. Track the
+                        // contracts seen here and reject the second (mirrors blockPrivateNullifierKeys).
+                        var blockWithdrawalContracts = new HashSet<string>();
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -784,6 +789,18 @@ namespace ReserveBlockCore.Services
                                 {
                                     if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(blkTransaction, blockPrivateNullifierKeys, out var nulErr))
                                         effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
+                                }
+
+                                // S3C §0: enforce one withdrawal request per contract within a block.
+                                if (effectiveTxResult.Item1 && blkTransaction.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                                {
+                                    try
+                                    {
+                                        var wScUID = JObject.Parse(blkTransaction.Data)["ContractUID"]?.ToObject<string>();
+                                        if (!string.IsNullOrEmpty(wScUID) && !blockWithdrawalContracts.Add(wScUID))
+                                            effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wScUID} within block.");
+                                    }
+                                    catch { }
                                 }
 
                                 if(effectiveTxResult.Item1 == false)
