@@ -792,8 +792,9 @@ namespace ReserveBlockCore.Bitcoin.Services
                 }
                 else
                 {
-                    // Fallback: no snapshot available — use all registry validators (legacy behavior)
-                    snapshotValidators = allRegistryValidators;
+                    // Fallback: no snapshot — use PUBLIC validators only (§7.2: never pull S3C
+                    // validators into a legacy public contract).
+                    snapshotValidators = VBTCValidatorRegistry.GetPublicValidators();
                     SCLogUtility.Log($"[FROST Signing] WARNING: No snapshot addresses found for contract {scUID}. " +
                         $"Using all {allRegistryValidators.Count} registry validators (legacy fallback)", "VBTCService.CompleteWithdrawal()");
                 }
@@ -1128,6 +1129,71 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// <param name="evmDestination">EVM address on Base to receive vBTC.b</param>
         /// <param name="lockIdOverride">Optional; default is a new GUID (format N). Must be unique on-chain.</param>
         /// <returns>(Success, TxHashOrError, LockId)</returns>
+        /// <summary>
+        /// S3C §6.3: resolve a contract's IsS3C flag — local record first, else state-trei
+        /// decompile (works on any node; used by the consensus bridge-lock rejection too).
+        /// </summary>
+        public static bool ResolveContractIsS3C(string scUID)
+        {
+            var local = VBTCContractV2.GetContract(scUID);
+            if (local != null) return local.IsS3C;
+            try
+            {
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
+                {
+                    var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                    var tknz = scMain?.Features?
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures)
+                        .FirstOrDefault() as TokenizationV2Feature;
+                    if (tknz != null) return tknz.IsS3C;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>
+        /// S3C §7.4/§8: resolve a contract's DKG validator snapshot — local record first, else
+        /// state-trei decompile (works on any node). Empty list if none (legacy no-snapshot).
+        /// </summary>
+        public static List<string> ResolveContractSnapshot(string scUID)
+        {
+            var local = VBTCContractV2.GetContract(scUID);
+            if (local != null && local.ValidatorAddressesSnapshot != null && local.ValidatorAddressesSnapshot.Count > 0)
+                return local.ValidatorAddressesSnapshot;
+            try
+            {
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
+                {
+                    var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                    var tknz = scMain?.Features?
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures)
+                        .FirstOrDefault() as TokenizationV2Feature;
+                    if (tknz?.ValidatorAddressesSnapshot != null) return tknz.ValidatorAddressesSnapshot;
+                }
+            }
+            catch { }
+            return new List<string>();
+        }
+
+        /// <summary>
+        /// S3C §7.4: the eligible cancellation-voter set for a contract. Snapshot validators if the
+        /// contract has a DKG snapshot; else the public validators (legacy fallback). The 75%
+        /// denominator is this set's Count (FULL snapshot — dead members still count). Used
+        /// identically by TransactionValidatorService (eligibility) and StateData (denominator).
+        /// </summary>
+        public static HashSet<string> ResolveCancellationVoterSet(string scUID)
+        {
+            var snapshot = ResolveContractSnapshot(scUID);
+            if (snapshot.Count > 0)
+                return new HashSet<string>(snapshot);
+            return new HashSet<string>(VBTCValidatorRegistry.GetPublicValidators().Select(v => v.ValidatorAddress));
+        }
+
         public static async Task<(bool Success, string TxHashOrError, string LockId)> CreateBridgeLockTx(
             string scUID, string ownerAddress, decimal amount, string evmDestination, string? lockIdOverride = null)
         {
@@ -1139,6 +1205,11 @@ namespace ReserveBlockCore.Bitcoin.Services
                     SCLogUtility.Log($"Account not found: {ownerAddress}", "VBTCService.CreateBridgeLockTx()");
                     return (false, $"Account not found: {ownerAddress}", string.Empty);
                 }
+
+                // S3C §6.3: vBTC.b bridge is not available for S3C contracts (client-side gate;
+                // also consensus-enforced at TX validation). Companion path (§5) is the route.
+                if (ResolveContractIsS3C(scUID))
+                    return (false, "vBTC.b bridge is not available for S3C contracts. Withdraw to your own public companion contract to bridge.", string.Empty);
 
                 // Validate balance (subtract local bridge reservations not yet reflected in state trei)
                 var balResult = await TryGetAvailableTransparentVbtcBalance(scUID, ownerAddress);

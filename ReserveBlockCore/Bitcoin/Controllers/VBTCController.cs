@@ -229,7 +229,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 // Get candidate validators — these are all known active validators.
                 // Some may be offline. We probe reachability to filter to only online ones.
-                var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
 
                 if (allValidators == null || !allValidators.Any())
                 {
@@ -437,12 +437,17 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         /// <returns>Ceremony ID for tracking progress</returns>
         [HttpPost("InitiateMPCCeremony/{ownerAddress}")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> InitiateMPCCeremony(string ownerAddress)
+        public async Task<string> InitiateMPCCeremony(string ownerAddress, bool forcePublic = false)
         {
             try
             {
                 if (string.IsNullOrEmpty(ownerAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                // S3C §2.1: if S3C= is configured but invalid, refuse to mint rather than silently
+                // falling back to the public pool. forcePublic companions (§5) are exempt.
+                if (!forcePublic && Globals.S3CConfigInvalid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "S3C configuration is present but invalid; refusing to mint. Fix the S3C= config and restart." });
 
                 // Anti-spam: Check if this owner already has an active (non-terminal) ceremony
                 var existingActive = _ceremonies.Values.FirstOrDefault(c =>
@@ -484,7 +489,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     InitiatedTimestamp = currentTime,
                     RequiredThreshold = 51,
                     ProgressPercentage = 0,
-                    CurrentRound = 0
+                    CurrentRound = 0,
+                    // S3C §7.1: global config sets the default; companion creation forces public.
+                    IsS3C = forcePublic ? false : Globals.UseS3C
                 };
 
                 // Store in memory
@@ -624,6 +631,40 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         /// Background task that executes the MPC (FROST DKG) ceremony.
         /// Unified MPC: Any VFX wallet owner can coordinate directly — no delegation needed.
         /// </summary>
+        /// <summary>
+        /// S3C §11: pre-flight status — per configured validator, whether it is registered+active+
+        /// IsS3C on-chain, reachable on the FROST port, and whether its config IP differs from the
+        /// on-chain IP (informational; config wins). Operators confirm all-green before minting.
+        /// </summary>
+        [HttpGet("GetS3CStatus")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetS3CStatus()
+        {
+            try
+            {
+                var validators = await Services.S3CService.ValidatePoolStatus();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Enabled = Globals.UseS3C,
+                    ConfigInvalid = Globals.S3CConfigInvalid,
+                    IsS3CValidator = Globals.IsS3CValidator,
+                    Validators = validators.Select(v => new
+                    {
+                        v.IPAddress,
+                        v.ValidatorAddress,
+                        v.RegisteredOnChain,
+                        v.Reachable,
+                        v.ConfigIPMismatch
+                    })
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
         private async Task ExecuteMPCCeremony(string ceremonyId)
         {
             try
@@ -654,9 +695,22 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             ceremony.Status = CeremonyStatus.ValidatingValidators;
             ceremony.ProgressPercentage = 5;
 
-            // Get candidate validators — these are all known active validators.
-            // Some may be offline. We probe reachability to filter to only online ones.
-            var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+            // Get candidate validators. S3C §7.1: route on the ceremony's pool, not global state.
+            // S3C ceremony → the configured private pool (all-or-nothing); public → S3C-excluded.
+            List<ReserveBlockCore.Bitcoin.Models.VBTCValidator> allValidators;
+            try
+            {
+                allValidators = ceremony.IsS3C
+                    ? Services.S3CService.GetValidatorsForCeremony()
+                    : Services.VBTCValidatorRegistry.GetPublicValidators();
+            }
+            catch (Exception s3cEx)
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = s3cEx.Message;
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
 
             if (allValidators == null || !allValidators.Any())
             {
@@ -666,7 +720,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 return;
             }
 
-            LogUtility.Log($"[MPC Ceremony] Found {allValidators.Count} registered validators. Probing FROST port reachability...", 
+            LogUtility.Log($"[MPC Ceremony] Found {allValidators.Count} registered validators. Probing FROST port reachability...",
                 "VBTCController.ExecuteMPCCeremonyLocally");
 
             // Probe which validators are actually reachable on the FROST port
@@ -832,7 +886,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     CeremonyId = effectiveCeremonyId,
-                    ImageBase = payload.ImageBase
+                    ImageBase = payload.ImageBase,
+                    // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
+                    // into the contract so it survives to every node via the state-trei seam.
+                    IsS3C = ceremony.IsS3C,
+                    LinkedContractUID = payload.LinkedContractUID
                 };
 
                 // Create smart contract
@@ -1084,7 +1142,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     CeremonyId = effectiveCeremonyId,
-                    ImageBase = payload.ImageBase
+                    ImageBase = payload.ImageBase,
+                    // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
+                    // into the contract so it survives to every node via the state-trei seam.
+                    IsS3C = ceremony.IsS3C,
+                    LinkedContractUID = payload.LinkedContractUID
                 };
 
                 // Create smart contract
@@ -2477,7 +2539,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Active ceremony already in progress.", ExistingCeremonyId = existingActive.CeremonyId });
 
                 // Probe validators
-                var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
                 if (allValidators == null || !allValidators.Any())
                     return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available" });
 
@@ -2592,7 +2654,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                         ceremony.Status = CeremonyStatus.ValidatingValidators;
                         ceremony.ProgressPercentage = 5;
 
-                        var allValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                        var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
                         if (allValidators == null || !allValidators.Any())
                         {
                             ceremony.Status = CeremonyStatus.Failed;
@@ -2724,7 +2786,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     DKGProof = ceremony.DKGProof!,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     CeremonyId = effectiveCeremonyId,
-                    ImageBase = payload.ImageBase
+                    ImageBase = payload.ImageBase,
+                    // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
+                    // into the contract so it survives to every node via the state-trei seam.
+                    IsS3C = ceremony.IsS3C,
+                    LinkedContractUID = payload.LinkedContractUID
                 };
 
                 var scMain = new SmartContractMain
@@ -4118,6 +4184,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         /// If not provided, you must call InitiateMPCCeremony first
         /// </summary>
         public string? CeremonyId { get; set; }
+        /// <summary>S3C §5: when minting a public companion, the linked S3C contract's scUID.</summary>
+        public string? LinkedContractUID { get; set; }
     }
 
     public class VBTCTransferPayload
@@ -4189,6 +4257,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public long Timestamp { get; set; }              // Unix timestamp
         public string UniqueId { get; set; }             // Unique request ID (prevents replay)
         public string OwnerSignature { get; set; }       // Signature of request data
+        public string? LinkedContractUID { get; set; }   // S3C §5: linked S3C contract for a public companion
     }
 
     // Raw Withdrawal Payload Models (for external/pre-signed requests)

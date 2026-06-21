@@ -1019,6 +1019,22 @@ namespace ReserveBlockCore.Services
                 {
                     try
                     {
+                        // S3C §6.3: reject a bridge-lock for an S3C contract at block validation too
+                        // (IsS3C read from state trei) — defense against a malicious-producer bypass.
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
+                        {
+                            var blScUID = JObject.Parse(tx.Data)["ContractUID"]?.ToObject<string>();
+                            if (!string.IsNullOrEmpty(blScUID) && Bitcoin.Services.VBTCService.ResolveContractIsS3C(blScUID))
+                            {
+                                SCLogUtility.Log($"VBTC_V2_BRIDGE_LOCK rejected: S3C contract {blScUID} cannot bridge",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdataInv = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdataInv.InsertSafe(tx);
+                                return;
+                            }
+                        }
+
                         var txdataSuccess = TransactionData.GetAll();
                         tx.TransactionStatus = TransactionStatus.Success;
                         txdataSuccess.InsertSafe(tx);

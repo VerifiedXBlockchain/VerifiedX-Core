@@ -2108,6 +2108,17 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // S3C §8: residency — this node stores a backup ONLY for a contract whose
+                            // DKG snapshot it belongs to. Enforces "S3C key material lives only on S3C
+                            // infra" regardless of who broadcasts. Legacy no-snapshot contracts: accept.
+                            var storeSnapshot = Services.VBTCService.ResolveContractSnapshot(smartContractUID);
+                            if (storeSnapshot.Count > 0 && !storeSnapshot.Contains(Globals.ValidatorAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This node is not in the contract's DKG snapshot; refusing to store backup." }));
+                                return;
+                            }
+
                             // Verify signature: message = "{OwnerAddress}.{SmartContractUID}.{Timestamp}"
                             var signMessage = $"{ownerAddress}.{smartContractUID}.{timestamp}";
                             var sigValid = SignatureService.VerifySignature(ownerAddress, signMessage, signature);

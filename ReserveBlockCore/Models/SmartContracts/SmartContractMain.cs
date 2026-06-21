@@ -642,6 +642,10 @@ namespace ReserveBlockCore.Models.SmartContracts
                                     var v2ValidatorSnapshot = repl.Run(@"GetValidatorSnapshot()").Value != null ? repl.Run(@"GetValidatorSnapshot()").Value.ToString() : "";
                                     var v2DkgProofRaw = repl.Run(@"GetDKGProof()").Value != null ? repl.Run(@"GetDKGProof()").Value.ToString() : "";
                                     var v2ImageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
+                                    // S3C (§5.4): absent getter → null Value → defaults (IsS3C=false, Linked=null) for pre-S3C contracts
+                                    var v2IsS3C = (repl.Run(@"GetIsS3C()").Value != null ? repl.Run(@"GetIsS3C()").Value.ToString() : "false") == "true";
+                                    var v2LinkedRaw = repl.Run(@"GetLinkedContractUID()").Value != null ? repl.Run(@"GetLinkedContractUID()").Value.ToString() : "";
+                                    string? v2LinkedContractUID = string.IsNullOrEmpty(v2LinkedRaw) ? null : v2LinkedRaw;
 
                                     // Parse DKG proof (format: "proof|->blockHeight")
                                     var v2DkgProof = "";
@@ -674,7 +678,9 @@ namespace ReserveBlockCore.Models.SmartContracts
                                         DKGProof = v2DkgProof,
                                         ProofBlockHeight = v2ProofBlockHeight,
                                         CeremonyId = v2CeremonyId,
-                                        ImageBase = v2ImageBase
+                                        ImageBase = v2ImageBase,
+                                        IsS3C = v2IsS3C,
+                                        LinkedContractUID = v2LinkedContractUID
                                     };
 
                                     scFeature.FeatureName = FeatureName.TokenizationV2;
@@ -822,6 +828,10 @@ namespace ReserveBlockCore.Models.SmartContracts
                                 var v2ValidatorSnapshot = repl.Run(@"GetValidatorSnapshot()").Value != null ? repl.Run(@"GetValidatorSnapshot()").Value.ToString() : "";
                                 var v2DkgProofRaw = repl.Run(@"GetDKGProof()").Value != null ? repl.Run(@"GetDKGProof()").Value.ToString() : "";
                                 var v2ImageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
+                                // S3C (§5.4): absent getter → null Value → defaults (IsS3C=false, Linked=null) for pre-S3C contracts
+                                var v2IsS3C = (repl.Run(@"GetIsS3C()").Value != null ? repl.Run(@"GetIsS3C()").Value.ToString() : "false") == "true";
+                                var v2LinkedRaw = repl.Run(@"GetLinkedContractUID()").Value != null ? repl.Run(@"GetLinkedContractUID()").Value.ToString() : "";
+                                string? v2LinkedContractUID = string.IsNullOrEmpty(v2LinkedRaw) ? null : v2LinkedRaw;
 
                                 // Parse DKG proof (format: "proof|->blockHeight")
                                 var v2DkgProof = "";
@@ -854,7 +864,9 @@ namespace ReserveBlockCore.Models.SmartContracts
                                     DKGProof = v2DkgProof,
                                     ProofBlockHeight = v2ProofBlockHeight,
                                     CeremonyId = v2CeremonyId,
-                                    ImageBase = v2ImageBase
+                                    ImageBase = v2ImageBase,
+                                    IsS3C = v2IsS3C,
+                                    LinkedContractUID = v2LinkedContractUID
                                 };
 
                                 scFeature.FeatureName = FeatureName.TokenizationV2;

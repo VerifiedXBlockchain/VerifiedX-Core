@@ -75,6 +75,10 @@ namespace ReserveBlockCore.Config
         /// <summary>When true, enables casterlog.txt and caster-scoped validator console diagnostics.</summary>
         public bool CasterLog { get; set; }
 
+        // S3C (Self-Sovereign Smart Contracts)
+        public string? S3C { get; set; }            // minting node: comma-separated IP:ValidatorAddress pairs
+        public bool S3CValidator { get; set; }      // validator node: this validator is private/S3C-only
+
         public static Config ReadConfigFile()
         {
             var path = GetPathUtility.GetConfigPath();
@@ -184,6 +188,10 @@ namespace ReserveBlockCore.Config
 
                 config.CasterLog = dict.ContainsKey("CasterLog") ? Convert.ToBoolean(dict["CasterLog"]) : false;
 
+                // S3C — value may contain ':' and ',', preserved as the whole right-hand side.
+                config.S3C = dict.ContainsKey("S3C") ? dict["S3C"] : null;
+                config.S3CValidator = dict.ContainsKey("S3CValidator") ? Convert.ToBoolean(dict["S3CValidator"]) : false;
+
                 config.MotherAddress = dict.ContainsKey("MotherAddress") ? dict["MotherAddress"] : null;
                 config.MotherPassword = dict.ContainsKey("MotherPassword") ? dict["MotherPassword"] : null;
 
@@ -245,6 +253,15 @@ namespace ReserveBlockCore.Config
 			Globals.LogMemory = config.LogMemory;
 			Globals.BlockSeedCalls = config.BlockSeedCalls;
 			Globals.CasterLogEnabled = config.CasterLog;
+            Globals.IsS3CValidator = config.S3CValidator;
+            if (!string.IsNullOrEmpty(config.S3C))
+            {
+                if (Bitcoin.Services.S3CService.ParseAndValidate(config.S3C))
+                    Console.WriteLine($"[S3C] Self-Sovereign Smart Contract mode enabled with {Globals.S3CPool!.Count} validators.");
+                else
+                    Console.WriteLine("[S3C] S3C= present but INVALID — vBTC minting will refuse until corrected (see errors above).");
+            }
+
             Globals.BTCNetwork = NBitcoin.Network.Main;
 			Globals.SegwitP2SHStartPrefix = "3";
 			Globals.SegwitTaprootStartPrefix = "bc1";

@@ -83,7 +83,11 @@ namespace ReserveBlockCore.BrowserWalletServices
                         activeWithdrawalDest = contract?.ActiveWithdrawalBTCDestination ?? "",
                         proofBlockHeight = contract?.ProofBlockHeight ?? 0,
                         totalValidators = contract?.TotalRegisteredValidators ?? 0,
-                        requiredThreshold = contract?.RequiredThreshold ?? 0
+                        requiredThreshold = contract?.RequiredThreshold ?? 0,
+                        // S3C §1/§5.4 disclosure: surface IsS3C (resolved via state trei so transferees
+                        // holding no local record still see it) + the companion back-pointer for grouping.
+                        isS3C = Bitcoin.Services.VBTCService.ResolveContractIsS3C(scState.SmartContractUID),
+                        linkedContractUID = contract?.LinkedContractUID
                     });
                 }
             }
