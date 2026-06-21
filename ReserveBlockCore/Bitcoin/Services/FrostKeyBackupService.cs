@@ -246,6 +246,16 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
+                // S3C §8: residency — broadcast a contract's backup ONLY to its DKG snapshot
+                // members. Public contracts have public-only snapshots (behavior-preserving);
+                // legacy no-snapshot → leave as-is.
+                var snapAddrs = VBTCService.ResolveContractSnapshot(smartContractUID);
+                if (snapAddrs.Count > 0)
+                {
+                    var snapSet = new HashSet<string>(snapAddrs);
+                    validators = validators.Where(v => snapSet.Contains(v.ValidatorAddress)).ToList();
+                }
+
                 // Encrypt the key package
                 var (encryptedBlob, plaintextHash) = EncryptKeyPackage(validatorAddress, smartContractUID, keyStore);
                 if (string.IsNullOrEmpty(encryptedBlob) || string.IsNullOrEmpty(plaintextHash))
@@ -411,6 +421,14 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
+                // S3C §8: residency — broadcast a contract's backup ONLY to its DKG snapshot members.
+                var snapAddrs = VBTCService.ResolveContractSnapshot(smartContractUID);
+                if (snapAddrs.Count > 0)
+                {
+                    var snapSet = new HashSet<string>(snapAddrs);
+                    validators = validators.Where(v => snapSet.Contains(v.ValidatorAddress)).ToList();
+                }
+
                 // Encrypt first to get the plaintext hash for the check probe
                 var (encryptedBlob, plaintextHash) = EncryptKeyPackage(validatorAddress, smartContractUID, keyStore);
                 if (string.IsNullOrEmpty(encryptedBlob) || string.IsNullOrEmpty(plaintextHash))

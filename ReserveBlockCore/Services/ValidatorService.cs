@@ -363,6 +363,7 @@ namespace ReserveBlockCore.Services
                         FrostPublicKey = validator.PublicKey,
                         BaseAddress = Globals.ValidatorBaseAddress,
                         RegistrationBlockHeight = Globals.LastBlock.Height,
+                        IsS3C = Globals.IsS3CValidator,   // S3C §3.3/§3.4 — present on every register
                         Signature = signature
                     })
                 };
@@ -502,6 +503,7 @@ namespace ReserveBlockCore.Services
                         BaseAddress = Globals.ValidatorBaseAddress,
                         ReactivationBlockHeight = Globals.LastBlock.Height,
                         PreviousIPAddress = existingValidator.IPAddress,
+                        IsS3C = Globals.IsS3CValidator,   // S3C §3.3/§3.4 — present on every heartbeat
                         Signature = signature
                     })
                 };

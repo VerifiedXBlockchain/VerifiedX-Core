@@ -83,7 +83,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     baseValidators.Select(v => v.ToLowerInvariant()));
 
                 // Get active VFX validators with Base addresses
-                var vfxValidators = VBTCValidatorRegistry.GetActiveValidators();
+                var vfxValidators = VBTCValidatorRegistry.GetPublicValidators();
                 var vfxValidatorBaseAddresses = new Dictionary<string, string>();
 
                 foreach (var val in vfxValidators)
@@ -200,7 +200,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 signatures.Add(localSig);
 
             // Collect from remote validators via HTTP
-            var validators = VBTCValidatorRegistry.GetActiveValidators();
+            var validators = VBTCValidatorRegistry.GetPublicValidators();
             using var httpClient = Globals.HttpClientFactory.CreateClient();
             httpClient.Timeout = TimeSpan.FromSeconds(10);
 

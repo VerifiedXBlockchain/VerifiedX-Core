@@ -149,7 +149,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             record.Status = BridgeLockStatus.AttestationPending;
             BridgeLockRecord.Save(record);
 
-            var validators = VBTCValidatorRegistry.GetActiveValidators();
+            var validators = VBTCValidatorRegistry.GetPublicValidators();
             var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
 
             foreach (var v in validators)

@@ -3235,7 +3235,10 @@ namespace ReserveBlockCore.Data
                     Timestamp = tx.Timestamp,
                     TransactionHash = tx.Hash,
                     Status = VBTCWithdrawalStatus.Requested,
-                    IsCompleted = false
+                    IsCompleted = false,
+                    // S3C §0: stamp the mined block height — the consensus-deterministic value
+                    // all nodes agree on. Drives the per-contract anti-grief expiry gate.
+                    RequestBlockHeight = tx.Height
                 };
 
                 // Save the withdrawal request to the per-user tracking database
@@ -3513,11 +3516,13 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Verify voter is an active vBTC validator (tx.FromAddress is authoritative)
+                // S3C §7.4: voter must be active AND in the contract's DKG snapshot (or the public
+                // set for legacy no-snapshot contracts). Public→public-only; S3C→S3C-only.
+                var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID);
                 var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
-                if (validator == null || !validator.IsActive)
+                if (validator == null || !validator.IsActive || !voterSet.Contains(tx.FromAddress))
                 {
-                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: {tx.FromAddress} is not an active vBTC validator", "StateData.VoteOnVBTCV2Cancellation()");
+                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: {tx.FromAddress} is not an eligible voter for contract {cancellation.SmartContractUID}", "StateData.VoteOnVBTCV2Cancellation()");
                     return;
                 }
 
@@ -3531,9 +3536,9 @@ namespace ReserveBlockCore.Data
                 // Record the vote
                 VBTCWithdrawalCancellation.AddVote(cancellationUID, tx.FromAddress, approve);
 
-                // Check if 75% approval threshold reached
-                var activeValidators = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
-                var totalValidatorCount = activeValidators?.Count ?? 0;
+                // Check if 75% approval threshold reached. S3C §7.4: denominator = FULL snapshot
+                // count (dead snapshot validators still count; only snapshot members can vote).
+                var totalValidatorCount = voterSet.Count;
                 
                 if (totalValidatorCount > 0)
                 {

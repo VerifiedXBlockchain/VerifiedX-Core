@@ -304,3 +304,4 @@ deploy/typechain-types/
 .env
 .env.*
 .github/copilot-instructions.md
+CLAUDE.md

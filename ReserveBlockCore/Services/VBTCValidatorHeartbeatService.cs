@@ -227,6 +227,7 @@ namespace ReserveBlockCore.Services
                         BaseAddress = Globals.ValidatorBaseAddress,
                         ReactivationBlockHeight = Globals.LastBlock.Height,
                         PreviousIPAddress = previousIP,
+                        IsS3C = Globals.IsS3CValidator,   // S3C §3.3/§3.4 — present on every heartbeat
                         Signature = signature
                     })
                 };

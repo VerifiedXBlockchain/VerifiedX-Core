@@ -26,5 +26,15 @@ namespace ReserveBlockCore.Models.SmartContracts
         #region Visual
         public string? ImageBase { get; set; }
         #endregion
+
+        #region S3C (Self-Sovereign Smart Contracts)
+        // True if minted against a private S3C validator pool. Default false → backward
+        // compatible. Drives the vBTC.b bridge block (§6) and wallet/explorer disclosure (§1).
+        public bool IsS3C { get; set; }
+        // Only populated on a public companion contract, pointing at the S3C contract it
+        // bridges for (§5). Null on S3C contracts and ordinary public contracts. UX/provenance
+        // metadata only — no consensus meaning.
+        public string? LinkedContractUID { get; set; }
+        #endregion
     }
 }

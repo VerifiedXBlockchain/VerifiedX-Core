@@ -48,7 +48,7 @@ namespace ReserveBlockCore.Services
                 tip = 0;
 
             var anchor = SnapshotAnchor(nextBlockHeight);
-            var candidates = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
+            var candidates = Bitcoin.Services.VBTCValidatorRegistry.GetPublicValidators();
 
             var list = new List<ValidatorSnapshotEntry>();
             foreach (var v in candidates.OrderBy(x => x.ValidatorAddress, StringComparer.Ordinal))
