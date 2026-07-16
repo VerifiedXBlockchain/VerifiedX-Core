@@ -513,9 +513,21 @@ namespace ReserveBlockCore.Services
             {
                 if (!settings.CorrectShutdown)
                 {
-                    if(!Debugger.IsAttached && !skipStateSync)
+                    // ROOT-CAUSE FIX: An improper shutdown (crash / process kill — e.g. a non-graceful
+                    // wallet update) can interrupt a block commit between AddBlock (chain DB) and
+                    // UpdateTreis (AccountStateTrei DB). Those are separate, non-atomic LiteDB files, so
+                    // the block survives while its state mutations are lost — a permanent
+                    // "new account with no balance" hole that gets the node stuck on a later block.
+                    // The StateTreiStatus flag is only written by a full rebuild, so it stays stale-green
+                    // and can't detect this. Force an integrity rebuild: mark the state trie not-synced
+                    // so DownloadBlocksOnStart runs ResetTreis before syncing blocks.
+                    if (!Debugger.IsAttached && !skipStateSync && Globals.LastBlock.Height > 0)
                     {
-                        //await StateTreiSyncService.SyncAccountStateTrei();
+                        ErrorLogUtility.LogError(
+                            "[STARTUP] Improper shutdown detected — state trie may be inconsistent with the chain. " +
+                            "Flagging for full state rebuild (ResetTreis) before block sync.",
+                            "StartupService.RunSettingChecks");
+                        StateTreiStatusService.SetFailed("Improper shutdown — state trie integrity not guaranteed.");
                     }
                 }
 
@@ -1469,179 +1481,7 @@ namespace ReserveBlockCore.Services
 
             
         }
-
-        internal static async void ResetStateTreis()
-        {
-            var blockChain = BlockchainData.GetBlocks().FindAll();
-            var failCount = 0;
-            List<Block> failBlocks = new List<Block>();
-
-            var transactions = TransactionData.GetAll();
-            var stateTrei = StateData.GetAccountStateTrei();
-            var worldTrei = WorldTrei.GetWorldTrei();
-
-            transactions.DeleteAllSafe();//delete all local transactions
-            stateTrei.DeleteAllSafe(); //removes all state trei data
-            worldTrei.DeleteAllSafe();  //removes the state trei
-
-            DbContext.DB.Checkpoint();
-            DbContext.DB_AccountStateTrei.Checkpoint();
-            DbContext.DB_WorldStateTrei.Checkpoint();
-
-            var accounts = AccountData.GetAccounts();
-            var accountList = accounts.FindAll().ToList();
-            if (accountList.Count() > 0)
-            {
-                foreach (var account in accountList)
-                {
-                    account.Balance = 0M;
-                    accounts.UpdateSafe(account);//updating local record with synced state trei
-                }
-            }
-
-            foreach (var block in blockChain)
-            {
-                var result = await BlockchainRescanUtility.ValidateBlock(block, true);
-                if(result != false)
-                {
-                    await StateData.UpdateTreis(block);
-
-                    foreach (Transaction transaction in block.Transactions)
-                    {
-                        var mempool = TransactionData.GetPool();
-
-                        var mempoolTx = mempool.FindAll().Where(x => x.Hash == transaction.Hash).FirstOrDefault();
-                        if (mempoolTx != null)
-                        {
-                            mempool.DeleteManySafe(x => x.Hash == transaction.Hash);
-                            TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
-                        }
-
-                        var account = AccountData.GetAccounts().FindAll().Where(x => x.Address == transaction.ToAddress).FirstOrDefault();
-                        if (account != null)
-                        {
-                            AccountData.UpdateLocalBalanceAdd(transaction.ToAddress, transaction.Amount);
-                            var txdata = TransactionData.GetAll();
-                            txdata.InsertSafe(transaction);
-                        }
-
-                        //Adds sent TX to wallet
-                        var fromAccount = AccountData.GetAccounts().FindOne(x => x.Address == transaction.FromAddress);
-                        if (fromAccount != null)
-                        {
-                            var txData = TransactionData.GetAll();
-                            var fromTx = transaction;
-                            fromTx.Amount = transaction.Amount * -1M;
-                            fromTx.Fee = transaction.Fee * -1M;
-                            txData.InsertSafe(fromTx);
-                            await AccountData.UpdateLocalBalance(fromAccount.Address, (transaction.Amount + transaction.Fee));
-                        }
-                    }
-                }
-                else
-                {
-                    //issue with chain and must redownload
-                    failBlocks.Add(block);
-                    failCount++;
-                }
-            }
-
-            if(failCount == 0)
-            {
-                
-            }
-            else
-            {
-                //chain is invalid. Delete and redownload
-            }
-        }
-
-        internal static async void ResetChainToPoint()
-        {
-            var blockFixHeight = 19941;
-            var blocks = BlockchainData.GetBlocks();
-            var block = BlockchainData.GetBlockByHeight(blockFixHeight);
-            int failCount = 0;
-            if(block != null)
-            {
-                if(block.Hash == "baca9daedafe1b480927e6eefbd366380c0fa2191c444bd246d6f34b43393928")
-                {
-                    var stateTrei = StateData.GetAccountStateTrei();
-
-                    stateTrei.DeleteAllSafe();
-                    DbContext.DB_AccountStateTrei.Checkpoint();
-
-                    blocks.DeleteManySafe(x => x.Height >= blockFixHeight);
-                    DbContext.DB.Checkpoint();
-                    var blocksFromGenesis = blocks.Find(LiteDB.Query.All(LiteDB.Query.Ascending));
-
-                    foreach (var blk in blocksFromGenesis)
-                    {
-                        var result = await BlockchainRescanUtility.ValidateBlock(blk);
-                        if(result == false)
-                        {
-                            failCount++;
-                        }
-                    }
-
-                }
-                else
-                {
-                    //do nothing
-                }
-            }
-
-            if(failCount > 0)
-            {
-                Console.WriteLine("Resync Failed. Download whole chain.");
-            }
-            else
-            {
-                Console.WriteLine("Resync Completed.");
-            }
-        }
-
-        internal static void ClearSelfValidator()
-        {
-            var validators = Validators.Validator.GetAll();
-            var validator = validators.FindOne(x => x.NodeIP == "SELF");
-            if (validator != null)
-            {
-                var accounts = AccountData.GetAccounts();
-                var account = accounts.FindOne(x => x.Address == validator.Address);
-
-                if(account != null)
-                {
-                    account.IsValidating = false;
-                    accounts.UpdateSafe(account);
-                }
-                var isDeleted = validators.DeleteSafe(validator.Id);
-                if(isDeleted)
-                {
-                    DbContext.DB_Peers.Checkpoint();//commits from log file
-                    //success
-                }
-            }
-        }
-
-        internal static void OpenUpShop()
-        {
-            var decShop = DecShop.GetMyDecShopInfo();
-            if(decShop != null)
-            {
-                var message = new Message
-                {
-                    Address = decShop.OwnerAddress,
-                    Data = "",
-                    Type = MessageType.ShopConnect,
-                    Port = decShop.Port
-                };
-
-                //var messageSend = 
-
-
-            }
-        }
+      
 
         internal static async Task UpdateSCOwnership()
         {

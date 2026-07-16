@@ -51,7 +51,7 @@ namespace ReserveBlockCore.Data
             await aTrei.InsertBulkSafeAsync(accStTrei);
         }
 
-        public static async Task UpdateTreis(Block block)
+        public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
             var txList = block.Transactions.ToList();
@@ -583,6 +583,12 @@ namespace ReserveBlockCore.Data
 
             WorldTrei.UpdateWorldTrei(block);
             Globals.TreisUpdating = false;
+
+            // ROOT-CAUSE GUARD: Report whether every transaction's state mutation actually applied.
+            // A false here means the block was/will be committed to the chain while its state
+            // effects are missing — the exact condition that produces a permanent
+            // "new account with no balance" hole and gets a node stuck on a later block.
+            return txTreiUpdateSuccessCount == txCount;
         }
 
         public static async Task UpdateTreiFromReserve(List<ReserveTransactions> txList)

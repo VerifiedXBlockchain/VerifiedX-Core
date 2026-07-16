@@ -1186,7 +1186,22 @@ namespace ReserveBlockCore.Services
                         UpdateMemBlocksHashes(block);
                         CleanupMempoolAfterBlock(block);//cleanup duplicate withdrawal requests from mempool
 
-                        await StateData.UpdateTreis(block); //update treis
+                        var stateApplied = await StateData.UpdateTreis(block); //update treis
+                        if (!stateApplied)
+                        {
+                            // ROOT-CAUSE GUARD: The block was just committed to the chain DB, but one or
+                            // more of its transactions failed to apply to the state trie (the per-tx catch
+                            // in UpdateTreis swallowed an error). Block-add and state-update are not atomic
+                            // across the two LiteDB files, so this silently leaves a permanent hole that
+                            // later surfaces as "new account with no balance" and stalls the node.
+                            // Flag the state trie as dirty so it gets rebuilt (ResetTreis) instead of
+                            // running indefinitely on inconsistent state.
+                            ErrorLogUtility.LogError(
+                                $"[ValidateBlock] STATE-APPLY-INCOMPLETE: Block {block.Height} committed but not all " +
+                                $"transactions applied to the state trie. Flagging state trie for rebuild.",
+                                "BlockValidatorService.ValidateBlock()");
+                            StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
+                        }
                         await ReserveService.Run(); //updates treis for reserve pending txs
 
                         // Process vBTC V2 validator registration/exit transactions
