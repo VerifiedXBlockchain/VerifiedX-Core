@@ -1376,9 +1376,24 @@ namespace ReserveBlockCore.Services
                     }
                 }
                 if (!Globals.IsResyncing)
-                {                    
+                {
                     Globals.StopAllTimers = false;
                     Globals.IsChainSynced = true;
+
+                    // FRESH-SYNC BASELINE: a wallet that built its state by validating every block
+                    // from genesis never runs ResetTreis, so no StateTreiStatus record exists.
+                    // Without one, the snapshot cycle's dirty-state gate blocks forever and the
+                    // NEXT startup's integrity check would force a full ResetTreis. State built by
+                    // full validation is as trustworthy as a replay — record the baseline now.
+                    // (Never overwrites a Failed record: the startup gate resolved that before
+                    // block downloads began.)
+                    if (StateTreiStatusService.GetStatus() == null && Globals.LastBlock.Height > 0)
+                    {
+                        StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                        LogUtility.Log(
+                            $"[STARTUP] Fresh-synced chain — StateTreiStatus baseline recorded at height {Globals.LastBlock.Height}.",
+                            "StartupService.DownloadBlocksOnStart");
+                    }
 
                     // PEER-DISCOVERY: After sync completes, re-run chain-based peer discovery
                     // with the most up-to-date blocks to find all active validators.

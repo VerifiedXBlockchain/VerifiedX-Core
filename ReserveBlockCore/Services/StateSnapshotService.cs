@@ -203,10 +203,16 @@ namespace ReserveBlockCore.Services
             }
 
             // Never snapshot state that is flagged dirty/incomplete — a snapshot of corrupt
-            // state would just make recovery restore the corruption.
-            if (!StateTreiStatusService.IsSynced())
+            // state would just make recovery restore the corruption. A MISSING record is clean:
+            // any wallet with blocks and no/failed record is forced through restore/ResetTreis by
+            // the startup integrity gate before live blocks flow, so a null record on a synced,
+            // running node can only mean the state was built by full block validation from
+            // genesis (fresh sync) — as trustworthy as a replay. Only an explicit
+            // IsSynced=false (improper shutdown, incomplete state apply, failed rebuild) blocks.
+            var treiStatus = StateTreiStatusService.GetStatus();
+            if (treiStatus != null && !treiStatus.IsSynced)
             {
-                LogUtility.Log($"[Snapshot] Skipped cycle at {height}: state trei not flagged synced.", "StateSnapshotService");
+                LogUtility.Log($"[Snapshot] Skipped cycle at {height}: state trei flagged not synced ({treiStatus.LastFailureReason ?? "unknown"}).", "StateSnapshotService");
                 return Task.CompletedTask;
             }
 

@@ -267,6 +267,21 @@ namespace VerfiedXCore.Tests
             Assert.False(StateSnapshotService.HasValidSlot());
         }
 
+        [Fact]
+        public async Task UpdateCycle_RunsWhenNoStatusRecordExists()
+        {
+            // Fresh-sync wallets build state via full validation from genesis and never run
+            // ResetTreis, so no StateTreiStatus record exists — snapshots must still run.
+            _live.GetCollection("state_trei_status").DeleteAll();
+            Assert.Null(StateTreiStatusService.GetStatus());
+
+            SeedAccount("alice", 100m, stamp: 35);
+            await StateSnapshotService.UpdateCycleAsync(40);
+
+            Assert.True(StateSnapshotService.HasValidSlot());
+            Assert.Equal(40, StateSnapshotService.PickSlotForRestore(40)!.Height);
+        }
+
         // ── Restore-slot selection ──────────────────────────────────────────────────────────
 
         [Fact]
