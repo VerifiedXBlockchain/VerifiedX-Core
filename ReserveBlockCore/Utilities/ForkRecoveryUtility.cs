@@ -44,6 +44,12 @@ namespace ReserveBlockCore.Utilities
         /// <summary>After this many consecutive RecoverAsync failures, escalate to full ResetTreis.</summary>
         public const int ESCALATION_THRESHOLD = 3;
 
+        /// <summary>LOOP-BREAKER: Height of the last escalation snapshot restore. If escalation
+        /// fires again near the same height, the snapshot restore "succeeded" without actually
+        /// fixing sync (e.g., a fork deeper than every slot) — skip the restore and go straight
+        /// to the full ResetTreis rebuild instead of restoring the same bad slot forever.</summary>
+        private static long _lastEscalationRestoreHeight = -1;
+
         /// <summary>DOWNLOAD-PHASE: Set to true while GetAllBlocks() is running inside RecoverAsync.
         /// When true, ValidateBlock() should allow blocks through even though IsRecoveryInProgress is set,
         /// because these blocks are the ones we're downloading as part of recovery.</summary>
@@ -145,6 +151,36 @@ namespace ReserveBlockCore.Utilities
 
                     try
                     {
+                        // FAST PATH: restore state from a snapshot slot below the suspect region
+                        // and replay/re-download — seconds instead of a full genesis replay.
+                        // LOOP-BREAKER: if the last escalation already restored near this height
+                        // and we are stuck again, the snapshots aren't fixing it — ResetTreis.
+                        var restoreTarget = Math.Max(0, Globals.LastBlock.Height - blocksToRollback);
+                        var restoreAlreadyTried = _lastEscalationRestoreHeight >= 0
+                            && Math.Abs(restoreTarget - _lastEscalationRestoreHeight) <= 20;
+
+                        var restored = !restoreAlreadyTried && await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                        if (restored)
+                        {
+                            _lastEscalationRestoreHeight = restoreTarget;
+                            LogUtility.Log(
+                                $"[{caller}] FORK-RECOVERY-ESCALATION: Snapshot restore SUCCEEDED at height {restoreTarget}. " +
+                                $"Re-downloading tip...",
+                                $"{caller}.ForkRecovery");
+                            ConsoleWriterService.Output(
+                                $"[{caller}] FORK-RECOVERY-ESCALATION: Snapshot restore complete at height {restoreTarget}.");
+
+                            // Re-download the blocks above the restore point from peers.
+                            BanService.UnbanAllForForkRecovery();
+                            await Task.Delay(2000);
+                            await BlockDownloadService.GetAllBlocks();
+                            return true;
+                        }
+
+                        LogUtility.Log(
+                            $"[{caller}] FORK-RECOVERY-ESCALATION: No usable snapshot — falling back to ResetTreis().",
+                            $"{caller}.ForkRecovery");
+
                         var rebuilt = await BlockRollbackUtility.ResetTreis();
                         if (rebuilt)
                         {
@@ -155,6 +191,8 @@ namespace ReserveBlockCore.Utilities
                             ConsoleWriterService.Output(
                                 $"[{caller}] FORK-RECOVERY-ESCALATION: State rebuild complete. " +
                                 $"Now at height {Globals.LastBlock.Height}.");
+                            _lastEscalationRestoreHeight = -1; // fresh state — future snapshot restores allowed again
+                            await Services.StateSnapshotService.BootstrapAsync();
                             return true;
                         }
                         else
@@ -169,7 +207,7 @@ namespace ReserveBlockCore.Utilities
                     catch (Exception resetEx)
                     {
                         LogUtility.Log(
-                            $"[{caller}] FORK-RECOVERY-ESCALATION: ResetTreis threw exception: {resetEx.Message}",
+                            $"[{caller}] FORK-RECOVERY-ESCALATION: Recovery threw exception: {resetEx.Message}",
                             $"{caller}.ForkRecovery");
                         return false;
                     }

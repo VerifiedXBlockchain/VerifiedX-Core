@@ -1,5 +1,7 @@
+using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Services;
 using LiteDB;
 
@@ -39,6 +41,13 @@ namespace ReserveBlockCore.Utilities
                 var blocks = Block.GetBlocks();
                 blocks.DeleteManySafe(x => x.Height > newHeight);
                 DbContext.DB.Checkpoint();
+
+                // FAST PATH: restore from a snapshot slot at/below the rollback target and replay
+                // the tail — this is what upgrades every RollbackBlocksFast fallback (blocks with
+                // NFT/token/reserve/SC TXs) from a 45-min genesis replay to seconds.
+                var restored = await SnapshotRestoreUtility.TryRestoreAsync(newHeight, manageFlags: false);
+                if (restored)
+                    return true;
 
                 return await ResetTreis();
             }
@@ -198,49 +207,9 @@ namespace ReserveBlockCore.Utilities
                 DbContext.DB.Checkpoint();
                 DbContext.DB_AccountStateTrei.Checkpoint();
 
-                // Step 5: Update Globals.LastBlock to the new tip
-                var newLastBlock = BlockchainData.GetLastBlock();
-                if (newLastBlock != null)
-                {
-                    Globals.LastBlock = newLastBlock;
-                }
-                else
-                {
-                    LogUtility.Log($"[RollbackFast] WARNING: GetLastBlock returned null after rollback to height {targetHeight}.", "BlockRollback");
-                    // Fall back to genesis state
-                    Globals.LastBlock = new Block { Height = -1 };
-                }
-
-                // Step 6: Clear stale in-memory queues to prevent orphaned blocks from
-                // passing validation via Block.GetPreviousHash() after rollback.
-                // Without this, blocks referencing the rolled-back block's hash can still
-                // be validated and committed, creating gaps in the chain.
-                var queueKeysToRemove = Globals.NetworkBlockQueue.Keys.Where(k => k > targetHeight).ToList();
-                var removedQueueCount = 0;
-                foreach (var key in queueKeysToRemove)
-                {
-                    if (Globals.NetworkBlockQueue.TryRemove(key, out _))
-                        removedQueueCount++;
-                }
-
-                var broadcastKeysToRemove = Globals.BlockQueueBroadcasted.Keys.Where(k => k > targetHeight).ToList();
-                foreach (var key in broadcastKeysToRemove)
-                    Globals.BlockQueueBroadcasted.TryRemove(key, out _);
-
-                var backupKeysToRemove = Globals.BackupProofs.Keys.Where(k => k > targetHeight).ToList();
-                foreach (var key in backupKeysToRemove)
-                    Globals.BackupProofs.TryRemove(key, out _);
-
-                // Also clear BlockHashes for removed heights
-                var hashKeysToRemove = Globals.BlockHashes.Keys.Where(k => k > targetHeight).ToList();
-                foreach (var key in hashKeysToRemove)
-                    Globals.BlockHashes.TryRemove(key, out _);
-
-                LogUtility.Log(
-                    $"[RollbackFast] Cleared in-memory queues above height {targetHeight}: " +
-                    $"NetworkBlockQueue={removedQueueCount}, BlockQueueBroadcasted={broadcastKeysToRemove.Count}, " +
-                    $"BackupProofs={backupKeysToRemove.Count}, BlockHashes={hashKeysToRemove.Count}",
-                    "BlockRollback");
+                // Step 5 + 6: Update Globals.LastBlock to the new tip and clear stale in-memory
+                // queues (shared with SnapshotRestoreUtility).
+                RefreshInMemoryTip(targetHeight);
 
                 LogUtility.Log(
                     $"[RollbackFast] SUCCESS: Rolled back {numBlocksRollback} block(s). " +
@@ -269,6 +238,53 @@ namespace ReserveBlockCore.Utilities
                     Globals.StopAllTimers = false;
                 }
             }
+        }
+
+        /// <summary>
+        /// Sets Globals.LastBlock from the block store and clears stale in-memory queues above
+        /// the new tip. Without this, orphaned blocks referencing a removed block's hash can
+        /// still pass validation via Block.GetPreviousHash() and create gaps in the chain.
+        /// Shared by RollbackBlocksFast and SnapshotRestoreUtility.
+        /// </summary>
+        public static void RefreshInMemoryTip(long targetHeight)
+        {
+            var newLastBlock = BlockchainData.GetLastBlock();
+            if (newLastBlock != null)
+            {
+                Globals.LastBlock = newLastBlock;
+            }
+            else
+            {
+                LogUtility.Log($"[RefreshInMemoryTip] WARNING: GetLastBlock returned null after rewind to height {targetHeight}.", "BlockRollback");
+                // Fall back to genesis state
+                Globals.LastBlock = new Block { Height = -1 };
+            }
+
+            var queueKeysToRemove = Globals.NetworkBlockQueue.Keys.Where(k => k > targetHeight).ToList();
+            var removedQueueCount = 0;
+            foreach (var key in queueKeysToRemove)
+            {
+                if (Globals.NetworkBlockQueue.TryRemove(key, out _))
+                    removedQueueCount++;
+            }
+
+            var broadcastKeysToRemove = Globals.BlockQueueBroadcasted.Keys.Where(k => k > targetHeight).ToList();
+            foreach (var key in broadcastKeysToRemove)
+                Globals.BlockQueueBroadcasted.TryRemove(key, out _);
+
+            var backupKeysToRemove = Globals.BackupProofs.Keys.Where(k => k > targetHeight).ToList();
+            foreach (var key in backupKeysToRemove)
+                Globals.BackupProofs.TryRemove(key, out _);
+
+            var hashKeysToRemove = Globals.BlockHashes.Keys.Where(k => k > targetHeight).ToList();
+            foreach (var key in hashKeysToRemove)
+                Globals.BlockHashes.TryRemove(key, out _);
+
+            LogUtility.Log(
+                $"[RefreshInMemoryTip] Cleared in-memory queues above height {targetHeight}: " +
+                $"NetworkBlockQueue={removedQueueCount}, BlockQueueBroadcasted={broadcastKeysToRemove.Count}, " +
+                $"BackupProofs={backupKeysToRemove.Count}, BlockHashes={hashKeysToRemove.Count}",
+                "BlockRollback");
         }
 
         /// <summary>
@@ -304,6 +320,201 @@ namespace ReserveBlockCore.Utilities
                     // have complex state side-effects that can't be safely reversed
                     return false;
             }
+        }
+
+        /// <summary>
+        /// Wipes every chain-derived state collection (rebuildable by replaying blocks through
+        /// StateData.UpdateTreis) while preserving local data that CANNOT be rebuilt from the chain:
+        /// FROST validator keys/peer backups (rsrv_frost_validator_keys / rsrv_frost_peer_backups),
+        /// arbiter secret shares (DB_Shares), local bridge mint tracking (BridgeLockRecord), the
+        /// Base exit-scan cursor (BridgeExitSyncState), shielded wallets, reserve account keys,
+        /// and all wallet/keystore/bitcoin local data.
+        ///
+        /// Does NOT touch the block store, local wallet transactions (rsrv_transactions), or the
+        /// mempool — callers decide whether to wipe those (full genesis rebuild) or prune above a
+        /// height (snapshot restore). Shared by ResetTreis and SnapshotRestoreUtility.
+        /// </summary>
+        public static void WipeChainDerivedState()
+        {
+            // Core state treis (state_trei_status in the same file is intentionally preserved —
+            // it is managed by StateTreiStatusService, not derived from blocks)
+            var stateTrei = StateData.GetAccountStateTrei();
+            var worldTrei = WorldTrei.GetWorldTrei();
+            stateTrei.DeleteAllSafe();
+            worldTrei.DeleteAllSafe();
+
+            // Smart contract state — clear all collections (preserve structure)
+            try
+            {
+                if (DbContext.DB_SmartContractStateTrei != null)
+                {
+                    foreach (var name in DbContext.DB_SmartContractStateTrei.GetCollectionNames().ToList())
+                    {
+                        var coll = DbContext.DB_SmartContractStateTrei.GetCollection(name);
+                        coll.DeleteAll();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe SmartContractStateTrei: {ex.Message}");
+            }
+
+            // DecShop state — clear all collections (preserve structure)
+            try
+            {
+                if (DbContext.DB_DecShopStateTrei != null)
+                {
+                    foreach (var name in DbContext.DB_DecShopStateTrei.GetCollectionNames().ToList())
+                    {
+                        var coll = DbContext.DB_DecShopStateTrei.GetCollection(name);
+                        coll.DeleteAll();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DecShopStateTrei: {ex.Message}");
+            }
+
+            // Topic trei
+            try
+            {
+                var topicTrei = TopicTrei.GetTopics();
+                if (topicTrei != null) topicTrei.DeleteAllSafe();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe TopicTrei: {ex.Message}");
+            }
+
+            // Vote
+            try
+            {
+                var votes = Vote.GetVotes();
+                if (votes != null) votes.DeleteAllSafe();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe Vote: {ex.Message}");
+            }
+
+            // Token governance votes — chain-derived (written by TokenVoteTopicCast during
+            // UpdateTreis) but stored in the wallet DB file; previously missed, which left
+            // duplicate votes behind after every replay.
+            try
+            {
+                DbContext.DB_Wallet.GetCollection(DbContext.RSRV_TOKEN_VOTE).DeleteAll();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe TokenVote: {ex.Message}");
+            }
+
+            // DNR (Domain Name Records) — VFX and Bitcoin ADNRs share this file. The Bitcoin
+            // collection was previously missed, leaving stale BTC ADNRs to collide with replay.
+            try
+            {
+                var dnr = Adnr.GetAdnr();
+                if (dnr != null) dnr.DeleteAllSafe();
+                DbContext.DB_DNR.GetCollection(DbContext.RSRV_BITCOIN_ADNR).DeleteAll();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DNR/ADNR: {ex.Message}");
+            }
+
+            // Reserve transactions (chain-derived) — rsrv_reserve_account (local keys) is preserved
+            try
+            {
+                var reserveTxDb = ReserveTransactions.GetReserveTransactionsDb();
+                if (reserveTxDb != null) reserveTxDb.DeleteAllSafe();
+                DbContext.DB_Reserve.GetCollection(DbContext.RSRV_RESERVE_TRANSACTIONS_CALLED_BACK).DeleteAll();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe ReserveTransactions: {ex.Message}");
+            }
+
+            // vBTC V2 consensus state — named collections ONLY. This file also holds FROST
+            // signing keys, peer key backups, local bridge mint tracking, and the Base exit-scan
+            // cursor, none of which can be rebuilt from the chain. The previous wipe-all loop
+            // destroyed validator signing material on every rebuild.
+            try
+            {
+                if (DbContext.DB_vBTC != null)
+                {
+                    DbContext.DB_vBTC.GetCollection(DbContext.RSRV_VBTC_V2_CONTRACTS).DeleteAll();
+                    DbContext.DB_vBTC.GetCollection(DbContext.RSRV_VBTC_V2_CANCELLATIONS).DeleteAll();
+                    DbContext.DB_vBTC.GetCollection(DbContext.RSRV_VBTC_V2_VALIDATORS).DeleteAll();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_vBTC consensus collections: {ex.Message}");
+            }
+
+            // Tokenized withdrawals
+            try
+            {
+                if (DbContext.DB_TokenizedWithdrawals != null)
+                    DbContext.DB_TokenizedWithdrawals.GetCollection(DbContext.RSRV_TOKENIZED_WITHDRAWALS).DeleteAll();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_TokenizedWithdrawals: {ex.Message}");
+            }
+
+            // vBTC withdrawal requests + bridge lock/exit consensus state (all written from StateData)
+            try
+            {
+                if (DbContext.DB_VBTCWithdrawalRequests != null)
+                {
+                    DbContext.DB_VBTCWithdrawalRequests.GetCollection(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS).DeleteAll();
+                    DbContext.DB_VBTCWithdrawalRequests.GetCollection(VBTCBridgeLockState.CollectionName).DeleteAll();
+                    DbContext.DB_VBTCWithdrawalRequests.GetCollection(VBTCBridgeBtcExitState.CollectionName).DeleteAll();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_VBTCWithdrawalRequests: {ex.Message}");
+            }
+
+            // NOTE: DB_Shares (arbiter secret shares) is deliberately NOT wiped — it is local
+            // secret material, not chain-derived state, and was previously destroyed here in error.
+
+            // Shielded pool chain state — replay re-applies private TXs, and commitments insert
+            // blindly (no dedup), so skipping this wipe duplicates commitments and corrupts merkle
+            // roots. ShieldedWallets (local viewing/spend material) is intentionally preserved.
+            try
+            {
+                if (DbContext.DB_Privacy != null)
+                {
+                    DbContext.DB_Privacy.GetCollection(PrivacyDbContext.PRIV_COMMITMENTS).DeleteAll();
+                    DbContext.DB_Privacy.GetCollection(PrivacyDbContext.PRIV_NULLIFIERS).DeleteAll();
+                    DbContext.DB_Privacy.GetCollection(PrivacyDbContext.PRIV_POOL_STATE).DeleteAll();
+                    DbContext.DB_Privacy.GetCollection(PrivacyDbContext.PRIV_MERKLE_NODES).DeleteAll();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe shielded pool state: {ex.Message}");
+            }
+
+            // Checkpoint all touched databases
+            DbContext.DB_AccountStateTrei.Checkpoint();
+            DbContext.DB_WorldStateTrei.Checkpoint();
+            try { DbContext.DB_SmartContractStateTrei.Checkpoint(); } catch { }
+            try { DbContext.DB_DecShopStateTrei.Checkpoint(); } catch { }
+            try { DbContext.DB_TopicTrei.Checkpoint(); } catch { }
+            try { DbContext.DB_Vote.Checkpoint(); } catch { }
+            try { DbContext.DB_DNR.Checkpoint(); } catch { }
+            try { DbContext.DB_Reserve.Checkpoint(); } catch { }
+            try { DbContext.DB_Wallet.Checkpoint(); } catch { }
+            try { DbContext.DB_vBTC?.Checkpoint(); } catch { }
+            try { DbContext.DB_TokenizedWithdrawals?.Checkpoint(); } catch { }
+            try { DbContext.DB_VBTCWithdrawalRequests?.Checkpoint(); } catch { }
+            try { DbContext.DB_Privacy?.Checkpoint(); } catch { }
         }
 
         /// <summary>
@@ -347,92 +558,9 @@ namespace ReserveBlockCore.Utilities
                 // ═══════════════════════════════════════════════════════════════
                 Console.WriteLine("[ResetTreis] Step 1: Wiping chain-derived state databases...");
 
-                // Core state treis
+                // Local wallet transactions — full genesis replay rebuilds these in Step 4b.
                 var transactions = TransactionData.GetAll();
-                var stateTrei = StateData.GetAccountStateTrei();
-                var worldTrei = WorldTrei.GetWorldTrei();
-
                 transactions.DeleteAllSafe();
-                stateTrei.DeleteAllSafe();
-                worldTrei.DeleteAllSafe();
-
-                // Smart contract state — clear all collections (preserve structure)
-                try
-                {
-                    if (DbContext.DB_SmartContractStateTrei != null)
-                    {
-                        foreach (var name in DbContext.DB_SmartContractStateTrei.GetCollectionNames().ToList())
-                        {
-                            var coll = DbContext.DB_SmartContractStateTrei.GetCollection(name);
-                            coll.DeleteAll();
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe SmartContractStateTrei: {ex.Message}");
-                }
-
-                // DecShop state — clear all collections (preserve structure)
-                try
-                {
-                    if (DbContext.DB_DecShopStateTrei != null)
-                    {
-                        foreach (var name in DbContext.DB_DecShopStateTrei.GetCollectionNames().ToList())
-                        {
-                            var coll = DbContext.DB_DecShopStateTrei.GetCollection(name);
-                            coll.DeleteAll();
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DecShopStateTrei: {ex.Message}");
-                }
-
-                // Topic trei
-                try
-                {
-                    var topicTrei = TopicTrei.GetTopics();
-                    if (topicTrei != null) topicTrei.DeleteAllSafe();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe TopicTrei: {ex.Message}");
-                }
-
-                // Vote
-                try
-                {
-                    var votes = Vote.GetVotes();
-                    if (votes != null) votes.DeleteAllSafe();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe Vote: {ex.Message}");
-                }
-
-                // DNR (Domain Name Records)
-                try
-                {
-                    var dnr = Adnr.GetAdnr();
-                    if (dnr != null) dnr.DeleteAllSafe();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DNR/ADNR: {ex.Message}");
-                }
-
-                // Reserve transactions
-                try
-                {
-                    var reserveTxDb = ReserveTransactions.GetReserveTransactionsDb();
-                    if (reserveTxDb != null) reserveTxDb.DeleteAllSafe();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe ReserveTransactions: {ex.Message}");
-                }
 
                 // Mempool
                 try
@@ -445,89 +573,10 @@ namespace ReserveBlockCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe Mempool: {ex.Message}");
                 }
 
-                // vBTC / Bitcoin state databases — clear all collections (preserve structure)
-                // CRITICAL FIX: Use DeleteAll() instead of DropCollection() to avoid
-                // leaving AccountStateTrei and other collections empty after replay
-                try
-                {
-                    if (DbContext.DB_vBTC != null)
-                    {
-                        foreach (var name in DbContext.DB_vBTC.GetCollectionNames().ToList())
-                        {
-                            var coll = DbContext.DB_vBTC.GetCollection(name);
-                            coll.DeleteAll();
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_vBTC: {ex.Message}");
-                }
+                WipeChainDerivedState();
 
-                try
-                {
-                    if (DbContext.DB_TokenizedWithdrawals != null)
-                    {
-                        foreach (var name in DbContext.DB_TokenizedWithdrawals.GetCollectionNames().ToList())
-                        {
-                            var coll = DbContext.DB_TokenizedWithdrawals.GetCollection(name);
-                            coll.DeleteAll();
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_TokenizedWithdrawals: {ex.Message}");
-                }
-
-                try
-                {
-                    if (DbContext.DB_VBTCWithdrawalRequests != null)
-                    {
-                        foreach (var name in DbContext.DB_VBTCWithdrawalRequests.GetCollectionNames().ToList())
-                        {
-                            var coll = DbContext.DB_VBTCWithdrawalRequests.GetCollection(name);
-                            coll.DeleteAll();
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_VBTCWithdrawalRequests: {ex.Message}");
-                }
-
-                // Shares — clear all collections (preserve structure)
-                try
-                {
-                    if (DbContext.DB_Shares != null)
-                    {
-                        foreach (var name in DbContext.DB_Shares.GetCollectionNames().ToList())
-                        {
-                            var coll = DbContext.DB_Shares.GetCollection(name);
-                            coll.DeleteAll();
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ResetTreis] Warning: Could not wipe DB_Shares: {ex.Message}");
-                }
-
-                // Checkpoint all wiped databases
                 DbContext.DB.Checkpoint();
-                DbContext.DB_AccountStateTrei.Checkpoint();
-                DbContext.DB_WorldStateTrei.Checkpoint();
-                try { DbContext.DB_SmartContractStateTrei.Checkpoint(); } catch { }
-                try { DbContext.DB_DecShopStateTrei.Checkpoint(); } catch { }
-                try { DbContext.DB_TopicTrei.Checkpoint(); } catch { }
-                try { DbContext.DB_Vote.Checkpoint(); } catch { }
-                try { DbContext.DB_DNR.Checkpoint(); } catch { }
-                try { DbContext.DB_Reserve.Checkpoint(); } catch { }
                 try { DbContext.DB_Mempool.Checkpoint(); } catch { }
-                try { DbContext.DB_vBTC?.Checkpoint(); } catch { }
-                try { DbContext.DB_TokenizedWithdrawals?.Checkpoint(); } catch { }
-                try { DbContext.DB_VBTCWithdrawalRequests?.Checkpoint(); } catch { }
-                try { DbContext.DB_Shares?.Checkpoint(); } catch { }
 
                 Console.WriteLine("[ResetTreis] Step 1 complete — all state databases wiped.");
 

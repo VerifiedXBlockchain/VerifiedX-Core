@@ -48,6 +48,9 @@ namespace ReserveBlockCore.Services
         private static int _txFailCount = 0;
         /// <summary>After this many consecutive TX-validation failures (any height), trigger full state rebuild.</summary>
         public const int TX_FAIL_RECOVERY_THRESHOLD = 10;
+        /// <summary>Height of the last TX-fail-triggered snapshot restore. A repeat trigger near the
+        /// same height means the snapshot carries the corruption — escalate to ResetTreis instead.</summary>
+        private static long _lastTxFailRestoreHeight = -1;
 
         public static void UpdateMemBlocks(Block block)
         {
@@ -305,12 +308,12 @@ namespace ReserveBlockCore.Services
             // that GetAllBlocks() is running inside RecoverAsync() and blocks should
             // be validated normally.
             // ═══════════════════════════════════════════════════════════════
-            if (BlockRollbackUtility.IsResetTreisRunning)
+            if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning)
             {
-                return false; // Always block during full state rebuild — no exceptions
+                return false; // Always block during full state rebuild / snapshot restore — no exceptions
             }
 
-            if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress) 
+            if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress)
                 && !ForkRecoveryUtility.IsInDownloadPhase)
             {
                 return false; // Silent drop — recovery is in rollback phase, not download phase
@@ -321,7 +324,7 @@ namespace ReserveBlockCore.Services
             try
             {
                 // Double-check after acquiring semaphore (recovery may have started while waiting)
-                if (BlockRollbackUtility.IsResetTreisRunning)
+                if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning)
                 {
                     return false;
                 }
@@ -1128,14 +1131,40 @@ namespace ReserveBlockCore.Services
                                     // Reset counter before recovery
                                     _txFailCount = 0;
 
-                                    // Fire-and-forget full state rebuild
+                                    // Fire-and-forget state recovery: snapshot restore (seconds)
+                                    // first, full genesis rebuild only as fallback.
                                     _ = Task.Run(async () =>
                                     {
                                         try
                                         {
                                             await Task.Delay(100);
+
+                                            // If a snapshot restore already ran for TX failures near this
+                                            // height, the snapshot itself likely carries the corruption —
+                                            // skip straight to the full rebuild instead of looping.
+                                            var restoreTarget = Globals.LastBlock.Height;
+                                            var restoreAlreadyTried = _lastTxFailRestoreHeight >= 0
+                                                && Math.Abs(restoreTarget - _lastTxFailRestoreHeight) <= 20;
+
+                                            if (!restoreAlreadyTried)
+                                            {
+                                                LogUtility.Log(
+                                                    $"[ValidateBlock] STATE-REBUILD: Attempting snapshot restore to height {restoreTarget}...",
+                                                    "BlockValidatorService");
+                                                var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                                                if (restored)
+                                                {
+                                                    _lastTxFailRestoreHeight = restoreTarget;
+                                                    LogUtility.Log(
+                                                        $"[ValidateBlock] STATE-REBUILD-SUCCESS: Snapshot restore complete. " +
+                                                        $"Tip: height={Globals.LastBlock.Height}",
+                                                        "BlockValidatorService");
+                                                    return;
+                                                }
+                                            }
+
                                             LogUtility.Log(
-                                                $"[ValidateBlock] STATE-REBUILD: Starting full chain state rebuild via ResetTreis()...",
+                                                $"[ValidateBlock] STATE-REBUILD: No usable snapshot — starting full chain state rebuild via ResetTreis()...",
                                                 "BlockValidatorService");
                                             var rebuilt = await BlockRollbackUtility.ResetTreis();
                                             if (rebuilt)
@@ -1144,6 +1173,7 @@ namespace ReserveBlockCore.Services
                                                     $"[ValidateBlock] STATE-REBUILD-SUCCESS: Full state rebuild complete. " +
                                                     $"Tip: height={Globals.LastBlock.Height}",
                                                     "BlockValidatorService");
+                                                await StateSnapshotService.BootstrapAsync();
                                             }
                                             else
                                             {
@@ -1517,6 +1547,18 @@ namespace ReserveBlockCore.Services
                     await TransactionData.UpdateWalletTXTask();
 
                     //DbContext.Commit();
+
+                    // Roll the oldest snapshot slot forward every SnapshotCadence blocks so fork/crash
+                    // recovery can restore from a near-tip snapshot instead of a full genesis replay.
+                    // Runs synchronously inside the block-processing path (no concurrent UpdateTreis);
+                    // typical cost is well under a second. Gated off during initial download/resync.
+                    if (block.Height % StateSnapshotService.SnapshotCadence == 0
+                        && Globals.IsChainSynced
+                        && !Globals.IsResyncing
+                        && !BlockRollbackUtility.IsResetTreisRunning)
+                    {
+                        await StateSnapshotService.UpdateCycleAsync(block.Height, block.Hash);
+                    }
 
                     if (!validateOnly && !blockDownloads && ConsensusCertificateRules.SupportsConsensusCertificate(block.Version) && !Globals.IsBootstrapMode)
                         _ = ConsensusAttestationPublisher.PublishLocalAsync(block);

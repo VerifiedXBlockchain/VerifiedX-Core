@@ -1255,31 +1255,51 @@ namespace ReserveBlockCore.Services
                         }
                         else
                         {
-                            var reason = treiStatus == null 
-                                ? "no StateTreiStatus record found (state trie was wiped or never built)" 
+                            var reason = treiStatus == null
+                                ? "no StateTreiStatus record found (state trie was wiped or never built)"
                                 : $"IsSynced=false (last failure: {treiStatus.LastFailureReason ?? "unknown"})";
 
                             ConsoleWriterService.Output($"[STARTUP] State trie integrity check FAILED: {reason}");
-                            ConsoleWriterService.Output($"[STARTUP] Running full state rebuild (ResetTreis) before block downloads...");
-                            ConsoleWriterService.Output($"[STARTUP] This will replay {blockCount:N0} blocks. This may take a while...");
                             LogUtility.Log(
-                                $"[STARTUP] State trie not synced: {reason}. Running ResetTreis before block downloads.",
+                                $"[STARTUP] State trie not synced: {reason}. Attempting snapshot restore before falling back to ResetTreis.",
                                 "StartupService.DownloadBlocksOnStart");
 
-                            var rebuilt = await BlockRollbackUtility.ResetTreis();
-                            if (rebuilt)
+                            // FAST PATH: restore from a snapshot slot + replay the tail (seconds)
+                            // instead of a full genesis replay (~45 min). Crash-recovery case, so
+                            // the target is the current local tip.
+                            var restoreTarget = BlockchainData.GetLastBlock()?.Height ?? Globals.LastBlock.Height;
+                            var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                            if (restored)
                             {
-                                ConsoleWriterService.Output($"[STARTUP] State rebuild complete. Proceeding with block downloads.");
+                                ConsoleWriterService.Output($"[STARTUP] Snapshot restore complete at height {restoreTarget}. Proceeding with block downloads.");
                                 LogUtility.Log(
-                                    $"[STARTUP] ResetTreis succeeded. State trie is now synced at height {Globals.LastBlock.Height}.",
+                                    $"[STARTUP] Snapshot restore succeeded at height {restoreTarget}.",
                                     "StartupService.DownloadBlocksOnStart");
                             }
                             else
                             {
-                                ConsoleWriterService.Output($"[STARTUP] WARNING: State rebuild had errors. Block sync may fail.");
-                                ErrorLogUtility.LogError(
-                                    $"[STARTUP] ResetTreis returned false. State may still be inconsistent.",
-                                    "StartupService.DownloadBlocksOnStart");
+                                ConsoleWriterService.Output($"[STARTUP] No usable snapshot — running full state rebuild (ResetTreis) before block downloads...");
+                                ConsoleWriterService.Output($"[STARTUP] This will replay {blockCount:N0} blocks. This may take a while...");
+
+                                var rebuilt = await BlockRollbackUtility.ResetTreis();
+                                if (rebuilt)
+                                {
+                                    ConsoleWriterService.Output($"[STARTUP] State rebuild complete. Proceeding with block downloads.");
+                                    LogUtility.Log(
+                                        $"[STARTUP] ResetTreis succeeded. State trie is now synced at height {Globals.LastBlock.Height}.",
+                                        "StartupService.DownloadBlocksOnStart");
+
+                                    // Snapshot the freshly rebuilt state immediately so the
+                                    // genesis-replay work is never repeated.
+                                    await StateSnapshotService.BootstrapAsync();
+                                }
+                                else
+                                {
+                                    ConsoleWriterService.Output($"[STARTUP] WARNING: State rebuild had errors. Block sync may fail.");
+                                    ErrorLogUtility.LogError(
+                                        $"[STARTUP] ResetTreis returned false. State may still be inconsistent.",
+                                        "StartupService.DownloadBlocksOnStart");
+                                }
                             }
                         }
                     }
@@ -1288,6 +1308,10 @@ namespace ReserveBlockCore.Services
                         LogUtility.Log(
                             $"[STARTUP] State trie integrity check PASSED (synced at height {treiStatus.LastSyncedHeight}).",
                             "StartupService.DownloadBlocksOnStart");
+
+                        // First run after upgrade: state is verified good but no snapshot slot
+                        // exists yet — take the initial full snapshot now (no-op once slots exist).
+                        await StateSnapshotService.BootstrapAsync();
                     }
                 }
             }

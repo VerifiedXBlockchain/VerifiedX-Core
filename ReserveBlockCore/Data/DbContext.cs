@@ -46,6 +46,7 @@ namespace ReserveBlockCore.Data
         public static LiteDatabase DB_vBTC { set; get; } // stores vBTC V2 data (validators, contracts, cancellations)
         public static LiteDatabase DB_Shares { set; get; }
         public static LiteDatabase DB_Privacy { set; get; }
+        public static LiteDatabase DB_Snapshot { set; get; } //rotating chain-state snapshots for fast fork/crash recovery
 
 
         //Database names
@@ -77,6 +78,7 @@ namespace ReserveBlockCore.Data
         public const string RSRV_DB_VBTC = @"rsrvvbtc.db";
         public const string RSRV_DB_SHARES = @"rsrvshares.db";
         public const string RSRV_DB_PRIVACY = @"DB_Privacy.db";
+        public const string RSRV_DB_SNAPSHOT = @"rsrvsnapshot.db";
 
         //Database tables
         public const string RSRV_BLOCKCHAIN = "rsrv_blockchain";
@@ -137,6 +139,8 @@ namespace ReserveBlockCore.Data
         public const string RSRV_VBTC_V2_VALIDATORS = "rsrv_vbtc_v2_validators";
         public const string RSRV_VBTC_V2_CONTRACTS = "rsrv_vbtc_v2_contracts";
         public const string RSRV_VBTC_V2_CANCELLATIONS = "rsrv_vbtc_v2_cancellations";
+        public const string RSRV_SNAPSHOT_MANIFEST = "snapshot_manifest";
+        public const string RSRV_STATE_TOMBSTONES = "state_tombstones";
 
         internal static void Initialize()
         {
@@ -197,8 +201,12 @@ namespace ReserveBlockCore.Data
             transactions.EnsureIndexSafe(x => x.FromAddress, false);
             transactions.EnsureIndexSafe(x => x.ToAddress, false);
 
-            var aTrei = DbContext.DB_AccountStateTrei.GetCollection<AccountStateTrei>(DbContext.RSRV_ASTATE_TREI);            
+            var aTrei = DbContext.DB_AccountStateTrei.GetCollection<AccountStateTrei>(DbContext.RSRV_ASTATE_TREI);
             aTrei.EnsureIndexSafe(x => x.Key, false);
+            aTrei.EnsureIndexSafe(x => x.LastModifiedHeight, false); //snapshot diff-copy queries
+
+            var scTrei = DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI);
+            scTrei.EnsureIndexSafe(x => x.LastModifiedHeight, false); //snapshot diff-copy queries
 
             //var peers = DbContext.DB_Peers.GetCollection<Peers>(DbContext.RSRV_PEERS);
             //peers.EnsureIndex(x => x.PeerIP, true);
@@ -402,9 +410,19 @@ namespace ReserveBlockCore.Data
             File.Delete(path + RSRV_DB_BITCOIN);
             File.Delete(path + RSRV_DB_TOKENIZED_WITHDRAWALS);
             File.Delete(path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS);
-            File.Delete(path + RSRV_DB_VBTC);
-            File.Delete(path + RSRV_DB_SHARES);
-            File.Delete(path + RSRV_DB_PRIVACY);
+            File.Delete(path + RSRV_DB_SNAPSHOT);
+
+            // SECRET-BEARING FILES ARE NEVER DELETED — they hold local material that cannot be
+            // rebuilt from any chain:
+            //   rsrvvbtc.db    → FROST validator signing keys + peer key backups (guard real BTC)
+            //   rsrvshares.db  → arbiter secret shares
+            //   DB_Privacy.db  → ShieldedWallets viewing/spend keys
+            // Their chain-derived collections are cleared below AFTER the databases reopen,
+            // mirroring BlockRollbackUtility.WipeChainDerivedState's per-collection granularity.
+            // (Belt-and-braces: keep a pre-migration copy alongside, like the wallet backup.)
+            TryBackupSecretDbFile(path, RSRV_DB_VBTC);
+            TryBackupSecretDbFile(path, RSRV_DB_SHARES);
+            TryBackupSecretDbFile(path, RSRV_DB_PRIVACY);
 
             var mapper = new BsonMapper();
             mapper.RegisterType<DateTime>(
@@ -443,14 +461,51 @@ namespace ReserveBlockCore.Data
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            DB_Snapshot = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SNAPSHOT, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
 
             PrivacyDbContext.EnsurePrivacyIndexes(DB_Privacy);
+
+            // The preserved secret-bearing files still contain OLD-chain consensus state — clear
+            // only those collections (secrets stay): vBTC V2 contracts/cancellations/validators
+            // and the shielded pool chain state. rsrvshares.db holds no chain-derived collections.
+            try
+            {
+                DB_vBTC.GetCollection(RSRV_VBTC_V2_CONTRACTS).DeleteAll();
+                DB_vBTC.GetCollection(RSRV_VBTC_V2_CANCELLATIONS).DeleteAll();
+                DB_vBTC.GetCollection(RSRV_VBTC_V2_VALIDATORS).DeleteAll();
+
+                DB_Privacy.GetCollection(PrivacyDbContext.PRIV_COMMITMENTS).DeleteAll();
+                DB_Privacy.GetCollection(PrivacyDbContext.PRIV_NULLIFIERS).DeleteAll();
+                DB_Privacy.GetCollection(PrivacyDbContext.PRIV_POOL_STATE).DeleteAll();
+                DB_Privacy.GetCollection(PrivacyDbContext.PRIV_MERKLE_NODES).DeleteAll();
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error clearing old-chain consensus collections during migration: {ex.Message}", "DbContext.MigrateDbNewChainRef()");
+            }
 
             DB_Assets.Pragma("UTC_DATE", true);
             DB_AssetQueue.Pragma("UTC_DATE", true);
             DB_SmartContractStateTrei.Pragma("UTC_DATE", true);
             DB_TopicTrei.Pragma("UTC_DATE", true);
             DB_Vote.Pragma("UTC_DATE", true);
+        }
+
+        /// <summary>Copies a secret-bearing DB file to a timestamp-free "_premigration" sibling
+        /// before a chain-ref migration touches it. Best-effort — failure is logged, never thrown.</summary>
+        private static void TryBackupSecretDbFile(string path, string dbFileName)
+        {
+            try
+            {
+                var src = path + dbFileName;
+                if (!File.Exists(src)) return;
+                var bak = path + System.IO.Path.GetFileNameWithoutExtension(dbFileName) + "_premigration.db";
+                File.Copy(src, bak, overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Could not back up {dbFileName} before migration: {ex.Message}", "DbContext.TryBackupSecretDbFile()");
+            }
         }
 
         public static void CloseDB()
@@ -483,6 +538,7 @@ namespace ReserveBlockCore.Data
             DB_vBTC.Dispose();
             DB_Shares.Dispose();
             DB_Privacy.Dispose();
+            DB_Snapshot.Dispose();
         }
 
         public static async Task CheckPoint()

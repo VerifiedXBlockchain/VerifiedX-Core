@@ -59,7 +59,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         [BsonIgnore]
         public long RemainingAmountSats => AmountSats - UnlockedAmountSats;
 
-        private const string CollectionName = "rsrv_vbtc_bridge_locks";
+        public const string CollectionName = "rsrv_vbtc_bridge_locks";
 
         public static ILiteCollection<VBTCBridgeLockState> GetCollection()
         {

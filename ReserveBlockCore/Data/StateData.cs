@@ -54,6 +54,7 @@ namespace ReserveBlockCore.Data
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
+            StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();
             int txTreiUpdateSuccessCount = 0;
@@ -581,7 +582,16 @@ namespace ReserveBlockCore.Data
                 ErrorLogUtility.LogError($"TX Success Count Failed to match tx Count. TX Fail List: {txFailListJson}", "StateData.UpdateTreis() - Part 3");
             }
 
-            WorldTrei.UpdateWorldTrei(block);
+            try
+            {
+                WorldTrei.UpdateWorldTrei(block);
+            }
+            finally
+            {
+                // A stale (too-low) StateWriteContext height would make later out-of-band writes
+                // under-stamp and be missed by snapshot diffs — always clear, even on throw.
+                StateWriteContext.Clear();
+            }
             Globals.TreisUpdating = false;
 
             // ROOT-CAUSE GUARD: Report whether every transaction's state mutation actually applied.

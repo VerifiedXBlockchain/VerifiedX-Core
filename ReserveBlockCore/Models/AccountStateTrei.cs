@@ -15,6 +15,14 @@ namespace ReserveBlockCore.Models
         public string CodeHash { get; set; }
         public List<TokenAccount>? TokenAccounts { get; set; }
 
+        /// <summary>
+        /// Block height at which this record was last inserted/updated. Stamped automatically by
+        /// the typed overloads in <see cref="Extensions.StateTreiStampExtensions"/> and used by
+        /// StateSnapshotService to diff-copy only changed records into snapshot slots.
+        /// Legacy records without the field deserialize as 0 (always older than any snapshot).
+        /// </summary>
+        public long LastModifiedHeight { get; set; }
+
         public static decimal GetAccountBalance(string address)
         {
             var balance = 0.00M;

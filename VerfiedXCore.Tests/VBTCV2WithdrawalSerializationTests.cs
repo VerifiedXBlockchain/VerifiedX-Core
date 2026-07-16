@@ -14,6 +14,7 @@ namespace VerfiedXCore.Tests
     /// gate sites (TransactionValidatorService, BlockTransactionValidatorService, VBTCController)
     /// all delegate the decision to this helper, so testing it covers the rule itself.
     /// </summary>
+    [Collection("DbContextSequential")]
     public class VBTCV2WithdrawalSerializationTests : IDisposable
     {
         private readonly string _dbPath;
