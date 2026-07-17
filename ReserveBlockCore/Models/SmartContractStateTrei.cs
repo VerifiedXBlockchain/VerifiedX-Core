@@ -24,6 +24,14 @@ namespace ReserveBlockCore.Models
         public TokenDetails? TokenDetails { get; set; }
         public List<SmartContractStateTreiTokenizationTX>? SCStateTreiTokenizationTXes { get; set; }
 
+        /// <summary>
+        /// Block height at which this record was last inserted/updated. Stamped automatically by
+        /// the typed overloads in <see cref="Extensions.StateTreiStampExtensions"/> and used by
+        /// StateSnapshotService to diff-copy only changed records into snapshot slots.
+        /// Legacy records without the field deserialize as 0 (always older than any snapshot).
+        /// </summary>
+        public long LastModifiedHeight { get; set; }
+
         public static LiteDB.ILiteCollection<SmartContractStateTrei> GetSCST()
         {
             var scs = DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI);
@@ -111,6 +119,10 @@ namespace ReserveBlockCore.Models
             var scs = GetSCST();
 
             scs.DeleteManySafe(x => x.SmartContractUID == scMain.SmartContractUID);
+
+            // Snapshot diff queries can't see deletions — record a tombstone so
+            // StateSnapshotService propagates the delete into snapshot slots.
+            StateTombstone.Record(StateTombstone.COLL_SCSTATE, scMain.SmartContractUID);
         }
     }
 }

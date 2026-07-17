@@ -281,6 +281,12 @@ namespace ReserveBlockCore.P2P
         private static ConcurrentDictionary<string, bool> ConnectLock = new ConcurrentDictionary<string, bool>();
         private static async Task Connect(Peers peer)
         {
+            // FIX: Early MaxPeers check to prevent over-connection from parallel fire-and-forget calls.
+            // Without this, multiple parallel Connect() calls launched by ParallelLoop can all pass
+            // the initial Diff check in ConnectToPeers but complete after the limit is already reached.
+            if (Globals.Nodes.Count >= Globals.MaxPeers)
+                return;
+
             var url = "http://" + peer.PeerIP + ":" + Globals.Port + "/blockchain";
             try
             {
@@ -354,6 +360,14 @@ namespace ReserveBlockCore.P2P
                     peer.WalletVersion = safeVersion;
                     node.WalletVersion = safeVersion;
 
+                    // FIX: Re-check MaxPeers before adding — another parallel Connect() may have
+                    // filled the remaining slots since our initial check at method entry.
+                    if (Globals.Nodes.Count >= Globals.MaxPeers)
+                    {
+                        await hubConnection.DisposeAsync();
+                        return;
+                    }
+
                     Globals.Nodes.TryAdd(IPAddress, node);
 
                     if (Globals.Nodes.TryGetValue(IPAddress, out var currentNode))
@@ -402,16 +416,14 @@ namespace ReserveBlockCore.P2P
 
             await DropDisconnectedPeers();            
 
+            // FIX: Removed Globals.ReportedIPs from skip set — ReportedIPs contains external IPs
+            // that peers report back to us (our own IP as seen by them). Including them in the
+            // skip set was incorrectly preventing connections to legitimate peers whose IP happened
+            // to match an entry in ReportedIPs.
             var SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
-
-            if (Globals.IsTestNet)
-                SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-                .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
+                .Union(Globals.ReportedIPs.Keys)
+                .Union(Globals.SkipPeers.Keys));
 
             Random rnd = new Random();
             var newPeers = peerDB.Find(x => x.IsOutgoing == true).ToArray()

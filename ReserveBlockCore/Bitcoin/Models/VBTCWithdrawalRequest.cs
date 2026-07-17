@@ -22,6 +22,12 @@ namespace ReserveBlockCore.Bitcoin.Models
         public bool IsCompleted { get; set; }
         public VBTCWithdrawalStatus Status { get; set; }
         public string? BTCTxHash { get; set; }
+        // S3C §0: block height the request was mined at (0 = submitted but not yet mined).
+        // Drives the per-contract anti-grief expiry in HasActiveContractRequest.
+        public long RequestBlockHeight { get; set; }
+
+        // S3C §0: ~1 hour at ~10s/block; matches the existing 1-hour FROST ceremony TTL.
+        public const long EXPIRY_BLOCKS = 360;
 
         #region Get DB
         public static LiteDB.ILiteCollection<VBTCWithdrawalRequest>? GetVBTCWithdrawalRequestDb()
@@ -84,6 +90,42 @@ namespace ReserveBlockCore.Bitcoin.Models
                 .ToList();
 
             return incompleteRequests.Any();
+        }
+        #endregion
+
+        #region Per-Contract Active Request Gate (S3C §0)
+        /// <summary>
+        /// S3C §0: per-CONTRACT active-withdrawal gate (not per-user). Returns true if the
+        /// contract has ANY incomplete withdrawal request that still blocks new requests.
+        /// A request blocks iff its RequestBlockHeight is unset (0 = submitted, not yet mined —
+        /// fail toward locked so it cannot slip the mempool race) OR it is still inside the
+        /// EXPIRY_BLOCKS anti-grief window. Older incomplete requests are non-blocking; the
+        /// next valid request overwrites them. Stuck requests are recovered via the existing
+        /// cancellation vote.
+        /// </summary>
+        /// <param name="currentHeight">Height to measure expiry against — Globals.LastBlock.Height
+        /// at mempool/API time, the block-being-validated's height during block validation
+        /// (must be the block height, not the chain tip, so replay stays deterministic).</param>
+        public static bool HasActiveContractRequest(string scUID, long currentHeight)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+            {
+                ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.HasActiveContractRequest()");
+                return false;
+            }
+
+            var incompleteRequests = vwrDb.Query()
+                .Where(x => x.SmartContractUID == scUID && !x.IsCompleted)
+                .ToList();
+
+            foreach (var r in incompleteRequests)
+            {
+                if (r.RequestBlockHeight == 0 || currentHeight - r.RequestBlockHeight <= EXPIRY_BLOCKS)
+                    return true;
+            }
+
+            return false;
         }
         #endregion
 
@@ -158,6 +200,10 @@ namespace ReserveBlockCore.Bitcoin.Models
                 existingRequest.TransactionHash = request.TransactionHash;
                 existingRequest.IsCompleted = request.IsCompleted;
                 existingRequest.BTCTxHash = request.BTCTxHash;
+                // S3C §0: persist the mined block height when StateData updates the record at
+                // mine time; never zero it back out on later completion/cancellation saves.
+                if (request.RequestBlockHeight > 0)
+                    existingRequest.RequestBlockHeight = request.RequestBlockHeight;
 
                 vwrDb.UpdateSafe(existingRequest);
                 return true;

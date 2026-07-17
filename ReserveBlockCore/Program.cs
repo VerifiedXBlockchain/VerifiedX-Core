@@ -46,6 +46,7 @@ namespace ReserveBlockCore
             bool startGUI = false;
             bool headlessMode = false;
             long? revertToHeight = null;
+            bool rebuildStateRequested = false;
 
             var argList = args.ToList();
             // Exact "snapshot" = cold chain DB checkpoint + copy under the DB folder (excludes wallet DBs).
@@ -279,6 +280,14 @@ namespace ReserveBlockCore
                             Console.WriteLine($"[REVERT] Will revert chain to height {revertToHeight} after DB initialization.");
                         }
                     }
+                    if (argC == "rebuildstate")
+                    {
+                        // Explicit operator opt-in to a full genesis state replay (ResetTreis).
+                        // This is the ONLY way the multi-hour rebuild can run — it is never
+                        // triggered automatically.
+                        rebuildStateRequested = true;
+                        Console.WriteLine($"[REBUILD] Manual full state rebuild (rebuildstate) requested.");
+                    }
                     if(argC.Contains("ipaddress"))
                     {
                         var ipSplit = argC.Split(new char[] { '=' });
@@ -414,36 +423,62 @@ namespace ReserveBlockCore
 
             await DbContext.CheckPoint(); //checkpoints db log files
 
-            // STARTUP REVERT: If revertblock=N was passed, delete all blocks/headers above N
-            // and rebuild state from genesis before the rest of startup reads chain state.
+            // STARTUP REVERT: If revertblock=N was passed, revert chain + state to height N.
+            // Snapshot restore handles block deletion itself, so nothing is destroyed unless
+            // recovery to the target is actually possible. A revert below every snapshot slot is
+            // REFUSED unless the operator also passes `rebuildstate` (explicit opt-in to the
+            // multi-hour genesis replay) — this prevents an out-of-range target from deleting
+            // millions of blocks with no fast way back.
             if (revertToHeight.HasValue)
             {
                 Console.WriteLine($"[REVERT] Reverting chain to height {revertToHeight.Value}...");
                 try
                 {
-                    // 1. Delete blocks above target from block store (rsrvblkdata.db)
-                    var revertBlocks = Block.GetBlocks();
-                    var deletedBlocks = revertBlocks.DeleteManySafe(x => x.Height > revertToHeight.Value);
-                    DbContext.DB.Checkpoint();
+                    var reverted = await SnapshotRestoreUtility.TryRestoreAsync(revertToHeight.Value);
+                    if (reverted)
+                    {
+                        // Trim blockchain headers to match the reverted block store.
+                        var revertBlockchain = Blockchain.GetBlockchain();
+                        var deletedHeaders = revertBlockchain?.DeleteManySafe(x => x.Height > revertToHeight.Value) ?? 0;
+                        DbContext.DB_Blockchain.Checkpoint();
 
-                    // 2. Delete blockchain headers above target (rsrvblockchain.db)
-                    var revertBlockchain = Blockchain.GetBlockchain();
-                    var deletedHeaders = revertBlockchain?.DeleteManySafe(x => x.Height > revertToHeight.Value) ?? 0;
-                    DbContext.DB_Blockchain.Checkpoint();
+                        Console.WriteLine($"[REVERT] State restored from snapshot at height {revertToHeight.Value} ({deletedHeaders} header(s) trimmed). Continuing normal startup...");
+                    }
+                    else if (rebuildStateRequested)
+                    {
+                        Console.WriteLine($"[REVERT] No snapshot covers height {revertToHeight.Value} — rebuildstate passed, running full revert + genesis replay...");
 
-                    Console.WriteLine($"[REVERT] Deleted {deletedBlocks} block(s) and {deletedHeaders} blockchain header(s) above height {revertToHeight.Value}.");
+                        var revertBlocks = Block.GetBlocks();
+                        var deletedBlocks = revertBlocks.DeleteManySafe(x => x.Height > revertToHeight.Value);
+                        DbContext.DB.Checkpoint();
 
-                    //Add this back when we are ready to test full revert.
-                    // 3. Rebuild all state (transactions, account balances, world trei) from remaining blocks
-                    Console.WriteLine($"[REVERT] Rebuilding state from genesis... (this may take a while for long chains)");
-                    var resetResult = await BlockRollbackUtility.ResetTreis();
-                    Console.WriteLine($"[REVERT] State rebuild {(resetResult ? "succeeded" : "FAILED")}. Continuing normal startup...");
+                        var revertBlockchain = Blockchain.GetBlockchain();
+                        var deletedHeaders = revertBlockchain?.DeleteManySafe(x => x.Height > revertToHeight.Value) ?? 0;
+                        DbContext.DB_Blockchain.Checkpoint();
+
+                        Console.WriteLine($"[REVERT] Deleted {deletedBlocks} block(s) and {deletedHeaders} header(s) above height {revertToHeight.Value}. Rebuilding state from genesis (this may take a long time)...");
+                        var resetResult = await BlockRollbackUtility.ResetTreis();
+                        Console.WriteLine($"[REVERT] State rebuild {(resetResult ? "succeeded" : "FAILED")}. Continuing normal startup...");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[REVERT] REFUSED: no snapshot slot covers height {revertToHeight.Value} and rebuildstate was not passed.");
+                        Console.WriteLine($"[REVERT] Nothing was deleted. To force a full revert + genesis state replay (can take an hour or more),");
+                        Console.WriteLine($"[REVERT] restart with BOTH arguments: revertblock={revertToHeight.Value} rebuildstate");
+                    }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[REVERT] ERROR during revert: {ex.Message}");
                     Console.WriteLine($"[REVERT] The node may be in an inconsistent state. Consider using snapshot recovery.");
                 }
+            }
+            else if (rebuildStateRequested)
+            {
+                // Standalone manual rebuild — the only remaining entry point to ResetTreis.
+                Console.WriteLine($"[REBUILD] Running operator-requested full state rebuild (ResetTreis)...");
+                var resetResult = await BlockRollbackUtility.ResetTreis();
+                Console.WriteLine($"[REBUILD] State rebuild {(resetResult ? "succeeded" : "FAILED")}. Continuing normal startup...");
             }
 
             await VFXLogging.ClearElmah();

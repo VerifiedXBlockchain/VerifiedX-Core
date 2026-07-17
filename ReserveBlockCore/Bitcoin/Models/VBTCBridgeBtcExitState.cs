@@ -20,7 +20,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         public bool IsComplete { get; set; }
         public string? BtcTxHash { get; set; }
 
-        private const string CollectionName = "rsrv_vbtc_bridge_btc_exits";
+        public const string CollectionName = "rsrv_vbtc_bridge_btc_exits";
 
         public static ILiteCollection<VBTCBridgeBtcExitState> GetCollection()
         {

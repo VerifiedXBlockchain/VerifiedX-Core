@@ -673,12 +673,12 @@ namespace ReserveBlockCore.Services
                             return;
                         }
 
-                        // FIND-002 FIX: Check if THIS USER already has an active withdrawal request for this contract
-                        // (Per-user tracking, not contract-level)
-                        var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requesterAddress, scUID);
-                        if (existingRequest != null)
+                        // S3C §0: per-CONTRACT active-withdrawal gate (was per-user). Measure
+                        // expiry against the block's own height so the rule stays deterministic
+                        // under block replay/sync (NOT the chain tip).
+                        if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, blockHeight))
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: User {requesterAddress} already has an active withdrawal request for contract {scUID}", 
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: contract {scUID} already has an active withdrawal",
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             var txdata = TransactionData.GetAll();
                             tx.TransactionStatus = TransactionStatus.Invalid;
@@ -1019,6 +1019,22 @@ namespace ReserveBlockCore.Services
                 {
                     try
                     {
+                        // S3C §6.3: reject a bridge-lock for an S3C contract at block validation too
+                        // (IsS3C read from state trei) — defense against a malicious-producer bypass.
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
+                        {
+                            var blScUID = JObject.Parse(tx.Data)["ContractUID"]?.ToObject<string>();
+                            if (!string.IsNullOrEmpty(blScUID) && Bitcoin.Services.VBTCService.ResolveContractIsS3C(blScUID))
+                            {
+                                SCLogUtility.Log($"VBTC_V2_BRIDGE_LOCK rejected: S3C contract {blScUID} cannot bridge",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdataInv = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdataInv.InsertSafe(tx);
+                                return;
+                            }
+                        }
+
                         var txdataSuccess = TransactionData.GetAll();
                         tx.TransactionStatus = TransactionStatus.Success;
                         txdataSuccess.InsertSafe(tx);

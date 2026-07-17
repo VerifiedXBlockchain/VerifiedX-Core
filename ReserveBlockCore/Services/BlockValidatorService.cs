@@ -48,6 +48,19 @@ namespace ReserveBlockCore.Services
         private static int _txFailCount = 0;
         /// <summary>After this many consecutive TX-validation failures (any height), trigger full state rebuild.</summary>
         public const int TX_FAIL_RECOVERY_THRESHOLD = 10;
+        /// <summary>Height of the last TX-fail-triggered snapshot restore. A repeat trigger near the
+        /// same height means the snapshot carries the corruption — recovery is exhausted (manual
+        /// 'rebuildstate' required) instead of looping restores.</summary>
+        private static long _lastTxFailRestoreHeight = -1;
+
+        /// <summary>STATE PROBATION: consecutive cleanly-committed blocks while the state trie is
+        /// flagged unverified. Automatic rebuilds are disabled, so a node whose flag is dirty but
+        /// whose state is actually fine (e.g. crash before its first snapshot existed) re-earns
+        /// SetSynced after this streak — every committed block is consensus-validated against the
+        /// state, so a clean streak is direct evidence of consistency. Resumes snapshot protection.</summary>
+        private static int _cleanBlockStreak = 0;
+        private static bool _stateStatusVerified = false;
+        public const int STATE_PROBATION_BLOCKS = 50;
 
         public static void UpdateMemBlocks(Block block)
         {
@@ -305,12 +318,12 @@ namespace ReserveBlockCore.Services
             // that GetAllBlocks() is running inside RecoverAsync() and blocks should
             // be validated normally.
             // ═══════════════════════════════════════════════════════════════
-            if (BlockRollbackUtility.IsResetTreisRunning)
+            if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning)
             {
-                return false; // Always block during full state rebuild — no exceptions
+                return false; // Always block during full state rebuild / snapshot restore — no exceptions
             }
 
-            if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress) 
+            if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress)
                 && !ForkRecoveryUtility.IsInDownloadPhase)
             {
                 return false; // Silent drop — recovery is in rollback phase, not download phase
@@ -321,7 +334,7 @@ namespace ReserveBlockCore.Services
             try
             {
                 // Double-check after acquiring semaphore (recovery may have started while waiting)
-                if (BlockRollbackUtility.IsResetTreisRunning)
+                if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning)
                 {
                     return false;
                 }
@@ -753,6 +766,11 @@ namespace ReserveBlockCore.Services
                         // Initialize dictionary with current state nonces for all addresses in block
                         var processedNonces = new Dictionary<string, long>();
                         var blockPrivateNullifierKeys = new HashSet<string>();
+                        // S3C §0: block-scoped per-contract withdrawal serialization. Per-tx
+                        // validation can't see sibling txs, so a malicious producer could place two
+                        // VBTC_V2_WITHDRAWAL_REQUESTs for the same contract in one block. Track the
+                        // contracts seen here and reject the second (mirrors blockPrivateNullifierKeys).
+                        var blockWithdrawalContracts = new HashSet<string>();
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -784,6 +802,18 @@ namespace ReserveBlockCore.Services
                                 {
                                     if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(blkTransaction, blockPrivateNullifierKeys, out var nulErr))
                                         effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
+                                }
+
+                                // S3C §0: enforce one withdrawal request per contract within a block.
+                                if (effectiveTxResult.Item1 && blkTransaction.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                                {
+                                    try
+                                    {
+                                        var wScUID = JObject.Parse(blkTransaction.Data)["ContractUID"]?.ToObject<string>();
+                                        if (!string.IsNullOrEmpty(wScUID) && !blockWithdrawalContracts.Add(wScUID))
+                                            effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wScUID} within block.");
+                                    }
+                                    catch { }
                                 }
 
                                 if(effectiveTxResult.Item1 == false)
@@ -1111,30 +1141,50 @@ namespace ReserveBlockCore.Services
                                     // Reset counter before recovery
                                     _txFailCount = 0;
 
-                                    // Fire-and-forget full state rebuild
+                                    // Fire-and-forget state recovery: snapshot restore (seconds)
+                                    // first, full genesis rebuild only as fallback.
                                     _ = Task.Run(async () =>
                                     {
                                         try
                                         {
                                             await Task.Delay(100);
-                                            LogUtility.Log(
-                                                $"[ValidateBlock] STATE-REBUILD: Starting full chain state rebuild via ResetTreis()...",
+
+                                            // If a snapshot restore already ran for TX failures near this
+                                            // height, the snapshot itself likely carries the corruption —
+                                            // skip straight to the full rebuild instead of looping.
+                                            var restoreTarget = Globals.LastBlock.Height;
+                                            var restoreAlreadyTried = _lastTxFailRestoreHeight >= 0
+                                                && Math.Abs(restoreTarget - _lastTxFailRestoreHeight) <= 20;
+
+                                            if (!restoreAlreadyTried)
+                                            {
+                                                LogUtility.Log(
+                                                    $"[ValidateBlock] STATE-REBUILD: Attempting snapshot restore to height {restoreTarget}...",
+                                                    "BlockValidatorService");
+                                                var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                                                if (restored)
+                                                {
+                                                    _lastTxFailRestoreHeight = restoreTarget;
+                                                    LogUtility.Log(
+                                                        $"[ValidateBlock] STATE-REBUILD-SUCCESS: Snapshot restore complete. " +
+                                                        $"Tip: height={Globals.LastBlock.Height}",
+                                                        "BlockValidatorService");
+                                                    return;
+                                                }
+                                            }
+
+                                            // NO AUTOMATIC REBUILD: snapshot recovery is exhausted (no usable
+                                            // slot, or a restore already ran and TX failures persist — the
+                                            // snapshot likely carries the corruption). The multi-hour genesis
+                                            // replay is operator-only. Flag the state so this is visible.
+                                            StateTreiStatusService.SetFailed(
+                                                $"Repeated TX validation failures at height {Globals.LastBlock.Height}; snapshot recovery exhausted.");
+                                            ErrorLogUtility.LogError(
+                                                $"[ValidateBlock] STATE-RECOVERY-EXHAUSTED: Repeated TX validation failures and no usable snapshot recovery. " +
+                                                $"State may be corrupted. Restart this node with the 'rebuildstate' argument to run a full state rebuild.",
                                                 "BlockValidatorService");
-                                            var rebuilt = await BlockRollbackUtility.ResetTreis();
-                                            if (rebuilt)
-                                            {
-                                                LogUtility.Log(
-                                                    $"[ValidateBlock] STATE-REBUILD-SUCCESS: Full state rebuild complete. " +
-                                                    $"Tip: height={Globals.LastBlock.Height}",
-                                                    "BlockValidatorService");
-                                            }
-                                            else
-                                            {
-                                                LogUtility.Log(
-                                                    $"[ValidateBlock] STATE-REBUILD-PARTIAL: ResetTreis returned false. " +
-                                                    $"State may still be inconsistent.",
-                                                    "BlockValidatorService");
-                                            }
+                                            ConsoleWriterService.Output(
+                                                $"[ValidateBlock] WARNING: State recovery exhausted — restart with 'rebuildstate' to run a full rebuild.");
                                         }
                                         catch (Exception ex)
                                         {
@@ -1169,8 +1219,47 @@ namespace ReserveBlockCore.Services
                         UpdateMemBlocksHashes(block);
                         CleanupMempoolAfterBlock(block);//cleanup duplicate withdrawal requests from mempool
 
-                        await StateData.UpdateTreis(block); //update treis
+                        var stateApplied = await StateData.UpdateTreis(block); //update treis
+                        if (!stateApplied)
+                        {
+                            // ROOT-CAUSE GUARD: The block was just committed to the chain DB, but one or
+                            // more of its transactions failed to apply to the state trie (the per-tx catch
+                            // in UpdateTreis swallowed an error). Block-add and state-update are not atomic
+                            // across the two LiteDB files, so this silently leaves a permanent hole that
+                            // later surfaces as "new account with no balance" and stalls the node.
+                            // Flag the state trie as dirty so it gets rebuilt (ResetTreis) instead of
+                            // running indefinitely on inconsistent state.
+                            ErrorLogUtility.LogError(
+                                $"[ValidateBlock] STATE-APPLY-INCOMPLETE: Block {block.Height} committed but not all " +
+                                $"transactions applied to the state trie. Flagging state trie for rebuild.",
+                                "BlockValidatorService.ValidateBlock()");
+                            StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
+                        }
                         await ReserveService.Run(); //updates treis for reserve pending txs
+
+                        // STATE PROBATION: with automatic rebuilds removed, a dirty-flagged node keeps
+                        // running on its existing state. Each cleanly applied block is evidence of
+                        // consistency; after a clean streak, re-mark synced so snapshots resume.
+                        if (!_stateStatusVerified)
+                        {
+                            if (StateTreiStatusService.IsSynced())
+                            {
+                                _stateStatusVerified = true;
+                            }
+                            else if (!stateApplied)
+                            {
+                                _cleanBlockStreak = 0;
+                            }
+                            else if (++_cleanBlockStreak >= STATE_PROBATION_BLOCKS)
+                            {
+                                StateTreiStatusService.SetSynced(block.Height);
+                                _stateStatusVerified = true;
+                                LogUtility.Log(
+                                    $"[ValidateBlock] STATE-PROBATION-PASSED: {STATE_PROBATION_BLOCKS} consecutive blocks applied cleanly on an " +
+                                    $"unverified state trie — marking synced at height {block.Height}. Snapshot protection resumes.",
+                                    "BlockValidatorService");
+                            }
+                        }
 
                         // Process vBTC V2 validator registration/exit transactions
                         if (block.Transactions.Count() > 0)
@@ -1485,6 +1574,18 @@ namespace ReserveBlockCore.Services
                     await TransactionData.UpdateWalletTXTask();
 
                     //DbContext.Commit();
+
+                    // Roll the oldest snapshot slot forward every SnapshotCadence blocks so fork/crash
+                    // recovery can restore from a near-tip snapshot instead of a full genesis replay.
+                    // Runs synchronously inside the block-processing path (no concurrent UpdateTreis);
+                    // typical cost is well under a second. Gated off during initial download/resync.
+                    if (block.Height % StateSnapshotService.SnapshotCadence == 0
+                        && Globals.IsChainSynced
+                        && !Globals.IsResyncing
+                        && !BlockRollbackUtility.IsResetTreisRunning)
+                    {
+                        await StateSnapshotService.UpdateCycleAsync(block.Height, block.Hash);
+                    }
 
                     if (!validateOnly && !blockDownloads && ConsensusCertificateRules.SupportsConsensusCertificate(block.Version) && !Globals.IsBootstrapMode)
                         _ = ConsensusAttestationPublisher.PublishLocalAsync(block);

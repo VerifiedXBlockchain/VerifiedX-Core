@@ -162,12 +162,18 @@ namespace ReserveBlockCore
         public static int DSTClientPort = 3341;
         public static int ArbiterPort = 3342;
         public static int FrostValidatorPort = 7295;
+
+        // S3C (Self-Sovereign Smart Contracts)
+        public static List<Bitcoin.Models.S3CEntry>? S3CPool = null;   // minting-node side (parsed from S3C= config)
+        public static bool UseS3C => S3CPool != null && S3CPool.Count >= 3;
+        public static bool IsS3CValidator = false;                     // validator side (S3CValidator=true)
+        public static bool S3CConfigInvalid = false;                   // S3C= present but failed validation → refuse mints (§2.1)
         public static int APIPort = 7292;
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
         public static int MajorVer = 6;
-        public static int MinorVer = 0;
-        public static int RevisionVer = 6;
+        public static int MinorVer = 2;
+        public static int RevisionVer = 1;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;

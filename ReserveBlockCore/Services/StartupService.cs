@@ -513,9 +513,21 @@ namespace ReserveBlockCore.Services
             {
                 if (!settings.CorrectShutdown)
                 {
-                    if(!Debugger.IsAttached && !skipStateSync)
+                    // ROOT-CAUSE FIX: An improper shutdown (crash / process kill — e.g. a non-graceful
+                    // wallet update) can interrupt a block commit between AddBlock (chain DB) and
+                    // UpdateTreis (AccountStateTrei DB). Those are separate, non-atomic LiteDB files, so
+                    // the block survives while its state mutations are lost — a permanent
+                    // "new account with no balance" hole that gets the node stuck on a later block.
+                    // The StateTreiStatus flag is only written by a full rebuild, so it stays stale-green
+                    // and can't detect this. Force an integrity rebuild: mark the state trie not-synced
+                    // so DownloadBlocksOnStart runs ResetTreis before syncing blocks.
+                    if (!Debugger.IsAttached && !skipStateSync && Globals.LastBlock.Height > 0)
                     {
-                        //await StateTreiSyncService.SyncAccountStateTrei();
+                        ErrorLogUtility.LogError(
+                            "[STARTUP] Improper shutdown detected — state trie may be inconsistent with the chain. " +
+                            "Flagging for full state rebuild (ResetTreis) before block sync.",
+                            "StartupService.RunSettingChecks");
+                        StateTreiStatusService.SetFailed("Improper shutdown — state trie integrity not guaranteed.");
                     }
                 }
 
@@ -1243,31 +1255,83 @@ namespace ReserveBlockCore.Services
                         }
                         else
                         {
-                            var reason = treiStatus == null 
-                                ? "no StateTreiStatus record found (state trie was wiped or never built)" 
-                                : $"IsSynced=false (last failure: {treiStatus.LastFailureReason ?? "unknown"})";
-
-                            ConsoleWriterService.Output($"[STARTUP] State trie integrity check FAILED: {reason}");
-                            ConsoleWriterService.Output($"[STARTUP] Running full state rebuild (ResetTreis) before block downloads...");
-                            ConsoleWriterService.Output($"[STARTUP] This will replay {blockCount:N0} blocks. This may take a while...");
-                            LogUtility.Log(
-                                $"[STARTUP] State trie not synced: {reason}. Running ResetTreis before block downloads.",
-                                "StartupService.DownloadBlocksOnStart");
-
-                            var rebuilt = await BlockRollbackUtility.ResetTreis();
-                            if (rebuilt)
+                            // ═══════════════════════════════════════════════════════════════
+                            // TRUST-ON-UPGRADE: a MISSING status record on a populated node is
+                            // the normal first boot after updating from a build that never wrote
+                            // one — NOT corruption. RunSettingChecks runs before this gate and
+                            // writes an explicit IsSynced=false on improper shutdown, so a null
+                            // record here means the previous (pre-upgrade) session shut down
+                            // gracefully with state validated block-by-block by consensus.
+                            // Forcing every updated node through a 45-min ResetTreis takes the
+                            // fleet offline (silent block rejection during rebuild) for nothing.
+                            // Sanity check: the account state trei must actually be populated —
+                            // a wiped trei (deleted db file) must still rebuild.
+                            // ═══════════════════════════════════════════════════════════════
+                            bool trustedExistingState = false;
+                            if (treiStatus == null)
                             {
-                                ConsoleWriterService.Output($"[STARTUP] State rebuild complete. Proceeding with block downloads.");
-                                LogUtility.Log(
-                                    $"[STARTUP] ResetTreis succeeded. State trie is now synced at height {Globals.LastBlock.Height}.",
-                                    "StartupService.DownloadBlocksOnStart");
+                                long stateRecordCount = 0;
+                                try { stateRecordCount = StateData.GetAccountStateTrei().Count(); } catch { }
+
+                                if (stateRecordCount > 0)
+                                {
+                                    StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] No StateTreiStatus record (first boot after update) — previous shutdown was clean and " +
+                                        $"state trie is populated ({stateRecordCount:N0} accounts). Trusting existing state; baseline recorded at height {Globals.LastBlock.Height}.");
+                                    LogUtility.Log(
+                                        $"[STARTUP] TRUST-ON-UPGRADE: StateTreiStatus baseline recorded at height {Globals.LastBlock.Height} " +
+                                        $"({stateRecordCount:N0} state records). Skipping rebuild.",
+                                        "StartupService.DownloadBlocksOnStart");
+
+                                    await StateSnapshotService.BootstrapAsync();
+                                    trustedExistingState = true;
+                                }
                             }
-                            else
+
+                            if (!trustedExistingState)
                             {
-                                ConsoleWriterService.Output($"[STARTUP] WARNING: State rebuild had errors. Block sync may fail.");
-                                ErrorLogUtility.LogError(
-                                    $"[STARTUP] ResetTreis returned false. State may still be inconsistent.",
+                                var reason = treiStatus == null
+                                    ? "no StateTreiStatus record found and state trie is EMPTY (wiped or never built)"
+                                    : $"IsSynced=false (last failure: {treiStatus.LastFailureReason ?? "unknown"})";
+
+                                ConsoleWriterService.Output($"[STARTUP] State trie integrity check FAILED: {reason}");
+                                LogUtility.Log(
+                                    $"[STARTUP] State trie not synced: {reason}. Attempting snapshot restore before falling back to ResetTreis.",
                                     "StartupService.DownloadBlocksOnStart");
+
+                                // FAST PATH: restore from a snapshot slot + replay the tail (seconds)
+                                // instead of a full genesis replay (~45 min). Crash-recovery case, so
+                                // the target is the current local tip.
+                                var restoreTarget = BlockchainData.GetLastBlock()?.Height ?? Globals.LastBlock.Height;
+                                var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                                if (restored)
+                                {
+                                    ConsoleWriterService.Output($"[STARTUP] Snapshot restore complete at height {restoreTarget}. Proceeding with block downloads.");
+                                    LogUtility.Log(
+                                        $"[STARTUP] Snapshot restore succeeded at height {restoreTarget}.",
+                                        "StartupService.DownloadBlocksOnStart");
+                                }
+                                else
+                                {
+                                    // NO AUTOMATIC REBUILD: the multi-hour genesis replay is
+                                    // operator-only (start with the `rebuildstate` argument).
+                                    // The node continues on its existing state — in the common
+                                    // case (improper shutdown before the first snapshot existed)
+                                    // that state is fine, consensus validates every block against
+                                    // it, and the probation counter in BlockValidatorService
+                                    // re-marks it synced after enough clean blocks so snapshot
+                                    // protection resumes. Real corruption surfaces as TX failures
+                                    // and is handled by the recovery paths.
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] WARNING: State trie is flagged unverified and no usable snapshot exists. " +
+                                        $"Continuing on existing state — snapshots will resume automatically after clean block validation. " +
+                                        $"If this node shows persistent TX/balance errors, restart it with the 'rebuildstate' argument for a full rebuild.");
+                                    ErrorLogUtility.LogError(
+                                        $"[STARTUP] Unverified state with no usable snapshot at height {Globals.LastBlock.Height}. " +
+                                        $"Automatic rebuild is disabled; running on existing state under probation. Manual option: 'rebuildstate' startup argument.",
+                                        "StartupService.DownloadBlocksOnStart");
+                                }
                             }
                         }
                     }
@@ -1276,6 +1340,10 @@ namespace ReserveBlockCore.Services
                         LogUtility.Log(
                             $"[STARTUP] State trie integrity check PASSED (synced at height {treiStatus.LastSyncedHeight}).",
                             "StartupService.DownloadBlocksOnStart");
+
+                        // First run after upgrade: state is verified good but no snapshot slot
+                        // exists yet — take the initial full snapshot now (no-op once slots exist).
+                        await StateSnapshotService.BootstrapAsync();
                     }
                 }
             }
@@ -1340,9 +1408,38 @@ namespace ReserveBlockCore.Services
                     }
                 }
                 if (!Globals.IsResyncing)
-                {                    
+                {
                     Globals.StopAllTimers = false;
                     Globals.IsChainSynced = true;
+
+                    // FRESH-SYNC BASELINE: a wallet that built its state by validating every block
+                    // from genesis never runs ResetTreis, so no StateTreiStatus record exists.
+                    // Without one, the snapshot cycle's dirty-state gate blocks forever and the
+                    // NEXT startup's integrity check would force a full ResetTreis. State built by
+                    // full validation is as trustworthy as a replay — record the baseline now.
+                    // (Never overwrites a Failed record: the startup gate resolved that before
+                    // block downloads began.)
+                    if (StateTreiStatusService.GetStatus() == null && Globals.LastBlock.Height > 0)
+                    {
+                        StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                        LogUtility.Log(
+                            $"[STARTUP] Fresh-synced chain — StateTreiStatus baseline recorded at height {Globals.LastBlock.Height}.",
+                            "StartupService.DownloadBlocksOnStart");
+                    }
+
+                    // PEER-DISCOVERY: After sync completes, re-run chain-based peer discovery
+                    // with the most up-to-date blocks to find all active validators.
+                    _ = Task.Run(() =>
+                    {
+                        try
+                        {
+                            PeerDiscoveryService.RunPostSyncDiscovery();
+                        }
+                        catch (Exception pdEx)
+                        {
+                            ErrorLogUtility.LogError($"Post-sync peer discovery failed: {pdEx.Message}", "StartupService.DownloadBlocksOnStart");
+                        }
+                    });
 
                     // VALIDATOR-REJOIN-FIX: Scan recent blocks for HEARTBEAT and REGISTER TXs
                     // to hydrate NetworkValidators from on-chain state. This runs BEFORE the
@@ -1455,179 +1552,7 @@ namespace ReserveBlockCore.Services
 
             
         }
-
-        internal static async void ResetStateTreis()
-        {
-            var blockChain = BlockchainData.GetBlocks().FindAll();
-            var failCount = 0;
-            List<Block> failBlocks = new List<Block>();
-
-            var transactions = TransactionData.GetAll();
-            var stateTrei = StateData.GetAccountStateTrei();
-            var worldTrei = WorldTrei.GetWorldTrei();
-
-            transactions.DeleteAllSafe();//delete all local transactions
-            stateTrei.DeleteAllSafe(); //removes all state trei data
-            worldTrei.DeleteAllSafe();  //removes the state trei
-
-            DbContext.DB.Checkpoint();
-            DbContext.DB_AccountStateTrei.Checkpoint();
-            DbContext.DB_WorldStateTrei.Checkpoint();
-
-            var accounts = AccountData.GetAccounts();
-            var accountList = accounts.FindAll().ToList();
-            if (accountList.Count() > 0)
-            {
-                foreach (var account in accountList)
-                {
-                    account.Balance = 0M;
-                    accounts.UpdateSafe(account);//updating local record with synced state trei
-                }
-            }
-
-            foreach (var block in blockChain)
-            {
-                var result = await BlockchainRescanUtility.ValidateBlock(block, true);
-                if(result != false)
-                {
-                    await StateData.UpdateTreis(block);
-
-                    foreach (Transaction transaction in block.Transactions)
-                    {
-                        var mempool = TransactionData.GetPool();
-
-                        var mempoolTx = mempool.FindAll().Where(x => x.Hash == transaction.Hash).FirstOrDefault();
-                        if (mempoolTx != null)
-                        {
-                            mempool.DeleteManySafe(x => x.Hash == transaction.Hash);
-                            TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
-                        }
-
-                        var account = AccountData.GetAccounts().FindAll().Where(x => x.Address == transaction.ToAddress).FirstOrDefault();
-                        if (account != null)
-                        {
-                            AccountData.UpdateLocalBalanceAdd(transaction.ToAddress, transaction.Amount);
-                            var txdata = TransactionData.GetAll();
-                            txdata.InsertSafe(transaction);
-                        }
-
-                        //Adds sent TX to wallet
-                        var fromAccount = AccountData.GetAccounts().FindOne(x => x.Address == transaction.FromAddress);
-                        if (fromAccount != null)
-                        {
-                            var txData = TransactionData.GetAll();
-                            var fromTx = transaction;
-                            fromTx.Amount = transaction.Amount * -1M;
-                            fromTx.Fee = transaction.Fee * -1M;
-                            txData.InsertSafe(fromTx);
-                            await AccountData.UpdateLocalBalance(fromAccount.Address, (transaction.Amount + transaction.Fee));
-                        }
-                    }
-                }
-                else
-                {
-                    //issue with chain and must redownload
-                    failBlocks.Add(block);
-                    failCount++;
-                }
-            }
-
-            if(failCount == 0)
-            {
-                
-            }
-            else
-            {
-                //chain is invalid. Delete and redownload
-            }
-        }
-
-        internal static async void ResetChainToPoint()
-        {
-            var blockFixHeight = 19941;
-            var blocks = BlockchainData.GetBlocks();
-            var block = BlockchainData.GetBlockByHeight(blockFixHeight);
-            int failCount = 0;
-            if(block != null)
-            {
-                if(block.Hash == "baca9daedafe1b480927e6eefbd366380c0fa2191c444bd246d6f34b43393928")
-                {
-                    var stateTrei = StateData.GetAccountStateTrei();
-
-                    stateTrei.DeleteAllSafe();
-                    DbContext.DB_AccountStateTrei.Checkpoint();
-
-                    blocks.DeleteManySafe(x => x.Height >= blockFixHeight);
-                    DbContext.DB.Checkpoint();
-                    var blocksFromGenesis = blocks.Find(LiteDB.Query.All(LiteDB.Query.Ascending));
-
-                    foreach (var blk in blocksFromGenesis)
-                    {
-                        var result = await BlockchainRescanUtility.ValidateBlock(blk);
-                        if(result == false)
-                        {
-                            failCount++;
-                        }
-                    }
-
-                }
-                else
-                {
-                    //do nothing
-                }
-            }
-
-            if(failCount > 0)
-            {
-                Console.WriteLine("Resync Failed. Download whole chain.");
-            }
-            else
-            {
-                Console.WriteLine("Resync Completed.");
-            }
-        }
-
-        internal static void ClearSelfValidator()
-        {
-            var validators = Validators.Validator.GetAll();
-            var validator = validators.FindOne(x => x.NodeIP == "SELF");
-            if (validator != null)
-            {
-                var accounts = AccountData.GetAccounts();
-                var account = accounts.FindOne(x => x.Address == validator.Address);
-
-                if(account != null)
-                {
-                    account.IsValidating = false;
-                    accounts.UpdateSafe(account);
-                }
-                var isDeleted = validators.DeleteSafe(validator.Id);
-                if(isDeleted)
-                {
-                    DbContext.DB_Peers.Checkpoint();//commits from log file
-                    //success
-                }
-            }
-        }
-
-        internal static void OpenUpShop()
-        {
-            var decShop = DecShop.GetMyDecShopInfo();
-            if(decShop != null)
-            {
-                var message = new Message
-                {
-                    Address = decShop.OwnerAddress,
-                    Data = "",
-                    Type = MessageType.ShopConnect,
-                    Port = decShop.Port
-                };
-
-                //var messageSend = 
-
-
-            }
-        }
+      
 
         internal static async Task UpdateSCOwnership()
         {
@@ -1773,9 +1698,35 @@ namespace ReserveBlockCore.Services
                 var delay = Globals.Nodes.Count < startupCount ? Task.Delay(1000) : Task.Delay(10000);
                 try
                 {
+                    // FIX: Periodically clear SkipPeers so temporarily-offline nodes can be retried.
+                    // Without this, a bootstrap node that was offline at startup gets permanently
+                    // skipped for the entire session.
+                    PeerDiscoveryService.ClearSkipPeersIfDue();
+
                     var ConnectedCount = Globals.Nodes.Values.Where(x => x.IsConnected).Count();
                     if(ConnectedCount < Globals.MaxPeers)
+                    {
+                        // Step 1: Chain-based peer discovery — scan on-chain validator data
+                        // to populate the Peers DB with known-good validator IPs.
+                        // This is the primary discovery mechanism (no network calls needed).
+                        PeerDiscoveryService.DiscoverPeersFromChain();
+
+                        // Step 2: Try connecting to peers from the now-enriched Peers DB
                         await P2PClient.ConnectToPeers();
+
+                        // Step 3: If still below MaxPeers, use peer gossip as fallback —
+                        // ask connected nodes for their peer lists.
+                        ConnectedCount = Globals.Nodes.Values.Where(x => x.IsConnected).Count();
+                        if (ConnectedCount < Globals.MaxPeers)
+                        {
+                            var gossipAdded = await PeerDiscoveryService.RequestPeersFromConnectedNodes();
+                            if (gossipAdded > 0)
+                            {
+                                // New peers discovered via gossip — try connecting again
+                                await P2PClient.ConnectToPeers();
+                            }
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {

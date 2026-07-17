@@ -38,11 +38,17 @@ namespace ReserveBlockCore.Utilities
         /// <summary>ESCALATION: Tracks consecutive failed recovery attempts.
         /// When RecoverAsync() returns false (blocks couldn't be validated after rollback+download),
         /// this counter increments. After ESCALATION_THRESHOLD failures, we skip the rollback approach
-        /// entirely and trigger a full state rebuild via ResetTreis().</summary>
+        /// and escalate to a snapshot state restore below the suspect region.</summary>
         private static int _consecutiveRecoveryFailures = 0;
 
         /// <summary>After this many consecutive RecoverAsync failures, escalate to full ResetTreis.</summary>
         public const int ESCALATION_THRESHOLD = 3;
+
+        /// <summary>LOOP-BREAKER: Height of the last escalation snapshot restore. If escalation
+        /// fires again near the same height, the snapshot restore "succeeded" without actually
+        /// fixing sync (e.g., a fork deeper than every slot) — skip the restore and go straight
+        /// to the full ResetTreis rebuild instead of restoring the same bad slot forever.</summary>
+        private static long _lastEscalationRestoreHeight = -1;
 
         /// <summary>DOWNLOAD-PHASE: Set to true while GetAllBlocks() is running inside RecoverAsync.
         /// When true, ValidateBlock() should allow blocks through even though IsRecoveryInProgress is set,
@@ -127,49 +133,69 @@ namespace ReserveBlockCore.Utilities
             {
                 // ═══════════════════════════════════════════════════════════════
                 // ESCALATION CHECK: If we've failed recovery too many times,
-                // the state trie is likely corrupted and rollback+download won't
-                // help. Escalate to a full state rebuild via ResetTreis().
+                // rollback+download isn't fixing it. Escalate to a snapshot state
+                // restore below the suspect region. (Automatic full rebuilds are
+                // disabled — genesis replay is operator-only via 'rebuildstate'.)
                 // ═══════════════════════════════════════════════════════════════
                 if (_consecutiveRecoveryFailures >= ESCALATION_THRESHOLD)
                 {
                     LogUtility.Log(
                         $"[{caller}] FORK-RECOVERY-ESCALATION: {_consecutiveRecoveryFailures} consecutive " +
                         $"recovery failures. Rollback+download is not fixing the issue. " +
-                        $"Escalating to full state rebuild via ResetTreis().",
+                        $"Escalating to snapshot state restore.",
                         $"{caller}.ForkRecovery");
                     ConsoleWriterService.Output(
-                        $"[{caller}] FORK-RECOVERY-ESCALATION: State trie appears corrupted after " +
-                        $"{_consecutiveRecoveryFailures} failed recoveries. Starting full state rebuild...");
+                        $"[{caller}] FORK-RECOVERY-ESCALATION: {_consecutiveRecoveryFailures} failed recoveries — " +
+                        $"attempting snapshot state restore...");
 
-                    _consecutiveRecoveryFailures = 0; // Reset before rebuild to prevent re-triggering
+                    _consecutiveRecoveryFailures = 0; // Reset before recovery to prevent re-triggering
 
                     try
                     {
-                        var rebuilt = await BlockRollbackUtility.ResetTreis();
-                        if (rebuilt)
+                        // FAST PATH: restore state from a snapshot slot below the suspect region
+                        // and replay/re-download — seconds instead of a full genesis replay.
+                        // LOOP-BREAKER: if the last escalation already restored near this height
+                        // and we are stuck again, snapshots can't fix this — give up loudly so
+                        // the operator can intervene, instead of looping the same restore.
+                        var restoreTarget = Math.Max(0, Globals.LastBlock.Height - blocksToRollback);
+                        var restoreAlreadyTried = _lastEscalationRestoreHeight >= 0
+                            && Math.Abs(restoreTarget - _lastEscalationRestoreHeight) <= 20;
+
+                        var restored = !restoreAlreadyTried && await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                        if (restored)
                         {
+                            _lastEscalationRestoreHeight = restoreTarget;
                             LogUtility.Log(
-                                $"[{caller}] FORK-RECOVERY-ESCALATION: Full state rebuild SUCCEEDED. " +
-                                $"Tip: height={Globals.LastBlock.Height}",
+                                $"[{caller}] FORK-RECOVERY-ESCALATION: Snapshot restore SUCCEEDED at height {restoreTarget}. " +
+                                $"Re-downloading tip...",
                                 $"{caller}.ForkRecovery");
                             ConsoleWriterService.Output(
-                                $"[{caller}] FORK-RECOVERY-ESCALATION: State rebuild complete. " +
-                                $"Now at height {Globals.LastBlock.Height}.");
+                                $"[{caller}] FORK-RECOVERY-ESCALATION: Snapshot restore complete at height {restoreTarget}.");
+
+                            // Re-download the blocks above the restore point from peers.
+                            BanService.UnbanAllForForkRecovery();
+                            await Task.Delay(2000);
+                            await BlockDownloadService.GetAllBlocks();
                             return true;
                         }
-                        else
-                        {
-                            LogUtility.Log(
-                                $"[{caller}] FORK-RECOVERY-ESCALATION: ResetTreis returned false. " +
-                                $"State may still be inconsistent.",
-                                $"{caller}.ForkRecovery");
-                            return false;
-                        }
+
+                        // NO AUTOMATIC REBUILD: snapshot recovery is exhausted (no usable slot, or a
+                        // restore near this height already ran without fixing sync). The multi-hour
+                        // genesis replay is operator-only ('rebuildstate' startup argument). Keep the
+                        // node up — a lightweight resync attempt may still succeed as peers correct.
+                        ErrorLogUtility.LogError(
+                            $"[{caller}] FORK-RECOVERY-EXHAUSTED: {_consecutiveRecoveryFailures + ESCALATION_THRESHOLD} recovery attempts " +
+                            $"and snapshot restore did not resolve sync at height {Globals.LastBlock.Height}. Automatic rebuild is disabled. " +
+                            $"If this node stays stuck, restart it with the 'rebuildstate' argument.",
+                            $"{caller}.ForkRecovery");
+                        ConsoleWriterService.Output(
+                            $"[{caller}] FORK-RECOVERY: recovery attempts exhausted — if the node stays stuck, restart with 'rebuildstate'.");
+                        return false;
                     }
                     catch (Exception resetEx)
                     {
                         LogUtility.Log(
-                            $"[{caller}] FORK-RECOVERY-ESCALATION: ResetTreis threw exception: {resetEx.Message}",
+                            $"[{caller}] FORK-RECOVERY-ESCALATION: Recovery threw exception: {resetEx.Message}",
                             $"{caller}.ForkRecovery");
                         return false;
                     }

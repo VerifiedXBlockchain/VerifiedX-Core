@@ -51,6 +51,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 if (!BaseBridgeService.IsBridgeConfigured)
                     return (false, "Base bridge not configured. Set BaseBridgeContract in config.", null);
 
+                // S3C §6.3: block bridge for S3C contracts early (also blocked in CreateBridgeLockTx + consensus).
+                if (VBTCService.ResolveContractIsS3C(scUID))
+                    return (false, "vBTC.b bridge is not available for S3C contracts. Withdraw to your own public companion contract to bridge.", null);
+
                 // Validate EVM address
                 if (string.IsNullOrWhiteSpace(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                     return (false, "Invalid EVM destination address. Expected 0x + 40 hex characters.", null);
@@ -181,7 +185,7 @@ namespace ReserveBlockCore.Bitcoin.Services
             BridgeLockRecord record, long nonce, long chainId, string contractAddress, int requiredSigs)
         {
             var signatures = new Dictionary<string, string>();
-            var validators = VBTCValidatorRegistry.GetActiveValidators();
+            var validators = VBTCValidatorRegistry.GetPublicValidators();
             if (validators == null || validators.Count == 0)
             {
                 LogUtility.Log("[UserBridgeMint] No active validators found.", "UserBridgeMintService");
@@ -198,7 +202,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     LogUtility.Log($"[UserBridgeMint] Retry round {attempt + 1} for attestations. Have {signatures.Count}/{requiredSigs}.", "UserBridgeMintService");
                     await Task.Delay(15_000);
                     // Refresh validator list
-                    validators = VBTCValidatorRegistry.GetActiveValidators();
+                    validators = VBTCValidatorRegistry.GetPublicValidators();
                 }
 
                 foreach (var v in validators)

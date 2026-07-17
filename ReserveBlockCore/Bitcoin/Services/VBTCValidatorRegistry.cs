@@ -73,6 +73,14 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// S3C (§3.2): the exclusion point for ALL public ceremony/selection sites — the active
+        /// set minus S3C validators. GetActiveValidators() stays inclusive for auth/consensus.
+        /// With no S3C validators on-chain this returns the identical set as today.
+        /// </summary>
+        public static List<VBTCValidator> GetPublicValidators()
+            => GetActiveValidators().Where(v => !v.IsS3C).ToList();
+
+        /// <summary>
         /// Returns the count of currently active validators.
         /// </summary>
         public static int GetActiveValidatorCount()
@@ -164,6 +172,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var baseAddress = jobj["BaseAddress"]?.ToObject<string>() ?? "";
                 var registrationBlockHeight = jobj["RegistrationBlockHeight"]?.ToObject<long>() ?? blockHeight;
                 var signature = jobj["Signature"]?.ToObject<string>();
+                var isS3C = jobj["IsS3C"]?.ToObject<bool?>();   // §3.4: null when absent → must NOT downgrade
 
                 // Use explicit BaseAddress from TX data; fall back to derivation from public key
                 if (string.IsNullOrEmpty(baseAddress))
@@ -176,6 +185,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         existing.LastHeartbeatBlock = blockHeight;
                         existing.IsActive = true;
+                        if (isS3C.HasValue) existing.IsS3C = isS3C.Value;   // §3.4 present-only
                         if (!string.IsNullOrEmpty(ipAddress)) existing.IPAddress = ipAddress;
                         if (!string.IsNullOrEmpty(frostPublicKey))
                             existing.FrostPublicKey = frostPublicKey;
@@ -195,7 +205,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                         IsActive = true,
                         RegistrationSignature = signature,
                         RegisterTransactionHash = tx.Hash,
-                        BaseAddress = baseAddress
+                        BaseAddress = baseAddress,
+                        IsS3C = isS3C ?? false
                     };
                 }
             }
@@ -217,6 +228,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 var ipAddress = jobj["IPAddress"]?.ToObject<string>();
                 var frostPublicKey = jobj["FrostPublicKey"]?.ToObject<string>();
                 var baseAddress = jobj["BaseAddress"]?.ToObject<string>() ?? "";
+                var isS3C = jobj["IsS3C"]?.ToObject<bool?>();   // §3.4: null when absent → must NOT downgrade
 
                 // Use explicit BaseAddress from TX data; fall back to derivation from public key
                 if (string.IsNullOrEmpty(baseAddress))
@@ -228,6 +240,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         if (!string.IsNullOrEmpty(ipAddress)) existing.IPAddress = ipAddress;
                         existing.IsActive = true;
+                        if (isS3C.HasValue) existing.IsS3C = isS3C.Value;   // §3.4 present-only
                         existing.LastHeartbeatBlock = blockHeight;
                         if (!string.IsNullOrEmpty(frostPublicKey))
                             existing.FrostPublicKey = frostPublicKey;
@@ -247,7 +260,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                         LastHeartbeatBlock = blockHeight,
                         IsActive = true,
                         RegisterTransactionHash = tx.Hash,
-                        BaseAddress = baseAddress
+                        BaseAddress = baseAddress,
+                        IsS3C = isS3C ?? false
                     };
                 }
             }
