@@ -245,8 +245,8 @@ namespace ReserveBlockCore.Services
                         nTx.TransactionRating = rating;
                     }
 
-                    await TransactionData.AddToPool(nTx);
-                    await P2PClient.SendTXMempool(nTx);
+                    nTx.TransactionStatus = TransactionStatus.Pending;
+                    await SendTransaction(nTx, account);
 
                     // Update original TX status locally
                     var localTxDb = TransactionData.GetAll();
@@ -339,8 +339,8 @@ namespace ReserveBlockCore.Services
                         nTx.TransactionRating = rating;
                     }
 
-                    await TransactionData.AddToPool(nTx);
-                    await P2PClient.SendTXMempool(nTx);//send out to mempool
+                    nTx.TransactionStatus = TransactionStatus.Pending;
+                    await SendTransaction(nTx, account);
 
                     output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Transaction has been broadcasted.", Hash = nTx.Hash });
                 }

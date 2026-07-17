@@ -1,0 +1,269 @@
+using System.Numerics;
+using Nethereum.ABI.FunctionEncoding.Attributes;
+using Nethereum.Hex.HexTypes;
+using Nethereum.RPC.Eth.DTOs;
+using Nethereum.Web3;
+using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Data;
+using ReserveBlockCore.Utilities;
+
+namespace ReserveBlockCore.Bitcoin.Services
+{
+    /// <summary>
+    /// Polls Base for <c>VfxExitBurned</c> (V3) and <c>BTCExitBurned</c> events.
+    /// For VfxExitBurned (V3 pool): feeds into <see cref="BurnExitConsensusService"/> → <see cref="BridgePoolUnlockService"/>.
+    /// For BTCExitBurned: feeds into <see cref="BurnExitConsensusService"/> for caster consensus + FROST.
+    /// </summary>
+    public static class BaseBridgeExitWatchService
+    {
+        private const int MaxBlockSpan = 4000;
+        private static long? _startBlockOverride;
+
+        /// <summary>V3 contract event: burnForVfxExit(amount, vfxDestinationAddress)</summary>
+        [Event("VfxExitBurned")]
+        public class VfxExitBurnedEventDTO : IEventDTO
+        {
+            [Parameter("address", "burner", 1, true)]
+            public string Burner { get; set; } = "";
+
+            [Parameter("uint256", "amount", 2, false)]
+            public BigInteger Amount { get; set; }
+
+            [Parameter("string", "vfxDestinationAddress", 3, false)]
+            public string VfxDestinationAddress { get; set; } = "";
+
+            [Parameter("uint256", "chainId", 4, false)]
+            public BigInteger ChainId { get; set; }
+        }
+
+        [Event("BTCExitBurned")]
+        public class BTCExitBurnedEventDTO : IEventDTO
+        {
+            [Parameter("address", "burner", 1, true)]
+            public string Burner { get; set; } = "";
+
+            [Parameter("uint256", "amount", 2, false)]
+            public BigInteger Amount { get; set; }
+
+            [Parameter("string", "btcDestination", 3, false)]
+            public string BtcDestination { get; set; } = "";
+
+            [Parameter("uint256", "chainId", 4, false)]
+            public BigInteger ChainId { get; set; }
+        }
+
+        /// <summary>Needs VBTCb proxy address and Base RPC.</summary>
+        public static bool IsConfigured =>
+            !string.IsNullOrWhiteSpace(BaseBridgeService.VBTCbContractAddress);
+
+        public static void LoadStartBlockOverride()
+        {
+            var env = Environment.GetEnvironmentVariable("BASE_BRIDGE_EXIT_FROM_BLOCK");
+            if (!string.IsNullOrEmpty(env) && long.TryParse(env, out var b) && b >= 0)
+                _startBlockOverride = b;
+        }
+
+        /// <summary>Background loop entrypoint.</summary>
+        public static async Task BridgeExitScanLoop()
+        {
+            LoadStartBlockOverride();
+            while (!Globals.StopAllTimers)
+            {
+                try
+                {
+                    if (IsConfigured)
+                        await PollOnceInternal();
+                }
+                catch (Exception ex)
+                {
+                    LogUtility.Log($"[BaseBridgeExit] Poll error: {ex.Message}", "BaseBridgeExitWatchService.BridgeExitScanLoop");
+                }
+
+                await Task.Delay(12_000);
+            }
+        }
+
+        /// <summary>Reset the scan cursor to rescan from a specific block. Next poll will start from fromBlock.</summary>
+        public static (bool Success, string Message) RescanFromBlock(long fromBlock)
+        {
+            if (fromBlock < 0)
+                return (false, "Block number must be >= 0");
+
+            var state = BridgeExitSyncState.GetOrCreate();
+            var previousBlock = state.LastScannedBlock;
+            state.LastScannedBlock = Math.Max(0, fromBlock - 1);
+            BridgeExitSyncState.Save(state);
+
+            var msg = $"Reset exit scan cursor from {previousBlock} to {state.LastScannedBlock} (will rescan from block {fromBlock})";
+            LogUtility.Log($"[BaseBridgeExit] {msg}", "BaseBridgeExitWatchService.RescanFromBlock");
+            return (true, msg);
+        }
+
+        /// <summary>Single poll; for API manual trigger.</summary>
+        public static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnce()
+        {
+            if (!IsConfigured)
+                return (0, 0, "VBTCb contract address not configured");
+            return await PollOnceInternal();
+        }
+
+        private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
+        {
+            var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
+            var latestHex = await web3.Eth.Blocks.GetBlockNumber.SendRequestAsync();
+            var latest = (long)latestHex.Value;
+
+            var state = BridgeExitSyncState.GetOrCreate();
+
+            if (state.LastScannedBlock == 0)
+            {
+                if (_startBlockOverride.HasValue)
+                {
+                    state.LastScannedBlock = Math.Max(0, _startBlockOverride.Value - 1);
+                    BridgeExitSyncState.Save(state);
+                    LogUtility.Log(
+                        $"[BaseBridgeExit] BASE_BRIDGE_EXIT_FROM_BLOCK={_startBlockOverride}; scanning from block {state.LastScannedBlock + 1}",
+                        "BaseBridgeExitWatchService.PollOnceInternal");
+                }
+                else
+                {
+                    state.LastScannedBlock = Math.Max(0, latest - 1);
+                    BridgeExitSyncState.Save(state);
+                    LogUtility.Log($"[BaseBridgeExit] Initialized scan cursor at block {state.LastScannedBlock} (only new burns after this are processed).",
+                        "BaseBridgeExitWatchService.PollOnceInternal");
+                    return (0, latest, "Initialized cursor; no backlog scan on first run");
+                }
+            }
+
+            var from = state.LastScannedBlock + 1;
+            if (from > latest)
+                return (0, state.LastScannedBlock, "No new blocks");
+
+            var to = Math.Min(from + MaxBlockSpan - 1, latest);
+            var contract = BaseBridgeService.VBTCbContractAddress;
+
+            var processed = 0;
+
+            // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
+            try
+            {
+                var v3Contract = BaseBridgeService.ContractAddress;
+                if (!string.IsNullOrEmpty(v3Contract))
+                {
+                    var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
+                    var vfxExitFilter = vfxExitHandler.CreateFilterInput(
+                        new BlockParameter(new HexBigInteger(from)),
+                        new BlockParameter(new HexBigInteger(to)));
+
+                    var vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitFilter);
+
+                    foreach (var ev in vfxExitLogs)
+                    {
+                        var log = ev.Log;
+                        var burner = ev.Event?.Burner ?? "";
+                        var amount = ev.Event?.Amount ?? BigInteger.Zero;
+                        var vfxDest = ev.Event?.VfxDestinationAddress?.Trim() ?? "";
+                        if (string.IsNullOrEmpty(burner) || string.IsNullOrEmpty(vfxDest)) continue;
+                        if (amount > long.MaxValue || amount <= 0) continue;
+
+                        var txHash = log.TransactionHash;
+                        if (string.IsNullOrEmpty(txHash)) continue;
+
+                        if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
+                            continue;
+
+                        var amountDecimal = (decimal)amount / 100_000_000M;
+
+                        LogUtility.Log($"[BaseBridgeExit] Detected VfxExitBurned (V3 pool): {txHash}, amount={amountDecimal}, vfxDest={vfxDest}",
+                            "BaseBridgeExitWatchService.PollOnceInternal");
+
+                        if (Globals.IsBlockCaster)
+                        {
+                            _ = BurnExitConsensusService.HandleDetectedBurn(
+                                txHash,
+                                BurnExitConsensusService.BurnExitType.VfxPoolUnlock,
+                                "", "", amountDecimal, burner,
+                                vfxDestinationAddress: vfxDest)
+                                .ContinueWith(t =>
+                                {
+                                    if (t.IsFaulted)
+                                        ErrorLogUtility.LogError($"[BaseBridgeExit] HandleDetectedBurn (VfxPoolUnlock) faulted for {txHash}: {t.Exception?.InnerException?.Message}",
+                                            "BaseBridgeExitWatchService.PollOnceInternal");
+                                }, TaskContinuationOptions.OnlyOnFaulted);
+                        }
+
+                        processed++;
+                    }
+                }
+            }
+            catch (Exception v3Ex)
+            {
+                LogUtility.Log($"[BaseBridgeExit] VfxExitBurned scan error: {v3Ex.Message}",
+                    "BaseBridgeExitWatchService.PollOnceInternal");
+            }
+
+            // --- BTCExitBurned events (burnForBTCExit → direct BTC withdrawal) ---
+            try
+            {
+                // Also scan the V2 contract if configured
+                var v2Contract = BaseBridgeService.ContractAddress;
+                var btcExitContract = !string.IsNullOrEmpty(v2Contract) ? v2Contract : contract;
+
+                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
+                var btcFilter = btcEventHandler.CreateFilterInput(
+                    new BlockParameter(new HexBigInteger(from)),
+                    new BlockParameter(new HexBigInteger(to)));
+
+                var btcLogs = await btcEventHandler.GetAllChangesAsync(btcFilter);
+
+                foreach (var ev in btcLogs)
+                {
+                    var log = ev.Log;
+                    var burner = ev.Event?.Burner ?? "";
+                    var amount = ev.Event?.Amount ?? BigInteger.Zero;
+                    var btcDest = ev.Event?.BtcDestination?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(burner) || string.IsNullOrEmpty(btcDest)) continue;
+                    if (amount > long.MaxValue || amount <= 0) continue;
+
+                    var txHash = log.TransactionHash;
+                    if (string.IsNullOrEmpty(txHash)) continue;
+
+                    if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
+                        continue;
+
+                    var amountDecimal = (decimal)amount / 100_000_000M;
+
+                    LogUtility.Log($"[BaseBridgeExit] Detected BTCExitBurned: {txHash}, amount={amountDecimal}, dest={btcDest}",
+                        "BaseBridgeExitWatchService.PollOnceInternal");
+
+                    // Feed into BurnExitConsensusService for caster consensus + FROST
+                    if (Globals.IsBlockCaster)
+                    {
+                        _ = BurnExitConsensusService.HandleDetectedBurn(
+                            txHash,
+                            BurnExitConsensusService.BurnExitType.BtcExit,
+                            "", btcDest, amountDecimal, burner)
+                            .ContinueWith(t =>
+                            {
+                                if (t.IsFaulted)
+                                    ErrorLogUtility.LogError($"[BaseBridgeExit] HandleDetectedBurn (BtcExit) faulted for {txHash}: {t.Exception?.InnerException?.Message}",
+                                        "BaseBridgeExitWatchService.PollOnceInternal");
+                            }, TaskContinuationOptions.OnlyOnFaulted);
+                    }
+
+                    processed++;
+                }
+            }
+            catch (Exception btcEx)
+            {
+                LogUtility.Log($"[BaseBridgeExit] BTCExitBurned scan error: {btcEx.Message}",
+                    "BaseBridgeExitWatchService.PollOnceInternal");
+            }
+
+            state.LastScannedBlock = to;
+            BridgeExitSyncState.Save(state);
+
+            return (processed, to, processed > 0 ? $"Processed {processed} exit burn(s)" : "OK");
+        }
+    }
+}

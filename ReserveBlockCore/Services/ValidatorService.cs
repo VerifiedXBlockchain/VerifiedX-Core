@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.SignalR.Client;
 using Newtonsoft.Json;
 using ReserveBlockCore.Beacon;
 using ReserveBlockCore.Bitcoin.FROST;
+using ReserveBlockCore.Bitcoin.Services;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.EllipticCurve;
 using ReserveBlockCore.Extensions;
@@ -24,6 +25,7 @@ namespace ReserveBlockCore.Services
     {
         static SemaphoreSlim ValidatorMonitorServiceLock = new SemaphoreSlim(1, 1);
         static SemaphoreSlim ValidatorCountServiceLock = new SemaphoreSlim(1, 1);
+        static bool _processExitCasterDepartureRegistered;
 
         public static async Task StartValidatorServer()
         {
@@ -126,15 +128,56 @@ namespace ReserveBlockCore.Services
         {
             if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
+                LogUtility.Log("VALIDATOR-STARTUP: Waiting for chain sync before starting validator process...", "ValidatorService.StartupValidatorProcess");
+                var syncWaitLogged = false;
                 while (!Globals.IsChainSynced)
                 {
+                    if (!syncWaitLogged && Globals.LastBlock.Height > 0)
+                    {
+                        LogUtility.Log($"VALIDATOR-STARTUP: Chain not synced yet. Height={Globals.LastBlock.Height}, Nodes={Globals.Nodes.Count}, ValidatorNodes={Globals.ValidatorNodes.Count}, BlockCasters={Globals.BlockCasters.Count}",
+                            "ValidatorService.StartupValidatorProcess");
+                        syncWaitLogged = true;
+                    }
                     await Task.Delay(1000);
                 }
+                LogUtility.Log($"VALIDATOR-STARTUP: Chain synced at height {Globals.LastBlock.Height}. Starting validator services...", "ValidatorService.StartupValidatorProcess");
                 
+                // Scan recent blocks first to rebuild accurate validator state from consensus
+                // Block-scan-based validator registry replaces startup DB scan
+                // VBTCValidatorRegistry.GetActiveValidators() will scan blocks on-demand
+
+                // Clean stale validator TXs from mempool before sending new ones
+                // This prevents nonce conflicts and duplicate TXs after restart
+                CleanStaleValidatorTxsFromMempool();
+
                 _ = StartCasterAPIServer();
                 _ = StartValidatorServer();
                 Globals.IsFrostValidator = true; // Enable FROST server for validator nodes
                 _ = FrostServer.Start();
+
+                if (!_processExitCasterDepartureRegistered)
+                {
+                    _processExitCasterDepartureRegistered = true;
+                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                    {
+                        if (!Globals.IsBlockCaster)
+                            return;
+                        try
+                        {
+                            CasterDiscoveryService.BroadcastDeparture().GetAwaiter().GetResult();
+                        }
+                        catch { /* best-effort */ }
+                    };
+                }
+
+                // Give servers a moment to bind their ports before checking reachability
+                await Task.Delay(5000);
+
+                Globals.LastBlockProducedTick = Environment.TickCount64;
+
+                // Run port reachability check now that servers are listening
+                ValidatorPortCheckService.RunValidatorPortCheck();
+
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
                 _ = VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop();  // Start vBTC V2 validator heartbeat loop
@@ -144,11 +187,67 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        /// <summary>
+        /// Removes stale validator lifecycle TXs from the mempool on startup.
+        /// When a validator restarts, old heartbeat/register TXs may still be in the mempool.
+        /// These can conflict with new TXs (same nonce) and cause block validation failures (-13 rollback).
+        /// </summary>
+        private static void CleanStaleValidatorTxsFromMempool()
+        {
+            try
+            {
+                var mempool = TransactionData.GetPool();
+                if (mempool == null || mempool.Count() == 0) return;
+
+                var staleTxTypes = new[]
+                {
+                    TransactionType.VBTC_V2_VALIDATOR_REGISTER,
+                    TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT,
+                    TransactionType.VBTC_V2_VALIDATOR_EXIT
+                };
+
+                var staleTxs = mempool.FindAll()
+                    .Where(x => x.FromAddress == Globals.ValidatorAddress && staleTxTypes.Contains(x.TransactionType))
+                    .ToList();
+
+                if (staleTxs.Any())
+                {
+                    foreach (var tx in staleTxs)
+                    {
+                        mempool.DeleteManySafe(x => x.Hash == tx.Hash);
+                        LogUtility.Log($"Cleaned stale validator TX from mempool: {tx.Hash} (Type: {tx.TransactionType}, Nonce: {tx.Nonce})",
+                            "ValidatorService.CleanStaleValidatorTxsFromMempool()");
+                    }
+                    LogUtility.Log($"Cleaned {staleTxs.Count} stale validator TX(s) from mempool on startup",
+                        "ValidatorService.CleanStaleValidatorTxsFromMempool()");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error cleaning stale validator TXs from mempool: {ex}",
+                    "ValidatorService.CleanStaleValidatorTxsFromMempool()");
+            }
+        }
+
         private static async Task SendVBTCV2RegistrationTx()
         {
             try
             {
-                var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(Globals.ValidatorAddress);
+                // Wait for ports to be verified open before sending any registration/heartbeat TXs
+                var portWaitAttempts = 0;
+                while (!Globals.PortsOpened && portWaitAttempts < 30)
+                {
+                    portWaitAttempts++;
+                    await Task.Delay(5000);
+                }
+                if (!Globals.PortsOpened)
+                {
+                    LogUtility.Log("Cannot send vBTC V2 registration - ports not verified open. Validator may have been stopped.",
+                        "ValidatorService.SendVBTCV2RegistrationTx()");
+                    return;
+                }
+
+                var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(Globals.ValidatorAddress);
                 if (existingValidator != null)
                 {
                     // Wait briefly for IP to be discovered before making decisions
@@ -166,20 +265,23 @@ namespace ReserveBlockCore.Services
                         // Check if IP address has changed since last registration
                         if (!string.IsNullOrEmpty(currentIp) && currentIp != existingValidator.IPAddress)
                         {
-                            LogUtility.Log($"Validator {Globals.ValidatorAddress} IP changed from {existingValidator.IPAddress} to {currentIp}. Sending reactivation TX with updated IP...",
+                            LogUtility.Log($"Validator {Globals.ValidatorAddress} IP changed from {existingValidator.IPAddress} to {currentIp}. Sending heartbeat TX with updated IP...",
                                 "ValidatorService.SendVBTCV2RegistrationTx()");
                             await SendVBTCV2ReactivationTx(existingValidator);
                             return;
                         }
 
-                        // Active and same IP — nothing to do
-                        LogUtility.Log($"Validator {Globals.ValidatorAddress} already registered and active in vBTC V2 database. No registration TX needed.",
+                        // ALWAYS send a heartbeat TX on startup to ensure network convergence.
+                        // The local DB may show IsActive=true but other nodes may have marked us inactive.
+                        // On-chain heartbeat is the only way to guarantee all nodes agree.
+                        LogUtility.Log($"Validator {Globals.ValidatorAddress} appears active locally. Sending startup heartbeat TX to ensure network-wide convergence...",
                             "ValidatorService.SendVBTCV2RegistrationTx()");
+                        await SendVBTCV2ReactivationTx(existingValidator);
                         return;
                     }
                     else
                     {
-                        // Validator was marked inactive (e.g., went offline for 30+ minutes).
+                        // Validator was marked inactive (e.g., went offline for extended period).
                         // Send a VBTC_V2_VALIDATOR_HEARTBEAT TX to reactivate on the network.
                         LogUtility.Log($"Validator {Globals.ValidatorAddress} found in vBTC V2 database but is INACTIVE. Sending reactivation TX...",
                             "ValidatorService.SendVBTCV2RegistrationTx()");
@@ -237,16 +339,21 @@ namespace ReserveBlockCore.Services
                     return;
                 }
 
+                // Ensure Base address is derived before building the TX payload
+                Bitcoin.Services.ValidatorEthKeyService.EnsureBaseAddressInitialized();
+
                 var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
 
                 // Create VBTC_V2_VALIDATOR_REGISTER transaction
+                // Normalize Amount/Fee/ToAddress BEFORE Build() so the hash matches
+                // what remote nodes compute after deserializing (prevents "hash not equal" errors)
                 var registerTx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = validator.Address,
-                    ToAddress = validator.Address,
-                    Amount = 0M,
-                    Fee = 0M,
+                    ToAddress = validator.Address.ToAddressNormalize(),
+                    Amount = 0M.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
                     Nonce = sTreiAcct.Nonce,
                     TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER,
                     Data = JsonConvert.SerializeObject(new
@@ -254,7 +361,9 @@ namespace ReserveBlockCore.Services
                         ValidatorAddress = validator.Address,
                         IPAddress = ipAddress,
                         FrostPublicKey = validator.PublicKey,
+                        BaseAddress = Globals.ValidatorBaseAddress,
                         RegistrationBlockHeight = Globals.LastBlock.Height,
+                        IsS3C = Globals.IsS3CValidator,   // S3C §3.3/§3.4 — present on every register
                         Signature = signature
                     })
                 };
@@ -267,8 +376,6 @@ namespace ReserveBlockCore.Services
 
                 try
                 {
-                    registerTx.ToAddress = registerTx.ToAddress.ToAddressNormalize();
-                    registerTx.Amount = registerTx.Amount.ToNormalizeDecimal();
                     var result = await TransactionValidatorService.VerifyTX(registerTx);
 
                     if (result.Item1 == true)
@@ -317,6 +424,14 @@ namespace ReserveBlockCore.Services
         {
             try
             {
+                // Don't send reactivation TX if ports aren't verified open
+                if (!Globals.PortsOpened)
+                {
+                    LogUtility.Log("Cannot send vBTC V2 reactivation - ports not verified open.",
+                        "ValidatorService.SendVBTCV2ReactivationTx()");
+                    return;
+                }
+
                 var validator = AccountData.GetSingleAccount(Globals.ValidatorAddress);
                 if (validator == null) return;
 
@@ -346,9 +461,9 @@ namespace ReserveBlockCore.Services
                     await Task.Delay(5000);
                 }
 
-                // Wait for 5 new blocks (shorter than initial registration since we're already known)
-                var reactivationBlockTarget = Globals.LastBlock.Height + 5;
-                LogUtility.Log($"Waiting for 5 blocks before vBTC V2 reactivation (target height: {reactivationBlockTarget})...",
+                // Wait for 2 new blocks — fast startup to let the network know we're back quickly
+                var reactivationBlockTarget = Globals.LastBlock.Height + VBTCValidatorHeartbeatService.STARTUP_HEARTBEAT_BLOCK_WAIT;
+                LogUtility.Log($"Waiting for {VBTCValidatorHeartbeatService.STARTUP_HEARTBEAT_BLOCK_WAIT} blocks before vBTC V2 reactivation (target height: {reactivationBlockTarget})...",
                     "ValidatorService.SendVBTCV2ReactivationTx()");
                 while (Globals.LastBlock.Height < reactivationBlockTarget)
                 {
@@ -363,16 +478,21 @@ namespace ReserveBlockCore.Services
                     return;
                 }
 
+                // Ensure Base address is derived before building the TX payload
+                Bitcoin.Services.ValidatorEthKeyService.EnsureBaseAddressInitialized();
+
                 var signature = SignatureService.CreateSignature(validator.Address, AccountData.GetPrivateKey(validator), validator.PublicKey);
 
                 // Create VBTC_V2_VALIDATOR_HEARTBEAT transaction for reactivation / IP update
+                // Normalize Amount/Fee/ToAddress BEFORE Build() so the hash matches
+                // what remote nodes compute after deserializing (prevents "hash not equal" errors)
                 var reactivationTx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = validator.Address,
-                    ToAddress = validator.Address,
-                    Amount = 0M,
-                    Fee = 0M,
+                    ToAddress = validator.Address.ToAddressNormalize(),
+                    Amount = 0M.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
                     Nonce = sTreiAcct.Nonce,
                     TransactionType = TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT,
                     Data = JsonConvert.SerializeObject(new
@@ -380,8 +500,10 @@ namespace ReserveBlockCore.Services
                         ValidatorAddress = validator.Address,
                         IPAddress = ipAddress,
                         FrostPublicKey = validator.PublicKey,
+                        BaseAddress = Globals.ValidatorBaseAddress,
                         ReactivationBlockHeight = Globals.LastBlock.Height,
                         PreviousIPAddress = existingValidator.IPAddress,
+                        IsS3C = Globals.IsS3CValidator,   // S3C §3.3/§3.4 — present on every heartbeat
                         Signature = signature
                     })
                 };
@@ -394,8 +516,6 @@ namespace ReserveBlockCore.Services
 
                 try
                 {
-                    reactivationTx.ToAddress = reactivationTx.ToAddress.ToAddressNormalize();
-                    reactivationTx.Amount = reactivationTx.Amount.ToNormalizeDecimal();
                     var result = await TransactionValidatorService.VerifyTX(reactivationTx);
 
                     if (result.Item1 == true)
@@ -435,10 +555,143 @@ namespace ReserveBlockCore.Services
             }
         }
 
+        private const int MAX_PORT_CHECK_RETRIES = 3;
+
+        /// <summary>
+        /// Target number of validator SignalR connections to maintain.
+        /// The loop will keep trying to connect until this many active connections exist.
+        /// </summary>
+        private const int TARGET_VAL_CONNECTIONS = 8;
+
+        /// <summary>
+        /// Populates the peer database with active validators discovered from committed blocks.
+        /// Uses VBTCValidatorRegistry which scans the last 1000 blocks for REGISTER/HEARTBEAT TXs.
+        /// 
+        /// This is the primary validator discovery mechanism — blocks are the trust anchor.
+        /// No gossip trust gates, rate limits, or cross-validation needed since the data
+        /// comes from committed, validated blocks.
+        /// </summary>
+        private static void PopulateValidatorPeersFromBlocks()
+        {
+            try
+            {
+                if (!Globals.IsChainSynced)
+                    return;
+
+                var activeValidators = VBTCValidatorRegistry.GetActiveValidators();
+                if (activeValidators == null || !activeValidators.Any())
+                    return;
+
+                var myIP = Globals.ReportedIP?.Replace("::ffff:", "") ?? "";
+                var peerDB = Peers.GetAll();
+                if (peerDB == null)
+                    return;
+
+                int upsertedCount = 0;
+
+                foreach (var val in activeValidators)
+                {
+                    // Skip validators with no IP address
+                    if (string.IsNullOrEmpty(val.IPAddress))
+                        continue;
+
+                    var cleanIP = val.IPAddress.Replace("::ffff:", "");
+
+                    // Skip self
+                    if (!string.IsNullOrEmpty(myIP) && cleanIP == myIP)
+                        continue;
+
+                    // Skip our own validator address
+                    if (val.ValidatorAddress == Globals.ValidatorAddress)
+                        continue;
+
+                    // Skip banned IPs
+                    if (Globals.BannedIPs.ContainsKey(cleanIP))
+                        continue;
+
+                    // Upsert into peer DB as a validator
+                    var existingPeer = peerDB.FindOne(x => x.PeerIP == cleanIP);
+                    if (existingPeer != null)
+                    {
+                        bool needsUpdate = false;
+
+                        // Re-enable validator status if it was demoted due to failures
+                        if (!existingPeer.IsValidator || existingPeer.ValidatorAddress != val.ValidatorAddress)
+                        {
+                            existingPeer.IsValidator = true;
+                            existingPeer.ValidatorAddress = val.ValidatorAddress;
+                            if (!string.IsNullOrEmpty(val.FrostPublicKey))
+                                existingPeer.ValidatorPublicKey = val.FrostPublicKey;
+                            needsUpdate = true;
+                        }
+
+                        // STALE-PEER-FIX: Reset FailCount for validators that are actively on-chain.
+                        // This is the recovery mechanism: when a validator comes back online and sends
+                        // a heartbeat TX that gets included in a block, we detect it here and reset
+                        // their FailCount so the connection loop will try them again.
+                        if (existingPeer.FailCount > 0)
+                        {
+                            var previousFailCount = existingPeer.FailCount;
+                            existingPeer.FailCount = 0;
+                            existingPeer.IsOutgoing = true;
+                            needsUpdate = true;
+
+                            if (previousFailCount >= 50)
+                            {
+                                LogUtility.Log(
+                                    $"PEER-REHABILITATED: Reset FailCount for {cleanIP} (was {previousFailCount}) — " +
+                                    $"validator {val.ValidatorAddress} found active on-chain.",
+                                    "ValidatorService.PopulateValidatorPeersFromBlocks");
+                            }
+                        }
+
+                        if (needsUpdate)
+                        {
+                            peerDB.UpdateSafe(existingPeer);
+                            upsertedCount++;
+                        }
+                    }
+                    else
+                    {
+                        var newPeer = new Peers
+                        {
+                            PeerIP = cleanIP,
+                            IsIncoming = false,
+                            IsOutgoing = true,
+                            FailCount = 0,
+                            IsValidator = true,
+                            ValidatorAddress = val.ValidatorAddress,
+                            ValidatorPublicKey = val.FrostPublicKey ?? "",
+                            WalletVersion = Globals.CLIVersion
+                        };
+                        peerDB.InsertSafe(newPeer);
+                        upsertedCount++;
+                    }
+                }
+
+                if (upsertedCount > 0)
+                {
+                    LogUtility.Log(
+                        $"BLOCK-DISCOVERY: Upserted {upsertedCount} validator peers from block scan. " +
+                        $"Total active on-chain: {activeValidators.Count}, " +
+                        $"ValidatorNodes connected: {Globals.ValidatorNodes.Values.Count(x => x.IsConnected)}",
+                        "ValidatorService.PopulateValidatorPeersFromBlocks");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(
+                    $"Error populating validator peers from blocks: {ex.Message}",
+                    "ValidatorService.PopulateValidatorPeersFromBlocks");
+            }
+        }
+
         internal static async Task StartupValidators()
         {
-            //wait 25 seconds
+            //wait 5 seconds
             await Task.Delay(new TimeSpan(0,0,5));
+            int portFailCount = 0;
+
             while (true)
             {
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
@@ -459,23 +712,64 @@ namespace ReserveBlockCore.Services
 
                 if(!Globals.IsFROSTAPIPortOpen || !Globals.IsValidatorAPIPortOpen || !Globals.IsValidatorPortOpen)
                 {
-                    Console.WriteLine("Validator Ports Not Open Please open ports and try again. Retrying in 30 seconds...");
+                    portFailCount++;
+                    Globals.PortsOpened = false;
+
+                    Console.WriteLine($"Validator Ports Not Open (attempt {portFailCount}/{MAX_PORT_CHECK_RETRIES}). Please open ports and try again.");
                     Console.WriteLine("Current Port Status");
                     AnsiConsole.WriteLine("Validator Port (" + Globals.ValPort + "): " + (Globals.IsValidatorPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
                     AnsiConsole.WriteLine("Validator API Port (" + Globals.ValAPIPort + "): " + (Globals.IsValidatorAPIPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
                     AnsiConsole.WriteLine("Frost API Port (" + Globals.FrostValidatorPort + "): " + (Globals.IsFROSTAPIPortOpen ? "[green]Open[/]" : "[red]Closed[/]"));
+
+                    if (portFailCount >= MAX_PORT_CHECK_RETRIES)
+                    {
+                        Console.WriteLine("============================================================");
+                        Console.WriteLine("VALIDATOR STOPPED: Required ports are not reachable after " + MAX_PORT_CHECK_RETRIES + " attempts.");
+                        Console.WriteLine("Please ensure your firewall/router has the following ports open:");
+                        Console.WriteLine($"  Validator Port:     {Globals.ValPort}");
+                        Console.WriteLine($"  Validator API Port: {Globals.ValAPIPort}");
+                        Console.WriteLine($"  FROST API Port:     {Globals.FrostValidatorPort}");
+                        Console.WriteLine("Fix your port configuration and restart the wallet to try again.");
+                        Console.WriteLine("============================================================");
+                        LogUtility.Log($"Validator stopped due to unreachable ports after {MAX_PORT_CHECK_RETRIES} attempts. ValPort={Globals.ValPort} open={Globals.IsValidatorPortOpen}, ValAPIPort={Globals.ValAPIPort} open={Globals.IsValidatorAPIPortOpen}, FrostPort={Globals.FrostValidatorPort} open={Globals.IsFROSTAPIPortOpen}",
+                            "ValidatorService.StartupValidators()");
+                        ErrorLogUtility.LogError($"Validator stopped: required ports not reachable after {MAX_PORT_CHECK_RETRIES} attempts on IP {myIP}.",
+                            "ValidatorService.StartupValidators()");
+                        await DoMasterNodeStop();
+                        return;
+                    }
+
                     await Task.Delay(new TimeSpan(0, 0, 30));
                     continue;
                 }
 
-                var startupCount = Globals.ValidatorNodes.Count / 2 + 1;
+                // All ports verified open — update global flag and reset fail counter
+                portFailCount = 0;
+                Globals.PortsOpened = true;
+
                 var delay = new TimeSpan(0,0,15);
 
                 try
                 {
+                    // Populate peer DB from on-chain validator registry (block-based discovery).
+                    // This runs every loop iteration so new validators from new blocks get picked up.
+                    PopulateValidatorPeersFromBlocks();
+
                     var ConnectedCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
-                    if (ConnectedCount < Globals.MaxValPeers)
+                    if (ConnectedCount < TARGET_VAL_CONNECTIONS)
+                    {
                         await P2PValidatorClient.ConnectToValidators();
+
+                        // Log connection progress for diagnostics
+                        var newCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
+                        if (newCount < TARGET_VAL_CONNECTIONS)
+                        {
+                            LogUtility.Log(
+                                $"VAL-CONNECT: {newCount}/{TARGET_VAL_CONNECTIONS} validator connections " +
+                                $"(target not yet met, will retry next loop)",
+                                "ValidatorService.StartupValidators()");
+                        }
+                    }
 
                     if(Globals.BlockCasters.Any())
                     {
@@ -662,10 +956,10 @@ namespace ReserveBlockCore.Services
                         Globals.IsValidatorAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.ValAPIPort);
                         Globals.IsFROSTAPIPortOpen = PortUtility.IsPortOpen(myIP, Globals.FrostValidatorPort);
 
-                        if (!Globals.IsFROSTAPIPortOpen || !Globals.IsValidatorAPIPortOpen || !Globals.IsValidatorPortOpen)
-                        {
-                            return $"Port Status: Main Port Open: {Globals.IsValidatorPortOpen} | Validator API Port Open: {!Globals.IsValidatorAPIPortOpen} | FROST Port Open: {Globals.IsFROSTAPIPortOpen}";
-                        }
+                        //if (!Globals.IsFROSTAPIPortOpen || !Globals.IsValidatorAPIPortOpen || !Globals.IsValidatorPortOpen)
+                        //{
+                        //    return $"Port Status: Main Port Open: {Globals.IsValidatorPortOpen} | Validator API Port Open: {Globals.IsValidatorAPIPortOpen} | FROST Port Open: {Globals.IsFROSTAPIPortOpen}";
+                        //}
 
                         //add total num of validators to block
                         validator.NodeIP = "SELF"; //this is as new as other users will fill this in once connected
@@ -808,7 +1102,6 @@ namespace ReserveBlockCore.Services
             //Disconnect from adj
             try
             {
-                await P2PClient.DisconnectAdjudicators();
                 //Do a block check to ensure all blocks are present.
                 await BlockDownloadService.GetAllBlocks();
                 await Task.Delay(500);
@@ -899,13 +1192,15 @@ namespace ReserveBlockCore.Services
                 }
 
                 // Create VBTC_V2_VALIDATOR_EXIT transaction
+                // Normalize Amount/Fee/ToAddress BEFORE Build() so the hash matches
+                // what remote nodes compute after deserializing (prevents "hash not equal" errors)
                 var exitTx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
                     FromAddress = validator.Address,
-                    ToAddress = validator.Address,  // Self transaction
-                    Amount = 0M,
-                    Fee = 0M,  // FREE transaction
+                    ToAddress = validator.Address.ToAddressNormalize(),
+                    Amount = 0M.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
                     Nonce = from.Nonce,
                     TransactionType = TransactionType.VBTC_V2_VALIDATOR_EXIT,
                     Data = JsonConvert.SerializeObject(new
@@ -980,7 +1275,6 @@ namespace ReserveBlockCore.Services
                     Globals.ValidatorAddress = "";
                     Globals.ValidatorPublicKey = "";
 
-                    await P2PClient.DisconnectAdjudicators();
                 }
 
             }

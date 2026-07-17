@@ -125,11 +125,184 @@ namespace ReserveBlockCore.Services
         }
         internal static void StartupDatabase()
         {
-            ConsoleWriterService.Output("Initializing Reserve Block Database...");
+            ConsoleWriterService.Output("Initializing VerifiedX Database...");
             DbContext.Initialize();
             var peerDb = Peers.GetAll();
             Globals.BannedIPs = new ConcurrentDictionary<string, Peers>(
                 peerDb.Find(x => x.IsBanned || x.IsPermaBanned).ToArray().ToDictionary(x => x.PeerIP, x => x));
+
+            // VALIDATOR-REJOIN-FIX: Reset stale FailCounts for validator peers on startup.
+            // When validators go offline for extended periods, the remaining nodes accumulate
+            // FailCounts in the thousands for those IPs. With FailCount > 600, IsOutgoing is
+            // set to false and persisted. This prevents P2P connections from being established
+            // to/from those validators after restart, even though the nodes are back online.
+            // Resetting at startup ensures returning validators can re-establish P2P connections.
+            ResetStaleValidatorPeerFailCounts();
+        }
+
+        /// <summary>
+        /// VALIDATOR-REJOIN-FIX: Reset FailCount and IsOutgoing for validator peers at startup.
+        /// High FailCounts from prolonged offline periods prevent P2P connection establishment.
+        /// The blockchain is the source of truth — a validator's on-chain presence (REGISTER/HEARTBEAT TX)
+        /// proves legitimacy, not the P2P connection history. Resetting these counters allows
+        /// returning validators to re-establish connections and rejoin the network.
+        /// </summary>
+        internal static void ResetStaleValidatorPeerFailCounts()
+        {
+            try
+            {
+                var peerDb = Peers.GetAll();
+                if (peerDb == null) return;
+
+                var staleValidatorPeers = peerDb.Find(x => x.IsValidator && (x.FailCount > 10 || !x.IsOutgoing)).ToList();
+                if (!staleValidatorPeers.Any()) return;
+
+                int resetCount = 0;
+                foreach (var peer in staleValidatorPeers)
+                {
+                    var oldFailCount = peer.FailCount;
+                    var oldIsOutgoing = peer.IsOutgoing;
+                    peer.FailCount = 0;
+                    peer.IsOutgoing = true;
+                    peerDb.UpdateSafe(peer);
+                    resetCount++;
+                    LogUtility.Log(
+                        $"VALIDATOR-REJOIN-FIX: Reset stale peer {peer.PeerIP} (addr={peer.ValidatorAddress}): " +
+                        $"FailCount {oldFailCount}→0, IsOutgoing {oldIsOutgoing}→true",
+                        "StartupService.ResetStaleValidatorPeerFailCounts()");
+                }
+
+                if (resetCount > 0)
+                {
+                    ConsoleWriterService.Output($"[Startup] Reset {resetCount} stale validator peer FailCounts to allow P2P reconnection.");
+                    LogUtility.Log(
+                        $"VALIDATOR-REJOIN-FIX: Reset {resetCount} stale validator peer FailCounts on startup.",
+                        "StartupService.ResetStaleValidatorPeerFailCounts()");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error resetting stale validator peer fail counts: {ex.Message}",
+                    "StartupService.ResetStaleValidatorPeerFailCounts()");
+            }
+        }
+
+        /// <summary>
+        /// VALIDATOR-REJOIN-FIX: Scan the last N blocks for VBTC_V2_VALIDATOR_HEARTBEAT and
+        /// VBTC_V2_VALIDATOR_REGISTER transactions. For each one found, hydrate Globals.NetworkValidators
+        /// with the validator's address and IP from the on-chain TX data.
+        /// 
+        /// This is the blockchain-as-source-of-truth approach: a TX in a committed block is the
+        /// strongest proof of validator liveness. No DB trust, no P2P dependency — just the chain.
+        /// 
+        /// Called after chain sync completes but BEFORE the liveness sweep, so returning validators
+        /// that broadcast heartbeat TXs during the caster's downtime are discovered and present
+        /// when the sweep checks them.
+        /// </summary>
+        internal static void ScanRecentBlocksForValidators()
+        {
+            const int SCAN_DEPTH = 500; // Scan last 500 blocks for validator TXs
+
+            try
+            {
+                var lastHeight = Globals.LastBlock.Height;
+                if (lastHeight <= 0) return;
+
+                var startHeight = Math.Max(0, lastHeight - SCAN_DEPTH);
+                var blockChain = BlockchainData.GetBlocks();
+                int hydratedCount = 0;
+                var currentTime = TimeUtil.GetTime();
+
+                LogUtility.Log(
+                    $"VALIDATOR-REJOIN-SCAN: Starting scan of blocks {startHeight}→{lastHeight} for HEARTBEAT/REGISTER TXs",
+                    "StartupService.ScanRecentBlocksForValidators");
+
+                for (long h = startHeight; h <= lastHeight; h++)
+                {
+                    try
+                    {
+                        var block = blockChain.Query().Where(x => x.Height == h).FirstOrDefault();
+                        if (block == null || block.Transactions == null || block.Transactions.Count <= 1)
+                            continue;
+
+                        foreach (var tx in block.Transactions)
+                        {
+                            if (tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT &&
+                                tx.TransactionType != TransactionType.VBTC_V2_VALIDATOR_REGISTER)
+                                continue;
+
+                            try
+                            {
+                                if (string.IsNullOrEmpty(tx.Data)) continue;
+
+                                var txData = JObject.Parse(tx.Data);
+                                var validatorAddress = txData["ValidatorAddress"]?.ToString();
+                                var ipAddress = txData["IPAddress"]?.ToString();
+
+                                if (string.IsNullOrEmpty(validatorAddress) || string.IsNullOrEmpty(ipAddress))
+                                    continue;
+
+                                // Validate IP format
+                                var cleanIP = ipAddress.Replace("::ffff:", "");
+                                if (!System.Net.IPAddress.TryParse(cleanIP, out _))
+                                    continue;
+
+                                // Skip if already in NetworkValidators with a recent LastSeen
+                                if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existing))
+                                {
+                                    // Update LastSeen and IP if the block is newer
+                                    if (block.Timestamp > existing.LastSeen)
+                                    {
+                                        existing.LastSeen = block.Timestamp;
+                                        existing.IPAddress = cleanIP;
+                                        existing.CheckFailCount = 0;
+                                        Globals.NetworkValidators[validatorAddress] = existing;
+                                    }
+                                    continue;
+                                }
+
+                                // Add new entry — the TX on-chain IS the proof of legitimacy
+                                var netVal = new NetworkValidator
+                                {
+                                    Address = validatorAddress,
+                                    IPAddress = cleanIP,
+                                    PublicKey = txData["FrostPublicKey"]?.ToString() ?? "",
+                                    IsFullyTrusted = false,
+                                    LastSeen = block.Timestamp,
+                                    FirstSeenAtHeight = block.Height,
+                                    CheckFailCount = 0,
+                                    FirstAdvertised = block.Timestamp,
+                                };
+
+                                if (Globals.NetworkValidators.TryAdd(validatorAddress, netVal))
+                                {
+                                    hydratedCount++;
+                                }
+                            }
+                            catch { /* skip malformed TX data */ }
+                        }
+                    }
+                    catch { /* skip unreadable block */ }
+                }
+
+                // Clear proof cache so the new validators are included in proof generation
+                if (hydratedCount > 0)
+                {
+                    Utilities.ProofUtility.ClearProofGenerationCache();
+                }
+
+                LogUtility.Log(
+                    $"VALIDATOR-REJOIN-SCAN: Complete. Scanned {lastHeight - startHeight} blocks, hydrated {hydratedCount} validators. " +
+                    $"NetworkValidators.Count now = {Globals.NetworkValidators.Count}",
+                    "StartupService.ScanRecentBlocksForValidators");
+                ConsoleWriterService.Output(
+                    $"[Startup] Blockchain validator scan: found {hydratedCount} validators in last {SCAN_DEPTH} blocks.");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"VALIDATOR-REJOIN-SCAN error: {ex.Message}",
+                    "StartupService.ScanRecentBlocksForValidators");
+            }
         }
 
         public static async void EncryptedPasswordEntry()
@@ -340,35 +513,46 @@ namespace ReserveBlockCore.Services
             {
                 if (!settings.CorrectShutdown)
                 {
-                    if(!Debugger.IsAttached && !skipStateSync)
+                    // ROOT-CAUSE FIX: An improper shutdown (crash / process kill — e.g. a non-graceful
+                    // wallet update) can interrupt a block commit between AddBlock (chain DB) and
+                    // UpdateTreis (AccountStateTrei DB). Those are separate, non-atomic LiteDB files, so
+                    // the block survives while its state mutations are lost — a permanent
+                    // "new account with no balance" hole that gets the node stuck on a later block.
+                    // The StateTreiStatus flag is only written by a full rebuild, so it stays stale-green
+                    // and can't detect this. Force an integrity rebuild: mark the state trie not-synced
+                    // so DownloadBlocksOnStart runs ResetTreis before syncing blocks.
+                    if (!Debugger.IsAttached && !skipStateSync && Globals.LastBlock.Height > 0)
                     {
-                        //await StateTreiSyncService.SyncAccountStateTrei();
+                        ErrorLogUtility.LogError(
+                            "[STARTUP] Improper shutdown detected — state trie may be inconsistent with the chain. " +
+                            "Flagging for full state rebuild (ResetTreis) before block sync.",
+                            "StartupService.RunSettingChecks");
+                        StateTreiStatusService.SetFailed("Improper shutdown — state trie integrity not guaranteed.");
                     }
                 }
 
-                if (Globals.AdjudicateAccount == null)
+                
+                var now = DateTime.Now;
+                var lastShutDown = settings.LastShutdown;
+
+                if (lastShutDown != null && settings.CorrectShutdown && Globals.LastBlock.Height > 0)
                 {
-                    var now = DateTime.Now;
-                    var lastShutDown = settings.LastShutdown;
-
-                    if (lastShutDown != null && settings.CorrectShutdown && Globals.LastBlock.Height > 0)
+                    if (!Debugger.IsAttached && lastShutDown.Value.AddSeconds(20) > now)
                     {
-                        if (!Debugger.IsAttached && lastShutDown.Value.AddSeconds(20) > now)
-                        {
-                            var diff = Convert.ToInt32((lastShutDown.Value.AddSeconds(20) - now).TotalMilliseconds);
-                            Console.WriteLine("Wallet was restarted too fast. Startup will continue in a moment. Do not close wallet.");
-                            await Task.Delay(diff);//make the wallet wait if restart is too fast
-                        }
-                    }
-                    else
-                    {
-                        if (!Debugger.IsAttached && Globals.LastBlock.Height > 0)
-                        {
-                            Console.WriteLine("Wallet was restarted too fast or improperly closed. Startup will continue in a moment. Do not close wallet.");
-                            await Task.Delay(15000);
-                        }
+                        var diff = Convert.ToInt32((lastShutDown.Value.AddSeconds(20) - now).TotalMilliseconds);
+                        Console.WriteLine("Wallet was restarted too fast. Startup will continue in a moment. Do not close wallet.");
+                        await Task.Delay(diff);//make the wallet wait if restart is too fast
                     }
                 }
+                else
+                {
+                    if (!Debugger.IsAttached && Globals.LastBlock.Height > 0 && !skipStateSync)
+                    {
+                        Console.WriteLine("Wallet was restarted too fast or improperly closed. Startup will continue in a moment. Do not close wallet.");
+                        await Task.Delay(15000);
+                    }
+                }
+                
 
                 _ = Settings.InitiateStartupUpdate();
             }
@@ -424,8 +608,8 @@ namespace ReserveBlockCore.Services
                 if(Globals.SelfBeacon?.SelfBeaconActive == true)
                 {
                     _ = BeaconServerFast.StartBeaconServer();
-                    var port = Globals.Port + 20000; //23338 - mainnet
-                    
+                    var port = Globals.BeaconPort; //23338 - mainnet | 33338 - testnet
+
                     BeaconServer server = new BeaconServer(GetPathUtility.GetBeaconPath(), port);
                     Thread obj_thread = new Thread(server.StartServer());
                     Console.WriteLine("Beacon Stopped");
@@ -447,7 +631,7 @@ namespace ReserveBlockCore.Services
                         Address = "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
                         SigningAddress = "xPqVbS8X6X9ofeD5F2VsEV4KHBeMZoVawa",
                         Generation = 0,
-                        IPAddress = "66.94.124.2",
+                        IPAddress = "40.160.225.225",
                         StartOfService = 1715745443,
                         Title = "Arbiter1"
                     },
@@ -455,7 +639,7 @@ namespace ReserveBlockCore.Services
                         Address = "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
                         SigningAddress = "",
                         Generation = 0,
-                        IPAddress = "144.126.156.102",
+                        IPAddress = "40.160.233.196",
                         StartOfService = 1715745443,
                         Title = "Arbiter2"
                     }
@@ -650,8 +834,8 @@ namespace ReserveBlockCore.Services
                     {
                         List<Beacons> beaconList = new List<Beacons>
                         {
-                            new Beacons { IPAddress = "66.94.124.2", Name = "Lily Beacon TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
-                            new Beacons { IPAddress = "144.126.156.102", Name = "Lotus Beacon V2 TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "40.160.225.225", Name = "Lily Beacon TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LilyBeacon", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
+                            new Beacons { IPAddress = "40.160.233.196", Name = "Lotus Beacon V2 TESTNET", Port = Globals.Port + 1 + 20000, BeaconUID = "LotusBeaconV2", DefaultBeacon = true, AutoDeleteAfterDownload = true, FileCachePeriodDays = 2, IsPrivateBeacon = false, SelfBeacon = false, SelfBeaconActive = false, BeaconLocator = "", Region = 1 },
                         };
 
                         foreach (var beacon in beaconList)
@@ -733,6 +917,17 @@ namespace ReserveBlockCore.Services
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
             }
+
+            // Derive Base address if validator was found
+            if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.SetValidator()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
+            }
         }
 
         internal static async void SetConfigValidator()
@@ -746,6 +941,14 @@ namespace ReserveBlockCore.Services
                 var valResult = await ValidatorService.StartValidating(myAccount, uname, true);
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
+
+                // Derive Base address after config validator is set
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.SetConfigValidator()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
             }
         }
 
@@ -1003,6 +1206,154 @@ namespace ReserveBlockCore.Services
         }
         internal static async Task DownloadBlocksOnStart()
         {
+            // ═══════════════════════════════════════════════════════════════
+            // STATE TRIE INTEGRITY CHECK: Before downloading any blocks, verify
+            // the state trie is in a consistent state. If the StateTreiStatus
+            // record is missing (wiped DB) or IsSynced=false (failed rebuild),
+            // run a full ResetTreis BEFORE attempting to sync blocks.
+            // Without this, the node will download blocks, fail TX validation
+            // on every one ("new account with no balance"), and spam errors.
+            // ═══════════════════════════════════════════════════════════════
+            try
+            {
+                // Only check if we have blocks to rebuild from (not a fresh install)
+                var blockCount = BlockchainData.GetBlocks().Count();
+                if (blockCount > 0)
+                {
+                    var treiStatus = StateTreiStatusService.GetStatus();
+                    if (treiStatus == null || !treiStatus.IsSynced)
+                    {
+                        // Check if ResetTreis is already running (triggered by TX failure counter)
+                        // If so, wait for it to finish instead of trying to start another one.
+                        if (BlockRollbackUtility.IsResetTreisRunning)
+                        {
+                            ConsoleWriterService.Output("[STARTUP] State trie rebuild is already in progress. Waiting for it to complete...");
+                            LogUtility.Log(
+                                "[STARTUP] ResetTreis already running (triggered by TX failure counter). Waiting...",
+                                "StartupService.DownloadBlocksOnStart");
+                            
+                            while (BlockRollbackUtility.IsResetTreisRunning)
+                            {
+                                await Task.Delay(5000); // Check every 5 seconds
+                            }
+
+                            ConsoleWriterService.Output("[STARTUP] State trie rebuild finished. Checking status...");
+
+                            // Re-check status after rebuild completes
+                            var postStatus = StateTreiStatusService.GetStatus();
+                            if (postStatus != null && postStatus.IsSynced)
+                            {
+                                ConsoleWriterService.Output("[STARTUP] State rebuild completed successfully. Proceeding with block downloads.");
+                                LogUtility.Log(
+                                    $"[STARTUP] ResetTreis completed. State trie synced at height {postStatus.LastSyncedHeight}.",
+                                    "StartupService.DownloadBlocksOnStart");
+                            }
+                            else
+                            {
+                                ConsoleWriterService.Output("[STARTUP] WARNING: State rebuild did not fully succeed. Will attempt again...");
+                            }
+                        }
+                        else
+                        {
+                            // ═══════════════════════════════════════════════════════════════
+                            // TRUST-ON-UPGRADE: a MISSING status record on a populated node is
+                            // the normal first boot after updating from a build that never wrote
+                            // one — NOT corruption. RunSettingChecks runs before this gate and
+                            // writes an explicit IsSynced=false on improper shutdown, so a null
+                            // record here means the previous (pre-upgrade) session shut down
+                            // gracefully with state validated block-by-block by consensus.
+                            // Forcing every updated node through a 45-min ResetTreis takes the
+                            // fleet offline (silent block rejection during rebuild) for nothing.
+                            // Sanity check: the account state trei must actually be populated —
+                            // a wiped trei (deleted db file) must still rebuild.
+                            // ═══════════════════════════════════════════════════════════════
+                            bool trustedExistingState = false;
+                            if (treiStatus == null)
+                            {
+                                long stateRecordCount = 0;
+                                try { stateRecordCount = StateData.GetAccountStateTrei().Count(); } catch { }
+
+                                if (stateRecordCount > 0)
+                                {
+                                    StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] No StateTreiStatus record (first boot after update) — previous shutdown was clean and " +
+                                        $"state trie is populated ({stateRecordCount:N0} accounts). Trusting existing state; baseline recorded at height {Globals.LastBlock.Height}.");
+                                    LogUtility.Log(
+                                        $"[STARTUP] TRUST-ON-UPGRADE: StateTreiStatus baseline recorded at height {Globals.LastBlock.Height} " +
+                                        $"({stateRecordCount:N0} state records). Skipping rebuild.",
+                                        "StartupService.DownloadBlocksOnStart");
+
+                                    await StateSnapshotService.BootstrapAsync();
+                                    trustedExistingState = true;
+                                }
+                            }
+
+                            if (!trustedExistingState)
+                            {
+                                var reason = treiStatus == null
+                                    ? "no StateTreiStatus record found and state trie is EMPTY (wiped or never built)"
+                                    : $"IsSynced=false (last failure: {treiStatus.LastFailureReason ?? "unknown"})";
+
+                                ConsoleWriterService.Output($"[STARTUP] State trie integrity check FAILED: {reason}");
+                                LogUtility.Log(
+                                    $"[STARTUP] State trie not synced: {reason}. Attempting snapshot restore before falling back to ResetTreis.",
+                                    "StartupService.DownloadBlocksOnStart");
+
+                                // FAST PATH: restore from a snapshot slot + replay the tail (seconds)
+                                // instead of a full genesis replay (~45 min). Crash-recovery case, so
+                                // the target is the current local tip.
+                                var restoreTarget = BlockchainData.GetLastBlock()?.Height ?? Globals.LastBlock.Height;
+                                var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                                if (restored)
+                                {
+                                    ConsoleWriterService.Output($"[STARTUP] Snapshot restore complete at height {restoreTarget}. Proceeding with block downloads.");
+                                    LogUtility.Log(
+                                        $"[STARTUP] Snapshot restore succeeded at height {restoreTarget}.",
+                                        "StartupService.DownloadBlocksOnStart");
+                                }
+                                else
+                                {
+                                    // NO AUTOMATIC REBUILD: the multi-hour genesis replay is
+                                    // operator-only (start with the `rebuildstate` argument).
+                                    // The node continues on its existing state — in the common
+                                    // case (improper shutdown before the first snapshot existed)
+                                    // that state is fine, consensus validates every block against
+                                    // it, and the probation counter in BlockValidatorService
+                                    // re-marks it synced after enough clean blocks so snapshot
+                                    // protection resumes. Real corruption surfaces as TX failures
+                                    // and is handled by the recovery paths.
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] WARNING: State trie is flagged unverified and no usable snapshot exists. " +
+                                        $"Continuing on existing state — snapshots will resume automatically after clean block validation. " +
+                                        $"If this node shows persistent TX/balance errors, restart it with the 'rebuildstate' argument for a full rebuild.");
+                                    ErrorLogUtility.LogError(
+                                        $"[STARTUP] Unverified state with no usable snapshot at height {Globals.LastBlock.Height}. " +
+                                        $"Automatic rebuild is disabled; running on existing state under probation. Manual option: 'rebuildstate' startup argument.",
+                                        "StartupService.DownloadBlocksOnStart");
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        LogUtility.Log(
+                            $"[STARTUP] State trie integrity check PASSED (synced at height {treiStatus.LastSyncedHeight}).",
+                            "StartupService.DownloadBlocksOnStart");
+
+                        // First run after upgrade: state is verified good but no snapshot slot
+                        // exists yet — take the initial full snapshot now (no-op once slots exist).
+                        await StateSnapshotService.BootstrapAsync();
+                    }
+                }
+            }
+            catch (Exception stateCheckEx)
+            {
+                ErrorLogUtility.LogError(
+                    $"[STARTUP] State trie integrity check failed with exception: {stateCheckEx.Message}. Proceeding with block downloads.",
+                    "StartupService.DownloadBlocksOnStart");
+            }
+
             var download = true;
             try
             {
@@ -1057,9 +1408,68 @@ namespace ReserveBlockCore.Services
                     }
                 }
                 if (!Globals.IsResyncing)
-                {                    
+                {
                     Globals.StopAllTimers = false;
                     Globals.IsChainSynced = true;
+
+                    // FRESH-SYNC BASELINE: a wallet that built its state by validating every block
+                    // from genesis never runs ResetTreis, so no StateTreiStatus record exists.
+                    // Without one, the snapshot cycle's dirty-state gate blocks forever and the
+                    // NEXT startup's integrity check would force a full ResetTreis. State built by
+                    // full validation is as trustworthy as a replay — record the baseline now.
+                    // (Never overwrites a Failed record: the startup gate resolved that before
+                    // block downloads began.)
+                    if (StateTreiStatusService.GetStatus() == null && Globals.LastBlock.Height > 0)
+                    {
+                        StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                        LogUtility.Log(
+                            $"[STARTUP] Fresh-synced chain — StateTreiStatus baseline recorded at height {Globals.LastBlock.Height}.",
+                            "StartupService.DownloadBlocksOnStart");
+                    }
+
+                    // PEER-DISCOVERY: After sync completes, re-run chain-based peer discovery
+                    // with the most up-to-date blocks to find all active validators.
+                    _ = Task.Run(() =>
+                    {
+                        try
+                        {
+                            PeerDiscoveryService.RunPostSyncDiscovery();
+                        }
+                        catch (Exception pdEx)
+                        {
+                            ErrorLogUtility.LogError($"Post-sync peer discovery failed: {pdEx.Message}", "StartupService.DownloadBlocksOnStart");
+                        }
+                    });
+
+                    // VALIDATOR-REJOIN-FIX: Scan recent blocks for HEARTBEAT and REGISTER TXs
+                    // to hydrate NetworkValidators from on-chain state. This runs BEFORE the
+                    // liveness sweep so returning validators discovered from the blockchain
+                    // are present before the sweep checks them.
+                    _ = Task.Run(() =>
+                    {
+                        try
+                        {
+                            ScanRecentBlocksForValidators();
+                        }
+                        catch (Exception scanEx)
+                        {
+                            ErrorLogUtility.LogError($"VALIDATOR-REJOIN-SCAN failed: {scanEx.Message}", "StartupService.DownloadBlocksOnStart");
+                        }
+                    });
+
+                    // POST-SYNC LIVENESS SWEEP: After sync completes, verify all NetworkValidators
+                    // are actually online and running a compatible version. Remove offline/outdated ones.
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await NetworkValidator.RunPostSyncLivenessSweep();
+                        }
+                        catch (Exception sweepEx)
+                        {
+                            LogUtility.Log($"Post-sync liveness sweep failed: {sweepEx.Message}", "StartupService.DownloadBlocksOnStartup");
+                        }
+                    });
                 }
                 download = false; //exit the while.
             }
@@ -1142,178 +1552,7 @@ namespace ReserveBlockCore.Services
 
             
         }
-
-        internal static async void ResetStateTreis()
-        {
-            var blockChain = BlockchainData.GetBlocks().FindAll();
-            var failCount = 0;
-            List<Block> failBlocks = new List<Block>();
-
-            var transactions = TransactionData.GetAll();
-            var stateTrei = StateData.GetAccountStateTrei();
-            var worldTrei = WorldTrei.GetWorldTrei();
-
-            transactions.DeleteAllSafe();//delete all local transactions
-            stateTrei.DeleteAllSafe(); //removes all state trei data
-            worldTrei.DeleteAllSafe();  //removes the state trei
-
-            DbContext.DB.Checkpoint();
-            DbContext.DB_AccountStateTrei.Checkpoint();
-            DbContext.DB_WorldStateTrei.Checkpoint();
-
-            var accounts = AccountData.GetAccounts();
-            var accountList = accounts.FindAll().ToList();
-            if (accountList.Count() > 0)
-            {
-                foreach (var account in accountList)
-                {
-                    account.Balance = 0M;
-                    accounts.UpdateSafe(account);//updating local record with synced state trei
-                }
-            }
-
-            foreach (var block in blockChain)
-            {
-                var result = await BlockchainRescanUtility.ValidateBlock(block, true);
-                if(result != false)
-                {
-                    await StateData.UpdateTreis(block);
-
-                    foreach (Transaction transaction in block.Transactions)
-                    {
-                        var mempool = TransactionData.GetPool();
-
-                        var mempoolTx = mempool.FindAll().Where(x => x.Hash == transaction.Hash).FirstOrDefault();
-                        if (mempoolTx != null)
-                        {
-                            mempool.DeleteManySafe(x => x.Hash == transaction.Hash);
-                        }
-
-                        var account = AccountData.GetAccounts().FindAll().Where(x => x.Address == transaction.ToAddress).FirstOrDefault();
-                        if (account != null)
-                        {
-                            AccountData.UpdateLocalBalanceAdd(transaction.ToAddress, transaction.Amount);
-                            var txdata = TransactionData.GetAll();
-                            txdata.InsertSafe(transaction);
-                        }
-
-                        //Adds sent TX to wallet
-                        var fromAccount = AccountData.GetAccounts().FindOne(x => x.Address == transaction.FromAddress);
-                        if (fromAccount != null)
-                        {
-                            var txData = TransactionData.GetAll();
-                            var fromTx = transaction;
-                            fromTx.Amount = transaction.Amount * -1M;
-                            fromTx.Fee = transaction.Fee * -1M;
-                            txData.InsertSafe(fromTx);
-                            await AccountData.UpdateLocalBalance(fromAccount.Address, (transaction.Amount + transaction.Fee));
-                        }
-                    }
-                }
-                else
-                {
-                    //issue with chain and must redownload
-                    failBlocks.Add(block);
-                    failCount++;
-                }
-            }
-
-            if(failCount == 0)
-            {
-                
-            }
-            else
-            {
-                //chain is invalid. Delete and redownload
-            }
-        }
-
-        internal static async void ResetChainToPoint()
-        {
-            var blockFixHeight = 19941;
-            var blocks = BlockchainData.GetBlocks();
-            var block = BlockchainData.GetBlockByHeight(blockFixHeight);
-            int failCount = 0;
-            if(block != null)
-            {
-                if(block.Hash == "baca9daedafe1b480927e6eefbd366380c0fa2191c444bd246d6f34b43393928")
-                {
-                    var stateTrei = StateData.GetAccountStateTrei();
-
-                    stateTrei.DeleteAllSafe();
-                    DbContext.DB_AccountStateTrei.Checkpoint();
-
-                    blocks.DeleteManySafe(x => x.Height >= blockFixHeight);
-                    DbContext.DB.Checkpoint();
-                    var blocksFromGenesis = blocks.Find(LiteDB.Query.All(LiteDB.Query.Ascending));
-
-                    foreach (var blk in blocksFromGenesis)
-                    {
-                        var result = await BlockchainRescanUtility.ValidateBlock(blk);
-                        if(result == false)
-                        {
-                            failCount++;
-                        }
-                    }
-
-                }
-                else
-                {
-                    //do nothing
-                }
-            }
-
-            if(failCount > 0)
-            {
-                Console.WriteLine("Resync Failed. Download whole chain.");
-            }
-            else
-            {
-                Console.WriteLine("Resync Completed.");
-            }
-        }
-
-        internal static void ClearSelfValidator()
-        {
-            var validators = Validators.Validator.GetAll();
-            var validator = validators.FindOne(x => x.NodeIP == "SELF");
-            if (validator != null)
-            {
-                var accounts = AccountData.GetAccounts();
-                var account = accounts.FindOne(x => x.Address == validator.Address);
-
-                if(account != null)
-                {
-                    account.IsValidating = false;
-                    accounts.UpdateSafe(account);
-                }
-                var isDeleted = validators.DeleteSafe(validator.Id);
-                if(isDeleted)
-                {
-                    DbContext.DB_Peers.Checkpoint();//commits from log file
-                    //success
-                }
-            }
-        }
-
-        internal static void OpenUpShop()
-        {
-            var decShop = DecShop.GetMyDecShopInfo();
-            if(decShop != null)
-            {
-                var message = new Message
-                {
-                    Address = decShop.OwnerAddress,
-                    Data = "",
-                    Type = MessageType.ShopConnect,
-                    Port = decShop.Port
-                };
-
-                //var messageSend = 
-
-
-            }
-        }
+      
 
         internal static async Task UpdateSCOwnership()
         {
@@ -1413,6 +1652,14 @@ namespace ReserveBlockCore.Services
                 Globals.ValidatorAddress = myAccount.Address;
                 Globals.ValidatorPublicKey = myAccount.PublicKey;
                 LogUtility.Log("Validator Address set: " + Globals.ValidatorAddress, "StartupService:StartupPeers()");
+
+                // Derive Base address immediately after validator address is confirmed
+                Bitcoin.Services.ValidatorEthKeyService.TryInitializeGlobalsValidatorBaseAddress();
+                if (!string.IsNullOrEmpty(Globals.ValidatorBaseAddress))
+                {
+                    LogUtility.Log($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}", "StartupService.DisplayValidatorAddress()");
+                    Console.WriteLine($"[vBTC Bridge V2] Validator Base Address: {Globals.ValidatorBaseAddress}");
+                }
             }
         }
 
@@ -1451,9 +1698,35 @@ namespace ReserveBlockCore.Services
                 var delay = Globals.Nodes.Count < startupCount ? Task.Delay(1000) : Task.Delay(10000);
                 try
                 {
+                    // FIX: Periodically clear SkipPeers so temporarily-offline nodes can be retried.
+                    // Without this, a bootstrap node that was offline at startup gets permanently
+                    // skipped for the entire session.
+                    PeerDiscoveryService.ClearSkipPeersIfDue();
+
                     var ConnectedCount = Globals.Nodes.Values.Where(x => x.IsConnected).Count();
                     if(ConnectedCount < Globals.MaxPeers)
+                    {
+                        // Step 1: Chain-based peer discovery — scan on-chain validator data
+                        // to populate the Peers DB with known-good validator IPs.
+                        // This is the primary discovery mechanism (no network calls needed).
+                        PeerDiscoveryService.DiscoverPeersFromChain();
+
+                        // Step 2: Try connecting to peers from the now-enriched Peers DB
                         await P2PClient.ConnectToPeers();
+
+                        // Step 3: If still below MaxPeers, use peer gossip as fallback —
+                        // ask connected nodes for their peer lists.
+                        ConnectedCount = Globals.Nodes.Values.Where(x => x.IsConnected).Count();
+                        if (ConnectedCount < Globals.MaxPeers)
+                        {
+                            var gossipAdded = await PeerDiscoveryService.RequestPeersFromConnectedNodes();
+                            if (gossipAdded > 0)
+                            {
+                                // New peers discovered via gossip — try connecting again
+                                await P2PClient.ConnectToPeers();
+                            }
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {

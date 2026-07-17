@@ -17,6 +17,11 @@ namespace ReserveBlockCore.P2P
         private static readonly object _nonceCleanupLock = new object();
         private static DateTime _lastNonceCleanup = DateTime.UtcNow;
 
+        // FORK-FIX: Rate-limit BANNED-IP-REJECT log messages to prevent log spam and OOM.
+        // Tracks (IP -> last log time) so we only log once per IP per 5 minutes.
+        private static readonly ConcurrentDictionary<string, (DateTime lastLog, int suppressedCount)> _bannedIpLogTracker = new();
+        private const int BANNED_IP_LOG_INTERVAL_SECONDS = 300; // 5 minutes
+
         #region On Connected 
         public override async Task OnConnectedAsync()
         {
@@ -27,6 +32,30 @@ namespace ReserveBlockCore.P2P
 
                 if (Globals.BannedIPs.ContainsKey(peerIP))
                 {
+                    // FORK-FIX: Rate-limit ban rejection logging to prevent log spam and OOM.
+                    // During fork events, banned IPs reconnect every ~15 seconds, generating
+                    // massive log volume that contributes to memory exhaustion.
+                    var banCheckTime = DateTime.UtcNow;
+                    _bannedIpLogTracker.AddOrUpdate(
+                        peerIP,
+                        _ =>
+                        {
+                            LogUtility.Log($"BANNED-IP-REJECT: Rejecting blockcaster connection from banned IP {peerIP}", "P2PBlockcasterServer.OnConnectedAsync");
+                            return (banCheckTime, 0);
+                        },
+                        (_, existing) =>
+                        {
+                            if ((banCheckTime - existing.lastLog).TotalSeconds >= BANNED_IP_LOG_INTERVAL_SECONDS)
+                            {
+                                var suppressed = existing.suppressedCount;
+                                LogUtility.Log(
+                                    $"BANNED-IP-REJECT: Rejecting blockcaster connection from banned IP {peerIP}" +
+                                    (suppressed > 0 ? $" ({suppressed} additional rejections suppressed since last log)" : ""),
+                                    "P2PBlockcasterServer.OnConnectedAsync");
+                                return (banCheckTime, 0);
+                            }
+                            return (existing.lastLog, existing.suppressedCount + 1);
+                        });
                     Context.Abort();
                     return;
                 }
@@ -172,9 +201,21 @@ namespace ReserveBlockCore.P2P
                     Signature = signature,
                     SignatureMessage = SignedMessage,
                     UniqueName = uName,
+                    // RESTART-FIX: Direct P2P connections are authenticated via signature,
+                    // so they are inherently trusted. This ensures returning validators
+                    // are immediately eligible for caster promotion.
+                    IsFullyTrusted = true,
+                    LastSeen = TimeUtil.GetTime(),
+                    FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
                 };
 
-                Globals.NetworkValidators.TryAdd(address, netVal);
+                // CASTER-PROMOTE-FIX: Use upsert helper instead of TryAdd.
+                // TryAdd is a no-op if the address is already present, which could
+                // leave a stale IsFullyTrusted=false entry from a prior gossip path,
+                // silently blocking caster promotion. The helper forces trust on
+                // direct authenticated connections and preserves FirstSeenAtHeight.
+                NetworkValidator.UpsertTrustedOnDirectConnect(netVal);
+
 
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
 
@@ -183,9 +224,19 @@ namespace ReserveBlockCore.P2P
                 _ = PortCheckCacheService.CheckAndDisconnectIfClosed(
                     peerIP, 
                     Globals.ValPort, 
-                    async () => await EndOnConnect(peerIP, 
-                        $"Port: {Globals.ValPort} was not detected as open.", 
-                        $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}."),
+                    async () =>
+                    {
+                        try
+                        {
+                            await EndOnConnect(peerIP, 
+                                $"Port: {Globals.ValPort} was not detected as open.", 
+                                $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}.");
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // Hub already disposed, connection is already gone - nothing to do
+                        }
+                    },
                     "P2PBlockcasterServer"
                 );
 

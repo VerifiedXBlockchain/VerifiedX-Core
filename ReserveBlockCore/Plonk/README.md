@@ -1,0 +1,50 @@
+# PLONK / privacy native library (`plonk_ffi`)
+
+Same deployment pattern as **`Frost/`**: platform-specific binaries live under `win/`, `linux/`, and `mac/`, and `ReserveBlockCore.csproj` copies them to the output directory with a flat `<Link>` name so `DllImport("plonk_ffi")` resolves.
+
+## Source (Rust)
+
+The FFI crate lives in the **`plonk`** workspace (sibling repo), not inside VerifiedX-Core:
+
+- `plonk/plonk-ffi/` — build + copy paths in `README.md`
+- `plonk/plonk-ffi/DEPLOYMENT.md` — step-by-step placement into this `Plonk/` folder
+- [`PARAMS.md`](PARAMS.md) — universal parameters file + `VFX_PLONK_PARAMS_PATH` (Phase 4 prep)
+
+## How binaries get here
+
+In the **plonk** repo: Actions → **Build Native Libraries (plonk_ffi)** (manual run) builds **all three** platforms and uploads artifacts:
+
+| Platform | Artifact | Copy to |
+|----------|----------|---------|
+| **Windows** | `plonk_ffi-windows` (`plonk_ffi.dll`) | `Plonk/win/plonk_ffi.dll` |
+| **Linux** | `libplonk_ffi-linux` | `Plonk/linux/libplonk_ffi.so` |
+| **macOS** | `libplonk_ffi-macos` | `Plonk/mac/libplonk_ffi.dylib` |
+
+FROST’s workflow only produces macOS/Linux; **plonk** adds **`windows-latest`** so you can pull the DLL from CI as well. Local `cargo build` still works if you prefer.
+
+## Layout
+
+```
+Plonk/
+├── win/
+│   └── plonk_ffi.dll
+├── linux/
+│   └── libplonk_ffi.so
+└── mac/
+    └── libplonk_ffi.dylib
+```
+
+## CI
+
+[`.github/workflows/dotnet.yml`](../../.github/workflows/dotnet.yml) runs **build + test** on **Windows** and **Ubuntu** so `plonk_ffi.dll` and `libplonk_ffi.so` are both exercised (same pattern as optional Frost linux `.so`).
+
+## Roadmap (beyond Phase 1 FFI)
+
+The committed library exposes **Pedersen**, **Poseidon** (plonk-hashing–aligned), **Merkle**, **nullifiers**, **`plonk_load_params` / `plonk_verify`**, and **`plonk_prove_v0`** (when params include a prover key — **`VXPLNK02`**). **C# Phase 4** wires [`PlonkProofVerifier`](../Privacy/PlonkProofVerifier.cs) + [`PlonkPublicInputsV1`](../Privacy/PlonkPublicInputsV1.cs) into validation; [`PlonkProverV0`](../Privacy/PlonkProverV0.cs) exposes proving when [`PLONKSetup.IsProofProvingImplemented`](../Privacy/PLONKSetup.cs) is true.
+
+1. **Parameters** — proving/verification keys generated in **`plonk`**, loaded via `plonk_load_params` (see [`PARAMS.md`](PARAMS.md)); use **`VXPLNK02`** (or current setup output) for wallets/nodes that must prove.
+2. **Circuits** — implement Transfer / Shield / Unshield / Fee in **`plonk`**; align public-input encoding with [`PlonkPublicInputsV1`](../Privacy/PlonkPublicInputsV1.cs).
+3. **`plonk_verify`** — VFXPI1 parsing + layout checks ship in `plonk-ffi` (`vfxpi1.rs`); full proof verification when circuits + SRS are wired (set capability bit **`PLONK_CAP_VERIFY_V1`** / C# [`PlonkNative.CapVerifyV1`](../Privacy/PlonkNative.cs)). [`PLONKSetup.RefreshVerificationCapability`](../Privacy/PLONKSetup.cs) uses [`plonk_capabilities()`](../Privacy/PlonkNative.cs), not a `plonk_verify` probe (avoids false “implemented” on `ERR_PARAM`).
+4. **`plonk_prove_v0`** — exported in `plonk-ffi`; C# [`PlonkNative.plonk_prove_v0`](../Privacy/PlonkNative.cs) + [`CapProveV1`](../Privacy/PlonkNative.cs). **`plonk_batch_verify`** remains future work if needed.
+
+See `Privacy_Layer_Implementation_Plan.md` for phased detail.

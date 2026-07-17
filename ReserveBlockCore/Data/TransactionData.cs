@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using ReserveBlockCore.Utilities;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Extensions;
 using ReserveBlockCore.EllipticCurve;
 using ReserveBlockCore.Services;
@@ -327,8 +328,102 @@ namespace ReserveBlockCore.Data
         public static async Task AddToPool(Transaction transaction)
         {
             var TransactionPool = GetPool();
+
+            // ===== EXIT_TO_BTC MEMPOOL CONFLICT DETECTION =====
+            // Reject EXIT_TO_BTC transactions that overlap with existing mempool TXs
+            // on BaseBurnTxHash or LockId to prevent double-spend of FIFO allocations.
+            if (transaction.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+            {
+                try
+                {
+                    var existingExitTxs = TransactionPool.Find(x =>
+                        x.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                        x.Hash != transaction.Hash).ToList();
+
+                    if (existingExitTxs.Any())
+                    {
+                        var newBurnHash = ExtractBaseBurnTxHashFromExitTx(transaction);
+                        var newLockIds = ExtractLockIdsFromExitTx(transaction);
+
+                        foreach (var existing in existingExitTxs)
+                        {
+                            // Reject if same BaseBurnTxHash (duplicate burn handling)
+                            if (!string.IsNullOrEmpty(newBurnHash))
+                            {
+                                var existingBurnHash = ExtractBaseBurnTxHashFromExitTx(existing);
+                                if (newBurnHash == existingBurnHash)
+                                {
+                                    LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: duplicate BaseBurnTxHash {newBurnHash} already in mempool ({existing.Hash})",
+                                        "TransactionData.AddToPool()");
+                                    return;
+                                }
+                            }
+
+                            // Reject if overlapping lock IDs
+                            if (newLockIds.Any())
+                            {
+                                var existingLockIds = ExtractLockIdsFromExitTx(existing);
+                                if (newLockIds.Intersect(existingLockIds).Any())
+                                {
+                                    LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: overlapping lock IDs with mempool TX {existing.Hash}",
+                                        "TransactionData.AddToPool()");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"[Mempool] EXIT_TO_BTC conflict check error (allowing TX): {ex.Message}", "TransactionData.AddToPool()");
+                }
+            }
+
             await TransactionPool.InsertSafeAsync(transaction);
         }
+
+        /// <summary>
+        /// Extract BaseBurnTxHash from an EXIT_TO_BTC transaction's Data field.
+        /// </summary>
+        private static string ExtractBaseBurnTxHashFromExitTx(Transaction tx)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(tx.Data)) return "";
+                var obj = JObject.Parse(tx.Data);
+                return obj["BaseBurnTxHash"]?.ToString() ?? "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>
+        /// Extract all LockIds from an EXIT_TO_BTC transaction's Allocations array.
+        /// </summary>
+        private static HashSet<string> ExtractLockIdsFromExitTx(Transaction tx)
+        {
+            var lockIds = new HashSet<string>();
+            try
+            {
+                if (string.IsNullOrEmpty(tx.Data)) return lockIds;
+                var obj = JObject.Parse(tx.Data);
+                var allocations = obj["Allocations"] as JArray;
+                if (allocations != null)
+                {
+                    foreach (var alloc in allocations)
+                    {
+                        var lockId = alloc["LockId"]?.ToString();
+                        if (!string.IsNullOrEmpty(lockId))
+                            lockIds.Add(lockId);
+                    }
+                }
+            }
+            catch { }
+            return lockIds;
+        }
+
+        /// <summary>Call when a transaction is removed from the mempool so private nullifier reservations can be cleared.</summary>
+        public static void ReleasePrivateMempoolNullifiersForTx(string txHash) =>
+            MempoolNullifierTracker.ReleaseClaimsForTxHash(txHash);
 
         public static LiteDB.ILiteCollection<Transaction> GetPool()
         {
@@ -465,7 +560,19 @@ namespace ReserveBlockCore.Data
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
-                                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
+                                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
+                                tx.TransactionType != TransactionType.VFX_SHIELD &&
+                                tx.TransactionType != TransactionType.VFX_UNSHIELD &&
+                                tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
+                                tx.TransactionType != TransactionType.VBTC_V2_SHIELD &&
+                                tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
+                                tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
                             {
                                 var scInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
                                 if (!scInfo.Item1)
@@ -654,7 +761,7 @@ namespace ReserveBlockCore.Data
                                     // this TX hash, it means this TX was already processed into a block
                                     // but not yet cleaned from mempool — allow it through (it will be
                                     // filtered by HasTxBeenCraftedIntoBlock check later).
-                                    var existingVal = Bitcoin.Models.VBTCValidator.GetValidator(tx.FromAddress);
+                                    var existingVal = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
                                     if (existingVal != null && existingVal.IsActive 
                                         && existingVal.RegisterTransactionHash != tx.Hash)
                                     {
@@ -747,88 +854,165 @@ namespace ReserveBlockCore.Data
                                 catch { }
                             }
 
+                            // ===== EXIT_TO_BTC STALE/DUPLICATE EVICTION =====
+                            // For EXIT_TO_BTC transactions, check if:
+                            // (a) BaseBurnTxHash already exists on-chain → stale, evict
+                            // (b) Another EXIT_TO_BTC with same BaseBurnTxHash already approved in this batch → first-wins
+                            // (c) Allocation lock IDs are no longer available on-chain → stale, evict
+                            if (!reject && tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+                            {
+                                try
+                                {
+                                    var burnHash = ExtractBaseBurnTxHashFromExitTx(tx);
+                                    if (!string.IsNullOrEmpty(burnHash))
+                                    {
+                                        // (a) Already on-chain?
+                                        var onChainExit = VBTCBridgeBtcExitState.GetByBurnHash(burnHash);
+                                        if (onChainExit != null)
+                                        {
+                                            reject = true;
+                                            LogUtility.Log($"[ProcessTxPool] Evicting stale EXIT_TO_BTC {tx.Hash}: BaseBurnTxHash {burnHash} already on-chain.",
+                                                "TransactionData.ProcessTxPool()");
+                                        }
+
+                                        // (b) Duplicate in this batch?
+                                        if (!reject)
+                                        {
+                                            var alreadyApproved = approvedMemPoolList.Any(a =>
+                                                a.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                                                ExtractBaseBurnTxHashFromExitTx(a) == burnHash);
+                                            if (alreadyApproved)
+                                            {
+                                                reject = true;
+                                                LogUtility.Log($"[ProcessTxPool] Evicting duplicate EXIT_TO_BTC {tx.Hash}: BaseBurnTxHash {burnHash} already in approved batch.",
+                                                    "TransactionData.ProcessTxPool()");
+                                            }
+                                        }
+                                    }
+
+                                    // (c) Allocation locks still available?
+                                    if (!reject)
+                                    {
+                                        var lockIds = ExtractLockIdsFromExitTx(tx);
+                                        foreach (var lockId in lockIds)
+                                        {
+                                            var lockState = VBTCBridgeLockState.GetByLockId(lockId);
+                                            if (lockState == null || lockState.RemainingAmount <= 0)
+                                            {
+                                                reject = true;
+                                                LogUtility.Log($"[ProcessTxPool] Evicting stale EXIT_TO_BTC {tx.Hash}: lock {lockId} no longer available.",
+                                                    "TransactionData.ProcessTxPool()");
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (Exception exitChkEx)
+                                {
+                                    ErrorLogUtility.LogError($"[ProcessTxPool] EXIT_TO_BTC stale check error: {exitChkEx.Message}", "TransactionData.ProcessTxPool()");
+                                }
+                            }
+
                             if (reject == false)
                             {
-                                var signature = tx.Signature;
-                                var sigCheck = SignatureService.VerifySignature(tx.FromAddress, tx.Hash, signature);
-                                if (sigCheck)
+                                // ZK-authorized private TXs (z2z, z2t) use PLONK sentinel signature
+                                // and FromAddress = Shielded_Pool — skip ECDSA sig + balance check.
+                                // VerifyTX delegates to PrivateTransactionValidatorService for proof verification.
+                                bool isZkPrivate = PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType);
+
+                                bool passedPreCheck;
+                                if (isZkPrivate)
                                 {
-                                    var balance = AccountStateTrei.GetAccountBalance(tx.FromAddress);
-
-                                    var totalSend = (tx.Amount + tx.Fee);
-                                    if (balance >= totalSend)
+                                    passedPreCheck = true; // skip ECDSA + balance
+                                }
+                                else
+                                {
+                                    var signature = tx.Signature;
+                                    var sigCheck = SignatureService.VerifySignature(tx.FromAddress, tx.Hash, signature);
+                                    if (sigCheck)
                                     {
-                                        var dblspndChk = await DoubleSpendReplayCheck(tx);
-                                        var isCraftedIntoBlock = await HasTxBeenCraftedIntoBlock(tx);
-                                        var txVerify = await TransactionValidatorService.VerifyTX(tx);
+                                        var balance = AccountStateTrei.GetAccountBalance(tx.FromAddress);
+                                        var totalSend = (tx.Amount + tx.Fee);
+                                        passedPreCheck = balance >= totalSend;
+                                    }
+                                    else
+                                    {
+                                        passedPreCheck = false;
+                                    }
+                                }
 
-                                        if (txVerify.Item1 && !dblspndChk && !isCraftedIntoBlock)
+                                if (passedPreCheck)
+                                {
+                                    var dblspndChk = await DoubleSpendReplayCheck(tx);
+                                    var isCraftedIntoBlock = await HasTxBeenCraftedIntoBlock(tx);
+                                    var txVerify = await TransactionValidatorService.VerifyTX(tx);
+
+                                    if (txVerify.Item1 && !dblspndChk && !isCraftedIntoBlock)
+                                    {
+                                        // HAL-067 Fix: RBF + Nonce Ordering (only after TXHeightRule4 activation)
+                                        if (Globals.LastBlock.Height > Globals.TXHeightRule4)
                                         {
-                                            // HAL-067 Fix: RBF + Nonce Ordering (only after TXHeightRule4 activation)
-                                            if (Globals.LastBlock.Height > Globals.TXHeightRule4)
+                                            // Get current expected nonce for this account
+                                            var expectedNonce = AccountStateTrei.GetNextNonce(tx.FromAddress);
+                                            
+                                            // Check if there are already approved TXs from this address
+                                            var approvedTxsFromSender = approvedMemPoolList
+                                                .Where(x => x.FromAddress == tx.FromAddress)
+                                                .OrderBy(x => x.Nonce)
+                                                .ToList();
+
+                                            // If there are approved TXs, the next expected nonce is the highest nonce + 1
+                                            if (approvedTxsFromSender.Count > 0)
                                             {
-                                                // Get current expected nonce for this account
-                                                var expectedNonce = AccountStateTrei.GetNextNonce(tx.FromAddress);
-                                                
-                                                // Check if there are already approved TXs from this address
-                                                var approvedTxsFromSender = approvedMemPoolList
-                                                    .Where(x => x.FromAddress == tx.FromAddress)
-                                                    .OrderBy(x => x.Nonce)
-                                                    .ToList();
+                                                expectedNonce = approvedTxsFromSender.Last().Nonce + 1;
+                                            }
 
-                                                // If there are approved TXs, the next expected nonce is the highest nonce + 1
-                                                if (approvedTxsFromSender.Count > 0)
+                                            // Check for duplicate nonce (RBF scenario)
+                                            var existingTx = approvedMemPoolList.FirstOrDefault(x => 
+                                                x.FromAddress == tx.FromAddress && 
+                                                x.Nonce == tx.Nonce
+                                            );
+
+                                            if (existingTx != null)
+                                            {
+                                                // RBF: Replace with higher fee transaction
+                                                if (tx.Fee > existingTx.Fee)
                                                 {
-                                                    expectedNonce = approvedTxsFromSender.Last().Nonce + 1;
-                                                }
+                                                    approvedMemPoolList.Remove(existingTx);
+                                                    await collection.DeleteManySafeAsync(x => x.Hash == existingTx.Hash);
 
-                                                // Check for duplicate nonce (RBF scenario)
-                                                var existingTx = approvedMemPoolList.FirstOrDefault(x => 
-                                                    x.FromAddress == tx.FromAddress && 
-                                                    x.Nonce == tx.Nonce
-                                                );
-
-                                                if (existingTx != null)
-                                                {
-                                                    // RBF: Replace with higher fee transaction
-                                                    if (tx.Fee > existingTx.Fee)
+                                                    // Mark old TX as replaced locally
+                                                    var localTxDb = TransactionData.GetAll();
+                                                    var localTx = localTxDb.FindOne(x => x.Hash == existingTx.Hash);
+                                                    if (localTx != null)
                                                     {
-                                                        approvedMemPoolList.Remove(existingTx);
-                                                        await collection.DeleteManySafeAsync(x => x.Hash == existingTx.Hash);
-
-                                                        // Mark old TX as replaced locally
-                                                        var localTxDb = TransactionData.GetAll();
-                                                        var localTx = localTxDb.FindOne(x => x.Hash == existingTx.Hash);
-                                                        if (localTx != null)
-                                                        {
-                                                            localTx.TransactionStatus = TransactionStatus.ReplacedByFee;
-                                                            await localTxDb.UpdateSafeAsync(localTx);
-                                                        }
-
-                                                        approvedMemPoolList.Add(tx);
+                                                        localTx.TransactionStatus = TransactionStatus.ReplacedByFee;
+                                                        await localTxDb.UpdateSafeAsync(localTx);
                                                     }
-                                                    else
-                                                    {
-                                                        // Keep existing (higher fee), reject this one
-                                                        await collection.DeleteManySafeAsync(x => x.Hash == tx.Hash);
-                                                    }
-                                                }
-                                                else if (tx.Nonce == expectedNonce)
-                                                {
-                                                    // Nonce is sequential - accept it
+
                                                     approvedMemPoolList.Add(tx);
                                                 }
                                                 else
                                                 {
-                                                    // Nonce is out of order (gap or stale) - keep in mempool but don't approve yet
-                                                    // This allows future nonces to wait for earlier ones
-                                                    // Don't delete it - it may become valid when earlier nonces arrive
+                                                    // Keep existing (higher fee), reject this one
+                                                    await collection.DeleteManySafeAsync(x => x.Hash == tx.Hash);
                                                 }
+                                            }
+                                            else if (tx.Nonce == expectedNonce)
+                                            {
+                                                // Nonce is sequential - accept it
+                                                approvedMemPoolList.Add(tx);
                                             }
                                             else
                                             {
-                                                approvedMemPoolList.Add(tx);
+                                                // Nonce is out of order (gap or stale) - keep in mempool but don't approve yet
+                                                // This allows future nonces to wait for earlier ones
+                                                // Don't delete it - it may become valid when earlier nonces arrive
                                             }
+                                        }
+                                        else
+                                        {
+                                            approvedMemPoolList.Add(tx);
                                         }
                                     }
                                     else
@@ -1007,7 +1191,19 @@ namespace ReserveBlockCore.Data
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
-                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
+                tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
+                tx.TransactionType != TransactionType.VFX_SHIELD &&
+                tx.TransactionType != TransactionType.VFX_UNSHIELD &&
+                tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
+                tx.TransactionType != TransactionType.VBTC_V2_SHIELD &&
+                tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
+                tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
             {
                 if(tx.Data != null)
                 {

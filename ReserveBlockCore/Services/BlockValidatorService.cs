@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Data;
@@ -7,8 +7,10 @@ using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.SmartContracts;
 using ReserveBlockCore.Nodes;
 using ReserveBlockCore.P2P;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Utilities;
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
 using System.Security.Principal;
@@ -18,8 +20,47 @@ namespace ReserveBlockCore.Services
 {
     public class BlockValidatorService
     {
+        /// <summary>Rate-limits "block rejected" log messages — one log per validator:height combo.</summary>
+        private static readonly ConcurrentDictionary<string, bool> _blockRejectionLog = new();
         public static SemaphoreSlim ValidateBlocksSemaphore = new SemaphoreSlim(1, 1);
         public static SemaphoreSlim ValidateBlockSemaphore = new SemaphoreSlim(1, 1);
+
+        /// <summary>FORK-FIX: Consecutive PREVHASH-MISMATCH detections at the same height trigger automatic fork recovery.</summary>
+        private static long _prevHashMismatchHeight = -1;
+        private static int _prevHashMismatchCount = 0;
+        /// <summary>After this many consecutive PREVHASH-MISMATCH rejections at the same expected height, trigger fork recovery.</summary>
+        public const int PREVHASH_MISMATCH_RECOVERY_THRESHOLD = 3;
+
+        /// <summary>FORK-FIX: Consecutive HEIGHT-GAP detections trigger automatic fork recovery.
+        /// This handles the case where the node is stuck at height N and only receives blocks at N+2 or higher,
+        /// meaning block N+1 was on a minority fork that no peer can serve anymore.</summary>
+        private static long _heightGapExpectedHeight = -1;
+        private static int _heightGapCount = 0;
+        /// <summary>After this many consecutive HEIGHT-GAP rejections at the same expected height, trigger fork recovery.</summary>
+        public const int HEIGHT_GAP_RECOVERY_THRESHOLD = 3;
+
+        /// <summary>FORK-FIX: Consecutive TX-validation failures trigger automatic state rebuild.
+        /// This handles the case where the state trie is corrupted/wiped and every block fails
+        /// TX validation with "new account with no balance" because the state doesn't match the network.
+        /// IMPORTANT: Tracks failures across ALL heights, not per-height, because when the state trie
+        /// is corrupted, blocks at different heights interleave (6610256, 6610258, 6610259...) and
+        /// a per-height counter would never reach the threshold.</summary>
+        private static int _txFailCount = 0;
+        /// <summary>After this many consecutive TX-validation failures (any height), trigger full state rebuild.</summary>
+        public const int TX_FAIL_RECOVERY_THRESHOLD = 10;
+        /// <summary>Height of the last TX-fail-triggered snapshot restore. A repeat trigger near the
+        /// same height means the snapshot carries the corruption — recovery is exhausted (manual
+        /// 'rebuildstate' required) instead of looping restores.</summary>
+        private static long _lastTxFailRestoreHeight = -1;
+
+        /// <summary>STATE PROBATION: consecutive cleanly-committed blocks while the state trie is
+        /// flagged unverified. Automatic rebuilds are disabled, so a node whose flag is dirty but
+        /// whose state is actually fine (e.g. crash before its first snapshot existed) re-earns
+        /// SetSynced after this streak — every committed block is consensus-validated against the
+        /// state, so a clean streak is direct evidence of consistency. Resumes snapshot protection.</summary>
+        private static int _cleanBlockStreak = 0;
+        private static bool _stateStatusVerified = false;
+        public const int STATE_PROBATION_BLOCKS = 50;
 
         public static void UpdateMemBlocks(Block block)
         {
@@ -138,6 +179,7 @@ namespace ReserveBlockCore.Services
                                         // This is a duplicate of the withdrawal in the block
                                         // Remove it from mempool
                                         mempool.DeleteManySafe(x => x.Hash == mempoolTx.Hash);
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(mempoolTx.Hash);
                                         
                                         VFXLogging.LogInfo($"Cleaned up duplicate withdrawal request from mempool. TX Hash: {mempoolTx.Hash}, Arbiter: {mempoolTx.FromAddress}", "BlockValidatorService.CleanupMempoolAfterBlock()");
                                     }
@@ -225,7 +267,9 @@ namespace ReserveBlockCore.Services
                             //ErrorLogUtility.LogError("Banned IP address: " + ipAddress + " at height " + height, "ValidateBlocks");
                             //if (Globals.Nodes.TryRemove(ipAddress, out var node) && node.Connection != null)
                             //    await node.Connection.DisposeAsync();
-                            ConsoleWriterService.Output($"Block: {block.Height} was rejected from: {block.Validator}");
+                            // Suppress spam during full state rebuild — blocks are expected to be rejected
+                            if (!BlockRollbackUtility.IsResetTreisRunning)
+                                ConsoleWriterService.Output($"Block: {block.Height} was rejected from: {block.Validator}");
                             //ErrorLogUtility.LogError($"Block: {block.Height} was rejected from: {block.Validator}", "ValidateBlocks");
                         }
                         else
@@ -244,7 +288,9 @@ namespace ReserveBlockCore.Services
                             }
                             else
                             {
-                                ConsoleWriterService.OutputSameLine($"\rBlocks Syncing... Current Block: {block.Height} - Speed: {stopwatch1.ElapsedMilliseconds}/ms");
+                                // Suppress sync output during full state rebuild — it's just noise
+                                if (!BlockRollbackUtility.IsResetTreisRunning)
+                                    ConsoleWriterService.OutputSameLine($"\rBlocks Syncing... Current Block: {block.Height} - Speed: {stopwatch1.ElapsedMilliseconds}/ms");
                             }
                                 
                         }
@@ -259,10 +305,46 @@ namespace ReserveBlockCore.Services
         }
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false)
         {
+            // ═══════════════════════════════════════════════════════════════
+            // RECOVERY GUARD: Silently drop ALL incoming blocks when a recovery
+            // operation is in progress. Without this, hundreds of blocks per second
+            // flood through validation during fork recovery / ResetTreis, generating
+            // thousands of log lines, triggering cascading recovery attempts, and
+            // corrupting the state trie during rebuild.
+            //
+            // EXCEPTION: During the download phase of fork recovery, blocks MUST be
+            // allowed through — these are the blocks we just downloaded to replace
+            // the rolled-back ones. ForkRecoveryUtility.IsInDownloadPhase signals
+            // that GetAllBlocks() is running inside RecoverAsync() and blocks should
+            // be validated normally.
+            // ═══════════════════════════════════════════════════════════════
+            if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning)
+            {
+                return false; // Always block during full state rebuild / snapshot restore — no exceptions
+            }
+
+            if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress)
+                && !ForkRecoveryUtility.IsInDownloadPhase)
+            {
+                return false; // Silent drop — recovery is in rollback phase, not download phase
+            }
+
             await ValidateBlockSemaphore.WaitAsync();
 
             try
             {
+                // Double-check after acquiring semaphore (recovery may have started while waiting)
+                if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning)
+                {
+                    return false;
+                }
+
+                if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress) 
+                    && !ForkRecoveryUtility.IsInDownloadPhase)
+                {
+                    return false;
+                }
+
                 if (block?.Height <= Globals.LastBlock.Height)
                     return block.Hash == Globals.LastBlock.Hash;
 
@@ -383,6 +465,14 @@ namespace ReserveBlockCore.Services
                     //no rules
                 }
 
+                // Certificates are attached after local craft (TryAttachCertificateAsync) and before broadcast.
+                // validateOnly preflight must not require a cert yet; full acceptance paths use validateOnly=false.
+                if (!validateOnly && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                {
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
+                    return result;
+                }
+
                 //ensures the timestamps being produced are correct
                 if (block.Height != 0)
                 {
@@ -395,18 +485,213 @@ namespace ReserveBlockCore.Services
                     }
                 }
 
-                //if (Globals.IsBlockCaster && !validateOnly && !skipCasterCheck)
-                //{
-                //    if (!Globals.CasterApprovedBlockHashDict.ContainsKey(block.Height))
-                //        return result;
+                // FORK-FIX: Re-enabled caster block hash enforcement.
+                // This was previously commented out, which allowed a caster to commit ANY block
+                // that passes basic validation — even if it wasn't the block agreed upon by
+                // VerifyBlockHashAgreementAsync. This is the ROOT CAUSE of the block 28131/28132
+                // fork: one caster committed a different block than the other 4.
+                // Now: If this node is a caster and the approved hash dict has an entry for this
+                // height, the block hash MUST match. If no entry exists yet (single-caster or
+                // agreement still pending), allow the block through.
+                if (Globals.IsBlockCaster && !validateOnly && !skipCasterCheck)
+                {
+                    if (Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var approvedHash))
+                    {
+                        if (!string.IsNullOrEmpty(approvedHash) && approvedHash != block.Hash)
+                        {
+                            LogUtility.Log(
+                                $"[ValidateBlock] CASTER-HASH-REJECT: Block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} " +
+                                $"does not match caster-approved hash={approvedHash[..Math.Min(16, approvedHash.Length)]}. " +
+                                $"Rejecting to prevent fork.",
+                                "BlockValidatorService");
+                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-casterHashMismatch");
+                            return result;
+                        }
+                    }
+                }
 
-                //    var hash = Globals.CasterApprovedBlockHashDict[block.Height];
-                //    if (hash == null)
-                //        return result;
+                // SAFETY: Enforce strict height continuity — no gaps allowed.
+                // This prevents orphaned blocks from being committed when the
+                // in-memory NetworkBlockQueue contains stale entries after rollback.
+                if (block.Height != Globals.LastBlock.Height + 1)
+                {
+                    // Don't reject if validateOnly (preflight) — only enforce on actual commit
+                    if (!validateOnly)
+                    {
+                        var expectedHeight = Globals.LastBlock.Height + 1;
+                        LogUtility.Log(
+                            $"[ValidateBlock] HEIGHT-GAP: Rejecting block at height {block.Height}, " +
+                            $"expected {expectedHeight}. LastBlock.Hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                            "BlockValidatorService");
 
-                //    if (hash != block.Hash)
-                //        return result;
-                //}
+                        // FORK-FIX: Track consecutive HEIGHT-GAP rejections where peers are ahead.
+                        // If the node is stuck at height N and only receives blocks at N+2 or higher,
+                        // it means block N+1 was on a minority fork that no peer can serve anymore.
+                        // After HEIGHT_GAP_RECOVERY_THRESHOLD consecutive gaps at the same expected height,
+                        // trigger automatic rollback + resync to find a common ancestor.
+                        if (block.Height > expectedHeight)
+                        {
+                            if (_heightGapExpectedHeight == expectedHeight)
+                            {
+                                _heightGapCount++;
+                            }
+                            else
+                            {
+                                _heightGapExpectedHeight = expectedHeight;
+                                _heightGapCount = 1;
+                            }
+
+                            LogUtility.Log(
+                                $"[ValidateBlock] FORK-DETECT: HEIGHT-GAP count={_heightGapCount}/{HEIGHT_GAP_RECOVERY_THRESHOLD} " +
+                                $"at expected height {expectedHeight}. Received block at {block.Height}. " +
+                                $"Our tip hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                "BlockValidatorService");
+
+                            if (_heightGapCount >= HEIGHT_GAP_RECOVERY_THRESHOLD)
+                            {
+                                LogUtility.Log(
+                                    $"[ValidateBlock] FORK-RECOVERY-TRIGGER: {_heightGapCount} consecutive HEIGHT-GAP " +
+                                    $"at expected height {expectedHeight} (receiving blocks at {block.Height}+). " +
+                                    $"Local chain is missing block(s) that peers have moved past. " +
+                                    $"Triggering automatic rollback + resync.",
+                                    "BlockValidatorService");
+
+                                // Reset counter before recovery to prevent re-triggering during the recovery process
+                                _heightGapCount = 0;
+                                _heightGapExpectedHeight = -1;
+
+                                // Calculate rollback depth: we need to go back far enough to find
+                                // a common ancestor. The gap size gives us a hint — roll back at least
+                                // the gap plus one extra block to ensure we reach shared history.
+                                var gapSize = (int)(block.Height - expectedHeight);
+                                var rollbackDepth = Math.Min(gapSize + 1, 10); // Cap at 10 to avoid excessive rollback
+
+                                // Fire-and-forget recovery — must release the semaphore first so the recovery
+                                // can re-enter ValidateBlock after rollback + download.
+                                _ = Task.Run(async () =>
+                                {
+                                    try
+                                    {
+                                        // Small delay to let the semaphore release in the finally block
+                                        await Task.Delay(100);
+                                        var recovered = await ForkRecoveryUtility.RecoverAsync(
+                                            Globals.LastBlock.Height,
+                                            "BlockValidatorService.HEIGHT-GAP",
+                                            rollbackDepth);
+                                        if (recovered)
+                                        {
+                                            LogUtility.Log(
+                                                $"[ValidateBlock] FORK-RECOVERY-SUCCESS: Recovered from HEIGHT-GAP fork. " +
+                                                $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                                "BlockValidatorService");
+                                        }
+                                        else
+                                        {
+                                            LogUtility.Log(
+                                                $"[ValidateBlock] FORK-RECOVERY-PARTIAL: HEIGHT-GAP recovery returned false. " +
+                                                $"Tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                                "BlockValidatorService");
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        LogUtility.Log(
+                                            $"[ValidateBlock] FORK-RECOVERY-ERROR: HEIGHT-GAP recovery failed: {ex.Message}",
+                                            "BlockValidatorService");
+                                    }
+                                });
+                            }
+                        }
+
+                        DbContext.Rollback("BlockValidatorService.ValidateBlock()-heightGap");
+                        return result;
+                    }
+                }
+
+                // SAFETY: Verify PrevHash matches the actual LastBlock hash.
+                // This catches cases where Block.GetPreviousHash() resolved from stale
+                // in-memory data (NetworkBlockQueue) instead of the actual chain tip.
+                if (!validateOnly && block.Height > 0 && block.PrevHash != Globals.LastBlock.Hash)
+                {
+                    var expectedHeight = Globals.LastBlock.Height + 1;
+                    LogUtility.Log(
+                        $"[ValidateBlock] PREVHASH-MISMATCH: Block {block.Height} PrevHash={block.PrevHash?[..Math.Min(16, block.PrevHash?.Length ?? 0)]} " +
+                        $"!= LastBlock.Hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                        "BlockValidatorService");
+
+                    // FORK-FIX: Track consecutive PREVHASH-MISMATCH at the expected next height.
+                    // If the block is at height N+1 but its PrevHash doesn't match our block N,
+                    // this means WE are on a minority fork. After PREVHASH_MISMATCH_RECOVERY_THRESHOLD
+                    // consecutive mismatches, trigger automatic rollback + resync.
+                    if (block.Height == expectedHeight)
+                    {
+                        if (_prevHashMismatchHeight == expectedHeight)
+                        {
+                            _prevHashMismatchCount++;
+                        }
+                        else
+                        {
+                            _prevHashMismatchHeight = expectedHeight;
+                            _prevHashMismatchCount = 1;
+                        }
+
+                        LogUtility.Log(
+                            $"[ValidateBlock] FORK-DETECT: PREVHASH-MISMATCH count={_prevHashMismatchCount}/{PREVHASH_MISMATCH_RECOVERY_THRESHOLD} " +
+                            $"at expected height {expectedHeight}. Our tip hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                            "BlockValidatorService");
+
+                        if (_prevHashMismatchCount >= PREVHASH_MISMATCH_RECOVERY_THRESHOLD)
+                        {
+                            LogUtility.Log(
+                                $"[ValidateBlock] FORK-RECOVERY-TRIGGER: {_prevHashMismatchCount} consecutive PREVHASH-MISMATCH " +
+                                $"at height {expectedHeight}. Local chain is on minority fork. " +
+                                $"Triggering automatic rollback + resync.",
+                                "BlockValidatorService");
+
+                            // Reset counter before recovery to prevent re-triggering during the recovery process
+                            _prevHashMismatchCount = 0;
+                            _prevHashMismatchHeight = -1;
+
+                            // Fire-and-forget recovery — must release the semaphore first so the recovery
+                            // can re-enter ValidateBlock after rollback + download.
+                            // We do this on a background task because we're inside the ValidateBlockSemaphore.
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    // Small delay to let the semaphore release in the finally block
+                                    await Task.Delay(100);
+                                    var recovered = await ForkRecoveryUtility.RecoverAsync(
+                                        Globals.LastBlock.Height,
+                                        "BlockValidatorService.PREVHASH-MISMATCH");
+                                    if (recovered)
+                                    {
+                                        LogUtility.Log(
+                                            $"[ValidateBlock] FORK-RECOVERY-SUCCESS: Recovered from minority fork. " +
+                                            $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                            "BlockValidatorService");
+                                    }
+                                    else
+                                    {
+                                        LogUtility.Log(
+                                            $"[ValidateBlock] FORK-RECOVERY-PARTIAL: Recovery returned false. " +
+                                            $"Tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                            "BlockValidatorService");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogUtility.Log(
+                                        $"[ValidateBlock] FORK-RECOVERY-ERROR: {ex.Message}",
+                                        "BlockValidatorService");
+                                }
+                            });
+                        }
+                    }
+
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-prevHashMismatch");
+                    return result;
+                }
 
                 var newBlock = new Block
                 {
@@ -455,11 +740,37 @@ namespace ReserveBlockCore.Services
 
                     if (block.Transactions.Count() > 0)
                     {
+                        if (block.Transactions.Count(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)) > Globals.MaxPrivateTxPerBlock)
+                        {
+                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-privateTxCap");
+                            return result;
+                        }
+
+                        if (!blockDownloads && block.Transactions.Any(t =>
+                            t.FromAddress != "Coinbase_TrxFees" && t.FromAddress != "Coinbase_BlkRwd"
+                            && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+                        {
+                            var plonkBatch = PlonkProofVerifier.TryValidatePrivateProofsInBlock(block, blockDownloads);
+                            if (!plonkBatch.ok)
+                            {
+                                DbContext.Rollback("BlockValidatorService.ValidateBlock()-privatePlonkBatch");
+                                return result;
+                            }
+                        }
+
                         //validate transactions.
                         bool rejectBlock = false;
+                        string rejectBlockReason = "";
+                        string rejectBlockTxHash = "";
                         // HAL-067 Fix: Track nonces per address during block validation to support multiple TXs from same sender
                         // Initialize dictionary with current state nonces for all addresses in block
                         var processedNonces = new Dictionary<string, long>();
+                        var blockPrivateNullifierKeys = new HashSet<string>();
+                        // S3C §0: block-scoped per-contract withdrawal serialization. Per-tx
+                        // validation can't see sibling txs, so a malicious producer could place two
+                        // VBTC_V2_WITHDRAWAL_REQUESTs for the same contract in one block. Track the
+                        // contracts seen here and reject the second (mirrors blockPrivateNullifierKeys).
+                        var blockWithdrawalContracts = new HashSet<string>();
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -484,18 +795,40 @@ namespace ReserveBlockCore.Services
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
                             {
-                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces);
+                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces, skipPrivatePlonkProofVerification: !blockDownloads);
 
-                                if(txResult.Item1 == false)
+                                var effectiveTxResult = txResult;
+                                if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(blkTransaction.TransactionType))
                                 {
-                                    //testing
+                                    if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(blkTransaction, blockPrivateNullifierKeys, out var nulErr))
+                                        effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
+                                }
+
+                                // S3C §0: enforce one withdrawal request per contract within a block.
+                                if (effectiveTxResult.Item1 && blkTransaction.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                                {
+                                    try
+                                    {
+                                        var wScUID = JObject.Parse(blkTransaction.Data)["ContractUID"]?.ToObject<string>();
+                                        if (!string.IsNullOrEmpty(wScUID) && !blockWithdrawalContracts.Add(wScUID))
+                                            effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wScUID} within block.");
+                                    }
+                                    catch { }
+                                }
+
+                                if(effectiveTxResult.Item1 == false)
+                                {
+                                    rejectBlockReason = effectiveTxResult.Item2 ?? "Unknown validation failure";
+                                    rejectBlockTxHash = blkTransaction.Hash;
+                                    ErrorLogUtility.LogError($"TX validation failed in block {block.Height}. TX: {blkTransaction.Hash}, Type: {blkTransaction.TransactionType}, From: {blkTransaction.FromAddress}, Nonce: {blkTransaction.Nonce}, Reason: {rejectBlockReason}",
+                                        "BlockValidatorService.ValidateBlock()");
                                 }
                                 if(!Globals.GUI && !Globals.BasicCLI && !blockDownloads)
                                 {
                                     //if (!txResult.Item1)
                                     //    await TransactionValidatorService.BadTXDetected(blkTransaction);
                                 }
-                                rejectBlock = txResult.Item1 == false ? rejectBlock = true : false;
+                                rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                                 //check for duplicate tx
                                 // FIND-009 FIX: Exempt vBTC V2 validator lifecycle transactions from smart-contract parsing
                                 // These transactions don't have ContractUID/Function fields and should not be validated as SC TXs
@@ -514,7 +847,19 @@ namespace ReserveBlockCore.Services
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
-                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL &&
+                                    blkTransaction.TransactionType != TransactionType.VFX_SHIELD &&
+                                    blkTransaction.TransactionType != TransactionType.VFX_UNSHIELD &&
+                                    blkTransaction.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_SHIELD &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
                                 {
                                     if (blkTransaction.Data != null)
                                     {
@@ -776,11 +1121,89 @@ namespace ReserveBlockCore.Services
 
                         if (rejectBlock)
                         {
-                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-13");
+                            // FORK-FIX: Track consecutive TX-validation failures across ALL heights.
+                            // When the state trie is corrupted/wiped, EVERY block fails TX validation
+                            // with "new account with no balance". Blocks at different heights interleave
+                            // (6610256, 6610258, 6610259...) so we must count ALL failures, not per-height.
+                            // After TX_FAIL_RECOVERY_THRESHOLD consecutive failures, trigger full state rebuild.
+                            if (!validateOnly)
+                            {
+                                _txFailCount++;
+
+                                if (_txFailCount >= TX_FAIL_RECOVERY_THRESHOLD)
+                                {
+                                    LogUtility.Log(
+                                        $"[ValidateBlock] STATE-REBUILD-TRIGGER: {_txFailCount} consecutive TX-validation failures " +
+                                        $"(latest at block {block.Height}). Bad TX: {rejectBlockTxHash}. Reason: {rejectBlockReason}. " +
+                                        $"State trie appears corrupted. Triggering full state rebuild (ResetTreis).",
+                                        "BlockValidatorService");
+
+                                    // Reset counter before recovery
+                                    _txFailCount = 0;
+
+                                    // Fire-and-forget state recovery: snapshot restore (seconds)
+                                    // first, full genesis rebuild only as fallback.
+                                    _ = Task.Run(async () =>
+                                    {
+                                        try
+                                        {
+                                            await Task.Delay(100);
+
+                                            // If a snapshot restore already ran for TX failures near this
+                                            // height, the snapshot itself likely carries the corruption —
+                                            // skip straight to the full rebuild instead of looping.
+                                            var restoreTarget = Globals.LastBlock.Height;
+                                            var restoreAlreadyTried = _lastTxFailRestoreHeight >= 0
+                                                && Math.Abs(restoreTarget - _lastTxFailRestoreHeight) <= 20;
+
+                                            if (!restoreAlreadyTried)
+                                            {
+                                                LogUtility.Log(
+                                                    $"[ValidateBlock] STATE-REBUILD: Attempting snapshot restore to height {restoreTarget}...",
+                                                    "BlockValidatorService");
+                                                var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                                                if (restored)
+                                                {
+                                                    _lastTxFailRestoreHeight = restoreTarget;
+                                                    LogUtility.Log(
+                                                        $"[ValidateBlock] STATE-REBUILD-SUCCESS: Snapshot restore complete. " +
+                                                        $"Tip: height={Globals.LastBlock.Height}",
+                                                        "BlockValidatorService");
+                                                    return;
+                                                }
+                                            }
+
+                                            // NO AUTOMATIC REBUILD: snapshot recovery is exhausted (no usable
+                                            // slot, or a restore already ran and TX failures persist — the
+                                            // snapshot likely carries the corruption). The multi-hour genesis
+                                            // replay is operator-only. Flag the state so this is visible.
+                                            StateTreiStatusService.SetFailed(
+                                                $"Repeated TX validation failures at height {Globals.LastBlock.Height}; snapshot recovery exhausted.");
+                                            ErrorLogUtility.LogError(
+                                                $"[ValidateBlock] STATE-RECOVERY-EXHAUSTED: Repeated TX validation failures and no usable snapshot recovery. " +
+                                                $"State may be corrupted. Restart this node with the 'rebuildstate' argument to run a full state rebuild.",
+                                                "BlockValidatorService");
+                                            ConsoleWriterService.Output(
+                                                $"[ValidateBlock] WARNING: State recovery exhausted — restart with 'rebuildstate' to run a full rebuild.");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            LogUtility.Log(
+                                                $"[ValidateBlock] STATE-REBUILD-ERROR: {ex.Message}",
+                                                "BlockValidatorService");
+                                        }
+                                    });
+                                }
+                            }
+
+                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-13", $"Bad TX: {rejectBlockTxHash} | Reason: {rejectBlockReason}");
                             return result;//block rejected due to bad transaction(s)
                         }
 
                         result = true;
+
+                        // Block accepted — reset TX failure counter since state trie is working
+                        _txFailCount = 0;
 
                         if (validateOnly)
                             return result;
@@ -796,8 +1219,47 @@ namespace ReserveBlockCore.Services
                         UpdateMemBlocksHashes(block);
                         CleanupMempoolAfterBlock(block);//cleanup duplicate withdrawal requests from mempool
 
-                        await StateData.UpdateTreis(block); //update treis
+                        var stateApplied = await StateData.UpdateTreis(block); //update treis
+                        if (!stateApplied)
+                        {
+                            // ROOT-CAUSE GUARD: The block was just committed to the chain DB, but one or
+                            // more of its transactions failed to apply to the state trie (the per-tx catch
+                            // in UpdateTreis swallowed an error). Block-add and state-update are not atomic
+                            // across the two LiteDB files, so this silently leaves a permanent hole that
+                            // later surfaces as "new account with no balance" and stalls the node.
+                            // Flag the state trie as dirty so it gets rebuilt (ResetTreis) instead of
+                            // running indefinitely on inconsistent state.
+                            ErrorLogUtility.LogError(
+                                $"[ValidateBlock] STATE-APPLY-INCOMPLETE: Block {block.Height} committed but not all " +
+                                $"transactions applied to the state trie. Flagging state trie for rebuild.",
+                                "BlockValidatorService.ValidateBlock()");
+                            StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
+                        }
                         await ReserveService.Run(); //updates treis for reserve pending txs
+
+                        // STATE PROBATION: with automatic rebuilds removed, a dirty-flagged node keeps
+                        // running on its existing state. Each cleanly applied block is evidence of
+                        // consistency; after a clean streak, re-mark synced so snapshots resume.
+                        if (!_stateStatusVerified)
+                        {
+                            if (StateTreiStatusService.IsSynced())
+                            {
+                                _stateStatusVerified = true;
+                            }
+                            else if (!stateApplied)
+                            {
+                                _cleanBlockStreak = 0;
+                            }
+                            else if (++_cleanBlockStreak >= STATE_PROBATION_BLOCKS)
+                            {
+                                StateTreiStatusService.SetSynced(block.Height);
+                                _stateStatusVerified = true;
+                                LogUtility.Log(
+                                    $"[ValidateBlock] STATE-PROBATION-PASSED: {STATE_PROBATION_BLOCKS} consecutive blocks applied cleanly on an " +
+                                    $"unverified state trie — marking synced at height {block.Height}. Snapshot protection resumes.",
+                                    "BlockValidatorService");
+                            }
+                        }
 
                         // Process vBTC V2 validator registration/exit transactions
                         if (block.Transactions.Count() > 0)
@@ -838,10 +1300,46 @@ namespace ReserveBlockCore.Services
                                             RegisterTransactionHash = tx.Hash
                                         };
                                         
-                                        Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
-                                        
-                                        LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", 
-                                            "BlockValidatorService");
+                                        // No DB save needed — VBTCValidatorRegistry derives state from block scanning
+
+                                        // VALIDATOR-REJOIN: Hydrate NetworkValidators when a REGISTER TX is on-chain.
+                                        // This is the strongest proof of validator liveness — the TX passed consensus
+                                        // and was included in a committed block. Add/update as fully trusted.
+                                        if (!string.IsNullOrEmpty(validatorAddress) && !string.IsNullOrEmpty(ipAddress))
+                                        {
+                                            var cleanIP = ipAddress.Replace("::ffff:", "");
+                                            var now = TimeUtil.GetTime();
+                                            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existingNv))
+                                            {
+                                                // Update existing entry — reset fail counts, update IP if changed
+                                                existingNv.IPAddress = cleanIP;
+                                                existingNv.IsFullyTrusted = true;
+                                                existingNv.LastSeen = now;
+                                                existingNv.CheckFailCount = 0;
+                                                Globals.NetworkValidators[validatorAddress] = existingNv;
+                                            }
+                                            else
+                                            {
+                                                // Add new entry — validator just registered on-chain
+                                                var nv = new NetworkValidator
+                                                {
+                                                    Address = validatorAddress,
+                                                    IPAddress = cleanIP,
+                                                    PublicKey = "", // Will be populated via P2P handshake or proof generation fallback
+                                                    IsFullyTrusted = true,
+                                                    LastSeen = now,
+                                                    FirstSeenAtHeight = block.Height,
+                                                    CheckFailCount = 0,
+                                                };
+                                                Globals.NetworkValidators.TryAdd(validatorAddress, nv);
+                                            }
+                                            // Clear any winner failure tracking for this validator
+                                            Nodes.BlockcasterNode.ClearWinnerFailures(validatorAddress);
+                                            Utilities.ProofUtility.ClearProofGenerationCache();
+                                            LogUtility.Log($"VALIDATOR-REJOIN: Hydrated NetworkValidators from REGISTER TX for {validatorAddress} (IP: {cleanIP}) at block {block.Height}", "BlockValidatorService");
+                                        }
+
+                                        //LogUtility.Log($"Processed VBTC V2 validator registration for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
@@ -859,10 +1357,9 @@ namespace ReserveBlockCore.Services
                                         var validatorAddress = jobj["ValidatorAddress"]?.ToObject<string>();
                                         var exitBlockHeight = jobj["ExitBlockHeight"]?.ToObject<long>();
                                         
-                                        Bitcoin.Models.VBTCValidator.SetInactive(validatorAddress, tx.Hash, exitBlockHeight ?? block.Height);
-                                        
-                                        LogUtility.Log($"Processed VBTC V2 validator exit for {validatorAddress} at block {block.Height}", 
-                                            "BlockValidatorService");
+                                        // No DB update needed — VBTCValidatorRegistry derives state from block scanning
+
+                                        //LogUtility.Log($"Processed VBTC V2 validator exit for {validatorAddress} at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
@@ -892,36 +1389,48 @@ namespace ReserveBlockCore.Services
                                             continue; // Skip — don't update DB with invalid IP
                                         }
 
-                                        var existingValidator = Bitcoin.Models.VBTCValidator.GetValidator(validatorAddress);
-                                        if (existingValidator != null)
+                                        // No DB save needed — VBTCValidatorRegistry derives state from block scanning
+
+                                        // VALIDATOR-REJOIN: Hydrate NetworkValidators when a HEARTBEAT TX is on-chain.
+                                        // A heartbeat TX in a committed block is the strongest proof of liveness —
+                                        // the validator crafted, signed, and broadcast this TX, and it passed consensus.
+                                        // This is the primary mechanism for returning validators to re-enter the
+                                        // in-memory NetworkValidators pool after being evicted or after a full restart.
+                                        if (!string.IsNullOrEmpty(validatorAddress) && !string.IsNullOrEmpty(ipAddress))
                                         {
-                                            // Update IP, reactivate, and refresh heartbeat block
-                                            existingValidator.IPAddress = ipAddress;
-                                            existingValidator.IsActive = true;
-                                            existingValidator.LastHeartbeatBlock = block.Height;
-                                            if (!string.IsNullOrEmpty(frostPublicKey))
-                                                existingValidator.FrostPublicKey = frostPublicKey;
-                                            Bitcoin.Models.VBTCValidator.SaveValidator(existingValidator);
-                                        }
-                                        else
-                                        {
-                                            // Validator not in local DB — create from heartbeat data
-                                            // (can happen when a node receives the heartbeat before it received the registration)
-                                            var vbtcValidator = new Bitcoin.Models.VBTCValidator
+                                            var cleanIP = ipAddress.Replace("::ffff:", "");
+                                            var now = TimeUtil.GetTime();
+                                            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existingNv))
                                             {
-                                                ValidatorAddress = validatorAddress,
-                                                IPAddress = ipAddress,
-                                                RegistrationBlockHeight = reactivationBlockHeight ?? block.Height,
-                                                LastHeartbeatBlock = block.Height,
-                                                IsActive = true,
-                                                FrostPublicKey = frostPublicKey ?? "",
-                                                RegisterTransactionHash = tx.Hash
-                                            };
-                                            Bitcoin.Models.VBTCValidator.SaveValidator(vbtcValidator);
+                                                // Update existing entry — reset fail counts, update IP if changed
+                                                existingNv.IPAddress = cleanIP;
+                                                existingNv.IsFullyTrusted = true;
+                                                existingNv.LastSeen = now;
+                                                existingNv.CheckFailCount = 0;
+                                                Globals.NetworkValidators[validatorAddress] = existingNv;
+                                            }
+                                            else
+                                            {
+                                                // Add new entry — validator just heartbeated on-chain
+                                                var nv = new NetworkValidator
+                                                {
+                                                    Address = validatorAddress,
+                                                    IPAddress = cleanIP,
+                                                    PublicKey = "", // Will be populated via P2P handshake or proof generation fallback
+                                                    IsFullyTrusted = true,
+                                                    LastSeen = now,
+                                                    FirstSeenAtHeight = block.Height,
+                                                    CheckFailCount = 0,
+                                                };
+                                                Globals.NetworkValidators.TryAdd(validatorAddress, nv);
+                                            }
+                                            // Clear any winner failure tracking for this validator
+                                            Nodes.BlockcasterNode.ClearWinnerFailures(validatorAddress);
+                                            Utilities.ProofUtility.ClearProofGenerationCache();
+                                            LogUtility.Log($"VALIDATOR-REJOIN: Hydrated NetworkValidators from HEARTBEAT TX for {validatorAddress} (IP: {cleanIP}) at block {block.Height}", "BlockValidatorService");
                                         }
 
-                                        LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}",
-                                            "BlockValidatorService");
+                                        //LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}", "BlockValidatorService");
                                     }
                                     catch (Exception ex)
                                     {
@@ -947,6 +1456,7 @@ namespace ReserveBlockCore.Services
                                     if (mempoolTx.Count() > 0)
                                     {
                                         mempool.DeleteManySafe(x => x.Hash == localFromTransaction.Hash);
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(localFromTransaction.Hash);
                                     }
                                 }
                                 try
@@ -1051,9 +1561,34 @@ namespace ReserveBlockCore.Services
 
                     }
 
+                    // Auto-detect shielded notes for local wallets in real-time
+                    try
+                    {
+                        ShieldedNoteAutoScanner.ProcessBlockForLocalWallets(block);
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Shielded auto-scan error: {ex.Message}", "BlockValidatorService.ValidateBlock()");
+                    }
+
                     await TransactionData.UpdateWalletTXTask();
 
                     //DbContext.Commit();
+
+                    // Roll the oldest snapshot slot forward every SnapshotCadence blocks so fork/crash
+                    // recovery can restore from a near-tip snapshot instead of a full genesis replay.
+                    // Runs synchronously inside the block-processing path (no concurrent UpdateTreis);
+                    // typical cost is well under a second. Gated off during initial download/resync.
+                    if (block.Height % StateSnapshotService.SnapshotCadence == 0
+                        && Globals.IsChainSynced
+                        && !Globals.IsResyncing
+                        && !BlockRollbackUtility.IsResetTreisRunning)
+                    {
+                        await StateSnapshotService.UpdateCycleAsync(block.Height, block.Hash);
+                    }
+
+                    if (!validateOnly && !blockDownloads && ConsensusCertificateRules.SupportsConsensusCertificate(block.Version) && !Globals.IsBootstrapMode)
+                        _ = ConsensusAttestationPublisher.PublishLocalAsync(block);
 
                     return result;//block accepted
                 }
@@ -1160,14 +1695,33 @@ namespace ReserveBlockCore.Services
 
             if (block.Transactions.Count() > 0)
             {
+                if (block.Transactions.Count(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)) > Globals.MaxPrivateTxPerBlock)
+                    return result;
+
+                if (!blockDownloads && block.Transactions.Any(t =>
+                    t.FromAddress != "Coinbase_TrxFees" && t.FromAddress != "Coinbase_BlkRwd"
+                    && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+                {
+                    var plonkBatch = PlonkProofVerifier.TryValidatePrivateProofsInBlock(block, blockDownloads);
+                    if (!plonkBatch.ok)
+                        return result;
+                }
+
                 //validate transactions.
                 bool rejectBlock = false;
+                var blockPrivateNullifierKeys = new HashSet<string>();
                 foreach (Transaction transaction in block.Transactions)
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                     {
-                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads);
-                        rejectBlock = txResult.Item1 == false ? rejectBlock = true : false;
+                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, false, false, null, skipPrivatePlonkProofVerification: !blockDownloads);
+                        var effectiveTxResult = txResult;
+                        if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(transaction.TransactionType))
+                        {
+                            if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(transaction, blockPrivateNullifierKeys, out var nulErr))
+                                effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
+                        }
+                        rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                         if (rejectBlock)
                         {
                             RemoveTxFromMempool(transaction);//this should not happen, but if client did fail to properly handle tx it will reject it here.
@@ -1186,7 +1740,9 @@ namespace ReserveBlockCore.Services
                     ValidatorLogUtility.Log("Block validated failed due to transactions not validating", "BlockValidatorService.ValidateBlockForTask()");
                     return result;//block rejected due to bad transaction(s)
                 }
-                    
+
+                if (!ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                    return result;
 
                 result = true;
             }
@@ -1201,6 +1757,7 @@ namespace ReserveBlockCore.Services
                 if (mempool.Count() > 0)
                 {
                     mempool.DeleteManySafe(x => x.Hash == tx.Hash);
+                    TransactionData.ReleasePrivateMempoolNullifiersForTx(tx.Hash);
                 }
             }
         }

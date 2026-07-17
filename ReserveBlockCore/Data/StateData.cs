@@ -1,4 +1,4 @@
-﻿using ReserveBlockCore.Extensions;
+using ReserveBlockCore.Extensions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Models;
@@ -11,6 +11,7 @@ using LiteDB;
 using System.Net;
 using System.Security.Principal;
 using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Privacy;
 using NBitcoin.JsonConverters;
 using ReserveBlockCore.Models.DST;
 using System;
@@ -41,6 +42,7 @@ namespace ReserveBlockCore.Data
 
             var worldTrei = new WorldTrei {
                 StateRoot = block.StateRoot,
+                ShieldedStateRoot = global::ReserveBlockCore.Privacy.ShieldedStateRoot.Compute(),
             };
 
             var wTrei = DbContext.DB_WorldStateTrei.GetCollection<WorldTrei>(DbContext.RSRV_WSTATE_TREI);
@@ -49,9 +51,10 @@ namespace ReserveBlockCore.Data
             await aTrei.InsertBulkSafeAsync(accStTrei);
         }
 
-        public static async Task UpdateTreis(Block block)
+        public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
+            StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();
             int txTreiUpdateSuccessCount = 0;
@@ -78,7 +81,9 @@ namespace ReserveBlockCore.Data
                     }
                     else
                     {
-                        if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd")
+                        // ZK private txs use FromAddress Shielded_Pool with nonce 0 — skip AccountStateTrei from updates.
+                        if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd"
+                            && !PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
                         {
                             var from = GetSpecificAccountStateTrei(tx.FromAddress);
 
@@ -496,6 +501,36 @@ namespace ReserveBlockCore.Data
                             VoteOnVBTCV2Cancellation(tx);
                         }
 
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
+                        {
+                            ApplyVBTCBridgeLock(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
+                        {
+                            ApplyVBTCBridgeUnlock(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK)
+                        {
+                            ApplyVBTCBridgePoolUnlock(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+                        {
+                            ApplyVBTCBridgeExitToBTC(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                        {
+                            ApplyVBTCBridgeExitToBTCComplete(tx);
+                        }
+
+                        if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+                        {
+                            ApplyVBTCBridgeExitToBTCFail(tx);
+                        }
+
                         if(tx.TransactionType == TransactionType.RESERVE)
                         {
                             var txData = tx.Data;
@@ -523,9 +558,12 @@ namespace ReserveBlockCore.Data
                                             break;
                                     }
                                 }
-                            }
                         }
                     }
+                }
+
+                    if (PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
+                        await PrivateTxLedgerService.ApplyBlockTransactionAsync(tx, block);
 
                     txTreiUpdateSuccessCount += 1;
                 }
@@ -544,8 +582,23 @@ namespace ReserveBlockCore.Data
                 ErrorLogUtility.LogError($"TX Success Count Failed to match tx Count. TX Fail List: {txFailListJson}", "StateData.UpdateTreis() - Part 3");
             }
 
-            WorldTrei.UpdateWorldTrei(block);
+            try
+            {
+                WorldTrei.UpdateWorldTrei(block);
+            }
+            finally
+            {
+                // A stale (too-low) StateWriteContext height would make later out-of-band writes
+                // under-stamp and be missed by snapshot diffs — always clear, even on throw.
+                StateWriteContext.Clear();
+            }
             Globals.TreisUpdating = false;
+
+            // ROOT-CAUSE GUARD: Report whether every transaction's state mutation actually applied.
+            // A false here means the block was/will be committed to the chain while its state
+            // effects are missing — the exact condition that produces a permanent
+            // "new account with no balance" hole and gets a node stuck on a later block.
+            return txTreiUpdateSuccessCount == txCount;
         }
 
         public static async Task UpdateTreiFromReserve(List<ReserveTransactions> txList)
@@ -2694,6 +2747,471 @@ namespace ReserveBlockCore.Data
             }
         }
 
+        /// <summary>
+        /// vBTC Base bridge lock: deduct transparent balance chain-wide (same ledger pattern as withdrawal burn).
+        /// </summary>
+        private static void ApplyVBTCBridgeLock(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeLock: expected self-transaction (from == to)", "StateData.ApplyVBTCBridgeLock()");
+                    return;
+                }
+
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var lockId = jobj["LockId"]?.ToObject<string?>();
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                var evmDestination = jobj["EvmDestination"]?.ToObject<string?>();
+
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId) || !amount.HasValue || !amountSats.HasValue || string.IsNullOrEmpty(evmDestination))
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeLock: missing required fields", "StateData.ApplyVBTCBridgeLock()");
+                    return;
+                }
+
+                var expectedSats = (long)(amount.Value * 100_000_000M);
+                if (expectedSats != amountSats.Value)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: AmountSats mismatch for lock {lockId}", "StateData.ApplyVBTCBridgeLock()");
+                    return;
+                }
+
+                if (VBTCBridgeLockState.GetByLockId(lockId) != null)
+                    return;
+
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTreiRec == null)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: contract not found {scUID}", "StateData.ApplyVBTCBridgeLock()");
+                    return;
+                }
+
+                var tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                {
+                    new SmartContractStateTreiTokenizationTX
+                    {
+                        Amount = amount.Value * -1.0M,
+                        FromAddress = tx.FromAddress,
+                        ToAddress = "-"
+                    }
+                };
+
+                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                else
+                    scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+
+                SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                if (!VBTCBridgeLockState.TryInsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination))
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: failed to persist VBTCBridgeLockState for {lockId}", "StateData.ApplyVBTCBridgeLock()");
+                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: FAILED to insert VBTCBridgeLockState. lockId={lockId}, txHash={tx.Hash}", "StateData.ApplyVBTCBridgeLock");
+                }
+                else
+                {
+                    BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash, tx.Height);
+                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: Bridge lock CONFIRMED on-chain. lockId={lockId}, owner={tx.FromAddress}, amount={amount.Value} BTC, amountSats={amountSats.Value}, evmDest={evmDestination}, txHash={tx.Hash}, blockHeight={tx.Height}, scUID={scUID}. Balance deducted from owner. Validators can now sign attestation requests for this lockId.", "StateData.ApplyVBTCBridgeLock");
+                }
+
+                SCLogUtility.Log($"ApplyVBTCBridgeLock: lockId={lockId}, amount={amount.Value} BTC, owner={tx.FromAddress}, scUID={scUID}",
+                    "StateData.ApplyVBTCBridgeLock()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeLock error: {ex.Message}", "StateData.ApplyVBTCBridgeLock()");
+            }
+        }
+
+        /// <summary>
+        /// vBTC Base bridge unlock: restore transparent balance after burn on Base (proof hash carried in TX data).
+        /// </summary>
+        private static void ApplyVBTCBridgeUnlock(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeUnlock: expected self-transaction (from == to)", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                var jobj = JObject.Parse(tx.Data);
+                var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                var lockId = jobj["LockId"]?.ToObject<string?>();
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string?>();
+
+                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId) || !amount.HasValue || !amountSats.HasValue || string.IsNullOrEmpty(exitBurnTxHash))
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeUnlock: missing required fields", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                var rec = VBTCBridgeLockState.GetByLockId(lockId);
+                if (rec == null || rec.IsUnlocked)
+                    return;
+
+                if (rec.OwnerAddress != tx.FromAddress || rec.SmartContractUID != scUID)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock: signer/contract mismatch for lock {lockId}", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                if (rec.AmountSats != amountSats.Value)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock: AmountSats mismatch for lock {lockId}", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTreiRec == null)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock: contract not found {scUID}", "StateData.ApplyVBTCBridgeUnlock()");
+                    return;
+                }
+
+                var tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                {
+                    new SmartContractStateTreiTokenizationTX
+                    {
+                        Amount = amount.Value,
+                        FromAddress = "+",
+                        ToAddress = tx.FromAddress
+                    }
+                };
+
+                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                else
+                    scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+
+                SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                if (!VBTCBridgeLockState.TryFinalizeUnlock(tx, rec, exitBurnTxHash))
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock: failed to finalize VBTCBridgeLockState for {lockId}", "StateData.ApplyVBTCBridgeUnlock()");
+
+                BridgeLockRecord.FinalizeFromChainUnlockIfPending(lockId);
+
+                SCLogUtility.Log($"ApplyVBTCBridgeUnlock: lockId={lockId}, amount={amount.Value} BTC, owner={tx.FromAddress}, exitBurn={exitBurnTxHash}",
+                    "StateData.ApplyVBTCBridgeUnlock()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock error: {ex.Message}", "StateData.ApplyVBTCBridgeUnlock()");
+            }
+        }
+
+        /// <summary>
+        /// V3 pool-based unlock: credit vBTC to a destination VFX address by consuming
+        /// available bridge locks FIFO. The TX data contains a pre-computed allocation plan
+        /// (list of lockId + unlockAmount pairs) so all nodes produce identical state.
+        /// </summary>
+        private static void ApplyVBTCBridgePoolUnlock(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgePoolUnlock: expected self-transaction (from == to)", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                var jobj = JObject.Parse(tx.Data);
+                var totalAmount = jobj["TotalAmount"]?.ToObject<decimal?>();
+                var totalAmountSats = jobj["TotalAmountSats"]?.ToObject<long?>();
+                var vfxDestinationAddress = jobj["VfxDestinationAddress"]?.ToObject<string?>();
+                var exitBurnTxHash = jobj["ExitBurnTxHash"]?.ToObject<string?>();
+                var allocationsToken = jobj["Allocations"];
+
+                if (!totalAmount.HasValue || !totalAmountSats.HasValue ||
+                    string.IsNullOrEmpty(vfxDestinationAddress) || string.IsNullOrEmpty(exitBurnTxHash) ||
+                    allocationsToken == null)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgePoolUnlock: missing required fields", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                var allocations = allocationsToken.ToObject<List<PoolUnlockAllocation>>();
+                if (allocations == null || allocations.Count == 0)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgePoolUnlock: empty allocations", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                // Verify allocations sum matches total
+                decimal allocSum = allocations.Sum(a => a.UnlockAmount);
+                if (Math.Abs(allocSum - totalAmount.Value) > 0.00000001M)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: allocation sum {allocSum} != totalAmount {totalAmount.Value}", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
+                // Process each allocation: partial-unlock each lock, credit each lock's contract
+                foreach (var alloc in allocations)
+                {
+                    var rec = VBTCBridgeLockState.GetByLockId(alloc.LockId);
+                    if (rec == null || rec.IsUnlocked)
+                    {
+                        ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: lock {alloc.LockId} not found or already fully unlocked", "StateData.ApplyVBTCBridgePoolUnlock()");
+                        continue;
+                    }
+
+                    long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
+
+                    // Credit the lock's original contract to the destination address
+                    var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(rec.SmartContractUID);
+                    if (scStateTreiRec == null)
+                    {
+                        ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: contract {rec.SmartContractUID} not found for lock {alloc.LockId}", "StateData.ApplyVBTCBridgePoolUnlock()");
+                        continue;
+                    }
+
+                    var tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                    {
+                        new SmartContractStateTreiTokenizationTX
+                        {
+                            Amount = alloc.UnlockAmount,
+                            FromAddress = "+",
+                            ToAddress = vfxDestinationAddress
+                        }
+                    };
+
+                    if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                    else
+                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+
+                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                    // Update partial unlock state
+                    if (!VBTCBridgeLockState.ApplyPartialUnlock(alloc.LockId, alloc.UnlockAmount, allocSats))
+                    {
+                        ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: failed to apply partial unlock for lock {alloc.LockId}", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    }
+
+                    BridgeLockRecord.FinalizeFromChainUnlockIfPending(alloc.LockId);
+                }
+
+                SCLogUtility.Log($"ApplyVBTCBridgePoolUnlock: totalAmount={totalAmount.Value} BTC, dest={vfxDestinationAddress}, allocations={allocations.Count}, exitBurn={exitBurnTxHash}",
+                    "StateData.ApplyVBTCBridgePoolUnlock()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock error: {ex.Message}", "StateData.ApplyVBTCBridgePoolUnlock()");
+            }
+        }
+
+        private static void ApplyVBTCBridgeExitToBTC(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                    return;
+                var jobj = JObject.Parse(tx.Data);
+                var totalAmount = jobj["TotalAmount"]?.ToObject<decimal?>();
+                var totalAmountSats = jobj["TotalAmountSats"]?.ToObject<long?>();
+                var btcDestination = jobj["BtcDestination"]?.ToObject<string>();
+                var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+                var allocationsToken = jobj["Allocations"];
+                var btcWithdrawalsToken = jobj["BtcWithdrawals"];
+
+                // Support legacy format (single contract/lockId) for backward compatibility
+                if (allocationsToken == null)
+                {
+                    // Legacy: single lock exit (no partial unlocks applied)
+                    var scUID = jobj["ContractUID"]?.ToObject<string>();
+                    var lockId = jobj["LockId"]?.ToObject<string>();
+                    var amount = jobj["Amount"]?.ToObject<decimal?>();
+                    var amountSats = jobj["AmountSats"]?.ToObject<long?>();
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId) || !amount.HasValue || !amountSats.HasValue ||
+                        string.IsNullOrEmpty(btcDestination) || string.IsNullOrEmpty(baseBurnTxHash))
+                        return;
+
+                    var st = new VBTCBridgeBtcExitState
+                    {
+                        BaseBurnTxHash = baseBurnTxHash.Trim(),
+                        LockId = lockId.Trim(),
+                        SmartContractUID = scUID,
+                        OwnerAddress = tx.FromAddress,
+                        Amount = amount.Value,
+                        AmountSats = amountSats.Value,
+                        BtcDestination = btcDestination,
+                        ExitTxHash = tx.Hash,
+                        CreatedTimestamp = tx.Timestamp,
+                        IsComplete = false
+                    };
+                    VBTCBridgeBtcExitState.TryInsert(st);
+                    SCLogUtility.Log($"ApplyVBTCBridgeExitToBTC (legacy): burn={baseBurnTxHash}, lockId={lockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
+                    return;
+                }
+
+                // V3 format: FIFO allocation plan with partial unlocks
+                if (!totalAmount.HasValue || !totalAmountSats.HasValue ||
+                    string.IsNullOrEmpty(btcDestination) || string.IsNullOrEmpty(baseBurnTxHash))
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeExitToBTC: missing required fields in V3 format", "StateData.ApplyVBTCBridgeExitToBTC()");
+                    return;
+                }
+
+                var allocations = allocationsToken.ToObject<List<PoolUnlockAllocation>>();
+                if (allocations == null || allocations.Count == 0)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeExitToBTC: empty allocations", "StateData.ApplyVBTCBridgeExitToBTC()");
+                    return;
+                }
+
+                // Verify allocations sum matches total
+                decimal allocSum = allocations.Sum(a => a.UnlockAmount);
+                if (Math.Abs(allocSum - totalAmount.Value) > 0.00000001M)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: allocation sum {allocSum} != totalAmount {totalAmount.Value}", "StateData.ApplyVBTCBridgeExitToBTC()");
+                    return;
+                }
+
+                // Process each allocation: apply partial unlock to each lock
+                foreach (var alloc in allocations)
+                {
+                    var rec = VBTCBridgeLockState.GetByLockId(alloc.LockId);
+                    if (rec == null || rec.IsUnlocked)
+                    {
+                        ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: lock {alloc.LockId} not found or already fully unlocked", "StateData.ApplyVBTCBridgeExitToBTC()");
+                        continue;
+                    }
+
+                    long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
+
+                    // Apply partial unlock to the lock state (reduces RemainingAmount, marks fully unlocked if 0)
+                    if (!VBTCBridgeLockState.ApplyPartialUnlock(alloc.LockId, alloc.UnlockAmount, allocSats))
+                    {
+                        ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: failed to apply partial unlock for lock {alloc.LockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
+                    }
+
+                    BridgeLockRecord.FinalizeFromChainUnlockIfPending(alloc.LockId);
+                }
+
+                // Insert BTC exit state record for tracking (use first allocation's contract for backward compat)
+                var firstAlloc = allocations.First();
+                var exitState = new VBTCBridgeBtcExitState
+                {
+                    BaseBurnTxHash = baseBurnTxHash.Trim(),
+                    LockId = string.Join(",", allocations.Select(a => a.LockId)),
+                    SmartContractUID = firstAlloc.SmartContractUID,
+                    OwnerAddress = tx.FromAddress,
+                    Amount = totalAmount.Value,
+                    AmountSats = totalAmountSats.Value,
+                    BtcDestination = btcDestination,
+                    ExitTxHash = tx.Hash,
+                    CreatedTimestamp = tx.Timestamp,
+                    IsComplete = false
+                };
+                VBTCBridgeBtcExitState.TryInsert(exitState);
+
+                SCLogUtility.Log(
+                    $"ApplyVBTCBridgeExitToBTC (V3): burn={baseBurnTxHash}, totalAmount={totalAmount.Value} BTC, " +
+                    $"allocations={allocations.Count}, locks=[{string.Join(",", allocations.Select(a => $"{a.LockId}:{a.UnlockAmount}"))}]",
+                    "StateData.ApplyVBTCBridgeExitToBTC()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTC()");
+            }
+        }
+
+        private static void ApplyVBTCBridgeExitToBTCComplete(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                    return;
+                var jobj = JObject.Parse(tx.Data);
+                var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+                var btcTxHash = jobj["BtcTxHash"]?.ToObject<string>();
+                if (string.IsNullOrEmpty(baseBurnTxHash) || string.IsNullOrEmpty(btcTxHash))
+                    return;
+                VBTCBridgeBtcExitState.MarkComplete(baseBurnTxHash.Trim(), btcTxHash.Trim());
+                SCLogUtility.Log($"ApplyVBTCBridgeExitToBTCComplete: burn={baseBurnTxHash}, btcTx={btcTxHash}", "StateData.ApplyVBTCBridgeExitToBTCComplete()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCComplete error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCComplete()");
+            }
+        }
+
+        /// <summary>
+        /// Handle VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL: reverse partial unlocks for failed locks,
+        /// blacklist them, and mark the BTC exit state as failed so a retry can occur.
+        /// </summary>
+        private static void ApplyVBTCBridgeExitToBTCFail(Transaction tx)
+        {
+            try
+            {
+                if (tx.FromAddress != tx.ToAddress)
+                    return;
+
+                var jobj = JObject.Parse(tx.Data);
+                var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
+                var exitTxHash = jobj["ExitTxHash"]?.ToObject<string>();
+                var reason = jobj["Reason"]?.ToObject<string>() ?? "Unknown";
+                var failedAllocationsToken = jobj["FailedAllocations"];
+
+                if (string.IsNullOrEmpty(baseBurnTxHash) || failedAllocationsToken == null)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeExitToBTCFail: missing required fields", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    return;
+                }
+
+                var failedAllocations = failedAllocationsToken.ToObject<List<PoolUnlockAllocation>>();
+                if (failedAllocations == null || failedAllocations.Count == 0)
+                {
+                    ErrorLogUtility.LogError("ApplyVBTCBridgeExitToBTCFail: empty FailedAllocations", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    return;
+                }
+
+                // For each failed allocation: restore the partial unlock and blacklist the lock
+                foreach (var alloc in failedAllocations)
+                {
+                    long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
+
+                    var blacklisted = VBTCBridgeLockState.BlacklistLock(
+                        alloc.LockId,
+                        alloc.UnlockAmount,
+                        allocSats,
+                        $"FROST fail: {reason}");
+
+                    if (!blacklisted)
+                    {
+                        ErrorLogUtility.LogError(
+                            $"ApplyVBTCBridgeExitToBTCFail: failed to blacklist lock {alloc.LockId}",
+                            "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    }
+                }
+
+                // Mark the BTC exit state as failed (if it exists)
+                var exitState = VBTCBridgeBtcExitState.GetByBurnTxHash(baseBurnTxHash.Trim());
+                if (exitState != null && !exitState.IsComplete)
+                {
+                    exitState.IsComplete = true; // Mark as "done" so the retry creates a new record
+                    exitState.BtcTxHash = $"FAILED:{tx.Hash}";
+                    VBTCBridgeBtcExitState.Update(exitState);
+                }
+
+                SCLogUtility.Log(
+                    $"ApplyVBTCBridgeExitToBTCFail: burn={baseBurnTxHash}, failedLocks={failedAllocations.Count}, " +
+                    $"locks=[{string.Join(",", failedAllocations.Select(a => $"{a.LockId}:{a.UnlockAmount}"))}], reason={reason}",
+                    "StateData.ApplyVBTCBridgeExitToBTCFail()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+            }
+        }
+
         private static void RequestVBTCV2Withdrawal(Transaction tx)
         {
             try
@@ -2717,14 +3235,6 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Get the contract
-                var contract = VBTCContractV2.GetContract(scUID);
-                if (contract == null)
-                {
-                    ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal failed: Contract not found - {scUID}", "StateData.RequestVBTCV2Withdrawal()");
-                    return;
-                }
-
                 // FIND-002 FIX: Create per-user withdrawal request record
                 // This allows tracking of who requested the withdrawal and prevents
                 // unauthorized parties from completing another user's withdrawal
@@ -2741,10 +3251,14 @@ namespace ReserveBlockCore.Data
                     Timestamp = tx.Timestamp,
                     TransactionHash = tx.Hash,
                     Status = VBTCWithdrawalStatus.Requested,
-                    IsCompleted = false
+                    IsCompleted = false,
+                    // S3C §0: stamp the mined block height — the consensus-deterministic value
+                    // all nodes agree on. Drives the per-contract anti-grief expiry gate.
+                    RequestBlockHeight = tx.Height
                 };
 
                 // Save the withdrawal request to the per-user tracking database
+                // This is consensus-critical and must succeed on ALL nodes
                 var saved = VBTCWithdrawalRequest.Save(withdrawalRequest);
                 if (!saved)
                 {
@@ -2752,17 +3266,19 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Also update contract-level tracking for backward compatibility
-                // Note: Contract-level tracking is informational; per-user tracking is authoritative
-                contract.WithdrawalStatus = VBTCWithdrawalStatus.Requested;
-                contract.ActiveWithdrawalRequestHash = tx.Hash;
-                contract.ActiveWithdrawalAmount = amount.Value;
-                contract.ActiveWithdrawalBTCDestination = btcAddress;
-                contract.ActiveWithdrawalFeeRate = feeRate.Value;
-                contract.ActiveWithdrawalRequestTime = tx.Timestamp;
-
-                // Save updated contract
-                VBTCContractV2.UpdateContract(contract);
+                // Also update contract-level tracking for backward compatibility (local DB only — informational)
+                // Remote nodes won't have VBTCContractV2 locally, so this is conditional.
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract != null)
+                {
+                    contract.WithdrawalStatus = VBTCWithdrawalStatus.Requested;
+                    contract.ActiveWithdrawalRequestHash = tx.Hash;
+                    contract.ActiveWithdrawalAmount = amount.Value;
+                    contract.ActiveWithdrawalBTCDestination = btcAddress;
+                    contract.ActiveWithdrawalFeeRate = feeRate.Value;
+                    contract.ActiveWithdrawalRequestTime = tx.Timestamp;
+                    VBTCContractV2.UpdateContract(contract);
+                }
 
                 SCLogUtility.Log($"RequestVBTCV2Withdrawal completed: SCUID={scUID}, Requester={requesterAddress}, Amount={amount.Value} BTC, Destination={btcAddress}, TxHash={tx.Hash}", 
                     "StateData.RequestVBTCV2Withdrawal()");
@@ -2822,52 +3338,43 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Get the contract
-                var contract = VBTCContractV2.GetContract(scUID);
-                if (contract == null)
-                {
-                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Contract not found - {scUID}", "StateData.CompleteVBTCV2Withdrawal()");
-                    return;
-                }
-
-                // Mark the withdrawal request as completed
+                // Mark the withdrawal request as completed (consensus-critical — runs on ALL nodes)
                 withdrawalRequest.Status = VBTCWithdrawalStatus.Completed;
                 withdrawalRequest.IsCompleted = true;
                 withdrawalRequest.BTCTxHash = btcTxHash;
                 VBTCWithdrawalRequest.Save(withdrawalRequest, true);
 
-                // Create withdrawal history entry
-                var historyEntry = new VBTCWithdrawalHistory
+                // Update local contract tracking if available (informational — only on nodes with local contract)
+                // Remote nodes won't have VBTCContractV2 locally, so this is conditional.
+                var contract = VBTCContractV2.GetContract(scUID);
+                if (contract != null)
                 {
-                    RequestHash = withdrawalRequestHash,
-                    CompletionHash = tx.Hash,
-                    BTCTransactionHash = btcTxHash,
-                    Amount = storedAmount,  // FIND-002 FIX: Use stored amount
-                    BTCDestination = withdrawalRequest.BTCDestination,
-                    RequestTime = withdrawalRequest.Timestamp,
-                    CompletionTime = tx.Timestamp,
-                    FeeRate = withdrawalRequest.FeeRate
-                };
+                    var historyEntry = new VBTCWithdrawalHistory
+                    {
+                        RequestHash = withdrawalRequestHash,
+                        CompletionHash = tx.Hash,
+                        BTCTransactionHash = btcTxHash,
+                        Amount = storedAmount,
+                        BTCDestination = withdrawalRequest.BTCDestination,
+                        RequestTime = withdrawalRequest.Timestamp,
+                        CompletionTime = tx.Timestamp,
+                        FeeRate = withdrawalRequest.FeeRate
+                    };
 
-                // Add to history
-                if (contract.WithdrawalHistory == null)
-                {
-                    contract.WithdrawalHistory = new List<VBTCWithdrawalHistory>();
+                    if (contract.WithdrawalHistory == null)
+                        contract.WithdrawalHistory = new List<VBTCWithdrawalHistory>();
+                    contract.WithdrawalHistory.Add(historyEntry);
+
+                    contract.WithdrawalStatus = VBTCWithdrawalStatus.Completed;
+                    contract.ActiveWithdrawalRequestHash = null;
+                    contract.ActiveWithdrawalAmount = 0;
+                    contract.ActiveWithdrawalBTCDestination = null;
+                    contract.ActiveWithdrawalFeeRate = 0;
+                    contract.ActiveWithdrawalRequestTime = 0;
+                    VBTCContractV2.UpdateContract(contract);
                 }
-                contract.WithdrawalHistory.Add(historyEntry);
 
-                // Update contract status to Completed and clear active withdrawal fields
-                contract.WithdrawalStatus = VBTCWithdrawalStatus.Completed;
-                contract.ActiveWithdrawalRequestHash = null;
-                contract.ActiveWithdrawalAmount = 0;
-                contract.ActiveWithdrawalBTCDestination = null;
-                contract.ActiveWithdrawalFeeRate = 0;
-                contract.ActiveWithdrawalRequestTime = 0;
-
-                // Save updated contract
-                VBTCContractV2.UpdateContract(contract);
-
-                // CRITICAL: Burn the withdrawn tokens in state trei
+                // CRITICAL: Burn the withdrawn tokens in state trei (CONSENSUS-CRITICAL — must run on ALL nodes)
                 // FIND-002 FIX: Use storedAmount (from request record), NOT tx.Data.Amount
                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                 if (scStateTreiRec != null)
@@ -3025,11 +3532,13 @@ namespace ReserveBlockCore.Data
                     return;
                 }
 
-                // Verify voter is an active vBTC validator (tx.FromAddress is authoritative)
-                var validator = VBTCValidator.GetValidator(tx.FromAddress);
-                if (validator == null || !validator.IsActive)
+                // S3C §7.4: voter must be active AND in the contract's DKG snapshot (or the public
+                // set for legacy no-snapshot contracts). Public→public-only; S3C→S3C-only.
+                var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID);
+                var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
+                if (validator == null || !validator.IsActive || !voterSet.Contains(tx.FromAddress))
                 {
-                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: {tx.FromAddress} is not an active vBTC validator", "StateData.VoteOnVBTCV2Cancellation()");
+                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: {tx.FromAddress} is not an eligible voter for contract {cancellation.SmartContractUID}", "StateData.VoteOnVBTCV2Cancellation()");
                     return;
                 }
 
@@ -3043,9 +3552,9 @@ namespace ReserveBlockCore.Data
                 // Record the vote
                 VBTCWithdrawalCancellation.AddVote(cancellationUID, tx.FromAddress, approve);
 
-                // Check if 75% approval threshold reached
-                var activeValidators = VBTCValidator.GetActiveValidators();
-                var totalValidatorCount = activeValidators?.Count ?? 0;
+                // Check if 75% approval threshold reached. S3C §7.4: denominator = FULL snapshot
+                // count (dead snapshot validators still count; only snapshot members can vote).
+                var totalValidatorCount = voterSet.Count;
                 
                 if (totalValidatorCount > 0)
                 {

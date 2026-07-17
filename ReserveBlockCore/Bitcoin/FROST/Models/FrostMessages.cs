@@ -89,6 +89,11 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public string LeaderSignature { get; set; }
         public List<string> SignerAddresses { get; set; }
         public int RequiredThreshold { get; set; }
+        /// <summary>
+        /// FIND-028: VFX withdrawal request TX hash. When set, validators enforce one-time signing
+        /// per withdrawal to prevent double-spend attacks. Null for non-withdrawal signings (e.g. bridge exits).
+        /// </summary>
+        public string? WithdrawalRequestHash { get; set; }
     }
 
     /// <summary>
@@ -129,6 +134,45 @@ namespace ReserveBlockCore.Bitcoin.FROST.Models
         public long CompletionTimestamp { get; set; }
         public List<string> SignerAddresses { get; set; }
         public int Threshold { get; set; }
+    }
+
+    /// <summary>
+    /// Pre-signed leader authentication for web wallet / external signer flows.
+    /// When provided to FROST ceremony methods, the pre-signed signatures are used
+    /// instead of calling AddressSignature() which requires a local private key.
+    /// </summary>
+    public class PreSignedLeaderAuth
+    {
+        /// <summary>
+        /// The session ID the web wallet signed over. When set, CoordinateDKGCeremony /
+        /// CoordinateSigningCeremony reuse this instead of generating a new Guid,
+        /// ensuring the leader message matches the pre-signed signature.
+        /// </summary>
+        public string? SessionId { get; set; }
+
+        /// <summary>
+        /// Pre-signed signature for the DKG/signing start broadcast.
+        /// Message format: "{sessionId}.{leaderAddress}.{timestamp}"
+        /// </summary>
+        public string StartSignature { get; set; } = "";
+
+        /// <summary>
+        /// Timestamp used when generating the start signature.
+        /// Must match the timestamp embedded in StartSignature.
+        /// </summary>
+        public long StartTimestamp { get; set; }
+
+        /// <summary>
+        /// Pre-signed signature for DKG share distribution (Round 2).
+        /// Only needed for DKG ceremonies. Message format: "{sessionId}.{leaderAddress}.{timestamp}"
+        /// </summary>
+        public string? ShareDistributionSignature { get; set; }
+
+        /// <summary>
+        /// Timestamp used when generating the share distribution signature.
+        /// Only needed for DKG ceremonies.
+        /// </summary>
+        public long? ShareDistributionTimestamp { get; set; }
     }
 
     #endregion

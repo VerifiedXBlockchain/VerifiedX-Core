@@ -33,6 +33,29 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
+        #region Stale Peer Management Constants
+
+        /// <summary>
+        /// Peers with FailCount at or above this value are excluded from connection attempts.
+        /// They will be rehabilitated when PopulateValidatorPeersFromBlocks detects a fresh
+        /// on-chain heartbeat/register TX and resets their FailCount.
+        /// </summary>
+        private const int MAX_FAIL_COUNT_FOR_CONNECT = 200;
+
+        /// <summary>
+        /// Peers with FailCount at or above this value get demoted (IsValidator = false).
+        /// This prevents them from being selected at all until re-discovered on-chain.
+        /// </summary>
+        private const int FAIL_COUNT_DEMOTION_THRESHOLD = 2000;
+
+        /// <summary>
+        /// For peers with FailCount above this value, only log every Nth failure to reduce noise.
+        /// </summary>
+        private const int FAIL_LOG_THROTTLE_AFTER = 50;
+        private const int FAIL_LOG_THROTTLE_INTERVAL = 100;
+
+        #endregion
+
         #region Security Helper Methods
 
         /// <summary>
@@ -378,12 +401,33 @@ namespace ReserveBlockCore.P2P
                     await node.Connection.DisposeAsync();
                 }                                
             }
-            catch 
+            catch (Exception ex)
             {
-                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
                 peer.FailCount += 1;
+
+                // Throttle logging for high-fail-count peers to reduce log noise
+                if (peer.FailCount <= FAIL_LOG_THROTTLE_AFTER || peer.FailCount % FAIL_LOG_THROTTLE_INTERVAL == 0)
+                {
+                    LogUtility.Log(
+                        $"CONNECT-FAIL: Validator connection to {peer.PeerIP} failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                        "P2PValidatorClient.Connect");
+                }
+
+                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+
                 if (peer.FailCount > 600)
                     peer.IsOutgoing = false;
+
+                // Demote peers that have been unreachable for a very long time
+                if (peer.FailCount >= FAIL_COUNT_DEMOTION_THRESHOLD)
+                {
+                    peer.IsValidator = false;
+                    LogUtility.Log(
+                        $"PEER-DEMOTED: Demoting {peer.PeerIP} from validator status after {peer.FailCount} consecutive failures. " +
+                        $"Will be re-enabled if a fresh on-chain heartbeat is detected.",
+                        "P2PValidatorClient.Connect");
+                }
+
                 Peers.GetAll()?.UpdateSafe(peer);
             }
             finally
@@ -420,12 +464,14 @@ namespace ReserveBlockCore.P2P
 
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                SkipIPs.Add("66.94.124.2");
+                SkipIPs.Add("40.160.225.225");
             }
 
             Random rnd = new Random();
+            // Filter out peers with excessive failures — they'll be rehabilitated when
+            // PopulateValidatorPeersFromBlocks detects a fresh on-chain heartbeat.
             var newPeers = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .Where(x => !SkipIPs.Contains(x.PeerIP) && x.FailCount < MAX_FAIL_COUNT_FOR_CONNECT)
                 .ToArray()
                 .OrderBy(x => rnd.Next())
                 .ThenBy(x => x.FailCount)
@@ -448,8 +494,9 @@ namespace ReserveBlockCore.P2P
                     SkipIPs.Add(validator.NodeIP);
                 }
 
+                // Still respect FailCount ceiling even after clearing SkipValPeers
                 newPeers = peerDB.Find(x => x.IsValidator).ToArray()
-                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .Where(x => !SkipIPs.Contains(x.PeerIP) && x.FailCount < MAX_FAIL_COUNT_FOR_CONNECT)
                 .ToArray()
                 .OrderBy(x => rnd.Next())
                 .ThenBy(x => x.FailCount)
@@ -522,7 +569,7 @@ namespace ReserveBlockCore.P2P
 
             if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
             {
-                SkipIPs.Add("66.94.124.2");
+                SkipIPs.Add("40.160.225.225");
             }
 
             Random rnd = new Random();
@@ -668,12 +715,33 @@ namespace ReserveBlockCore.P2P
                     await node.Connection.DisposeAsync();
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
                 peer.FailCount += 1;
+
+                // Throttle logging for high-fail-count peers to reduce log noise
+                if (peer.FailCount <= FAIL_LOG_THROTTLE_AFTER || peer.FailCount % FAIL_LOG_THROTTLE_INTERVAL == 0)
+                {
+                    LogUtility.Log(
+                        $"CONNECT-CASTER-FAIL: Blockcaster connection to {peer.PeerIP} ({url}) failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                        "P2PValidatorClient.ConnectBlockcaster");
+                }
+
+                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+
                 if (peer.FailCount > 600)
                     peer.IsOutgoing = false;
+
+                // Demote peers that have been unreachable for a very long time
+                if (peer.FailCount >= FAIL_COUNT_DEMOTION_THRESHOLD)
+                {
+                    peer.IsValidator = false;
+                    LogUtility.Log(
+                        $"PEER-DEMOTED: Demoting caster {peer.PeerIP} from validator status after {peer.FailCount} consecutive failures. " +
+                        $"Will be re-enabled if a fresh on-chain heartbeat is detected.",
+                        "P2PValidatorClient.ConnectBlockcaster");
+                }
+
                 Peers.GetAll()?.UpdateSafe(peer);
             }
             finally
@@ -1054,6 +1122,10 @@ namespace ReserveBlockCore.P2P
                                 // HAL-11 Fix: Enhanced validation with rate limiting and cross-verification
                                 LogUtility.Log($"Processing {activeVals.Count} validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
 
+                                int addedCount = 0;
+                                int failedCount = 0;
+                                int skippedCount = 0;
+
                                 foreach (var val in activeVals)
                                 {
                                     try
@@ -1062,14 +1134,15 @@ namespace ReserveBlockCore.P2P
                                         if (string.IsNullOrEmpty(val.Address) || string.IsNullOrEmpty(val.IPAddress))
                                         {
                                             ErrorLogUtility.LogError($"Invalid validator entry from {advertisingPeerIP}: missing address or IP", "RequestActiveValidators");
+                                            skippedCount++;
                                             continue;
                                         }
 
-                                        // HAL-11 Fix: Set advertisement metadata if not present
-                                        if (val.AdvertisementTimestamp == 0)
-                                        {
-                                            val.AdvertisementTimestamp = TimeUtil.GetTime();
-                                        }
+                                        // FIX: Always refresh advertisement timestamp when receiving validator lists
+                                        // from peers. The original timestamp was set when the validator first registered
+                                        // and becomes stale (>300s) by the time new nodes request the list, causing
+                                        // AddValidatorToPool to reject them as "timestamp too old".
+                                        val.AdvertisementTimestamp = TimeUtil.GetTime();
 
                                         if (string.IsNullOrEmpty(val.AdvertisementNonce))
                                         {
@@ -1082,8 +1155,11 @@ namespace ReserveBlockCore.P2P
                                         if (!addResult)
                                         {
                                             ErrorLogUtility.LogError($"Failed to add validator {val.Address} from peer {advertisingPeerIP}", "RequestActiveValidators");
+                                            failedCount++;
                                             continue;
                                         }
+
+                                        addedCount++;
 
                                         // HAL-11 Fix: Only update peer database for fully trusted validators
                                         if (val.IsFullyTrusted)
@@ -1129,7 +1205,7 @@ namespace ReserveBlockCore.P2P
                                     }
                                 }
 
-                                LogUtility.Log($"Completed processing validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
+                                LogUtility.Log($"Completed processing validator advertisements from peer {advertisingPeerIP}: added={addedCount}, failed={failedCount}, skipped={skippedCount}, NetworkValidators.Count={Globals.NetworkValidators.Count}, BlockCasters.Count={Globals.BlockCasters.Count}", "RequestActiveValidators");
                             }
                         }
                     }

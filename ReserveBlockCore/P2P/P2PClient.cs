@@ -281,6 +281,12 @@ namespace ReserveBlockCore.P2P
         private static ConcurrentDictionary<string, bool> ConnectLock = new ConcurrentDictionary<string, bool>();
         private static async Task Connect(Peers peer)
         {
+            // FIX: Early MaxPeers check to prevent over-connection from parallel fire-and-forget calls.
+            // Without this, multiple parallel Connect() calls launched by ParallelLoop can all pass
+            // the initial Diff check in ConnectToPeers but complete after the limit is already reached.
+            if (Globals.Nodes.Count >= Globals.MaxPeers)
+                return;
+
             var url = "http://" + peer.PeerIP + ":" + Globals.Port + "/blockchain";
             try
             {
@@ -354,6 +360,14 @@ namespace ReserveBlockCore.P2P
                     peer.WalletVersion = safeVersion;
                     node.WalletVersion = safeVersion;
 
+                    // FIX: Re-check MaxPeers before adding — another parallel Connect() may have
+                    // filled the remaining slots since our initial check at method entry.
+                    if (Globals.Nodes.Count >= Globals.MaxPeers)
+                    {
+                        await hubConnection.DisposeAsync();
+                        return;
+                    }
+
                     Globals.Nodes.TryAdd(IPAddress, node);
 
                     if (Globals.Nodes.TryGetValue(IPAddress, out var currentNode))
@@ -394,170 +408,6 @@ namespace ReserveBlockCore.P2P
 
         #endregion
 
-        #region Connect Adjudicator
-
-        private static ConcurrentDictionary<string, bool> ConnectAdjudicatorLock = new ConcurrentDictionary<string, bool>();
-        public static async Task<bool> ConnectAdjudicator(string url, string address, string time, string uName, string signature)
-        {
-            var IPAddress = GetPathUtility.IPFromURL(url);
-            try
-            {
-                if (!ConnectAdjudicatorLock.TryAdd(url, true))
-                    return false; 
-                var hubConnection = new HubConnectionBuilder()
-                .WithUrl(url, options => {
-                    options.Headers.Add("address", address);
-                    options.Headers.Add("time", time);
-                    options.Headers.Add("uName", uName);
-                    options.Headers.Add("signature", signature);
-                    options.Headers.Add("walver", Globals.CLIVersion);
-
-                })       
-                .Build();
-
-
-                LogUtility.Log($"Connecting to Adjudicator {IPAddress}", "ConnectAdjudicator()");                
-                hubConnection.Reconnecting += (sender) =>
-                {
-                    //LogUtility.Log("Reconnecting to Adjudicator", "ConnectAdjudicator()");
-                    //ConsoleWriterService.Output("[" + DateTime.Now.ToString() + $"] Connection to adjudicator {IPAddress} lost. Attempting to Reconnect.");
-                    return Task.CompletedTask;
-                };
-
-                hubConnection.Reconnected += (sender) =>
-                {
-                    //LogUtility.Log("Success! Reconnected to Adjudicator", "ConnectAdjudicator()");
-                    //ConsoleWriterService.Output("[" + DateTime.Now.ToString() + $"] Connection to adjudicator {IPAddress} has been restored.");
-                    return Task.CompletedTask;
-                };
-
-                hubConnection.Closed += (sender) =>
-                {
-                    //LogUtility.Log("Closed to Adjudicator", "ConnectAdjudicator()");
-                    //ConsoleWriterService.Output("[" + DateTime.Now.ToString() + $"] Connection to adjudicator {IPAddress} has been closed.");
-                    return Task.CompletedTask;
-                };
-                
-                hubConnection.On<string, string>("GetAdjMessage", async (message, data) => {
-                    if (message == "task" || 
-                    message == "taskResult" ||
-                    message == "fortisPool" || 
-                    message == "status" || 
-                    message == "tx" || 
-                    message == "badBlock" || 
-                    message == "sendWinningBlock" ||
-                    message == "disconnect" ||
-                    message == "terminate" ||
-                    message == "dupIP" ||
-                    message == "dupAddr")
-                    {
-                        switch(message)
-                        {
-                            case "task":
-                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "taskResult":
-                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "sendWinningBlock":
-                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "fortisPool":
-                                if(Globals.AdjudicateAccount == null)
-                                    await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "status":
-                                //ConsoleWriterService.Output(data);
-                                if (data == "Connected")
-                                {
-                                    //ValidatorLogUtility.Log("Connected to Validator Pool.", "P2PClient.ConnectAdjudicator()", true);
-                                    //LogUtility.Log("Success! Connected to Adjudicator", "ConnectAdjudicator()");
-                                }
-                                else
-                                {
-                                    ValidatorLogUtility.Log($"Response from adj: {data}", "P2PClient.ConnectAdjudicator()", true);
-                                }
-                                break;
-                            case "tx":
-                                await ValidatorProcessor_BAk.ProcessDatas(message, data, IPAddress);
-                                break;
-                            case "badBlock":
-                                //do something
-                                break;
-                            case "disconnect":
-                                await DisconnectAdjudicators();
-                                break;
-                            case "terminate":
-                                await ValidatorService.DoMasterNodeStop();
-                                break;
-                            case "dupIP":
-                                Globals.DuplicateAdjIP = true;
-                                break;
-                            case "dupAddr":
-                                Globals.DuplicateAdjAddr = true;
-                                break;
-                        }
-                    }
-                });
-
-                await hubConnection.StartAsync(new CancellationTokenSource(8000).Token);
-                if (string.IsNullOrEmpty(hubConnection.ConnectionId))
-                    return false;
-
-                var bench = Globals.AdjBench.Values.Where(x => x.IPAddress == IPAddress).FirstOrDefault();
-                if (Globals.AdjNodes.TryGetValue(IPAddress, out var node))
-                {
-                    node.Connection = hubConnection;
-                    node.IpAddress = IPAddress;
-                    node.AdjudicatorConnectDate = DateTime.UtcNow;
-                    node.Address = bench.RBXAddress;
-                }
-                else
-                {
-                    Globals.AdjNodes[IPAddress] = new AdjNodeInfo
-                    {
-                        Connection = hubConnection,
-                        IpAddress = IPAddress,
-                        AdjudicatorConnectDate = DateTime.UtcNow,
-                    Address = bench.RBXAddress
-                };
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                ValidatorLogUtility.Log($"Failed! Connecting to Adjudicator {IPAddress}: Reason - " + ex.ToString(), "ConnectAdjudicator()");
-            }
-            finally
-            {
-                ConnectAdjudicatorLock.TryRemove(url, out _);
-            }
-
-            return false;
-        }
-
-        #endregion
-
-        #region Disconnect Adjudicator
-        public static async Task DisconnectAdjudicators()
-        {
-            try
-            {
-                Globals.ValidatorAddress = "";
-                foreach (var node in Globals.AdjNodes.Values)
-                    if (node.Connection != null)
-                        await node.Connection.DisposeAsync();                    
-            }
-            catch (Exception ex)
-            {
-                ValidatorLogUtility.Log("Failed! Did not disconnect from Adjudicator: Reason - " + ex.ToString(), "DisconnectAdjudicator()");
-            }
-        }
-
-
-        #endregion
-
         #region Connect to Peers
         public static async Task<bool> ConnectToPeers()
         {
@@ -566,16 +416,14 @@ namespace ReserveBlockCore.P2P
 
             await DropDisconnectedPeers();            
 
+            // FIX: Removed Globals.ReportedIPs from skip set — ReportedIPs contains external IPs
+            // that peers report back to us (our own IP as seen by them). Including them in the
+            // skip set was incorrectly preventing connections to legitimate peers whose IP happened
+            // to match an entry in ReportedIPs.
             var SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
-
-            if (Globals.IsTestNet)
-                SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-                .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.SkipPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
+                .Union(Globals.ReportedIPs.Keys)
+                .Union(Globals.SkipPeers.Keys));
 
             Random rnd = new Random();
             var newPeers = peerDB.Find(x => x.IsOutgoing == true).ToArray()
@@ -678,7 +526,6 @@ namespace ReserveBlockCore.P2P
 
 
         #endregion
-
 
         #region Send TX To Adjudicators
         public static async Task SendTXToAdjudicator(Transaction tx)

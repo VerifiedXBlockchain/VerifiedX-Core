@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
@@ -18,6 +18,10 @@ namespace ReserveBlockCore.P2P
         private static readonly object _nonceCleanupLock = new object();
         private static DateTime _lastNonceCleanup = DateTime.UtcNow;
 
+        // FORK-FIX: Rate-limit BANNED-IP-REJECT log messages to prevent log spam and OOM.
+        private static readonly ConcurrentDictionary<string, (DateTime lastLog, int suppressedCount)> _bannedIpLogTracker = new();
+        private const int BANNED_IP_LOG_INTERVAL_SECONDS = 300; // 5 minutes
+
         #region On Connected 
         public override async Task OnConnectedAsync()
         {
@@ -28,13 +32,63 @@ namespace ReserveBlockCore.P2P
 
                 if (Globals.BannedIPs.ContainsKey(peerIP))
                 {
-                    Context.Abort();
-                    return;
+                    // FIX 4: If the banned IP is an active caster, auto-unban it instead of rejecting.
+                    // Caster IPs must always be allowed to connect for consensus to function.
+                    if (BanService.IsCasterIP(peerIP))
+                    {
+                        BanService.UnbanPeer(peerIP);
+                        LogUtility.Log($"CASTER-AUTO-UNBAN: Unbanned caster IP {peerIP} on connection attempt", "P2PValidatorServer.OnConnectedAsync");
+                        // Fall through to allow connection
+                    }
+                    // FORK-FIX: If the banned IP is a known validator, auto-unban it.
+                    // Validator IPs must not stay banned — they're needed for block downloads during fork recovery.
+                    else if (BanService.IsValidatorIP(peerIP))
+                    {
+                        BanService.UnbanPeer(peerIP);
+                        LogUtility.Log($"VALIDATOR-AUTO-UNBAN: Unbanned validator IP {peerIP} on connection attempt", "P2PValidatorServer.OnConnectedAsync");
+                        // Fall through to allow connection
+                    }
+                    else
+                    {
+                        // FORK-FIX: Rate-limit ban rejection logging to prevent log spam and OOM.
+                        var banCheckTime = DateTime.UtcNow;
+                        _bannedIpLogTracker.AddOrUpdate(
+                            peerIP,
+                            _ =>
+                            {
+                                LogUtility.Log($"BANNED-IP-REJECT: Rejecting validator connection from banned IP {peerIP}", "P2PValidatorServer.OnConnectedAsync");
+                                return (banCheckTime, 0);
+                            },
+                            (_, existing) =>
+                            {
+                                if ((banCheckTime - existing.lastLog).TotalSeconds >= BANNED_IP_LOG_INTERVAL_SECONDS)
+                                {
+                                    var suppressed = existing.suppressedCount;
+                                    LogUtility.Log(
+                                        $"BANNED-IP-REJECT: Rejecting validator connection from banned IP {peerIP}" +
+                                        (suppressed > 0 ? $" ({suppressed} additional rejections suppressed since last log)" : ""),
+                                        "P2PValidatorServer.OnConnectedAsync");
+                                    return (banCheckTime, 0);
+                                }
+                                return (existing.lastLog, existing.suppressedCount + 1);
+                            });
+                        Context.Abort();
+                        return;
+                    }
                 }
 
                 // HAL-14 Security Enhancement: Rate limiting and connection monitoring
+                // FIX 4: Skip rate-limit banning for caster IPs — casters naturally make
+                // many connections during consensus rounds and should never be banned for it.
                 if (ConnectionSecurityHelper.ShouldRateLimit(peerIP))
                 {
+                    if (BanService.IsCasterIP(peerIP))
+                    {
+                        LogUtility.Log($"CASTER-RATE-LIMIT-SKIP: Rate limit triggered for caster IP {peerIP} — skipping ban", "P2PValidatorServer.OnConnectedAsync");
+                        // Don't ban, but still throttle the connection
+                        await EndOnConnect(peerIP, "Too many connection attempts (throttled, not banned)", $"Rate limited caster IP: {peerIP}");
+                        return;
+                    }
                     BanService.BanPeer(peerIP, "Connection rate limit exceeded", "OnConnectedAsync-RateLimit");
                     await EndOnConnect(peerIP, "Too many connection attempts", $"Rate limited IP: {peerIP}");
                     return;
@@ -197,9 +251,21 @@ namespace ReserveBlockCore.P2P
                     Signature = signature,
                     SignatureMessage = SignedMessage,
                     UniqueName = uName,
+                    // RESTART-FIX: Direct P2P connections are authenticated via signature,
+                    // so they are inherently trusted. This ensures returning validators
+                    // are immediately eligible for caster promotion.
+                    IsFullyTrusted = true,
+                    LastSeen = TimeUtil.GetTime(),
+                    FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
                 };
 
-                Globals.NetworkValidators.TryAdd(address, netVal);
+                // CASTER-PROMOTE-FIX: Use upsert helper instead of TryAdd.
+                // TryAdd is a no-op if the address is already present, which could
+                // leave a stale IsFullyTrusted=false entry from a prior gossip path,
+                // silently blocking caster promotion. The helper forces trust on
+                // direct authenticated connections and preserves FirstSeenAtHeight.
+                NetworkValidator.UpsertTrustedOnDirectConnect(netVal);
+
 
                 var netValSerialize = JsonConvert.SerializeObject(netVal);
 
@@ -211,9 +277,19 @@ namespace ReserveBlockCore.P2P
                 _ = PortCheckCacheService.CheckAndDisconnectIfClosed(
                     peerIP,
                     Globals.ValPort,
-                    async () => await EndOnConnect(peerIP,
-                        $"Port: {Globals.ValPort} was not detected as open.",
-                        $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}."),
+                    async () =>
+                    {
+                        try
+                        {
+                            await EndOnConnect(peerIP,
+                                $"Port: {Globals.ValPort} was not detected as open.",
+                                $"HAL-022: One-way validator detected - Port: {Globals.ValPort} was not detected as open for IP: {peerIP}.");
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // Hub already disposed, connection is already gone - nothing to do
+                        }
+                    },
                     "P2PValidatorServer"
                 );
 
@@ -329,6 +405,21 @@ namespace ReserveBlockCore.P2P
                                 // HAL-025 Fix: Removed weak .Contains() check - proper cryptographic verification is sufficient
                                 if(verifySig)
                                 {
+                                    // CASTER-PROMOTE-FIX: Never allow a gossiped record to demote a
+                                    // validator that is already trusted locally. A gossiped record
+                                    // from an untrusted peer typically carries IsFullyTrusted=false;
+                                    // blindly overwriting would silently flip our trusted entry to
+                                    // untrusted, removing it from caster-candidate eligibility.
+                                    // Preserve the more authoritative local trust + first-seen info.
+                                    if (networkValidatorVal.IsFullyTrusted)
+                                    {
+                                        networkValidator.IsFullyTrusted = true;
+                                    }
+                                    if (networkValidatorVal.FirstSeenAtHeight > 0)
+                                    {
+                                        networkValidator.FirstSeenAtHeight = networkValidatorVal.FirstSeenAtHeight;
+                                    }
+                                    networkValidator.LastSeen = TimeUtil.GetTime();
                                     Globals.NetworkValidators[networkValidator.Address] = networkValidator;
                                     processedCount++;
                                 }
@@ -337,8 +428,17 @@ namespace ReserveBlockCore.P2P
                                     rejectedCount++;
                                 }
                             }
+
                             else
                             {
+                                // FIX E: During gossip cooldown after fresh startup, don't add NEW validators.
+                                // This prevents peers from immediately repopulating stale offline validators
+                                // that were just cleared by the fresh-startup detection.
+                                if (TimeUtil.GetTime() < Globals.GossipCooldownUntil)
+                                {
+                                    rejectedCount++;
+                                    continue;
+                                }
                                 // HAL-15 Security Fix: Use secure validator addition method
                                 var added = await NetworkValidator.AddValidatorToPool(networkValidator, peerIP);
                                 if (added)
@@ -436,9 +536,23 @@ namespace ReserveBlockCore.P2P
                                 // Just log and return false for duplicates - no need to ban
                                 return false;
                             }
+                            else if (headerValidation.IsParentHashMismatch)
+                            {
+                                // FORK-FIX: Parent hash mismatch at the expected next height is a FORK symptom,
+                                // not an attack. The sender has the correct chain; WE are on the wrong fork.
+                                // Banning correct validators makes the fork permanent and unrecoverable.
+                                // Log it but do NOT ban — the PREVHASH-MISMATCH recovery in ValidateBlock
+                                // will handle self-healing.
+                                LogUtility.Log(
+                                    $"FORK-NO-BAN: Block from {callerIP} has parent hash not in our chain " +
+                                    $"(block height {nextBlock?.Height}). This indicates WE may be on a minority fork. " +
+                                    $"NOT banning — fork recovery will handle this.",
+                                    "P2PValidatorServer.ReceiveBlockVal()");
+                                return false;
+                            }
                             else
                             {
-                                // Ban for other validation failures (invalid version, timestamp, parent hash)
+                                // Ban for genuinely invalid headers (wrong version, timestamp way off, etc.)
                                 BanService.BanPeer(callerIP, "Invalid block header", "ReceiveBlockVal");
                                 return false;
                             }
@@ -696,6 +810,15 @@ namespace ReserveBlockCore.P2P
             if (!vals.Any())
                 return "0";
 
+            // FIX: Refresh AdvertisementTimestamp before sending to prevent receivers
+            // from rejecting validators as "timestamp too old" (>300s stale).
+            var freshTime = TimeUtil.GetTime();
+            foreach (var v in vals)
+                v.AdvertisementTimestamp = freshTime;
+
+            var peerIPForLog = GetIP(Context);
+            LogUtility.Log($"SendActiveVals: sending {vals.Count} validators with refreshed timestamps to {peerIPForLog}", "P2PValidatorServer.SendActiveVals");
+
             // HAL-15 Security Fix: Limit validator list to maximum 2000 validators for broadcast
             var limitedVals = InputValidationHelper.LimitValidatorListForBroadcast(vals);
             
@@ -748,6 +871,7 @@ namespace ReserveBlockCore.P2P
                                     try
                                     {
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -808,6 +932,7 @@ namespace ReserveBlockCore.P2P
                                     try
                                     {
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -830,6 +955,7 @@ namespace ReserveBlockCore.P2P
                                     try
                                     {
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -844,6 +970,7 @@ namespace ReserveBlockCore.P2P
                                 try
                                 {
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch (Exception ex)
                                 {
@@ -864,6 +991,7 @@ namespace ReserveBlockCore.P2P
                                 try
                                 {
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -925,6 +1053,7 @@ namespace ReserveBlockCore.P2P
                                 try
                                 {
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 

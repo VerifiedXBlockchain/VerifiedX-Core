@@ -9,7 +9,7 @@ namespace ReserveBlockCore.Bitcoin.Services
     public static class VBTCThresholdCalculator
     {
         // Constants
-        private const int ORIGINAL_THRESHOLD = 51;
+        private const int ORIGINAL_THRESHOLD = 67;
         private const int SAFETY_BUFFER_PERCENT = 10;
         private const int SAFETY_GATE_HOURS = 24;
         private const int SECONDS_PER_BLOCK = 12; // VFX: ~12 seconds per block

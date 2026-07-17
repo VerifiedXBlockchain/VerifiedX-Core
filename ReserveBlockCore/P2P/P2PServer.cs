@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
 using ReserveBlockCore.Data;
@@ -441,8 +441,9 @@ namespace ReserveBlockCore.P2P
                                 {
                                     try
                                     {
-                                        ErrorLogUtility.LogError($"TX Faile From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()");
+                                        ErrorLogUtility.LogError($"TX Failed From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()-3");
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -533,8 +534,9 @@ namespace ReserveBlockCore.P2P
                                 {
                                     try
                                     {
-                                        ErrorLogUtility.LogError($"TX Faile From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()");
+                                        ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-1");
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -557,6 +559,7 @@ namespace ReserveBlockCore.P2P
                                     try
                                     {
                                         mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -571,6 +574,7 @@ namespace ReserveBlockCore.P2P
                                 try
                                 {
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch (Exception ex)
                                 {
@@ -590,8 +594,9 @@ namespace ReserveBlockCore.P2P
                             {
                                 try
                                 {
-                                    ErrorLogUtility.LogError($"TX Faile From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()");
+                                    ErrorLogUtility.LogError($"TX Failed From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()-4");
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -680,8 +685,9 @@ namespace ReserveBlockCore.P2P
                             {
                                 try
                                 {
-                                    ErrorLogUtility.LogError($"TX Faile From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()");
+                                    ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-2");
                                     mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -801,6 +807,38 @@ namespace ReserveBlockCore.P2P
         public async Task<string> GetWalletVersion()
         {
             return await SignalRQueue(Context, Globals.CLIVersion.Length, async () => Globals.CLIVersion);
+        }
+
+        #endregion
+
+        #region Send Peers (Peer Discovery)
+        /// <summary>
+        /// Returns a JSON array of up to 20 random peer IPs from this node's Peers DB.
+        /// Used by non-validator nodes to discover additional peers via gossip.
+        /// Only returns peers marked as IsOutgoing (known to have open ports).
+        /// </summary>
+        public async Task<string> SendPeers()
+        {
+            return await SignalRQueue(Context, 2048, async () =>
+            {
+                try
+                {
+                    var peerDB = Peers.GetAll();
+                    var rnd = new Random();
+                    var peers = peerDB.Find(x => x.IsOutgoing == true && x.FailCount < 3)
+                        .ToArray()
+                        .OrderBy(x => rnd.Next())
+                        .Take(20)
+                        .Select(x => x.PeerIP)
+                        .ToList();
+
+                    return JsonConvert.SerializeObject(peers);
+                }
+                catch
+                {
+                    return "[]";
+                }
+            });
         }
 
         #endregion

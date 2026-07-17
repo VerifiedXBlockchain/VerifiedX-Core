@@ -26,6 +26,9 @@ namespace ReserveBlockCore.Models
 		public int BCraftTime { get; set; }
 		public string AdjudicatorSignature { get; set; }
 
+		/// <summary>Optional caster quorum certificate; not included in <see cref="GetBlockHash"/>.</summary>
+		public ConsensusCertificate? ConsensusCertificate { get; set; }
+
 		public IList<Transaction> Transactions { get; set; }
 		//Methods
 		public void Build()

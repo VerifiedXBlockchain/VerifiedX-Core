@@ -8,6 +8,8 @@ using System.Net.Http.Json;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.SmartContracts;
 
 namespace ReserveBlockCore.Bitcoin.Services
 {
@@ -22,14 +24,108 @@ namespace ReserveBlockCore.Bitcoin.Services
             Timeout = TimeSpan.FromSeconds(30)
         };
 
+        /// <summary>
+        /// Dedicated long-timeout HttpClient for DKG Round 2 share generation.
+        /// FROST crypto with 85+ participants involves generating 84 secret shares per validator,
+        /// which can take significant time. 90-second timeout accommodates this.
+        /// </summary>
+        private static readonly HttpClient _ceremonyHttpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(90)
+        };
+
+        #region Validator Reachability
+
+        /// <summary>
+        /// Dedicated short-timeout HttpClient for health check probes.
+        /// Uses a 5-second timeout so we don't wait 30 seconds per offline validator.
+        /// </summary>
+        private static readonly HttpClient _probeHttpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+
+        /// <summary>
+        /// Probe all validators to find which ones are actually reachable on the FROST port.
+        /// Uses the /health endpoint with a short timeout to quickly identify online validators.
+        /// This prevents the DKG ceremony from being passed 34 validators when only 4 are online.
+        /// </summary>
+        /// <param name="validators">All registered/active validators to probe</param>
+        /// <returns>List of validators that responded successfully to the health check</returns>
+        public static async Task<List<VBTCValidator>> ProbeValidatorReachability(List<VBTCValidator> validators)
+        {
+            var reachable = new System.Collections.Concurrent.ConcurrentBag<VBTCValidator>();
+            var unreachableCount = 0;
+
+            LogUtility.Log($"[FROST MPC] Probing {validators.Count} validators for FROST port reachability...", 
+                "FrostMPCService.ProbeValidatorReachability");
+
+            var tasks = validators.Select(async validator =>
+            {
+                try
+                {
+                    // Validate IP before making HTTP call
+                    if (!InputValidationHelper.ValidateValidatorIPAddress(validator.IPAddress, out string ipError))
+                    {
+                        Interlocked.Increment(ref unreachableCount);
+                        return;
+                    }
+
+                    var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/health";
+                    var response = await _probeHttpClient.GetAsync(url);
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var body = await response.Content.ReadAsStringAsync();
+                        if (body.Contains("\"Success\":true") || body.Contains("\"Success\": true"))
+                        {
+                            reachable.Add(validator);
+                            return;
+                        }
+                    }
+
+                    Interlocked.Increment(ref unreachableCount);
+                }
+                catch
+                {
+                    // Timeout or connection refused — validator is offline
+                    Interlocked.Increment(ref unreachableCount);
+                }
+            });
+
+            await Task.WhenAll(tasks);
+
+            var reachableList = reachable.ToList();
+
+            LogUtility.Log($"[FROST MPC] Reachability probe complete: {reachableList.Count}/{validators.Count} validators online on FROST port {Globals.FrostValidatorPort}. " +
+                $"({unreachableCount} unreachable)", "FrostMPCService.ProbeValidatorReachability");
+
+            if (reachableList.Count > 0)
+            {
+                var addressList = string.Join(", ", reachableList.Select(v => v.ValidatorAddress));
+                LogUtility.Log($"[FROST MPC] Reachable validators: {addressList}", "FrostMPCService.ProbeValidatorReachability");
+            }
+
+            return reachableList;
+        }
+
+        #endregion
+
         #region DKG Ceremony - Taproot Address Generation
 
         /// <summary>
         /// Coordinate a complete FROST DKG ceremony to generate a Taproot deposit address
-        /// Returns the group public key, Taproot address, and DKG proof
+        /// Returns the group public key, Taproot address, and DKG proof.
+        /// Any node (validator or wallet) can coordinate — the coordinator only orchestrates
+        /// HTTP calls and never touches private key material.
+        /// 
+        /// FROST DKG requires ALL n participants to complete every round (unlike signing, which
+        /// is threshold-based). If some validators fail to respond during DKG start, the ceremony
+        /// automatically retries with only the confirmed participants (up to 2 retries, ≥90% required).
+        /// The ceremony ID stays the same; only the internal session ID changes on retry.
         /// </summary>
         /// <param name="ceremonyId">Ceremony ID (NOT smart contract UID - that doesn't exist yet)</param>
-        /// <param name="ownerAddress">Contract owner's VFX address</param>
+        /// <param name="ownerAddress">Contract owner's VFX address (used as leader address)</param>
         /// <param name="validators">List of active validators to participate</param>
         /// <param name="threshold">Required threshold percentage (e.g., 51)</param>
         /// <param name="progressCallback">Optional callback to report progress (round, percentage)</param>
@@ -39,42 +135,109 @@ namespace ReserveBlockCore.Bitcoin.Services
             string ownerAddress,
             List<VBTCValidator> validators,
             int threshold,
-            Action<int, int>? progressCallback = null)
+            Action<int, int>? progressCallback = null,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
-                var sessionId = Guid.NewGuid().ToString();
-                var leaderAddress = Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
+                // Reuse the pre-signed session ID if provided (web wallet flow), otherwise generate a new one.
+                // The pre-signed signatures embed this session ID in the message, so it MUST match.
+                var sessionId = !string.IsNullOrEmpty(preSignedAuth?.SessionId) ? preSignedAuth.SessionId : Guid.NewGuid().ToString();
+                // Use the owner's address as the leader — any VFX address can coordinate
+                var leaderAddress = ownerAddress;
+                var activeValidators = validators;
 
-                LogUtility.Log($"[FROST MPC] Starting DKG ceremony. Ceremony: {ceremonyId}, Session: {sessionId}, Validators: {validators.Count}, Threshold: {threshold}%", "FrostMPCService.CoordinateDKGCeremony");
+                LogUtility.Log($"[FROST MPC] Starting DKG ceremony. Ceremony: {ceremonyId}, Session: {sessionId}, Validators: {activeValidators.Count}, Threshold: {threshold}%, PreSignedSession: {preSignedAuth?.SessionId != null}", "FrostMPCService.CoordinateDKGCeremony");
 
-                // Phase 1: Broadcast DKG start to all validators
-                progressCallback?.Invoke(0, 10); // Starting
-                var startSuccess = await BroadcastDKGStart(sessionId, ceremonyId, leaderAddress, validators, threshold);
-                if (!startSuccess)
+                // Phase 1: Broadcast DKG start to all validators with retry for participant convergence.
+                // FROST DKG requires ALL n participants to complete every round. If some validators
+                // fail to respond, we retry with only the confirmed subset (up to 2 retries).
+                // The ceremony ID stays the same; only the internal session ID changes on retry.
+                progressCallback?.Invoke(0, 5); // Starting
+                const int MAX_DKG_START_RETRIES = 2;
+                List<VBTCValidator>? confirmedValidators = null;
+
+                for (int attempt = 0; attempt <= MAX_DKG_START_RETRIES; attempt++)
                 {
-                    LogUtility.Log($"[FROST MPC] Failed to start DKG ceremony - validators not ready", "FrostMPCService.CoordinateDKGCeremony");
+                    var (startSuccess, respondingList) = await BroadcastDKGStartWithResponders(
+                        sessionId, ceremonyId, leaderAddress, activeValidators, threshold, preSignedAuth);
+
+                    if (!startSuccess || respondingList == null || respondingList.Count == 0)
+                    {
+                        LogUtility.Log($"[FROST MPC] DKG start attempt {attempt + 1} failed - insufficient validators responded", 
+                            "FrostMPCService.CoordinateDKGCeremony");
+                        return null;
+                    }
+
+                    if (respondingList.Count == activeValidators.Count)
+                    {
+                        // All validators responded — perfect, proceed with this session
+                        confirmedValidators = respondingList;
+                        LogUtility.Log($"[FROST MPC] DKG start: All {activeValidators.Count} validators responded (attempt {attempt + 1})", 
+                            "FrostMPCService.CoordinateDKGCeremony");
+                        break;
+                    }
+
+                    // Not all responded. Check if we have ≥90% — if so, retry with confirmed subset
+                    var responseRate = (double)respondingList.Count / activeValidators.Count;
+                    if (responseRate < 0.90)
+                    {
+                        LogUtility.Log($"[FROST MPC] DKG start: Only {respondingList.Count}/{activeValidators.Count} responded ({responseRate:P0}) — " +
+                            $"below 90% threshold, aborting", "FrostMPCService.CoordinateDKGCeremony");
+                        return null;
+                    }
+
+                    if (attempt < MAX_DKG_START_RETRIES)
+                    {
+                        // Retry with only the confirmed validators and a new session ID
+                        LogUtility.Log($"[FROST MPC] DKG start: {respondingList.Count}/{activeValidators.Count} responded ({responseRate:P0}). " +
+                            $"Retrying with confirmed subset (attempt {attempt + 2}/{MAX_DKG_START_RETRIES + 1})...", 
+                            "FrostMPCService.CoordinateDKGCeremony");
+                        activeValidators = respondingList;
+                        sessionId = Guid.NewGuid().ToString(); // New session, same ceremony ID
+                    }
+                    else
+                    {
+                        // Final attempt and still not all responded — proceed with what we have
+                        // since we already confirmed ≥90% and retried
+                        LogUtility.Log($"[FROST MPC] DKG start: Final attempt still has {respondingList.Count}/{activeValidators.Count}. " +
+                            $"This will fail if not all responded — FROST DKG requires all n participants.", 
+                            "FrostMPCService.CoordinateDKGCeremony");
+                        confirmedValidators = respondingList;
+                    }
+                }
+
+                if (confirmedValidators == null || confirmedValidators.Count == 0)
+                {
+                    LogUtility.Log($"[FROST MPC] Failed to start DKG ceremony - no confirmed validators after retries", 
+                        "FrostMPCService.CoordinateDKGCeremony");
                     return null;
                 }
+
+                // From here on, use confirmedValidators (the exact set that responded to DKG start)
+                validators = confirmedValidators;
+                progressCallback?.Invoke(0, 10); // DKG start complete
 
                 // Phase 2: DKG Round 1 - Commitment Phase
                 progressCallback?.Invoke(1, 30); // Round 1 starting
                 var round1Results = await CollectDKGRound1Commitments(sessionId, validators);
                 if (round1Results == null || round1Results.Count < GetRequiredValidatorCount(validators.Count, threshold))
                 {
-                    LogUtility.Log($"[FROST MPC] DKG Round 1 failed - insufficient commitments", "FrostMPCService.CoordinateDKGCeremony");
+                    LogUtility.Log($"[FROST MPC] DKG Round 1 failed - insufficient commitments ({round1Results?.Count ?? 0}/{validators.Count})", 
+                        "FrostMPCService.CoordinateDKGCeremony");
                     return null;
                 }
                 progressCallback?.Invoke(1, 40); // Round 1 complete
 
                 // Phase 3: DKG Round 2 - Share Distribution
                 progressCallback?.Invoke(2, 50); // Round 2 starting
-                var round2Success = await CoordinateShareDistribution(sessionId, validators, round1Results);
-                if (!round2Success)
+                var respondingAddresses = await CoordinateShareDistribution(sessionId, validators, round1Results, leaderAddress, preSignedAuth);
+                if (respondingAddresses == null || respondingAddresses.Count == 0)
                 {
                     LogUtility.Log($"[FROST MPC] DKG Round 2 failed - share distribution error", "FrostMPCService.CoordinateDKGCeremony");
                     return null;
                 }
+                LogUtility.Log($"[FROST MPC] DKG Round 2 complete. {respondingAddresses.Count}/{validators.Count} validators actually responded with shares.", "FrostMPCService.CoordinateDKGCeremony");
                 progressCallback?.Invoke(2, 65); // Round 2 complete
 
                 // Phase 4: DKG Round 3 - Verification Phase
@@ -89,7 +252,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Phase 5: Aggregate and finalize
                 progressCallback?.Invoke(3, 90); // Aggregating
-                var dkgResult = await AggregateDKGResult(sessionId, ceremonyId, validators, threshold, round1Results);
+                var dkgResult = await AggregateDKGResult(sessionId, ceremonyId, validators, threshold, round1Results, respondingAddresses);
                 if (dkgResult != null)
                 {
                     progressCallback?.Invoke(3, 100); // Complete
@@ -106,21 +269,40 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Broadcast DKG start message to all validators
+        /// Broadcast DKG start message to all validators and return which ones actually responded.
+        /// FROST DKG requires ALL n participants, so we need to know exactly who confirmed.
+        /// Returns (success, respondingValidators) — success is true if threshold was met.
         /// </summary>
-        private static async Task<bool> BroadcastDKGStart(
+        private static async Task<(bool success, List<VBTCValidator>? respondingValidators)> BroadcastDKGStartWithResponders(
             string sessionId,
             string ceremonyId,
             string leaderAddress,
             List<VBTCValidator> validators,
-            int threshold)
+            int threshold,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
-                // FIND-0013 Fix: Sign with leader's key using deterministic message format
-                var timestamp = TimeUtil.GetTime();
-                var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var leaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(leaderMessage);
+                // Sign with leader's key using deterministic message format
+                // Any VFX wallet owner can be the leader — not just validators
+                // When preSignedAuth is provided (web wallet flow), use the pre-signed signature
+                // instead of calling AddressSignature() which requires a local private key.
+                long timestamp;
+                string leaderSignature;
+
+                if (preSignedAuth != null && !string.IsNullOrEmpty(preSignedAuth.StartSignature))
+                {
+                    timestamp = preSignedAuth.StartTimestamp;
+                    leaderSignature = preSignedAuth.StartSignature;
+                    LogUtility.Log($"[FROST MPC] Using pre-signed leader auth for DKG start (web wallet flow)", 
+                        "FrostMPCService.BroadcastDKGStartWithResponders");
+                }
+                else
+                {
+                    timestamp = TimeUtil.GetTime();
+                    var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                    leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
+                }
 
                 var startRequest = new FrostDKGStartRequest
                 {
@@ -133,7 +315,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     RequiredThreshold = threshold
                 };
 
-                var successCount = 0;
+                var respondingValidators = new System.Collections.Concurrent.ConcurrentBag<VBTCValidator>();
                 var tasks = validators.Select(async validator =>
                 {
                     try
@@ -142,38 +324,53 @@ namespace ReserveBlockCore.Bitcoin.Services
                         if (!InputValidationHelper.ValidateValidatorIPAddress(validator.IPAddress, out string ipError))
                         {
                             ErrorLogUtility.LogError($"FIND-007 Security (HTTP Client): Blocked HTTP call to invalid validator IP. Address: {validator.ValidatorAddress}, IP: {validator.IPAddress}, Error: {ipError}", 
-                                "FrostMPCService.BroadcastDKGStart");
+                                "FrostMPCService.BroadcastDKGStartWithResponders");
                             return false;
                         }
                         
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/start";
                         var response = await _httpClient.PostAsJsonAsync(url, startRequest);
-                        return response.IsSuccessStatusCode;
+                        if (response.IsSuccessStatusCode)
+                        {
+                            respondingValidators.Add(validator);
+                            return true;
+                        }
+                        else
+                        {
+                            var errorBody = await response.Content.ReadAsStringAsync();
+                            LogUtility.Log($"[FROST MPC] DKG Start REJECTED by {validator.ValidatorAddress}: HTTP {(int)response.StatusCode} — {errorBody}",
+                                "FrostMPCService.BroadcastDKGStartWithResponders");
+                            return false;
+                        }
                     }
                     catch (Exception ex)
                     {
-                        LogUtility.Log($"[FROST MPC] Failed to contact validator {validator.ValidatorAddress}: {ex.Message}", "FrostMPCService.BroadcastDKGStart");
+                        LogUtility.Log($"[FROST MPC] Failed to contact validator {validator.ValidatorAddress}: {ex.Message}", 
+                            "FrostMPCService.BroadcastDKGStartWithResponders");
                         return false;
                     }
                 });
 
                 var results = await Task.WhenAll(tasks);
-                successCount = results.Count(r => r);
+                var successCount = results.Count(r => r);
+                var respondingList = respondingValidators.ToList();
 
                 var requiredCount = GetRequiredValidatorCount(validators.Count, threshold);
-                LogUtility.Log($"[FROST MPC] DKG Start broadcast: {successCount}/{validators.Count} responded (required: {requiredCount})", "FrostMPCService.BroadcastDKGStart");
+                LogUtility.Log($"[FROST MPC] DKG Start broadcast: {successCount}/{validators.Count} responded (required: {requiredCount})", 
+                    "FrostMPCService.BroadcastDKGStartWithResponders");
 
-                return successCount >= requiredCount;
+                return (successCount >= requiredCount, respondingList);
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"DKG start broadcast error: {ex.Message}", "FrostMPCService.BroadcastDKGStart");
-                return false;
+                ErrorLogUtility.LogError($"DKG start broadcast error: {ex.Message}", "FrostMPCService.BroadcastDKGStartWithResponders");
+                return (false, null);
             }
         }
 
         /// <summary>
-        /// Collect Round 1 commitments from all validators
+        /// Collect Round 1 commitments from all validators in parallel.
+        /// Each validator stores its own commitment during DKG start — we poll all concurrently.
         /// </summary>
         private static async Task<Dictionary<string, string>?> CollectDKGRound1Commitments(
             string sessionId,
@@ -181,18 +378,16 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                var commitments = new Dictionary<string, string>();
-                var timeout = DateTime.UtcNow.AddSeconds(60);
+                var commitments = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
 
-                LogUtility.Log($"[FROST MPC] Collecting Round 1 commitments...", "FrostMPCService.CollectDKGRound1Commitments");
+                LogUtility.Log($"[FROST MPC] Collecting Round 1 commitments from {validators.Count} validators (parallel)...", 
+                    "FrostMPCService.CollectDKGRound1Commitments");
 
-                // In a real implementation, this would poll validators or receive via callback
-                // Poll each validator for their Round 1 commitment
-                await Task.Delay(2000); // Allow time for validators to process Round 2 and generate shares
+                // Allow time for validators to complete Round 1 generation
+                await Task.Delay(2000);
 
-                // FIND-015 Fix: Collect commitments from each validator using actual server response format
-                // Server GET /frost/dkg/round1/{sessionId} returns {Success, SessionId, Commitments: {addr:data}, ...}
-                foreach (var validator in validators)
+                // Poll all validators in parallel for their Round 1 commitment
+                var tasks = validators.Select(async validator =>
                 {
                     try
                     {
@@ -214,7 +409,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                                     var data = kvp.Value?.Value<string>();
                                     if (!string.IsNullOrEmpty(data))
                                     {
-                                        commitments[addr] = data;
+                                        commitments.TryAdd(addr, data);
                                     }
                                 }
                             }
@@ -222,12 +417,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                     }
                     catch (Exception ex)
                     {
-                        LogUtility.Log($"[FROST MPC] Failed to collect commitment from {validator.ValidatorAddress}: {ex.Message}", "FrostMPCService.CollectDKGRound1Commitments");
+                        LogUtility.Log($"[FROST MPC] Failed to collect commitment from {validator.ValidatorAddress}: {ex.Message}", 
+                            "FrostMPCService.CollectDKGRound1Commitments");
                     }
-                }
+                });
 
-                LogUtility.Log($"[FROST MPC] Collected {commitments.Count}/{validators.Count} commitments", "FrostMPCService.CollectDKGRound1Commitments");
-                return commitments.Count > 0 ? commitments : null;
+                await Task.WhenAll(tasks);
+
+                var result = commitments.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+                LogUtility.Log($"[FROST MPC] Collected {result.Count}/{validators.Count} commitments", 
+                    "FrostMPCService.CollectDKGRound1Commitments");
+                return result.Count > 0 ? result : null;
             }
             catch (Exception ex)
             {
@@ -237,30 +437,36 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// FIND-024 Fix: Coordinate share distribution between validators (Round 2)
-        /// Now collects generated shares from each validator's response and redistributes them
+        /// Coordinate share distribution between validators (Round 2).
+        /// Collects generated shares from each validator's response and redistributes them
         /// so that DKGRound3Finalize has the data it needs to produce a real group key.
+        /// Returns the list of validator addresses that actually responded with shares,
+        /// or null on failure. This becomes the "actual participants" list for the snapshot.
         /// </summary>
-        private static async Task<bool> CoordinateShareDistribution(
+        private static async Task<List<string>?> CoordinateShareDistribution(
             string sessionId,
             List<VBTCValidator> validators,
-            Dictionary<string, string> commitments)
+            Dictionary<string, string> commitments,
+            string leaderAddress,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
-                LogUtility.Log($"[FROST MPC] Coordinating share distribution...", "FrostMPCService.CoordinateShareDistribution");
+                LogUtility.Log($"[FROST MPC] Coordinating share distribution for {validators.Count} validators (parallel)...", 
+                    "FrostMPCService.CoordinateShareDistribution");
 
-                // Step 1: Send all Round 1 commitments to each validator and collect their generated Round 2 shares
+                // Step 1: Send all Round 1 commitments to each validator in parallel and collect their generated Round 2 shares.
+                // Uses _ceremonyHttpClient (90s timeout) because FROST crypto with 85 participants is computationally heavy.
                 var commitmentPayload = JsonConvert.SerializeObject(commitments);
-                var allGeneratedShares = new Dictionary<string, string>(); // validatorAddr → generatedSharesJson
+                var allGeneratedShares = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
 
-                foreach (var validator in validators)
+                var round2Tasks = validators.Select(async validator =>
                 {
                     try
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/round2/{sessionId}";
                         var content = new StringContent(commitmentPayload, Encoding.UTF8, "application/json");
-                        var response = await _httpClient.PostAsync(url, content);
+                        var response = await _ceremonyHttpClient.PostAsync(url, content);
 
                         if (response.IsSuccessStatusCode)
                         {
@@ -272,11 +478,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                                 var sharesData = json["GeneratedShares"]?.ToString();
                                 if (!string.IsNullOrEmpty(sharesData))
                                 {
-                                    allGeneratedShares[validator.ValidatorAddress] = sharesData;
+                                    allGeneratedShares.TryAdd(validator.ValidatorAddress, sharesData);
                                     LogUtility.Log($"[FROST MPC] Collected Round 2 shares from {validator.ValidatorAddress}", 
                                         "FrostMPCService.CoordinateShareDistribution");
                                 }
                             }
+                        }
+                        else
+                        {
+                            var errorBody = await response.Content.ReadAsStringAsync();
+                            LogUtility.Log($"[FROST MPC] DKG Round 2 REJECTED by {validator.ValidatorAddress}: HTTP {(int)response.StatusCode} — {errorBody}",
+                                "FrostMPCService.CoordinateShareDistribution");
                         }
                     }
                     catch (Exception ex)
@@ -284,14 +496,16 @@ namespace ReserveBlockCore.Bitcoin.Services
                         LogUtility.Log($"[FROST MPC] Failed to collect Round 2 shares from {validator.ValidatorAddress}: {ex.Message}", 
                             "FrostMPCService.CoordinateShareDistribution");
                     }
-                }
+                });
+
+                await Task.WhenAll(round2Tasks);
 
                 var requiredCount = (validators.Count * 2 / 3);
                 if (allGeneratedShares.Count < requiredCount)
                 {
                     ErrorLogUtility.LogError($"FROST DKG: Only {allGeneratedShares.Count}/{validators.Count} validators generated Round 2 shares (need {requiredCount})", 
                         "FrostMPCService.CoordinateShareDistribution");
-                    return false;
+                    return null;
                 }
 
                 LogUtility.Log($"[FROST MPC] Collected Round 2 shares from {allGeneratedShares.Count}/{validators.Count} validators. Redistributing...", 
@@ -299,10 +513,25 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                 // Step 2: Redistribute all shares to each validator via batch endpoint
                 // Each validator will extract the shares meant for them and auto-finalize DKG
-                var leaderAddress = Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
-                var timestamp = TimeUtil.GetTime();
-                var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var leaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(leaderMessage);
+                // Use the same leaderAddress that was used in BroadcastDKGStart so validators
+                // accept the request (they check leaderAddr == session.LeaderAddress).
+                // When preSignedAuth is provided (web wallet flow), use the pre-signed signature.
+                long timestamp;
+                string leaderSignature;
+
+                if (preSignedAuth != null && !string.IsNullOrEmpty(preSignedAuth.ShareDistributionSignature) && preSignedAuth.ShareDistributionTimestamp.HasValue)
+                {
+                    timestamp = preSignedAuth.ShareDistributionTimestamp.Value;
+                    leaderSignature = preSignedAuth.ShareDistributionSignature;
+                    LogUtility.Log($"[FROST MPC] Using pre-signed leader auth for share distribution (web wallet flow)", 
+                        "FrostMPCService.CoordinateShareDistribution");
+                }
+                else
+                {
+                    timestamp = TimeUtil.GetTime();
+                    var leaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                    leaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
+                }
 
                 var redistributePayload = JsonConvert.SerializeObject(new
                 {
@@ -313,17 +542,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                 });
 
                 var distributeSuccessCount = 0;
-                foreach (var validator in validators)
+                var distributeTasks = validators.Select(async validator =>
                 {
                     try
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/shares/{sessionId}";
                         var content = new StringContent(redistributePayload, Encoding.UTF8, "application/json");
-                        var response = await _httpClient.PostAsync(url, content);
+                        var response = await _ceremonyHttpClient.PostAsync(url, content);
 
                         if (response.IsSuccessStatusCode)
                         {
-                            distributeSuccessCount++;
+                            Interlocked.Increment(ref distributeSuccessCount);
                         }
                     }
                     catch (Exception ex)
@@ -331,17 +560,26 @@ namespace ReserveBlockCore.Bitcoin.Services
                         LogUtility.Log($"[FROST MPC] Failed to distribute shares to {validator.ValidatorAddress}: {ex.Message}", 
                             "FrostMPCService.CoordinateShareDistribution");
                     }
-                }
+                });
+
+                await Task.WhenAll(distributeTasks);
 
                 LogUtility.Log($"[FROST MPC] Share redistribution complete: {distributeSuccessCount}/{validators.Count} validators received shares", 
                     "FrostMPCService.CoordinateShareDistribution");
 
-                return distributeSuccessCount >= requiredCount;
+                if (distributeSuccessCount < requiredCount)
+                    return null;
+
+                // Return only the addresses of validators that actually responded with shares
+                var respondingAddresses = allGeneratedShares.Keys.ToList();
+                LogUtility.Log($"[FROST MPC] Actual participating validators: {string.Join(", ", respondingAddresses.Select(a => a.Length > 8 ? a.Substring(0, 8) + "..." : a))}", 
+                    "FrostMPCService.CoordinateShareDistribution");
+                return respondingAddresses;
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Share distribution error: {ex.Message}", "FrostMPCService.CoordinateShareDistribution");
-                return false;
+                return null;
             }
         }
 
@@ -354,14 +592,14 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                var verifications = new Dictionary<string, bool>();
+                var verifications = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
 
-                LogUtility.Log($"[FROST MPC] Collecting Round 3 verifications...", "FrostMPCService.CollectDKGRound3Verifications");
+                LogUtility.Log($"[FROST MPC] Collecting Round 3 verifications from {validators.Count} validators (parallel)...", "FrostMPCService.CollectDKGRound3Verifications");
                 await Task.Delay(2000); // Allow time for validators to complete DKG finalization
 
                 // FIND-015 Fix: Deserialize actual server response format
                 // Server GET /frost/dkg/round3/{sessionId} returns {Success, SessionId, Verifications: {addr:bool}, ...}
-                foreach (var validator in validators)
+                var round3Tasks = validators.Select(async validator =>
                 {
                     try
                     {
@@ -391,10 +629,13 @@ namespace ReserveBlockCore.Bitcoin.Services
                         LogUtility.Log($"[FROST MPC] Failed to collect verification from {validator.ValidatorAddress}: {ex.Message}", "FrostMPCService.CollectDKGRound3Verifications");
                         verifications[validator.ValidatorAddress] = false;
                     }
-                }
+                });
 
-                LogUtility.Log($"[FROST MPC] Collected {verifications.Count}/{validators.Count} verifications", "FrostMPCService.CollectDKGRound3Verifications");
-                return verifications.Count > 0 ? verifications : null;
+                await Task.WhenAll(round3Tasks);
+
+                var verificationResult = verifications.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+                LogUtility.Log($"[FROST MPC] Collected {verificationResult.Count}/{validators.Count} verifications", "FrostMPCService.CollectDKGRound3Verifications");
+                return verificationResult.Count > 0 ? verificationResult : null;
             }
             catch (Exception ex)
             {
@@ -414,18 +655,20 @@ namespace ReserveBlockCore.Bitcoin.Services
             string ceremonyId,
             List<VBTCValidator> validators,
             int threshold,
-            Dictionary<string, string> commitments)
+            Dictionary<string, string> commitments,
+            List<string> respondingAddresses)
         {
             try
             {
                 LogUtility.Log($"[FROST MPC] Collecting real DKG results from validators...", "FrostMPCService.AggregateDKGResult");
 
-                // Poll validators for their DKG result (each computed independently via FROST native)
+                // Poll validators for their DKG result in parallel (each computed independently via FROST native)
                 string? groupPublicKey = null;
                 string? taprootAddress = null;
                 string? dkgProof = null;
+                var dkgResults = new System.Collections.Concurrent.ConcurrentBag<(string gpk, string addr, string? proof, string validatorAddr)>();
 
-                foreach (var validator in validators)
+                var resultTasks = validators.Select(async validator =>
                 {
                     try
                     {
@@ -445,21 +688,7 @@ namespace ReserveBlockCore.Bitcoin.Services
 
                                 if (!string.IsNullOrEmpty(gpk) && !string.IsNullOrEmpty(addr))
                                 {
-                                    if (groupPublicKey == null)
-                                    {
-                                        groupPublicKey = gpk;
-                                        taprootAddress = addr;
-                                        dkgProof = proof;
-                                    }
-                                    else if (groupPublicKey != gpk)
-                                    {
-                                        // Validators disagree on group public key - fail closed
-                                        ErrorLogUtility.LogError($"FROST DKG: Validators disagree on group public key! " +
-                                            $"Expected: {groupPublicKey.Substring(0, 16)}..., Got: {gpk.Substring(0, 16)}...", 
-                                            "FrostMPCService.AggregateDKGResult");
-                                        return null;
-                                    }
-                                    // If they agree, that confirms the result
+                                    dkgResults.Add((gpk, addr, proof, validator.ValidatorAddress));
                                 }
                             }
                         }
@@ -468,6 +697,27 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         LogUtility.Log($"[FROST MPC] Failed to collect DKG result from {validator.ValidatorAddress}: {ex.Message}", 
                             "FrostMPCService.AggregateDKGResult");
+                    }
+                });
+
+                await Task.WhenAll(resultTasks);
+
+                // Check all results for consensus on group public key
+                foreach (var result in dkgResults)
+                {
+                    if (groupPublicKey == null)
+                    {
+                        groupPublicKey = result.gpk;
+                        taprootAddress = result.addr;
+                        dkgProof = result.proof;
+                    }
+                    else if (groupPublicKey != result.gpk)
+                    {
+                        // Validators disagree on group public key - fail closed
+                        ErrorLogUtility.LogError($"FROST DKG: Validators disagree on group public key! " +
+                            $"Expected: {groupPublicKey.Substring(0, 16)}..., Got: {result.gpk.Substring(0, 16)}... (from {result.validatorAddr})", 
+                            "FrostMPCService.AggregateDKGResult");
+                        return null;
                     }
                 }
 
@@ -504,7 +754,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     TaprootAddress = taprootAddress,
                     DKGProof = dkgProof ?? string.Empty,
                     CompletionTimestamp = TimeUtil.GetTime(),
-                    ParticipantAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
+                    ParticipantAddresses = respondingAddresses,
                     Threshold = threshold
                 };
             }
@@ -533,17 +783,26 @@ namespace ReserveBlockCore.Bitcoin.Services
             string scUID,
             List<VBTCValidator> validators,
             int threshold,
-            string? ceremonyId = null)
+            string? ceremonyId = null,
+            string? coordinatorAddress = null,
+            string? withdrawalRequestHash = null,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
-                var sessionId = Guid.NewGuid().ToString();
-                var leaderAddress = Globals.ValidatorAddress ?? validators.First().ValidatorAddress;
+                // Reuse the pre-signed session ID if provided (web wallet flow), otherwise generate a new one.
+                // The pre-signed signatures embed this session ID in the message, so it MUST match.
+                var sessionId = !string.IsNullOrEmpty(preSignedAuth?.SessionId) ? preSignedAuth.SessionId : Guid.NewGuid().ToString();
+                // Use provided coordinator address, fall back to validator address, then first validator
+                // Note: Globals.ValidatorAddress is "" (not null) for non-validators, so ?? won't fall through
+                var leaderAddress = !string.IsNullOrEmpty(coordinatorAddress) ? coordinatorAddress
+                    : !string.IsNullOrEmpty(Globals.ValidatorAddress) ? Globals.ValidatorAddress
+                    : validators.First().ValidatorAddress;
 
-                LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}", "FrostMPCService.CoordinateSigningCeremony");
+                LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}, PreSignedSession: {preSignedAuth?.SessionId != null}", "FrostMPCService.CoordinateSigningCeremony");
 
                 // Phase 1: Broadcast signing start
-                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId);
+                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId, withdrawalRequestHash, preSignedAuth);
                 if (!startSuccess)
                 {
                     LogUtility.Log($"[FROST MPC] Failed to start signing ceremony", "FrostMPCService.CoordinateSigningCeremony");
@@ -595,14 +854,31 @@ namespace ReserveBlockCore.Bitcoin.Services
             string leaderAddress,
             List<VBTCValidator> validators,
             int threshold,
-            string? ceremonyId = null)
+            string? ceremonyId = null,
+            string? withdrawalRequestHash = null,
+            PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
-                // FIND-0013 Fix: Sign with leader's key using deterministic message format
-                var timestamp = TimeUtil.GetTime();
-                var signingLeaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                var signingLeaderSignature = ReserveBlockCore.Services.SignatureService.ValidatorSignature(signingLeaderMessage);
+                // Sign with leader's key using deterministic message format
+                // Any VFX wallet owner can be the leader — not just validators
+                // When preSignedAuth is provided (web wallet flow), use the pre-signed signature.
+                long timestamp;
+                string signingLeaderSignature;
+
+                if (preSignedAuth != null && !string.IsNullOrEmpty(preSignedAuth.StartSignature))
+                {
+                    timestamp = preSignedAuth.StartTimestamp;
+                    signingLeaderSignature = preSignedAuth.StartSignature;
+                    LogUtility.Log($"[FROST MPC] Using pre-signed leader auth for signing start (web wallet flow)", 
+                        "FrostMPCService.BroadcastSigningStart");
+                }
+                else
+                {
+                    timestamp = TimeUtil.GetTime();
+                    var signingLeaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                    signingLeaderSignature = ReserveBlockCore.Services.SignatureService.AddressSignature(leaderAddress, signingLeaderMessage);
+                }
 
                 var startRequest = new FrostSigningStartRequest
                 {
@@ -614,7 +890,8 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Timestamp = timestamp,
                     LeaderSignature = signingLeaderSignature,
                     SignerAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
-                    RequiredThreshold = threshold
+                    RequiredThreshold = threshold,
+                    WithdrawalRequestHash = withdrawalRequestHash  // FIND-028: For validator-side dedup
                 };
 
                 var tasks = validators.Select(async validator =>
@@ -663,14 +940,14 @@ namespace ReserveBlockCore.Bitcoin.Services
         {
             try
             {
-                var nonces = new Dictionary<string, string>();
+                var nonces = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
                 
-                LogUtility.Log($"[FROST MPC] Collecting Round 1 nonces...", "FrostMPCService.CollectSigningRound1Nonces");
+                LogUtility.Log($"[FROST MPC] Collecting Round 1 nonces from {validators.Count} validators (parallel)...", "FrostMPCService.CollectSigningRound1Nonces");
                 await Task.Delay(1500);
 
                 // FIND-015 Fix: Use actual server response format
                 // Server GET /frost/sign/round1/{sessionId} returns {Success, SessionId, Nonces: {addr:data}, ...}
-                foreach (var validator in validators)
+                var nonceTasks = validators.Select(async validator =>
                 {
                     try
                     {
@@ -692,7 +969,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                                     var data = kvp.Value?.Value<string>();
                                     if (!string.IsNullOrEmpty(data))
                                     {
-                                        nonces[addr] = data;
+                                        nonces.TryAdd(addr, data);
                                     }
                                 }
                             }
@@ -702,10 +979,13 @@ namespace ReserveBlockCore.Bitcoin.Services
                     {
                         LogUtility.Log($"[FROST MPC] Failed to collect nonce from {validator.ValidatorAddress}: {ex.Message}", "FrostMPCService.CollectSigningRound1Nonces");
                     }
-                }
+                });
 
-                LogUtility.Log($"[FROST MPC] Collected {nonces.Count}/{validators.Count} nonces", "FrostMPCService.CollectSigningRound1Nonces");
-                return nonces.Count > 0 ? nonces : null;
+                await Task.WhenAll(nonceTasks);
+
+                var nonceResult = nonces.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+                LogUtility.Log($"[FROST MPC] Collected {nonceResult.Count}/{validators.Count} nonces", "FrostMPCService.CollectSigningRound1Nonces");
+                return nonceResult.Count > 0 ? nonceResult : null;
             }
             catch (Exception ex)
             {
@@ -728,59 +1008,144 @@ namespace ReserveBlockCore.Bitcoin.Services
                 
                 LogUtility.Log($"[FROST MPC] Broadcasting nonces and collecting signature shares...", "FrostMPCService.CollectSigningRound2Shares");
                 
-                // Broadcast aggregated nonces to all validators
+                // Broadcast aggregated nonces to all validators, extract signature shares
+                // directly from POST responses (the endpoint returns the share inline)
                 var noncePayload = JsonConvert.SerializeObject(nonces);
-                var tasks = validators.Select(async validator =>
+                var postSuccessCount = 0;
+                var postTasks = validators.Select(async validator =>
                 {
                     try
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/round2/{sessionId}";
                         var content = new StringContent(noncePayload, Encoding.UTF8, "application/json");
-                        await _httpClient.PostAsync(url, content);
-                    }
-                    catch { }
-                });
-                await Task.WhenAll(tasks);
-
-                await Task.Delay(2000);
-
-                // FIND-015 Fix: Collect signature shares using actual server response format
-                // Server GET /frost/sign/share/{sessionId} returns {Success, SessionId, Shares: {addr:data}, ...}
-                foreach (var validator in validators)
-                {
-                    try
-                    {
-                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/share/{sessionId}";
-                        var response = await _httpClient.GetAsync(url);
+                        var response = await _httpClient.PostAsync(url, content);
                         
                         if (response.IsSuccessStatusCode)
                         {
-                            var responseBody = await response.Content.ReadAsStringAsync();
-                            var json = JObject.Parse(responseBody);
+                            Interlocked.Increment(ref postSuccessCount);
                             
-                            if (json["Success"]?.Value<bool>() == true 
-                                && json["SessionId"]?.Value<string>() == sessionId
-                                && json["Shares"] is JObject sharesObj)
+                            // Extract the signature share directly from the POST response
+                            // instead of relying solely on a later GET poll.
+                            // POST /frost/sign/round2/{sessionId} returns:
+                            //   { Success: true, SignatureShare: "...", SessionId: "..." }
+                            try
                             {
-                                foreach (var kvp in sharesObj)
+                                var responseBody = await response.Content.ReadAsStringAsync();
+                                var json = JObject.Parse(responseBody);
+                                if (json["Success"]?.Value<bool>() == true 
+                                    && json["ShareGenerated"]?.Value<bool>() == true)
                                 {
-                                    var addr = kvp.Key;
-                                    var data = kvp.Value?.Value<string>();
-                                    if (!string.IsNullOrEmpty(data))
+                                    var share = json["SignatureShare"]?.Value<string>();
+                                    if (!string.IsNullOrEmpty(share))
                                     {
-                                        shares[addr] = data;
+                                        lock (shares)
+                                        {
+                                            if (!shares.ContainsKey(validator.ValidatorAddress))
+                                            {
+                                                shares[validator.ValidatorAddress] = share;
+                                                LogUtility.Log($"[FROST MPC] Extracted signature share from POST response for {validator.ValidatorAddress}",
+                                                    "FrostMPCService.CollectSigningRound2Shares");
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            catch (Exception parseEx)
+                            {
+                                LogUtility.Log($"[FROST MPC] Failed to parse POST response from {validator.ValidatorAddress}: {parseEx.Message}",
+                                    "FrostMPCService.CollectSigningRound2Shares");
+                            }
+                            
+                            return true;
+                        }
+                        else
+                        {
+                            var errorBody = await response.Content.ReadAsStringAsync();
+                            LogUtility.Log($"[FROST MPC] Sign Round 2 POST REJECTED by {validator.ValidatorAddress} ({validator.IPAddress}): HTTP {(int)response.StatusCode} — {errorBody}",
+                                "FrostMPCService.CollectSigningRound2Shares");
+                            return false;
                         }
                     }
                     catch (Exception ex)
                     {
-                        LogUtility.Log($"[FROST MPC] Failed to collect share from {validator.ValidatorAddress}: {ex.Message}", "FrostMPCService.CollectSigningRound2Shares");
+                        LogUtility.Log($"[FROST MPC] Sign Round 2 POST EXCEPTION contacting {validator.ValidatorAddress} ({validator.IPAddress}): {ex.Message}",
+                            "FrostMPCService.CollectSigningRound2Shares");
+                        return false;
                     }
+                });
+                var postResults = await Task.WhenAll(postTasks);
+
+                LogUtility.Log($"[FROST MPC] Sign Round 2 broadcast: {postSuccessCount}/{validators.Count} accepted, {shares.Count} shares extracted from POST responses",
+                    "FrostMPCService.CollectSigningRound2Shares");
+
+                // If we already have all shares from POST responses, skip polling entirely
+                if (shares.Count >= validators.Count)
+                {
+                    LogUtility.Log($"[FROST MPC] All {shares.Count} signature shares collected from POST responses — skipping GET polling",
+                        "FrostMPCService.CollectSigningRound2Shares");
+                    return shares;
                 }
 
-                LogUtility.Log($"[FROST MPC] Collected {shares.Count}/{validators.Count} signature shares", "FrostMPCService.CollectSigningRound2Shares");
+                // Retry polling with backoff: poll up to 5 times with increasing delays
+                // instead of a single fixed 2-second wait. This accommodates network latency
+                // and FROST native crypto processing time on remote validators.
+                var requiredCount = validators.Count; // ideally collect all shares
+                var maxAttempts = 5;
+                var pollDelaysMs = new[] { 2000, 2000, 3000, 3000, 5000 }; // total up to 15 seconds
+
+                for (int attempt = 0; attempt < maxAttempts; attempt++)
+                {
+                    await Task.Delay(pollDelaysMs[attempt]);
+
+                    // FIND-015 Fix: Collect signature shares using actual server response format
+                    // Server GET /frost/sign/share/{sessionId} returns {Success, SessionId, Shares: {addr:data}, ...}
+                    var pollTasks = validators.Select(async validator =>
+                    {
+                        try
+                        {
+                            var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/share/{sessionId}";
+                            var response = await _httpClient.GetAsync(url);
+                            
+                            if (response.IsSuccessStatusCode)
+                            {
+                                var responseBody = await response.Content.ReadAsStringAsync();
+                                var json = JObject.Parse(responseBody);
+                                
+                                if (json["Success"]?.Value<bool>() == true 
+                                    && json["SessionId"]?.Value<string>() == sessionId
+                                    && json["Shares"] is JObject sharesObj)
+                                {
+                                    lock (shares)
+                                    {
+                                        foreach (var kvp in sharesObj)
+                                        {
+                                            var addr = kvp.Key;
+                                            var data = kvp.Value?.Value<string>();
+                                            if (!string.IsNullOrEmpty(data) && !shares.ContainsKey(addr))
+                                            {
+                                                shares[addr] = data;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            LogUtility.Log($"[FROST MPC] Failed to collect share from {validator.ValidatorAddress} (attempt {attempt + 1}): {ex.Message}", "FrostMPCService.CollectSigningRound2Shares");
+                        }
+                    });
+
+                    await Task.WhenAll(pollTasks);
+
+                    LogUtility.Log($"[FROST MPC] Collected {shares.Count}/{validators.Count} signature shares (attempt {attempt + 1}/{maxAttempts})", "FrostMPCService.CollectSigningRound2Shares");
+
+                    // If we have all shares, no need to keep polling
+                    if (shares.Count >= requiredCount)
+                        break;
+                }
+
+                LogUtility.Log($"[FROST MPC] Final signature share collection: {shares.Count}/{validators.Count}", "FrostMPCService.CollectSigningRound2Shares");
                 return shares.Count > 0 ? shares : null;
             }
             catch (Exception ex)
@@ -817,9 +1182,9 @@ namespace ReserveBlockCore.Bitcoin.Services
             {
                 LogUtility.Log($"[FROST MPC] Aggregating {shares.Count} signature shares via FROST native library for contract {scUID}...", "FrostMPCService.AggregateSignature");
 
-                // Collect nonce commitments from validators (needed for aggregation)
-                var nonces = new Dictionary<string, string>();
-                foreach (var validator in validators)
+                // Collect nonce commitments from validators in parallel (needed for aggregation)
+                var nonces = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+                var nonceCollectTasks = validators.Select(async validator =>
                 {
                     try
                     {
@@ -833,59 +1198,184 @@ namespace ReserveBlockCore.Bitcoin.Services
                             {
                                 foreach (var kvp in noncesObj)
                                 {
-                                    nonces[kvp.Key] = kvp.Value?.Value<string>() ?? "";
+                                    nonces.TryAdd(kvp.Key, kvp.Value?.Value<string>() ?? "");
                                 }
                             }
                         }
                     }
                     catch { /* Already logged during collection phase */ }
-                }
+                });
 
-                // FIND-026 Fix: Look up the pubkey package for THIS SPECIFIC contract.
-                // Key packages are stored under the DKG ceremony ID (not the scUID which doesn't
-                // exist yet during DKG). Use ceremonyId when available, fall back to scUID.
-                var keyLookupId = !string.IsNullOrEmpty(ceremonyId) ? ceremonyId : scUID;
+                await Task.WhenAll(nonceCollectTasks);
 
-                if (scUID == "10e833cd81404daab9820d081dfefd06:1773167612")
-                    keyLookupId = "e4ac5290-5d9f-48db-be4f-909081276134";
-
-                if (scUID == "fd06ec2ce20a4a2aa7b3f2f2d2a92d11:1773205606")
-                    keyLookupId = "069f6dc5-d918-4018-a5b1-10e322f6b777";
-
-                LogUtility.Log($"[FROST MPC] Key lookup using ID: {keyLookupId} (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
+                // 3-tier key lookup for pubkey package:
+                // 1. Try SCUID first (works after SignStart auto-updated the record)
+                // 2. Try ceremonyId (original DKG session ID)
+                // 3. State Trei fallback → decompile contract → get GroupPublicKey → lookup by GPK
+                LogUtility.Log($"[FROST MPC] Key lookup for aggregation. scUID: {scUID}, ceremonyId: {ceremonyId ?? "null"}", "FrostMPCService.AggregateSignature");
 
                 string? pubkeyPackage = null;
                 var myAddr = Globals.ValidatorAddress;
-                if (!string.IsNullOrEmpty(myAddr) && !string.IsNullOrEmpty(keyLookupId))
+                FrostValidatorKeyStore? resolvedKeyStore = null;
+
+                // Tier 1: Try SCUID (SignStart may have already updated the record to use the real SCUID)
+                if (!string.IsNullOrEmpty(myAddr))
                 {
-                    var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
-                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.PubkeyPackage))
+                    resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackage(scUID, myAddr);
+                    if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
                     {
-                        pubkeyPackage = keyStore.PubkeyPackage;
-                        LogUtility.Log($"[FROST MPC] Found pubkey package for {keyLookupId} via direct lookup", "FrostMPCService.AggregateSignature");
+                        pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package via SCUID lookup: {scUID}", "FrostMPCService.AggregateSignature");
                     }
                 }
 
-                // Fallback: try any validator's key store for this contract
+                // Tier 2: Try ceremonyId (original DKG session GUID)
+                if (string.IsNullOrEmpty(pubkeyPackage) && !string.IsNullOrEmpty(ceremonyId) && !string.IsNullOrEmpty(myAddr))
+                {
+                    resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackage(ceremonyId, myAddr);
+                    if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
+                    {
+                        pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package via ceremonyId fallback: {ceremonyId}", "FrostMPCService.AggregateSignature");
+                    }
+                }
+
+                // Tier 3: State Trei fallback — decompile contract to get FrostGroupPublicKey, then lookup by GPK
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    pubkeyPackage = FrostValidatorKeyStore.GetPubkeyPackage(keyLookupId);
-                    if (!string.IsNullOrEmpty(pubkeyPackage))
+                    string? resolvedGroupPubKey = null;
+
+                    // Try local DB first
+                    var localContract = VBTCContractV2.GetContract(scUID);
+                    if (localContract != null && !string.IsNullOrEmpty(localContract.FrostGroupPublicKey))
                     {
-                        LogUtility.Log($"[FROST MPC] Found pubkey package for {keyLookupId} via fallback lookup", "FrostMPCService.AggregateSignature");
+                        resolvedGroupPubKey = localContract.FrostGroupPublicKey;
+                    }
+
+                    // Fall back to State Trei (works on all nodes including non-owners)
+                    if (string.IsNullOrEmpty(resolvedGroupPubKey))
+                    {
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                        if (scStateTreiRec != null && !string.IsNullOrEmpty(scStateTreiRec.ContractData))
+                        {
+                            var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                            if (scMainDecompile?.Features != null)
+                            {
+                                var tknzFeature = scMainDecompile.Features
+                                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                    .Select(x => x.FeatureFeatures)
+                                    .FirstOrDefault();
+                                if (tknzFeature is TokenizationV2Feature tknz)
+                                {
+                                    resolvedGroupPubKey = tknz.FrostGroupPublicKey;
+                                    LogUtility.Log($"[FROST MPC] Resolved GroupPublicKey from State Trei: {resolvedGroupPubKey}", "FrostMPCService.AggregateSignature");
+                                }
+                            }
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(resolvedGroupPubKey) && !string.IsNullOrEmpty(myAddr))
+                    {
+                        resolvedKeyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(resolvedGroupPubKey, myAddr);
+                        if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.PubkeyPackage))
+                        {
+                            pubkeyPackage = resolvedKeyStore.PubkeyPackage;
+                            LogUtility.Log($"[FROST MPC] Found pubkey package via GroupPublicKey fallback: {resolvedGroupPubKey}", "FrostMPCService.AggregateSignature");
+                        }
+                    }
+                }
+
+                // Tier 4: Non-validator fallback — use pubkey package from local VBTCContractV2.
+                // Non-validator wallet nodes don't have FrostValidatorKeyStore records (those are validator-only),
+                // but the contract owner's local DB stores the FrostPubkeyPackage from DKG.
+                if (string.IsNullOrEmpty(pubkeyPackage))
+                {
+                    var localContract = VBTCContractV2.GetContract(scUID);
+                    if (localContract != null && !string.IsNullOrEmpty(localContract.FrostPubkeyPackage))
+                    {
+                        pubkeyPackage = localContract.FrostPubkeyPackage;
+                        LogUtility.Log($"[FROST MPC] Found pubkey package via local VBTCContractV2 fallback (non-validator node)", "FrostMPCService.AggregateSignature");
+                    }
+                }
+
+                // Tier 5: Fetch pubkey package from a validator via the /frost/key/pubkey endpoint.
+                // This is the last resort for non-validator nodes where the local contract doesn't have it.
+                if (string.IsNullOrEmpty(pubkeyPackage))
+                {
+                    LogUtility.Log($"[FROST MPC] Tier 5: Fetching pubkey package from validators...", "FrostMPCService.AggregateSignature");
+                    foreach (var validator in validators)
+                    {
+                        try
+                        {
+                            // Try scUID first, then ceremonyId
+                            foreach (var lookupId in new[] { scUID, ceremonyId }.Where(id => !string.IsNullOrEmpty(id)))
+                            {
+                                var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/key/pubkey/{lookupId}";
+                                var response = await _httpClient.GetAsync(url);
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    var responseBody = await response.Content.ReadAsStringAsync();
+                                    var json = JObject.Parse(responseBody);
+                                    var pp = json["PubkeyPackage"]?.Value<string>();
+                                    if (!string.IsNullOrEmpty(pp))
+                                    {
+                                        pubkeyPackage = pp;
+                                        LogUtility.Log($"[FROST MPC] Found pubkey package from validator {validator.ValidatorAddress} (lookup: {lookupId})", "FrostMPCService.AggregateSignature");
+
+                                        // Cache it locally so we don't need to fetch again
+                                        try
+                                        {
+                                            var localContract = VBTCContractV2.GetContract(scUID);
+                                            if (localContract != null)
+                                            {
+                                                localContract.FrostPubkeyPackage = pp;
+                                                VBTCContractV2.UpdateContract(localContract);
+                                                LogUtility.Log($"[FROST MPC] Cached pubkey package to local VBTCContractV2", "FrostMPCService.AggregateSignature");
+                                            }
+                                        }
+                                        catch (Exception cacheEx)
+                                        {
+                                            LogUtility.Log($"[FROST MPC] Warning: Failed to cache pubkey package locally: {cacheEx.Message}", "FrostMPCService.AggregateSignature");
+                                        }
+
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!string.IsNullOrEmpty(pubkeyPackage)) break;
+                        }
+                        catch (Exception fetchEx)
+                        {
+                            LogUtility.Log($"[FROST MPC] Failed to fetch pubkey package from {validator.ValidatorAddress}: {fetchEx.Message}", "FrostMPCService.AggregateSignature");
+                        }
                     }
                 }
 
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package for {keyLookupId} (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
+                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
                     return null;
                 }
 
                 // FIND-026 Fix: Remap signature shares and nonce commitments from VFX address keys
                 // to FROST Identifier keys (64-char hex scalars). The FROST native library expects
                 // BTreeMap<Identifier, SignatureShare> and BTreeMap<Identifier, NonceCommitment>.
-                var addrToFrostId = BuildAddressToFrostIdentifierMap(signerAddresses);
+                // Use stored participant order from DKG if available, otherwise fall back to sorted order.
+                List<string>? storedOrderForAggregate = null;
+                if (resolvedKeyStore != null && !string.IsNullOrEmpty(resolvedKeyStore.ParticipantOrderJson))
+                {
+                    try
+                    {
+                        storedOrderForAggregate = JsonConvert.DeserializeObject<List<string>>(resolvedKeyStore.ParticipantOrderJson);
+                        LogUtility.Log($"[FROST MPC] Using stored participant order for aggregation ({storedOrderForAggregate?.Count ?? 0} entries)", "FrostMPCService.AggregateSignature");
+                    }
+                    catch (Exception orderEx)
+                    {
+                        LogUtility.Log($"[FROST MPC] WARNING: Failed to parse stored participant order: {orderEx.Message}. Falling back to sorted order.", "FrostMPCService.AggregateSignature");
+                    }
+                }
+                var addressListForAggregate = storedOrderForAggregate ?? signerAddresses;
+                var addrToFrostId = BuildAddressToFrostIdentifierMap(addressListForAggregate);
 
                 // Remap shares: VFX address → FROST Identifier
                 var remappedShares = new JObject();
@@ -1016,12 +1506,19 @@ namespace ReserveBlockCore.Bitcoin.Services
         /// using participant list ordering. The ordering must be identical to how the signing
         /// session was created (i.e., the SignerAddresses list order from BroadcastSigningStart).
         /// </summary>
+        /// <summary>
+        /// Build a deterministic mapping from signer addresses to FROST Identifiers.
+        /// CRITICAL: Addresses are sorted alphabetically (Ordinal) before assigning identifiers
+        /// so that the same set of addresses ALWAYS produces the same mapping, regardless of
+        /// input order. This must match FrostStartup.BuildAddressToIdentifierMap exactly.
+        /// </summary>
         private static Dictionary<string, string> BuildAddressToFrostIdentifierMap(List<string> signerAddresses)
         {
+            var sorted = signerAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();
-            for (int i = 0; i < signerAddresses.Count; i++)
+            for (int i = 0; i < sorted.Count; i++)
             {
-                map[signerAddresses[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
+                map[sorted[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
             }
             return map;
         }

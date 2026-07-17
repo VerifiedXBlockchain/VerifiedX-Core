@@ -292,3 +292,16 @@ ReserveBlockCore/Properties/
 ReserveBlockCore/Properties/launchSettings.json
 .github/workflows/dotnet.yml
 .clinerules
+.cursor
+.cline
+.claude
+
+docs/
+# Hardhat / Solidity deploy artifacts
+deploy/artifacts/
+deploy/cache/
+deploy/typechain-types/
+.env
+.env.*
+.github/copilot-instructions.md
+CLAUDE.md

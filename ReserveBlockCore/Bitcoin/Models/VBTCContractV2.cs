@@ -45,6 +45,10 @@ namespace ReserveBlockCore.Bitcoin.Models
         
         // Historical Withdrawals
         public List<VBTCWithdrawalHistory> WithdrawalHistory { get; set; }
+
+        // S3C — copied from the contract's TokenizationV2Feature at mint/decompile (§5.4).
+        public bool IsS3C { get; set; }
+        public string? LinkedContractUID { get; set; }
         #endregion
 
         #region Database Methods
@@ -160,7 +164,11 @@ namespace ReserveBlockCore.Bitcoin.Models
                                 TotalRegisteredValidators = tknz.ValidatorAddressesSnapshot?.Count ?? 0,
                                 OriginalThreshold = 51,
                                 WithdrawalStatus = VBTCWithdrawalStatus.None,
-                                WithdrawalHistory = new List<VBTCWithdrawalHistory>()
+                                WithdrawalHistory = new List<VBTCWithdrawalHistory>(),
+                                // S3C (§5.4): mirror the decoded feature so the local record
+                                // matches state-trei (drives bridge gate + disclosure on any node).
+                                IsS3C = tknz.IsS3C,
+                                LinkedContractUID = tknz.LinkedContractUID
                             };
                             contracts.InsertSafe(contract);
                         }

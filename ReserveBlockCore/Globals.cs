@@ -1,4 +1,4 @@
-﻿using ImageMagick;
+using ImageMagick;
 using Microsoft.AspNetCore.SignalR;
 using ReserveBlockCore.Bitcoin.ElectrumX;
 using ReserveBlockCore.Bitcoin.Models;
@@ -13,16 +13,22 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Security;
+using System.Collections.Generic;
 
 namespace ReserveBlockCore
 {
-    public static class Globals
+    public static partial class Globals
     {
         static Globals()
         {
             var Source = new CancellationTokenSource();
             Source.Cancel();
             CancelledToken = Source.Token;
+
+            if (MaxBlockCasters < 3)
+                MaxBlockCasters = 3;
+            else if (MaxBlockCasters > 5)
+                MaxBlockCasters = 5;
         }
 
         public class MethodCallCount
@@ -147,6 +153,8 @@ namespace ReserveBlockCore
         public static int PasswordClearTime = 10;
         public static int NFTTimeout = 0;
         public static int Port = 3338;
+        public static int BeaconPort = 23338;
+        public static int BeaconWebPort = 23339;
         //deprecate in v5.0.1 or greater
         public static int ADJPort = 3339;
         public static int ValPort = 3339;
@@ -154,12 +162,18 @@ namespace ReserveBlockCore
         public static int DSTClientPort = 3341;
         public static int ArbiterPort = 3342;
         public static int FrostValidatorPort = 7295;
+
+        // S3C (Self-Sovereign Smart Contracts)
+        public static List<Bitcoin.Models.S3CEntry>? S3CPool = null;   // minting-node side (parsed from S3C= config)
+        public static bool UseS3C => S3CPool != null && S3CPool.Count >= 3;
+        public static bool IsS3CValidator = false;                     // validator side (S3CValidator=true)
+        public static bool S3CConfigInvalid = false;                   // S3C= present but failed validation → refuse mints (§2.1)
         public static int APIPort = 7292;
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
-        public static int MajorVer = 5;
-        public static int MinorVer = 3;
-        public static int RevisionVer = 0;
+        public static int MajorVer = 6;
+        public static int MinorVer = 2;
+        public static int RevisionVer = 1;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
@@ -210,6 +224,8 @@ namespace ReserveBlockCore
         public static bool AlwaysRequireAPIPassword = false;
         public static bool StopConsoleOutput = false;
         public static bool StopValConsoleOutput = false;
+        /// <summary>When true, caster diagnostic file log (casterlog.txt) and caster-scoped validator console lines are emitted. Default off; set CasterLog=true in config.txt or pass the casterlog CLI flag.</summary>
+        public static bool CasterLogEnabled = false;
         public static int AdjudicateLock = 0;        
         public static Account AdjudicateAccount;
         public static PrivateKey AdjudicatePrivateKey;
@@ -231,6 +247,10 @@ namespace ReserveBlockCore
         public static bool DatabaseCorruptionDetected = false;
         public static bool RemoteCraftLock = false;
         public static bool IsChainSynced = false;
+        /// <summary>Height at which the post-sync validator liveness sweep was run. PromoteBlockProducer ignores blocks below this height for new validator additions.</summary>
+        public static long ValidatorListSyncedHeight = 0;
+        /// <summary>Set to true after the post-sync liveness sweep completes. Gates PromoteBlockProducer and P2P gossip additions.</summary>
+        public static bool ValidatorLivenessSweepComplete = false;
         public static bool OptionalLogging = false;
         public static bool AdjPoolCheckLock = false;
         public static bool GUI = false;
@@ -257,11 +277,29 @@ namespace ReserveBlockCore
         public static bool UseV2BlockDownload = false;
         public static bool IsArbiter = false;
         public static bool IsBlockCaster = false;
+        /// <summary>Environment.TickCount64 when a block was last committed (see BlockchainData.AddBlock). Used for caster stall detection.</summary>
+        public static long LastBlockProducedTick { get; set; } = 0;
         public static bool IsWardenMonitoring = false;
         public static bool IsFrostValidator = false;
         public static bool IsValidatorPortOpen = false;
         public static bool IsValidatorAPIPortOpen = false;
         public static bool IsFROSTAPIPortOpen = false;
+        public static bool FrostFFIAvailable = false;
+        public static string FrostFFIVersion = "Unknown";
+        public static string FrostFFICheckSummary = "";
+        public static bool PortsOpened = false;
+
+        /// <summary>Ethereum/Base address derived from this node's validator private key (empty if not a validator).</summary>
+        public static string ValidatorBaseAddress { get; set; } = string.Empty;
+
+        /// <summary>VBTCb proxy contract on Base (set from config). When set, bridge paths apply.</summary>
+        public static string VBTCbContractAddress { get; set; } = string.Empty;
+
+        /// <summary>Base (Ethereum) chain id: 84532 Sepolia when testnet, 8453 mainnet.</summary>
+        public static long BaseEvmChainId => IsTestNet ? 84532L : 8453L;
+
+        /// <summary>Active block casters (3–5). Used for adaptive majority on bridge exit consensus.</summary>
+        public static int ActiveCasterCount { get; set; } = 3;
 
         // HAL-17 Fix: Configurable timeout values
         public static int SignalRShortTimeoutMs = 2000;
@@ -319,12 +357,53 @@ namespace ReserveBlockCore
         public const int MaxValPeers = 20;
         public const int MaxBlockCasterPeers = 4;
         public static int MaxBlockCasters = 5;
+
+        /// <summary>How old the tip must be (seconds) before seed casters treat the chain as stopped and use bootstrap-only paths.</summary>
+        public const int BootstrapChainStallThresholdSeconds = 120;
+
+        /// <summary>Hardcoded seed caster addresses (mainnet + testnet). Only these nodes may enter <see cref="IsBootstrapMode"/> when the tip is stale.</summary>
+        public static readonly HashSet<string> BootstrapCasterAddresses = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "RK28ywrBfEXV5EuARn3etyVXMtcmywNxnM",
+            "RFoKrASMr19mg8S71Lf1F2suzxahG5Yj4N",
+            "RH9XAP3omXvk7P6Xe9fQ1C6nZQ1adJw2ZG",
+            "xBRzJUZiXjE3hkrpzGYMSpYCHU1yPpu8cj",
+            "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC",
+            "xCkUC4rrh2AnfNf78D5Ps83pMywk5vrwpi",
+        };
+
+        /// <summary>True if this node’s validating address is one of the seed casters.</summary>
+        public static bool IsLocalBootstrapCaster =>
+            !string.IsNullOrEmpty(ValidatorAddress) && BootstrapCasterAddresses.Contains(ValidatorAddress);
+
+        /// <summary>No tip yet → treat as stopped (cold start). After <see cref="IsChainSynced"/>, tip older than <see cref="BootstrapChainStallThresholdSeconds"/> vs wall clock → network likely stopped (~10+ missed slots at 12s target).</summary>
+        public static bool IsChainStalledForBootstrap
+        {
+            get
+            {
+                if (LastBlock == null || LastBlock.Height < 0)
+                    return true;
+                if (!IsChainSynced)
+                    return false;
+                var now = TimeUtil.GetTime();
+                return now - LastBlock.Timestamp > BootstrapChainStallThresholdSeconds;
+            }
+        }
+
+        /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.</summary>
+        public static bool IsBootstrapMode => IsLocalBootstrapCaster && IsChainStalledForBootstrap;
+
+        /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/> (when not bootstrap). Edit the initializer here only — not loaded from config.txt.</summary>
+        public static long CertEnforceHeight = long.MaxValue;
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;
         public static ConcurrentDictionary<string, int> SkipPeers = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, int> SkipValPeers = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, NetworkValidator> NetworkValidators = new ConcurrentDictionary<string, NetworkValidator>(); //key = vfx address
+        /// <summary>FIX E: Unix timestamp until which P2P gossip should NOT re-add new validators.
+        /// Set after fresh-startup clears stale NetworkValidators to prevent peers from immediately repopulating them.</summary>
+        public static long GossipCooldownUntil = 0;
         public static ConcurrentDictionary<string, Peers> ValidatorPool = new ConcurrentDictionary<string, Peers>();
         public static ConcurrentDictionary<string, NodeInfo> ValidatorNodes = new ConcurrentDictionary<string, NodeInfo>(); //key = ipaddress
         public static ConcurrentDictionary<string, NodeInfo> BlockCasterNodes = new ConcurrentDictionary<string, NodeInfo>(); //key = ipaddress
@@ -344,7 +423,43 @@ namespace ReserveBlockCore
         public static ConcurrentDictionary<long, CasterRound> CasterRoundDict = new ConcurrentDictionary<long, CasterRound>();
         public static ConcurrentDictionary<long, CasterRoundAudit> CasterRoundAuditDict = new ConcurrentDictionary<long, CasterRoundAudit>();
         public static ConcurrentDictionary<string, Proof> CasterProofDict = new ConcurrentDictionary<string, Proof>();
+        /// <summary>Winner vote exchange: key = height, value = dict of (casterIP -> chosen winner address). Used for mandatory winner agreement phase.</summary>
+        public static ConcurrentDictionary<long, ConcurrentDictionary<string, string>> CasterWinnerVoteDict = new ConcurrentDictionary<long, ConcurrentDictionary<string, string>>();
+        /// <summary>DETERMINISTIC-CONSENSUS: Tracks excluded addresses per voter per height for shared exclusion during winner agreement.</summary>
+        public static ConcurrentDictionary<long, ConcurrentDictionary<string, List<string>>> CasterExcludedAddressDict = new ConcurrentDictionary<long, ConcurrentDictionary<string, List<string>>>();
+        /// <summary>
+        /// CONSENSUS-V2 (Fix #5): Per-height proof-set commitments exchanged between casters.
+        /// Outer key = block height; inner key = caster ValidatorAddress; value = the commitment
+        /// that caster broadcast for that height. Used by ReachProofSetAgreementAsync to converge
+        /// every caster on the same sorted proof-address set before winner sorting.
+        /// Cleaned up to height-10 each round.
+        /// </summary>
+        public static ConcurrentDictionary<long, ConcurrentDictionary<string, ProofSetCommitment>> CasterProofSetCommitDict = new ConcurrentDictionary<long, ConcurrentDictionary<string, ProofSetCommitment>>();
 
+        /// <summary>Discovered / agreed caster set (synced from <see cref="BlockCasters"/> and discovery). Used with <see cref="BlockCasters"/> for certificate verification (plan §Appendix C).</summary>
+        public static object KnownCastersLock = new object();
+        public static List<CasterInfo> KnownCasters { get; } = new List<CasterInfo>();
+
+        public static void SyncKnownCastersFromBlockCasters()
+        {
+            lock (KnownCastersLock)
+            {
+                KnownCasters.Clear();
+                foreach (var p in BlockCasters)
+                {
+                    if (string.IsNullOrEmpty(p.ValidatorAddress))
+                        continue;
+                    KnownCasters.Add(new CasterInfo
+                    {
+                        Address = p.ValidatorAddress,
+                        PeerIP = (p.PeerIP ?? "").Replace("::ffff:", ""),
+                        PublicKey = p.ValidatorPublicKey ?? ""
+                    });
+                }
+
+                ActiveCasterCount = Math.Max(3, Math.Min(5, KnownCasters.Count > 0 ? KnownCasters.Count : 3));
+            }
+        }
 
         #endregion
 

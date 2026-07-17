@@ -11,6 +11,7 @@ using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace ReserveBlockCore.Bitcoin.Services
@@ -20,6 +21,148 @@ namespace ReserveBlockCore.Bitcoin.Services
     /// </summary>
     public class VBTCService
     {
+        /// <summary>
+        /// Spendable transparent vBTC for <paramref name="fromAddress"/> on contract <paramref name="scUid"/>:
+        /// owner = BTC deposit balance + tokenization ledger; non-owner = ledger only (matches <see cref="TransferVBTC"/>).
+        /// </summary>
+        public static async Task<(bool success, decimal availableBalance, string? error)> TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress)
+        {
+            try
+            {
+                var scState = SmartContractStateTrei.GetSmartContractState(scUid);
+                if (scState == null)
+                {
+                    return (false, 0M, $"Smart contract state not found: {scUid}");
+                }
+
+                // Calculate ledger balance from tokenization TXes (consensus data, available on all nodes)
+                decimal ledgerBalance = 0M;
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var transactions = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                        .ToList();
+
+                    if (transactions.Any())
+                    {
+                        var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
+                        var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
+                        ledgerBalance = received + sent;
+                    }
+                }
+
+                // Determine owner address and deposit address.
+                // Try local DB first; fall back to State Trei + in-memory decompile for remote nodes.
+                string? ownerAddress = null;
+                string? depositAddress = null;
+                decimal localCachedBalance = 0M;
+
+                var vbtcContract = VBTCContractV2.GetContract(scUid);
+                if (vbtcContract != null)
+                {
+                    ownerAddress = vbtcContract.OwnerAddress;
+                    depositAddress = vbtcContract.DepositAddress;
+                    localCachedBalance = vbtcContract.Balance;
+                }
+                else
+                {
+                    // Remote node fallback: owner address from State Trei, deposit address from contract code
+                    ownerAddress = scState.OwnerAddress;
+
+                    if (!string.IsNullOrEmpty(scState.ContractData))
+                    {
+                        try
+                        {
+                            var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                            if (scMainDecompile?.Features != null)
+                            {
+                                var tknzFeature = scMainDecompile.Features
+                                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                    .Select(x => x.FeatureFeatures)
+                                    .FirstOrDefault();
+
+                                if (tknzFeature is TokenizationV2Feature tknz)
+                                {
+                                    depositAddress = tknz.DepositAddress;
+                                }
+                            }
+                        }
+                        catch (Exception decompileEx)
+                        {
+                            ErrorLogUtility.LogError($"Failed to decompile contract {scUid} for deposit address: {decompileEx.Message}",
+                                "VBTCService.TryGetAvailableTransparentVbtcBalance()");
+                        }
+                    }
+                }
+
+                bool isOwner = !string.IsNullOrEmpty(ownerAddress) && ownerAddress == fromAddress;
+
+                if (!isOwner)
+                {
+                    // Non-owner: balance is purely from the tokenization ledger (works on all nodes)
+                    return (true, ledgerBalance, null);
+                }
+
+                // Owner: must verify actual BTC deposit balance to prevent inflation.
+                // Recalculate owner's ledger balance excluding burn entries (ToAddress == "-")
+                // to avoid double-counting with ElectrumX balance that already reflects withdrawals.
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var ownerTransactions = scState.SCStateTreiTokenizationTXes
+                        .Where(x => (x.FromAddress == fromAddress || x.ToAddress == fromAddress) && x.ToAddress != "-")
+                        .ToList();
+
+                    if (ownerTransactions.Any())
+                    {
+                        var received = ownerTransactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
+                        var sent = ownerTransactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
+                        ledgerBalance = received + sent;
+                    }
+                    else
+                    {
+                        ledgerBalance = 0M;
+                    }
+                }
+                else
+                {
+                    ledgerBalance = 0M;
+                }
+
+                // Query Electrum for real-time balance of the deposit address.
+                decimal btcDepositBalance = 0M;
+                if (!string.IsNullOrEmpty(depositAddress))
+                {
+                    try
+                    {
+                        using var client = await ReserveBlockCore.Bitcoin.Bitcoin.ElectrumXClient();
+                        if (client != null)
+                        {
+                            var balance = await client.GetBalance(depositAddress, false);
+                            btcDepositBalance = balance.Confirmed / 100_000_000M;
+                        }
+                        else
+                        {
+                            // Electrum unavailable — fall back to locally cached balance if we have it
+                            btcDepositBalance = localCachedBalance;
+                        }
+                    }
+                    catch (Exception elxEx)
+                    {
+                        // Electrum query failed — fall back to locally cached balance
+                        ErrorLogUtility.LogError($"ElectrumX query failed for deposit balance, using cached: {elxEx.Message}",
+                            "VBTCService.TryGetAvailableTransparentVbtcBalance()");
+                        btcDepositBalance = localCachedBalance;
+                    }
+                }
+
+                return (true, btcDepositBalance + ledgerBalance, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, 0M, ex.Message);
+            }
+        }
+
         #region Deposit Balance Scanning
 
         /// <summary>
@@ -295,48 +438,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Account not found: {fromAddress}");
                 }
 
-                // Get contract and validate
-                var vbtcContract = VBTCContractV2.GetContract(scUID);
-                if (vbtcContract == null)
+                var balResult = await TryGetAvailableTransparentVbtcBalance(scUID, fromAddress);
+                if (!balResult.success)
                 {
-                    SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.TransferVBTC()");
-                    return (false, $"vBTC V2 contract not found: {scUID}");
+                    SCLogUtility.Log(balResult.error ?? "Balance lookup failed", "VBTCService.TransferVBTC()");
+                    return (false, balResult.error ?? "Could not resolve vBTC transparent balance.");
                 }
 
-                // Get smart contract state
-                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
-                if (scState == null)
+                if (balResult.availableBalance < amount)
                 {
-                    SCLogUtility.Log($"Smart contract state not found: {scUID}", "VBTCService.TransferVBTC()");
-                    return (false, $"Smart contract state not found: {scUID}");
-                }
-
-                // Calculate balance using v1 pattern: owner gets deposit balance + ledger, non-owner gets just ledger
-                decimal ledgerBalance = 0M;
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                {
-                    var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                        .ToList();
-
-                    if (transactions.Any())
-                    {
-                        var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
-                        var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                        ledgerBalance = received + sent;
-                    }
-                }
-
-                // Owner's available = BTC deposit balance + ledger (ledger goes negative as owner sends)
-                // Non-owner's available = just ledger (received - sent)
-                bool isOwner = vbtcContract.OwnerAddress == fromAddress;
-                decimal availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
-
-                // Check sufficient balance
-                if (availableBalance < amount)
-                {
-                    SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.TransferVBTC()");
-                    return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
+                    SCLogUtility.Log($"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}", "VBTCService.TransferVBTC()");
+                    return (false, $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}");
                 }
 
                 toAddress = toAddress.ToAddressNormalize();
@@ -433,14 +545,6 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"Account not found: {requestorAddress}");
                 }
 
-                // Get contract and validate
-                var vbtcContract = VBTCContractV2.GetContract(scUID);
-                if (vbtcContract == null)
-                {
-                    SCLogUtility.Log($"vBTC V2 contract not found: {scUID}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"vBTC V2 contract not found: {scUID}");
-                }
-
                 // FIND-003 FIX: Check if THIS USER already has an active withdrawal request (per-user tracking)
                 var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requestorAddress, scUID);
                 if (existingRequest != null)
@@ -449,40 +553,17 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return (false, $"You already have an active withdrawal request. Complete it before starting a new one. Request Hash: {existingRequest.TransactionHash}");
                 }
 
-                // Get smart contract state and validate balance
-                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
-                if (scState == null)
+                var balResult = await TryGetAvailableTransparentVbtcBalance(scUID, requestorAddress);
+                if (!balResult.success)
                 {
-                    SCLogUtility.Log($"Smart contract state not found: {scUID}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"Smart contract state not found: {scUID}");
+                    SCLogUtility.Log(balResult.error ?? "Balance lookup failed", "VBTCService.RequestWithdrawal()");
+                    return (false, balResult.error ?? "Could not resolve vBTC transparent balance.");
                 }
 
-                // Calculate balance using v1 pattern: owner gets deposit balance + ledger
-                decimal ledgerBalance = 0M;
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                if (balResult.availableBalance < amount)
                 {
-                    var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == requestorAddress || x.ToAddress == requestorAddress)
-                        .ToList();
-
-                    if (transactions.Any())
-                    {
-                        var received = transactions.Where(x => x.ToAddress == requestorAddress).Sum(x => x.Amount);
-                        var sent = transactions.Where(x => x.FromAddress == requestorAddress).Sum(x => x.Amount);
-                        ledgerBalance = received + sent;
-                    }
-                }
-
-                // Owner's available = BTC deposit balance + ledger
-                // Non-owner's available = just ledger
-                bool isOwner = vbtcContract.OwnerAddress == requestorAddress;
-                decimal availableBalance = isOwner ? vbtcContract.Balance + ledgerBalance : ledgerBalance;
-
-                // Check sufficient balance
-                if (availableBalance < amount)
-                {
-                    SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.RequestWithdrawal()");
-                    return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
+                    SCLogUtility.Log($"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}", "VBTCService.RequestWithdrawal()");
+                    return (false, $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}");
                 }
 
                 btcAddress = btcAddress.ToBTCAddressNormalize();
@@ -568,19 +649,14 @@ namespace ReserveBlockCore.Bitcoin.Services
         public static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage)> CompleteWithdrawal(
             string scUID, string withdrawalRequestHash,
             decimal? delegatedAmount = null, string? delegatedBTCDestination = null, int? delegatedFeeRate = null,
-            bool signOnly = false)
+            bool signOnly = false,
+            FROST.Models.PreSignedLeaderAuth? preSignedAuth = null)
         {
             try
             {
-                // FIND-027 Fix: Safety guard — CompleteWithdrawal requires FROST signing which can only
-                // run on a validator node. If this is a non-validator, fail fast with a clear error
-                // instead of crashing with a NullReferenceException deep in the FROST signing flow.
-                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                {
-                    SCLogUtility.Log($"CompleteWithdrawal called on non-validator node. This must be delegated to a validator.", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, 
-                        "This node is not a validator and cannot coordinate FROST signing. The withdrawal must be delegated to a remote validator.");
-                }
+                // Unified MPC: Any VFX wallet owner can now coordinate FROST signing directly.
+                // The leader check in FrostStartup.cs has been relaxed to accept any valid VFX
+                // signature, and FrostMPCService signs with AddressSignature (owner's key).
 
                 // Get contract — try local DB first, fall back to State Trei for remote validators
                 var vbtcContract = VBTCContractV2.GetContract(scUID);
@@ -591,50 +667,58 @@ namespace ReserveBlockCore.Bitcoin.Services
                 string depositAddress = null;
                 int totalRegisteredValidators = 0;
                 long lastValidatorActivityBlock = 0;
+                List<string> snapshotAddresses = null; // DKG participant addresses from the contract
 
                 if (vbtcContract != null)
                 {
                     depositAddress = vbtcContract.DepositAddress;
                     totalRegisteredValidators = vbtcContract.TotalRegisteredValidators;
                     lastValidatorActivityBlock = vbtcContract.LastValidatorActivityBlock;
+                    
+                    // Try to get snapshot from local contract first
+                    // If not available locally, we'll try State Trei below
                 }
-                else
+                
+                // Always try to resolve the snapshot from State Trei (authoritative source for DKG participants)
                 {
-                    SCLogUtility.Log($"VBTCContractV2 not in local DB for {scUID}, falling back to State Trei + GenerateSmartContractInMemory", "VBTCService.CompleteWithdrawal()");
-
-                    // Get smart contract state from the State Trei (shared across ALL nodes — consensus data)
                     var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                    if (scStateTreiRec == null || string.IsNullOrEmpty(scStateTreiRec.ContractData))
+                    if (scStateTreiRec != null && !string.IsNullOrEmpty(scStateTreiRec.ContractData))
                     {
-                        SCLogUtility.Log($"Smart contract state not found in State Trei: {scUID}", "VBTCService.CompleteWithdrawal()");
+                        try
+                        {
+                            var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                            if (scMainDecompile?.Features != null)
+                            {
+                                var tknzFeature = scMainDecompile.Features
+                                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                    .Select(x => x.FeatureFeatures)
+                                    .FirstOrDefault();
+
+                                if (tknzFeature is TokenizationV2Feature tknz)
+                                {
+                                    snapshotAddresses = tknz.ValidatorAddressesSnapshot;
+                                    
+                                    // If we didn't have a local contract, fill in from State Trei
+                                    if (vbtcContract == null)
+                                    {
+                                        depositAddress = tknz.DepositAddress;
+                                        totalRegisteredValidators = tknz.ValidatorAddressesSnapshot?.Count ?? 0;
+                                        lastValidatorActivityBlock = tknz.ProofBlockHeight;
+                                        SCLogUtility.Log($"Resolved from State Trei — DepositAddress: {depositAddress}, Validators: {totalRegisteredValidators}, ActivityBlock: {lastValidatorActivityBlock}", "VBTCService.CompleteWithdrawal()");
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception decompileEx)
+                        {
+                            SCLogUtility.Log($"Failed to decompile contract from State Trei: {decompileEx.Message}", "VBTCService.CompleteWithdrawal()");
+                        }
+                    }
+                    else if (vbtcContract == null)
+                    {
+                        SCLogUtility.Log($"Smart contract state not found in State Trei and no local contract: {scUID}", "VBTCService.CompleteWithdrawal()");
                         return (false, string.Empty, string.Empty, $"vBTC V2 contract not found in local DB or State Trei: {scUID}");
                     }
-
-                    // Decompile the contract from the State Trei's ContractData field
-                    var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
-                    if (scMainDecompile == null || scMainDecompile.Features == null)
-                    {
-                        SCLogUtility.Log($"Failed to decompile smart contract from State Trei ContractData: {scUID}", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, string.Empty, $"Failed to decompile contract {scUID} from State Trei");
-                    }
-
-                    var tknzFeature = scMainDecompile.Features
-                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                        .Select(x => x.FeatureFeatures)
-                        .FirstOrDefault();
-
-                    if (tknzFeature == null)
-                    {
-                        SCLogUtility.Log($"No TokenizationV2 feature on contract: {scUID}", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, string.Empty, $"Contract {scUID} has no TokenizationV2 feature");
-                    }
-
-                    var tknz = (TokenizationV2Feature)tknzFeature;
-                    depositAddress = tknz.DepositAddress;
-                    totalRegisteredValidators = tknz.ValidatorAddressesSnapshot?.Count ?? 0;
-                    lastValidatorActivityBlock = tknz.ProofBlockHeight; // Default to DKG completion block
-
-                    SCLogUtility.Log($"Resolved from State Trei — DepositAddress: {depositAddress}, Validators: {totalRegisteredValidators}, ActivityBlock: {lastValidatorActivityBlock}", "VBTCService.CompleteWithdrawal()");
                 }
 
                 if (string.IsNullOrEmpty(depositAddress))
@@ -688,17 +772,54 @@ namespace ReserveBlockCore.Bitcoin.Services
                 
                 SCLogUtility.Log($"Starting FROST withdrawal for contract {scUID}", "VBTCService.CompleteWithdrawal()");
 
-                // Get active validators for FROST signing
-                var validators = VBTCValidator.GetActiveValidators();
-                if (validators == null || !validators.Any())
+                // Get validators for FROST signing — use the contract's DKG snapshot (only those validators
+                // hold FROST key shares), filtered by the registry (to get IPs) and reachability probe.
+                var allRegistryValidators = VBTCValidatorRegistry.GetActiveValidators();
+                if (allRegistryValidators == null || !allRegistryValidators.Any())
                 {
-                    SCLogUtility.Log($"No active validators available for FROST signing", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, "No active validators available for FROST signing");
+                    SCLogUtility.Log($"No active validators in registry for FROST signing", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, "No active validators in registry for FROST signing");
                 }
 
-                // Phase 5: Calculate DYNAMIC adjusted threshold based on validator availability
+                // Filter to only validators from the contract's DKG snapshot (they hold the key shares)
+                List<VBTCValidator> snapshotValidators;
+                if (snapshotAddresses != null && snapshotAddresses.Any())
+                {
+                    var snapshotSet = new HashSet<string>(snapshotAddresses);
+                    snapshotValidators = allRegistryValidators.Where(v => snapshotSet.Contains(v.ValidatorAddress)).ToList();
+                    SCLogUtility.Log($"[FROST Signing] Filtered to {snapshotValidators.Count} snapshot validators " +
+                        $"(from {allRegistryValidators.Count} registry, {snapshotAddresses.Count} in snapshot)", "VBTCService.CompleteWithdrawal()");
+                }
+                else
+                {
+                    // Fallback: no snapshot — use PUBLIC validators only (§7.2: never pull S3C
+                    // validators into a legacy public contract).
+                    snapshotValidators = VBTCValidatorRegistry.GetPublicValidators();
+                    SCLogUtility.Log($"[FROST Signing] WARNING: No snapshot addresses found for contract {scUID}. " +
+                        $"Using all {allRegistryValidators.Count} registry validators (legacy fallback)", "VBTCService.CompleteWithdrawal()");
+                }
+
+                if (!snapshotValidators.Any())
+                {
+                    SCLogUtility.Log($"No snapshot validators found in registry for FROST signing. " +
+                        $"Snapshot had {snapshotAddresses?.Count ?? 0} addresses but none matched active registry.", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, "No DKG snapshot validators are currently active in the registry");
+                }
+
+                // Probe reachability — only contact validators that are actually online
+                var validators = await FrostMPCService.ProbeValidatorReachability(snapshotValidators);
+                if (!validators.Any())
+                {
+                    SCLogUtility.Log($"No reachable validators for FROST signing (0/{snapshotValidators.Count} responded to health check)", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"No reachable validators for FROST signing (0/{snapshotValidators.Count} snapshot validators online)");
+                }
+
+                // Use the snapshot total (not registry total) for threshold calculation
+                int snapshotTotal = snapshotAddresses?.Count ?? totalRegisteredValidators;
+
+                // Calculate DYNAMIC adjusted threshold based on validator availability
                 int adjustedThreshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(
-                    totalRegisteredValidators,
+                    snapshotTotal,
                     validators.Count,
                     lastValidatorActivityBlock,
                     Globals.LastBlock.Height
@@ -709,17 +830,18 @@ namespace ReserveBlockCore.Bitcoin.Services
                 
                 // Log threshold information
                 string thresholdInfo = VBTCThresholdCalculator.GetThresholdExplanation(
-                    totalRegisteredValidators,
+                    snapshotTotal,
                     validators.Count,
                     lastValidatorActivityBlock,
                     Globals.LastBlock.Height
                 );
-                SCLogUtility.Log($"Threshold calculation: {thresholdInfo}", "VBTCService.CompleteWithdrawal()");
+                SCLogUtility.Log($"Threshold calculation (snapshot-based): {thresholdInfo}", "VBTCService.CompleteWithdrawal()");
                 
                 if (validators.Count < requiredValidators)
                 {
-                    SCLogUtility.Log($"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"Insufficient validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)");
+                    SCLogUtility.Log($"Insufficient reachable validators. Have: {validators.Count}, Need: {requiredValidators} " +
+                        $"(Adjusted threshold: {adjustedThreshold}%, Snapshot: {snapshotTotal})", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, string.Empty, $"Insufficient reachable validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)");
                 }
 
                 // Get withdrawal details — prefer contract Active* fields (set by StateData when TX is mined),
@@ -750,7 +872,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                 long feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
 
                 // Execute FROST withdrawal (build + sign; broadcast only if not signOnly)
-                SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination} (signOnly={signOnly})", "VBTCService.CompleteWithdrawal()");
+                // Use the withdrawal requestor's address as the FROST coordinator/leader —
+                // they already proved token ownership during the withdrawal request step.
+                var coordinatorAddress = withdrawalRequest.RequestorAddress;
+                SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination} (signOnly={signOnly}, coordinator={coordinatorAddress})", "VBTCService.CompleteWithdrawal()");
                 
                 var btcResult = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
                     depositAddress,
@@ -760,7 +885,10 @@ namespace ReserveBlockCore.Bitcoin.Services
                     scUID,
                     validators,
                     adjustedThreshold,
-                    broadcast: !signOnly
+                    broadcast: !signOnly,
+                    coordinatorAddress: coordinatorAddress,
+                    withdrawalRequestHash: withdrawalRequestHash,  // FIND-028: Validator-side dedup
+                    preSignedAuth: preSignedAuth
                 );
 
                 if (!btcResult.Success)
@@ -786,17 +914,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                 // ============================================================
 
                 // Use validator address or first available account for transaction creation
-                string fromAddress = !string.IsNullOrEmpty(Globals.ValidatorAddress) ? Globals.ValidatorAddress : null;
-                if (string.IsNullOrEmpty(fromAddress))
-                {
-                    var accounts = AccountData.GetAccounts();
-                    if (accounts == null || accounts.Count() == 0)
-                    {
-                        SCLogUtility.Log($"No accounts available to create completion transaction", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, btcTxHash, "No accounts available to create completion transaction");
-                    }
-                    fromAddress = accounts.FindAll().First().Address;
-                }
+                string fromAddress = withdrawalRequest.RequestorAddress;
 
                 var account = AccountData.GetSingleAccount(fromAddress);
                 if (account == null)
@@ -829,8 +947,12 @@ namespace ReserveBlockCore.Bitcoin.Services
                     Data = txData
                 };
 
-                completionTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(completionTx);
-                
+                // BURN-EXIT FIX: Bridge/withdrawal-complete transactions MUST remain fee-free.
+                // The previous call to FeeCalcService.CalculateTXFee(...) was overwriting Fee = 0.0M
+                // with a non-zero value which broke consensus on fee-free TX types and caused
+                // validator balance checks to reject casters that don't have a funded wallet.
+                completionTx.Fee = 0M.ToNormalizeDecimal();
+
                 // Build and sign transaction
                 completionTx.Build();
                 var txHash = completionTx.Hash;
@@ -885,5 +1007,696 @@ namespace ReserveBlockCore.Bitcoin.Services
                 return (false, string.Empty, string.Empty, $"Error: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// Cancel an active withdrawal request for a vBTC V2 contract.
+        /// Only the original requestor can cancel their own withdrawal.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <param name="requestorAddress">Address that originally requested the withdrawal</param>
+        /// <param name="withdrawalRequestHash">Hash of the withdrawal request transaction to cancel</param>
+        /// <returns>Success flag and message</returns>
+        public static async Task<(bool, string)> CancelWithdrawal(string scUID, string requestorAddress, string withdrawalRequestHash)
+        {
+            try
+            {
+                // Get account and validate
+                var account = AccountData.GetSingleAccount(requestorAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {requestorAddress}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"Account not found: {requestorAddress}");
+                }
+
+                // Verify the withdrawal request exists and belongs to this user
+                var existingRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (existingRequest == null)
+                {
+                    SCLogUtility.Log($"Withdrawal request not found: {withdrawalRequestHash}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"Withdrawal request not found: {withdrawalRequestHash}");
+                }
+
+                if (existingRequest.RequestorAddress != requestorAddress)
+                {
+                    SCLogUtility.Log($"Requestor address mismatch. Expected: {existingRequest.RequestorAddress}, Got: {requestorAddress}", "VBTCService.CancelWithdrawal()");
+                    return (false, "Only the original withdrawal requestor can cancel this withdrawal.");
+                }
+
+                if (existingRequest.IsCompleted)
+                {
+                    SCLogUtility.Log($"Withdrawal already completed/cancelled: {withdrawalRequestHash}", "VBTCService.CancelWithdrawal()");
+                    return (false, "Cannot cancel an already completed or cancelled withdrawal.");
+                }
+
+                // Create transaction data
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalCancel()",
+                    ContractUID = scUID,
+                    WithdrawalRequestHash = withdrawalRequestHash
+                });
+
+                // Build transaction — self-transaction from the requestor
+                var cancelTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = requestorAddress,
+                    ToAddress = requestorAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(requestorAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL,
+                    Data = txData
+                };
+
+                cancelTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(cancelTx);
+
+                // Build and sign transaction
+                cancelTx.Build();
+                var txHash = cancelTx.Hash;
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {requestorAddress}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"Private key was null for account {requestorAddress}");
+                }
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                }
+
+                cancelTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(cancelTx);
+                if (result.Item1)
+                {
+                    await TransactionData.AddTxToWallet(cancelTx, true);
+                    await AccountData.UpdateLocalBalance(requestorAddress, cancelTx.Fee + cancelTx.Amount);
+                    await TransactionData.AddToPool(cancelTx);
+                    await P2PClient.SendTXMempool(cancelTx);
+                    SCLogUtility.Log($"vBTC V2 Withdrawal Cancel TX Success. SCUID: {scUID}, TxHash: {cancelTx.Hash}", "VBTCService.CancelWithdrawal()");
+                    return (true, cancelTx.Hash);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Withdrawal Cancel TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CancelWithdrawal()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Withdrawal Cancel Error: {ex.Message}", "VBTCService.CancelWithdrawal()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        #region Bridge Lock / Unlock Transactions
+
+        /// <summary>
+        /// Create and broadcast a VBTC_V2_BRIDGE_LOCK transaction on the VFX chain.
+        /// This deducts the vBTC balance in the State Trei so all nodes see the lock.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID of the vBTC contract</param>
+        /// <param name="ownerAddress">VFX address that owns the vBTC being locked</param>
+        /// <param name="amount">Amount of vBTC to lock (in BTC, e.g. 0.001)</param>
+        /// <param name="evmDestination">EVM address on Base to receive vBTC.b</param>
+        /// <param name="lockIdOverride">Optional; default is a new GUID (format N). Must be unique on-chain.</param>
+        /// <returns>(Success, TxHashOrError, LockId)</returns>
+        /// <summary>
+        /// S3C §6.3: resolve a contract's IsS3C flag — local record first, else state-trei
+        /// decompile (works on any node; used by the consensus bridge-lock rejection too).
+        /// </summary>
+        public static bool ResolveContractIsS3C(string scUID)
+        {
+            var local = VBTCContractV2.GetContract(scUID);
+            if (local != null) return local.IsS3C;
+            try
+            {
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
+                {
+                    var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                    var tknz = scMain?.Features?
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures)
+                        .FirstOrDefault() as TokenizationV2Feature;
+                    if (tknz != null) return tknz.IsS3C;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>
+        /// S3C §7.4/§8: resolve a contract's DKG validator snapshot — local record first, else
+        /// state-trei decompile (works on any node). Empty list if none (legacy no-snapshot).
+        /// </summary>
+        public static List<string> ResolveContractSnapshot(string scUID)
+        {
+            var local = VBTCContractV2.GetContract(scUID);
+            if (local != null && local.ValidatorAddressesSnapshot != null && local.ValidatorAddressesSnapshot.Count > 0)
+                return local.ValidatorAddressesSnapshot;
+            try
+            {
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
+                {
+                    var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                    var tknz = scMain?.Features?
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures)
+                        .FirstOrDefault() as TokenizationV2Feature;
+                    if (tknz?.ValidatorAddressesSnapshot != null) return tknz.ValidatorAddressesSnapshot;
+                }
+            }
+            catch { }
+            return new List<string>();
+        }
+
+        /// <summary>
+        /// S3C §7.4: the eligible cancellation-voter set for a contract. Snapshot validators if the
+        /// contract has a DKG snapshot; else the public validators (legacy fallback). The 75%
+        /// denominator is this set's Count (FULL snapshot — dead members still count). Used
+        /// identically by TransactionValidatorService (eligibility) and StateData (denominator).
+        /// </summary>
+        public static HashSet<string> ResolveCancellationVoterSet(string scUID)
+        {
+            var snapshot = ResolveContractSnapshot(scUID);
+            if (snapshot.Count > 0)
+                return new HashSet<string>(snapshot);
+            return new HashSet<string>(VBTCValidatorRegistry.GetPublicValidators().Select(v => v.ValidatorAddress));
+        }
+
+        public static async Task<(bool Success, string TxHashOrError, string LockId)> CreateBridgeLockTx(
+            string scUID, string ownerAddress, decimal amount, string evmDestination, string? lockIdOverride = null)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {ownerAddress}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"Account not found: {ownerAddress}", string.Empty);
+                }
+
+                // S3C §6.3: vBTC.b bridge is not available for S3C contracts (client-side gate;
+                // also consensus-enforced at TX validation). Companion path (§5) is the route.
+                if (ResolveContractIsS3C(scUID))
+                    return (false, "vBTC.b bridge is not available for S3C contracts. Withdraw to your own public companion contract to bridge.", string.Empty);
+
+                // Validate balance (subtract local bridge reservations not yet reflected in state trei)
+                var balResult = await TryGetAvailableTransparentVbtcBalance(scUID, ownerAddress);
+                if (!balResult.success)
+                {
+                    SCLogUtility.Log(balResult.error ?? "Balance lookup failed", "VBTCService.CreateBridgeLockTx()");
+                    return (false, balResult.error ?? "Could not resolve vBTC transparent balance.", string.Empty);
+                }
+
+                var reservedLocal = BridgeLockRecord.GetLockedAmount(ownerAddress, scUID);
+                var spendable = balResult.availableBalance - reservedLocal;
+                if (spendable < amount)
+                {
+                    SCLogUtility.Log($"Insufficient balance. Available: {spendable} (raw: {balResult.availableBalance}, local bridge reserve: {reservedLocal}), Requested: {amount}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"Insufficient balance. Available: {spendable} BTC, Requested: {amount}", string.Empty);
+                }
+
+                // Auto-derive Base address from VFX key if evmDestination not provided
+                if (string.IsNullOrWhiteSpace(evmDestination))
+                    evmDestination = ValidatorEthKeyService.DeriveBaseAddressFromAccount(ownerAddress);
+
+                // Validate EVM destination
+                if (string.IsNullOrWhiteSpace(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
+                {
+                    return (false, "Invalid EVM destination address. Must be 0x-prefixed, 42 characters.", string.Empty);
+                }
+
+                var lockId = string.IsNullOrWhiteSpace(lockIdOverride) ? Guid.NewGuid().ToString("N") : lockIdOverride.Trim();
+                long amountSats = (long)(amount * 100_000_000M);
+
+                // Create transaction data
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeLock()",
+                    ContractUID = scUID,
+                    LockId = lockId,
+                    Amount = amount,
+                    AmountSats = amountSats,
+                    EvmDestination = evmDestination
+                });
+
+                // Build transaction (self-TX: from=to=owner, amount=0 VFX)
+                var lockTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = ownerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_LOCK,
+                    Data = txData
+                };
+
+                lockTx.Fee = ReserveBlockCore.Services.FeeCalcService.CalculateTXFee(lockTx);
+
+                // Build and sign
+                lockTx.Build();
+                var txHash = lockTx.Hash;
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {ownerAddress}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"Private key was null for account {ownerAddress}", string.Empty);
+                }
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}", string.Empty);
+                }
+
+                lockTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(lockTx);
+                if (result.Item1)
+                {
+                    await TransactionData.AddTxToWallet(lockTx, true);
+                    await AccountData.UpdateLocalBalance(ownerAddress, lockTx.Fee + lockTx.Amount);
+                    await TransactionData.AddToPool(lockTx);
+                    await P2PClient.SendTXMempool(lockTx);
+                    SCLogUtility.Log($"vBTC V2 Bridge Lock TX Success. SCUID: {scUID}, TxHash: {lockTx.Hash}, LockId: {lockId}", "VBTCService.CreateBridgeLockTx()");
+                    return (true, lockTx.Hash, lockId);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Bridge Lock TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CreateBridgeLockTx()");
+                    return (false, $"TX Verify Failed: {result.Item2}", string.Empty);
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Bridge Lock Error: {ex.Message}", "VBTCService.CreateBridgeLockTx()");
+                return (false, $"Error: {ex.Message}", string.Empty);
+            }
+        }
+
+        /// <summary>
+        /// Polls until <see cref="VBTCBridgeLockState"/> exists (lock included in a block) or the timeout elapses.
+        /// Used before relay mint on Base so the VFX lock is consensus-valid.
+        /// </summary>
+        public static async Task<bool> WaitForBridgeLockInStateAsync(string lockId, int timeoutMs = 120_000)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (VBTCBridgeLockState.GetByLockId(lockId) != null)
+                    return true;
+                var rec = BridgeLockRecord.GetByLockId(lockId);
+                if (rec?.VfxLockConfirmedOnChain == true)
+                    return true;
+                await Task.Delay(400);
+            }
+            return VBTCBridgeLockState.GetByLockId(lockId) != null;
+        }
+
+        /// <summary>
+        /// Create and broadcast a VBTC_V2_BRIDGE_UNLOCK transaction on the VFX chain.
+        /// This restores the vBTC balance after a burn on Base has been detected.
+        /// Called by the user's node when it detects its own ExitBurned event on Base.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID of the vBTC contract</param>
+        /// <param name="ownerAddress">VFX address that originally locked the vBTC</param>
+        /// <param name="lockId">The lock ID being unlocked</param>
+        /// <param name="amount">Amount being unlocked</param>
+        /// <param name="exitBurnTxHash">The Base transaction hash of the burnForExit call</param>
+        /// <returns>(Success, TxHashOrError)</returns>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeUnlockTx(
+            string scUID, string ownerAddress, string lockId, decimal amount, string exitBurnTxHash,
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found: {ownerAddress}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (false, $"Account not found: {ownerAddress}");
+                }
+
+                long amountSats = (long)(amount * 100_000_000M);
+
+                // Create transaction data
+                object payload = new
+                {
+                    Function = "VBTCBridgeUnlock()",
+                    ContractUID = scUID,
+                    LockId = lockId,
+                    Amount = amount,
+                    AmountSats = amountSats,
+                    ExitBurnTxHash = exitBurnTxHash,
+                    CasterConsensusVotes = casterConsensusVotes
+                };
+                var txData = JsonConvert.SerializeObject(payload);
+
+                // Build transaction (self-TX: from=to=owner, amount=0 VFX)
+                var unlockTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = ownerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_UNLOCK,
+                    Data = txData
+                };
+
+                unlockTx.Fee = 0.00M;
+
+                // Build and sign
+                unlockTx.Build();
+                var txHash = unlockTx.Hash;
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {ownerAddress}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (false, $"Private key was null for account {ownerAddress}");
+                }
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                }
+
+                unlockTx.Signature = signature;
+
+                // Verify transaction
+                var result = await TransactionValidatorService.VerifyTX(unlockTx);
+                if (result.Item1)
+                {
+                    await TransactionData.AddTxToWallet(unlockTx, true);
+                    await AccountData.UpdateLocalBalance(ownerAddress, unlockTx.Fee + unlockTx.Amount);
+                    await TransactionData.AddToPool(unlockTx);
+                    await P2PClient.SendTXMempool(unlockTx);
+                    SCLogUtility.Log($"vBTC V2 Bridge Unlock TX Success. SCUID: {scUID}, TxHash: {unlockTx.Hash}, LockId: {lockId}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (true, unlockTx.Hash);
+                }
+                else
+                {
+                    SCLogUtility.Log($"vBTC V2 Bridge Unlock TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CreateBridgeUnlockTx()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Bridge Unlock Error: {ex.Message}", "VBTCService.CreateBridgeUnlockTx()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC"/> after a Base <c>burnForBTCExit</c> is agreed by casters.
+        /// V3: Now includes FIFO allocation plan and per-contract BTC withdrawal records so
+        /// <see cref="StateData.ApplyVBTCBridgeExitToBTC"/> can apply partial unlocks to each lock.
+        /// </summary>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeExitToBTCTx(
+            string ownerAddress,
+            decimal totalAmount,
+            string btcDestination,
+            string baseBurnTxHash,
+            List<PoolUnlockAllocation> allocations,
+            List<BtcExitWithdrawalRecord>? btcWithdrawals = null,
+            IReadOnlyList<CasterConsensusVote>? casterConsensusVotes = null)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(ownerAddress);
+                if (account == null)
+                    return (false, $"Account not found: {ownerAddress}");
+
+                var totalAmountSats = (long)(totalAmount * 100_000_000M);
+                var firstAlloc = allocations?.FirstOrDefault();
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeExitToBTC()",
+                    // Backward-compatible fields required by TransactionValidatorService
+                    ContractUID = firstAlloc?.SmartContractUID ?? "",
+                    LockId = firstAlloc?.LockId ?? "",
+                    Amount = totalAmount,
+                    AmountSats = totalAmountSats,
+                    // V3 fields
+                    TotalAmount = totalAmount,
+                    TotalAmountSats = totalAmountSats,
+                    BtcDestination = btcDestination,
+                    BaseBurnTxHash = baseBurnTxHash,
+                    Allocations = allocations,
+                    BtcWithdrawals = btcWithdrawals,
+                    CasterConsensusVotes = casterConsensusVotes
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = ownerAddress,
+                    ToAddress = ownerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(ownerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
+                    Data = txData
+                };
+                tx.Fee = 0.00M;
+                tx.Build();
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+                if (privateKey == null)
+                    return (false, "Private key was null");
+                tx.Signature = ReserveBlockCore.Services.SignatureService.CreateSignature(tx.Hash, privateKey, publicKey);
+                if (tx.Signature == "ERROR")
+                    return (false, "TX Signature Failed");
+
+                var result = await TransactionValidatorService.VerifyTX(tx);
+                if (!result.Item1)
+                    return (false, $"TX Verify Failed: {result.Item2}");
+
+                await TransactionData.AddTxToWallet(tx, true);
+                await AccountData.UpdateLocalBalance(ownerAddress, tx.Fee + tx.Amount);
+                await TransactionData.AddToPool(tx);
+                await P2PClient.SendTXMempool(tx);
+                return (true, tx.Hash);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE"/> after the caster has
+        /// FROST-signed and broadcast the Bitcoin withdrawal for a <c>burnForBTCExit</c>.
+        /// This is the consensus-critical second half of the BTC-exit flow — it is what causes
+        /// <see cref="StateData.ApplyVBTCBridgeExitToBTCComplete"/> to mark the pending
+        /// <see cref="VBTCBridgeBtcExitState"/> row as complete.
+        /// Runs entirely on the caster — signer is the caster's validator address, Fee is 0, self-TX.
+        /// </summary>
+        /// <param name="signerAddress">Caster / validator VFX address (must have a local account).</param>
+        /// <param name="baseBurnTxHash">The Base <c>burnForBTCExit</c> transaction hash (32-byte hex).</param>
+        /// <param name="btcTxHash">The broadcasted Bitcoin withdrawal transaction hash.</param>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeExitToBTCCompleteTx(
+            string signerAddress,
+            string baseBurnTxHash,
+            string btcTxHash,
+            List<BtcExitWithdrawalRecord>? btcWithdrawals = null)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(signerAddress))
+                    return (false, "Signer address is required for bridge exit to BTC complete.");
+                if (string.IsNullOrWhiteSpace(baseBurnTxHash))
+                    return (false, "BaseBurnTxHash is required for bridge exit to BTC complete.");
+                if (string.IsNullOrWhiteSpace(btcTxHash))
+                    return (false, "BtcTxHash is required for bridge exit to BTC complete.");
+
+                var account = AccountData.GetSingleAccount(signerAddress);
+                if (account == null)
+                {
+                    SCLogUtility.Log($"Account not found for signer: {signerAddress}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                    return (false, $"Account not found: {signerAddress}");
+                }
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+                if (privateKey == null)
+                {
+                    SCLogUtility.Log($"Private key was null for account {signerAddress}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                    return (false, $"Private key was null for account {signerAddress}");
+                }
+
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeExitToBTCComplete()",
+                    BaseBurnTxHash = baseBurnTxHash.Trim(),
+                    BtcTxHash = btcTxHash.Trim(),
+                    BtcWithdrawals = btcWithdrawals
+                });
+
+                // Self-TX signed by the caster. Fee = 0 (enforced by validator). Amount = 0.
+                var completionTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = signerAddress,
+                    ToAddress = signerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(signerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE,
+                    Data = txData
+                };
+
+                // Do NOT call FeeCalcService.CalculateTXFee here — bridge TXs must remain fee-free.
+                completionTx.Fee = 0.00M;
+                completionTx.Build();
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(completionTx.Hash, privateKey, publicKey);
+                if (signature == "ERROR")
+                {
+                    SCLogUtility.Log($"TX signature failed for bridge exit-to-BTC complete. BurnHash: {baseBurnTxHash}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                    return (false, "TX Signature Failed");
+                }
+
+                completionTx.Signature = signature;
+
+                var result = await TransactionValidatorService.VerifyTX(completionTx);
+                if (!result.Item1)
+                {
+                    SCLogUtility.Log($"Bridge exit-to-BTC complete TX verify failed: {result.Item2}. BurnHash: {baseBurnTxHash}, BtcTxHash: {btcTxHash}",
+                        "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                    return (false, $"TX Verify Failed: {result.Item2}");
+                }
+
+                await TransactionData.AddTxToWallet(completionTx, true);
+                await AccountData.UpdateLocalBalance(signerAddress, completionTx.Fee + completionTx.Amount);
+                await TransactionData.AddToPool(completionTx);
+                await P2PClient.SendTXMempool(completionTx);
+
+                SCLogUtility.Log(
+                    $"vBTC V2 Bridge Exit-to-BTC Complete TX broadcast. TxHash: {completionTx.Hash}, BurnHash: {baseBurnTxHash}, BtcTxHash: {btcTxHash}",
+                    "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+
+                return (true, completionTx.Hash);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Bridge exit-to-BTC complete error: {ex.Message}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Broadcast <see cref="TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL"/> when FROST signing
+        /// fails for one or more lock allocations during a BTC exit. This transaction:
+        /// (1) Reverses the partial unlocks for the failed locks (restores their RemainingAmount).
+        /// (2) Blacklists those locks so they are never selected for future FIFO allocations.
+        /// (3) Allows the burn to be retried with different locks.
+        /// </summary>
+        /// <param name="signerAddress">Caster / validator VFX address.</param>
+        /// <param name="baseBurnTxHash">The original Base burn transaction hash.</param>
+        /// <param name="exitTxHash">The EXIT_TO_BTC transaction hash that reserved the locks.</param>
+        /// <param name="failedAllocations">The allocations whose contracts failed FROST signing.</param>
+        /// <param name="reason">Human-readable reason for the failure.</param>
+        public static async Task<(bool Success, string TxHashOrError)> CreateBridgeExitToBTCFailTx(
+            string signerAddress,
+            string baseBurnTxHash,
+            string exitTxHash,
+            List<PoolUnlockAllocation> failedAllocations,
+            string reason)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(signerAddress))
+                    return (false, "Signer address is required for bridge exit fail TX.");
+                if (string.IsNullOrWhiteSpace(baseBurnTxHash))
+                    return (false, "BaseBurnTxHash is required for bridge exit fail TX.");
+                if (failedAllocations == null || failedAllocations.Count == 0)
+                    return (false, "FailedAllocations must contain at least one allocation.");
+
+                var account = AccountData.GetSingleAccount(signerAddress);
+                if (account == null)
+                    return (false, $"Account not found: {signerAddress}");
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+                if (privateKey == null)
+                    return (false, $"Private key was null for account {signerAddress}");
+
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCBridgeExitToBTCFail()",
+                    BaseBurnTxHash = baseBurnTxHash.Trim(),
+                    ExitTxHash = exitTxHash?.Trim() ?? "",
+                    FailedAllocations = failedAllocations,
+                    Reason = reason
+                });
+
+                var failTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = signerAddress,
+                    ToAddress = signerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(signerAddress),
+                    TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL,
+                    Data = txData
+                };
+
+                failTx.Fee = 0.00M;
+                failTx.Build();
+
+                var signature = ReserveBlockCore.Services.SignatureService.CreateSignature(failTx.Hash, privateKey, publicKey);
+                if (signature == "ERROR")
+                    return (false, "TX Signature Failed");
+
+                failTx.Signature = signature;
+
+                var result = await TransactionValidatorService.VerifyTX(failTx);
+                if (!result.Item1)
+                    return (false, $"TX Verify Failed: {result.Item2}");
+
+                await TransactionData.AddTxToWallet(failTx, true);
+                await AccountData.UpdateLocalBalance(signerAddress, failTx.Fee + failTx.Amount);
+                await TransactionData.AddToPool(failTx);
+                await P2PClient.SendTXMempool(failTx);
+
+                SCLogUtility.Log(
+                    $"vBTC V2 Bridge Exit-to-BTC FAIL TX broadcast. TxHash: {failTx.Hash}, BurnHash: {baseBurnTxHash}, " +
+                    $"FailedLocks: {failedAllocations.Count}, Reason: {reason}",
+                    "VBTCService.CreateBridgeExitToBTCFailTx()");
+
+                return (true, failTx.Hash);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Bridge exit-to-BTC fail error: {ex.Message}", "VBTCService.CreateBridgeExitToBTCFailTx()");
+                return (false, $"Error: {ex.Message}");
+            }
+        }
+
+        #endregion
     }
 }

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
@@ -46,6 +46,7 @@
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Versioning" Version="5.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="6.0.14" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="6.0.1" />
+    <PackageReference Include="Nethereum.Web3" Version="4.21.4" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="Spectre.Console" Version="0.46.0" />
     <PackageReference Include="Swashbuckle.AspNetCore.Swagger" Version="6.5.0" />
@@ -54,6 +55,7 @@
     <PackageReference Include="System.Drawing.Common" Version="6.0.0" />
     <PackageReference Include="Trillium" Version="1.4.0" />
     <PackageReference Include="bblanchon.PDFium.macOS" Version="114.0.5731" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" Aliases="BouncyCryptography" />
   </ItemGroup>
 
   <ItemGroup>
@@ -121,12 +123,31 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <Link>libfrost_ffi.dylib</Link>
     </None>
+    <None Update="Plonk\win\plonk_ffi.dll" Condition="Exists('Plonk\win\plonk_ffi.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>plonk_ffi.dll</Link>
+    </None>
+    <None Update="Plonk\linux\libplonk_ffi.so" Condition="Exists('Plonk\linux\libplonk_ffi.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>libplonk_ffi.so</Link>
+    </None>
+    <None Update="Plonk\mac\libplonk_ffi.dylib" Condition="Exists('Plonk\mac\libplonk_ffi.dylib')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>libplonk_ffi.dylib</Link>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
     <Folder Include="Frost\linux\" />
     <Folder Include="Frost\mac\" />
     <Folder Include="Frost\win\" />
+    <Folder Include="BrowserWalletServices\" />
+    <Folder Include="Plonk\win\" />
+    <Folder Include="Plonk\linux\" />
+    <Folder Include="Plonk\mac\" />
   </ItemGroup>
 
 </Project>

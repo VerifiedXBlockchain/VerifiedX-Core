@@ -8,6 +8,7 @@ using ReserveBlockCore.Bitcoin.FROST.Models;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
+using System.Security.Cryptography;
 
 namespace ReserveBlockCore.Bitcoin.FROST
 {
@@ -28,8 +29,8 @@ namespace ReserveBlockCore.Bitcoin.FROST
             services.AddMvc();
             services.Configure<FormOptions>(x =>
             {
-                x.ValueLengthLimit = 4 * 1024 * 1024; // 4 MB
-                x.MultipartBodyLengthLimit = 4 * 1024 * 1024; // 4 MB
+                x.ValueLengthLimit = 8 * 1024 * 1024; // 8 MB (scaled for up to 200 FROST participants)
+                x.MultipartBodyLengthLimit = 8 * 1024 * 1024; // 8 MB
             });
         }
 
@@ -58,6 +59,65 @@ namespace ReserveBlockCore.Bitcoin.FROST
                         Timestamp = TimeUtil.GetTime()
                     }, Formatting.Indented);
                     await context.Response.WriteAsync(response);
+                });
+
+                /// <summary>
+                /// GET /frost/key/pubkey/{scUID} - Retrieve the FROST pubkey package for a contract.
+                /// Public data (no secrets) — needed by non-validator coordinators for signature aggregation.
+                /// Tries both SCUID and ceremonyId lookups in FrostValidatorKeyStore.
+                /// </summary>
+                endpoints.MapGet("/frost/key/pubkey/{scUID}", async context =>
+                {
+                    try
+                    {
+                        var scUID = context.Request.RouteValues["scUID"]?.ToString();
+                        if (string.IsNullOrEmpty(scUID))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "scUID required" }));
+                            return;
+                        }
+
+                        var myAddr = Globals.ValidatorAddress;
+                        string? pubkeyPackage = null;
+
+                        if (!string.IsNullOrEmpty(myAddr))
+                        {
+                            // Try SCUID lookup
+                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(scUID, myAddr);
+                            if (keyStore != null && !string.IsNullOrEmpty(keyStore.PubkeyPackage))
+                            {
+                                pubkeyPackage = keyStore.PubkeyPackage;
+                            }
+
+                            // Try GroupPublicKey fallback via local contract
+                            if (string.IsNullOrEmpty(pubkeyPackage))
+                            {
+                                var vbtcContract = ReserveBlockCore.Bitcoin.Models.VBTCContractV2.GetContract(scUID);
+                                if (vbtcContract != null && !string.IsNullOrEmpty(vbtcContract.FrostGroupPublicKey))
+                                {
+                                    var gpkStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
+                                    if (gpkStore != null && !string.IsNullOrEmpty(gpkStore.PubkeyPackage))
+                                        pubkeyPackage = gpkStore.PubkeyPackage;
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(pubkeyPackage))
+                        {
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, PubkeyPackage = pubkeyPackage }));
+                        }
+                        else
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Pubkey package not found" }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                    }
                 });
 
                 #endregion
@@ -138,7 +198,9 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Verify leader is a registered active vBTC validator
+                            // Unified MPC: Any VFX wallet owner can coordinate (not just validators).
+                            // The coordinator only orchestrates HTTP calls — it never touches private
+                            // key material. FROST protocol guarantees this is safe.
                             if (string.IsNullOrEmpty(request.LeaderAddress))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -150,22 +212,10 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var leaderValidator = VBTCValidator.GetValidator(request.LeaderAddress);
-                            if (leaderValidator == null || !leaderValidator.IsActive)
-                            {
-                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                                {
-                                    Success = false,
-                                    Message = "Leader is not a registered active vBTC validator"
-                                }));
-                                return;
-                            }
-
-                            // FIND-0013 Fix: Verify all participants are registered active validators
+                            // Verify all participants are registered active validators
                             foreach (var participantAddr in request.ParticipantAddresses)
                             {
-                                var participantValidator = VBTCValidator.GetValidator(participantAddr);
+                                var participantValidator = Services.VBTCValidatorRegistry.GetValidator(participantAddr);
                                 if (participantValidator == null || !participantValidator.IsActive)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -206,8 +256,10 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Determine this validator's participant index (1-based)
+                            // CRITICAL: Use sorted order to match BuildAddressToIdentifierMap
                             var myAddress = Globals.ValidatorAddress;
-                            var participantIndex = request.ParticipantAddresses.IndexOf(myAddress);
+                            var sortedParticipants = request.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
+                            var participantIndex = sortedParticipants.IndexOf(myAddress);
                             if (participantIndex < 0)
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -575,6 +627,21 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             }
                             var remappedCommitments = btreeMap.ToString(Newtonsoft.Json.Formatting.None);
                             LogUtility.Log($"[FROST] Round 2 BTreeMap built with {btreeMap.Count} entries for session {sessionId}", "FrostStartup.DKGRound2");
+
+                            // Pre-validate: FROST part2() requires exactly (maxSigners - 1) other participants' commitments.
+                            // If the count doesn't match, the FFI will return opaque error -4. Catch it early with a clear message.
+                            var expectedCommitmentCount = session.ParticipantAddresses.Count - 1; // maxSigners minus self
+                            if (btreeMap.Count != expectedCommitmentCount)
+                            {
+                                var errorMsg = $"FROST DKG Round 2 commitment count mismatch: expected {expectedCommitmentCount} " +
+                                    $"(maxSigners={session.ParticipantAddresses.Count} minus self), got {btreeMap.Count}. " +
+                                    $"This means {expectedCommitmentCount - btreeMap.Count} participant(s) did not complete Round 1. " +
+                                    $"The coordinator should retry with only the confirmed participants.";
+                                ErrorLogUtility.LogError(errorMsg, "FrostStartup.DKGRound2");
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = errorMsg }));
+                                return;
+                            }
 
                             // Call FROST native library to generate shares for other participants
                             var (sharesJson, round2Secret, errorCode) = FrostNative.DKGRound2GenerateShares(
@@ -1040,10 +1107,11 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                         session.DKGProof = GenerateDKGProof(session.SessionId, groupPubkey, pubkeyPackage);
                                         session.IsCompleted = true;
 
-                                        // Persist key package for future signing
+                                        // Persist key package for future signing, including sorted participant order
                                         var myAddr = Globals.ValidatorAddress;
                                         if (!string.IsNullOrEmpty(myAddr))
                                         {
+                                            var sortedR3Order = session.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
                                             FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
                                             {
                                                 SmartContractUID = session.SmartContractUID,
@@ -1051,6 +1119,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                                 KeyPackage = keyPackage,
                                                 PubkeyPackage = pubkeyPackage,
                                                 GroupPublicKey = groupPubkey,
+                                                ParticipantOrderJson = JsonConvert.SerializeObject(sortedR3Order),
                                                 CreatedTimestamp = TimeUtil.GetTime()
                                             });
                                         }
@@ -1307,7 +1376,45 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Verify leader is a registered active vBTC validator
+                            // FIND-028: Validator-side withdrawal dedup check.
+                            // If this signing request carries a WithdrawalRequestHash, verify that
+                            // we haven't already signed for this withdrawal. This is the network-level
+                            // defense against double-spend — even if the coordinator's code is modified.
+                            if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
+                            {
+                                var (blocked, reason) = ReserveBlockCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash);
+                                if (blocked)
+                                {
+                                    LogUtility.Log($"[FROST Dedup] BLOCKED signing start for withdrawal {request.WithdrawalRequestHash}: {reason}",
+                                        "FrostStartup.SignStart");
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = $"FIND-028: {reason}"
+                                    }));
+                                    return;
+                                }
+
+                                // Verify the withdrawal request exists in local DB and is not completed
+                                var withdrawalReq = ReserveBlockCore.Bitcoin.Models.VBTCWithdrawalRequest
+                                    .GetByTransactionHash(request.WithdrawalRequestHash);
+                                if (withdrawalReq != null && withdrawalReq.IsCompleted)
+                                {
+                                    LogUtility.Log($"[FROST Dedup] BLOCKED: Withdrawal already completed on-chain: {request.WithdrawalRequestHash}",
+                                        "FrostStartup.SignStart");
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = "Withdrawal request already completed on-chain"
+                                    }));
+                                    return;
+                                }
+                            }
+
+                            // Unified MPC: Any VFX wallet owner can coordinate signing (not just validators).
                             if (string.IsNullOrEmpty(request.LeaderAddress))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -1319,19 +1426,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
-                            var leaderValidator = VBTCValidator.GetValidator(request.LeaderAddress);
-                            if (leaderValidator == null || !leaderValidator.IsActive)
-                            {
-                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                                {
-                                    Success = false,
-                                    Message = "Leader is not a registered active vBTC validator"
-                                }));
-                                return;
-                            }
-
-                            // FIND-0013 Fix: Cryptographic signature verification
+                            // Cryptographic signature verification (any valid VFX address accepted)
                             if (string.IsNullOrEmpty(request.LeaderSignature))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -1358,18 +1453,44 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Load this validator's key package and generate nonces
-                            // Use CeremonyId (original DKG ceremony ID) for key lookup when available,
-                            // since key packages are stored under the ceremonyId during DKG (before scUID exists).
                             var myAddr = Globals.ValidatorAddress;
-                            var keyLookupId = !string.IsNullOrEmpty(request.CeremonyId) ? request.CeremonyId : request.SmartContractUID;
 
-                            if (request.SmartContractUID == "10e833cd81404daab9820d081dfefd06:1773167612")
-                                keyLookupId = "e4ac5290-5d9f-48db-be4f-909081276134";
+                            // Try direct SCUID lookup first
+                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(request.SmartContractUID, myAddr);
 
-                            if(request.SmartContractUID == "fd06ec2ce20a4a2aa7b3f2f2d2a92d11:1773205606")
-                                keyLookupId = "069f6dc5-d918-4018-a5b1-10e322f6b777";
+                            // If CeremonyId was provided and direct lookup failed, try ceremony ID
+                            if ((keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
+                                && !string.IsNullOrEmpty(request.CeremonyId))
+                            {
+                                keyStore = FrostValidatorKeyStore.GetKeyPackage(request.CeremonyId, myAddr);
+                                if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage))
+                                {
+                                    // Auto-fix: update the key store record to use the real SCUID
+                                    LogUtility.Log($"[FROST] Key found via CeremonyId fallback for SC={request.SmartContractUID} (was {request.CeremonyId}). Auto-updating.",
+                                        "FrostStartup.SignStart");
+                                    FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID);
+                                    keyStore.SmartContractUID = request.SmartContractUID;
+                                }
+                            }
 
-                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(keyLookupId, myAddr);
+                            // Fallback: look up via FrostGroupPublicKey from VBTCContractV2
+                            if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
+                            {
+                                var vbtcContract = ReserveBlockCore.Bitcoin.Models.VBTCContractV2.GetContract(request.SmartContractUID);
+                                if (vbtcContract != null && !string.IsNullOrEmpty(vbtcContract.FrostGroupPublicKey))
+                                {
+                                    keyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
+                                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage))
+                                    {
+                                        // Auto-fix: update the key store record to use the real SCUID
+                                        LogUtility.Log($"[FROST] Key found via GroupPublicKey fallback for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
+                                            "FrostStartup.SignStart");
+                                        FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID);
+                                        keyStore.SmartContractUID = request.SmartContractUID;
+                                    }
+                                }
+                            }
+
                             if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -1395,6 +1516,21 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // Load stored participant order from DKG key store if available
+                            List<string>? storedOrder = null;
+                            if (!string.IsNullOrEmpty(keyStore.ParticipantOrderJson))
+                            {
+                                try
+                                {
+                                    storedOrder = JsonConvert.DeserializeObject<List<string>>(keyStore.ParticipantOrderJson);
+                                    LogUtility.Log($"[FROST] Loaded stored participant order from DKG key store ({storedOrder?.Count ?? 0} entries)", "FrostStartup.SignStart");
+                                }
+                                catch (Exception orderEx)
+                                {
+                                    LogUtility.Log($"[FROST] WARNING: Failed to parse stored participant order: {orderEx.Message}. Will fall back to sorted order.", "FrostStartup.SignStart");
+                                }
+                            }
+
                             // Create signing session with FROST state
                             var signingSession = new SigningSession
                             {
@@ -1402,11 +1538,13 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                 MessageHash = request.MessageHash,
                                 SmartContractUID = request.SmartContractUID,
                                 LeaderAddress = request.LeaderAddress,
+                                WithdrawalRequestHash = request.WithdrawalRequestHash,  // FIND-028
                                 SignerAddresses = request.SignerAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
                                 StartTimestamp = TimeUtil.GetTime(),
                                 MyKeyPackage = keyStore.KeyPackage,
-                                NonceSecret = nonceSecret
+                                NonceSecret = nonceSecret,
+                                StoredParticipantOrder = storedOrder
                             };
 
                             // Auto-store this validator's nonce commitment
@@ -1414,6 +1552,12 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                             if (!FrostSessionStorage.SigningSessions.TryAdd(request.SessionId, signingSession))
                             {
+                                // FIND-028: Record failed if we can't create session (conflict)
+                                if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
+                                {
+                                    ReserveBlockCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                        .RecordSigningFailed(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId);
+                                }
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
@@ -1421,6 +1565,13 @@ namespace ReserveBlockCore.Bitcoin.FROST
                                     Message = "Signing session already exists"
                                 }));
                                 return;
+                            }
+
+                            // FIND-028: Record signing started for withdrawal dedup
+                            if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
+                            {
+                                ReserveBlockCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .RecordSigningStarted(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId);
                             }
 
                             LogUtility.Log($"[FROST] Signing ceremony started with real nonce generation. Session: {request.SessionId}", "FrostStartup.SignStart");
@@ -1690,7 +1841,9 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                             if (addressNonces != null && addressNonces.Count > 0 && session.SignerAddresses != null && session.SignerAddresses.Count > 0)
                             {
-                                var signerAddrToId = BuildAddressToIdentifierMap(session.SignerAddresses);
+                            // Use stored participant order from DKG if available, otherwise fall back to sorted order
+                            var addressListForMapping = session.StoredParticipantOrder ?? session.SignerAddresses;
+                            var signerAddrToId = BuildAddressToIdentifierMap(addressListForMapping);
                                 var noncesBTreeMap = new Newtonsoft.Json.Linq.JObject();
 
                                 foreach (var kvp in addressNonces)
@@ -1737,6 +1890,15 @@ namespace ReserveBlockCore.Bitcoin.FROST
                             // Store this validator's signature share
                             var myAddr = Globals.ValidatorAddress ?? "";
                             session.Round2Shares.TryAdd(myAddr, signatureShare);
+
+                            // FIND-028: Record signing completed for withdrawal dedup tracking.
+                            // After generating a signature share, this validator has committed its key share
+                            // to this withdrawal. It MUST NOT sign for the same withdrawal again.
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash))
+                            {
+                                ReserveBlockCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .RecordSigningCompleted(session.SmartContractUID, session.WithdrawalRequestHash, sessionId);
+                            }
 
                             LogUtility.Log($"[FROST] Signing Round 2 signature share generated via native library for session {sessionId}", "FrostStartup.SignRound2");
 
@@ -1881,149 +2043,271 @@ namespace ReserveBlockCore.Bitcoin.FROST
 
                 #endregion
 
-                #region MPC Ceremony Endpoints (Public - for wallet node delegation)
+                #region Key Backup Endpoints
 
                 /// <summary>
-                /// POST /frost/mpc/initiate/{ownerAddress} - Public endpoint for wallet nodes to delegate
-                /// MPC ceremony initiation to this validator. Calls into VBTCController's shared ceremony storage.
+                /// POST /frost/backup/store — Store a peer's encrypted FROST key backup.
+                /// Called by the validator that just completed DKG (broadcasts to all peers).
                 /// </summary>
-                endpoints.MapPost("/frost/mpc/initiate/{ownerAddress}", async context =>
-                {
-                    try
-                    {
-                        var ownerAddress = context.Request.RouteValues["ownerAddress"] as string;
-
-                        if (string.IsNullOrEmpty(ownerAddress))
-                        {
-                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                            {
-                                Success = false,
-                                Message = "Owner address is required"
-                            }));
-                            return;
-                        }
-
-                        // Delegate to VBTCController's static method (same ceremony storage)
-                        var result = await ReserveBlockCore.Bitcoin.Controllers.VBTCController.InitiateMPCCeremonyStatic(ownerAddress);
-
-                        context.Response.StatusCode = StatusCodes.Status200OK;
-                        context.Response.ContentType = "application/json";
-                        await context.Response.WriteAsync(result);
-                    }
-                    catch (Exception ex)
-                    {
-                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                        {
-                            Success = false,
-                            Message = $"Error: {ex.Message}"
-                        }));
-                    }
-                });
-
-                /// <summary>
-                /// GET /frost/mpc/status/{ceremonyId} - Public endpoint for wallet nodes to poll
-                /// MPC ceremony status from this validator. Reads from VBTCController's shared ceremony storage.
-                /// </summary>
-                endpoints.MapGet("/frost/mpc/status/{ceremonyId}", async context =>
-                {
-                    try
-                    {
-                        var ceremonyId = context.Request.RouteValues["ceremonyId"] as string;
-
-                        if (string.IsNullOrEmpty(ceremonyId))
-                        {
-                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                            {
-                                Success = false,
-                                Message = "Ceremony ID is required"
-                            }));
-                            return;
-                        }
-
-                        // Delegate to VBTCController's static method (same ceremony storage)
-                        var result = ReserveBlockCore.Bitcoin.Controllers.VBTCController.GetCeremonyStatusStatic(ceremonyId);
-
-                        context.Response.StatusCode = StatusCodes.Status200OK;
-                        context.Response.ContentType = "application/json";
-                        await context.Response.WriteAsync(result);
-                    }
-                    catch (Exception ex)
-                    {
-                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                        {
-                            Success = false,
-                            Message = $"Error: {ex.Message}"
-                        }));
-                    }
-                });
-
-                /// <summary>
-                /// FIND-027 Fix: POST /frost/mpc/withdrawal/complete - Public endpoint for wallet nodes to
-                /// delegate withdrawal completion (FROST signing ceremony) to this validator.
-                /// Non-validator wallet nodes cannot coordinate FROST signing because they lack
-                /// validator keys and FROST key packages. This mirrors the /frost/mpc/initiate pattern.
-                /// </summary>
-                endpoints.MapPost("/frost/mpc/withdrawal/complete", async context =>
+                endpoints.MapPost("/frost/backup/store", async context =>
                 {
                     try
                     {
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
-                            var payload = JsonConvert.DeserializeObject<dynamic>(body);
+                            var request = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(body);
 
-                            string scUID = payload?.SmartContractUID;
-                            string withdrawalRequestHash = payload?.WithdrawalRequestHash;
-                            
-                            // Parse optional delegated withdrawal details (sent by non-validator nodes)
-                            decimal? delegatedAmount = null;
-                            string? delegatedBTCDestination = null;
-                            int? delegatedFeeRate = null;
-
-                            try { delegatedAmount = (decimal?)payload?.Amount; } catch { }
-                            try { delegatedBTCDestination = (string?)payload?.BTCDestination; } catch { }
-                            try { delegatedFeeRate = (int?)payload?.FeeRate; } catch { }
-
-                            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                            if (request == null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                                {
-                                    Success = false,
-                                    Message = "SmartContractUID and WithdrawalRequestHash are required"
-                                }));
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid request body" }));
                                 return;
                             }
 
-                            LogUtility.Log($"[FROST MPC] Received delegated withdrawal request. scUID: {scUID}, hash: {withdrawalRequestHash}, delegatedAmount: {delegatedAmount}, delegatedDest: {delegatedBTCDestination}",
-                                "FrostStartup.WithdrawalComplete");
+                            var ownerAddress = request["OwnerAddress"]?.ToString();
+                            var smartContractUID = request["SmartContractUID"]?.ToString();
+                            var encryptedBlob = request["EncryptedBlob"]?.ToString();
+                            var plaintextHash = request["PlaintextHash"]?.ToString();
+                            var version = request["Version"]?.ToObject<int>() ?? 1;
+                            var timestamp = request["Timestamp"]?.ToObject<long>() ?? 0;
+                            var signature = request["Signature"]?.ToString();
 
-                            // Delegate to VBTCController's static method which runs the FROST signing locally
-                            var result = await ReserveBlockCore.Bitcoin.Controllers.VBTCController.CompleteWithdrawalStatic(
-                                scUID, withdrawalRequestHash, delegatedAmount, delegatedBTCDestination, delegatedFeeRate);
+                            // Validate required fields
+                            if (string.IsNullOrEmpty(ownerAddress) || string.IsNullOrEmpty(smartContractUID) ||
+                                string.IsNullOrEmpty(encryptedBlob) || string.IsNullOrEmpty(signature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Missing required fields" }));
+                                return;
+                            }
+
+                            // Size limit: 16 KB for encrypted blob
+                            if (encryptedBlob.Length > 16 * 1024)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "EncryptedBlob exceeds 16 KB limit" }));
+                                return;
+                            }
+
+                            // Verify timestamp is within ±5 minutes (replay protection)
+                            var now = TimeUtil.GetTime();
+                            if (Math.Abs(now - timestamp) > 300)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Timestamp outside ±5 minute window" }));
+                                return;
+                            }
+
+                            // Verify owner is a registered active validator
+                            var ownerValidator = Services.VBTCValidatorRegistry.GetValidator(ownerAddress);
+                            if (ownerValidator == null || !ownerValidator.IsActive)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Owner is not a registered active validator" }));
+                                return;
+                            }
+
+                            // S3C §8: residency — this node stores a backup ONLY for a contract whose
+                            // DKG snapshot it belongs to. Enforces "S3C key material lives only on S3C
+                            // infra" regardless of who broadcasts. Legacy no-snapshot contracts: accept.
+                            var storeSnapshot = Services.VBTCService.ResolveContractSnapshot(smartContractUID);
+                            if (storeSnapshot.Count > 0 && !storeSnapshot.Contains(Globals.ValidatorAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This node is not in the contract's DKG snapshot; refusing to store backup." }));
+                                return;
+                            }
+
+                            // Verify signature: message = "{OwnerAddress}.{SmartContractUID}.{Timestamp}"
+                            var signMessage = $"{ownerAddress}.{smartContractUID}.{timestamp}";
+                            var sigValid = SignatureService.VerifySignature(ownerAddress, signMessage, signature);
+                            if (!sigValid)
+                            {
+                                ErrorLogUtility.LogError($"Invalid signature for backup store from {ownerAddress}", "FrostStartup.BackupStore");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid signature" }));
+                                return;
+                            }
+
+                            // Store the backup
+                            var backup = new FrostPeerKeyBackup
+                            {
+                                OwnerAddress = ownerAddress,
+                                SmartContractUID = smartContractUID,
+                                EncryptedBlob = encryptedBlob,
+                                PlaintextHash = plaintextHash ?? "",
+                                Version = version,
+                                StoredTimestamp = now
+                            };
+
+                            FrostPeerKeyBackup.SaveBackup(backup);
+
+                            // Compute hash of stored blob for verification by sender
+                            var storedHash = Convert.ToHexString(
+                                SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(encryptedBlob))).ToLower();
 
                             context.Response.StatusCode = StatusCodes.Status200OK;
-                            context.Response.ContentType = "application/json";
-                            await context.Response.WriteAsync(result);
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                StoredHash = storedHash
+                            }));
                         }
                     }
                     catch (Exception ex)
                     {
-                        ErrorLogUtility.LogError($"Withdrawal delegation error: {ex.Message}", "FrostStartup.WithdrawalComplete");
+                        ErrorLogUtility.LogError($"Backup store error: {ex.Message}", "FrostStartup.BackupStore");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/backup/recover — Return stored encrypted backups to an authenticated requester.
+                /// Called by a wiped validator requesting its own backups.
+                /// </summary>
+                endpoints.MapPost("/frost/backup/recover", async context =>
+                {
+                    try
+                    {
+                        using (var reader = new StreamReader(context.Request.Body))
                         {
-                            Success = false,
-                            Message = $"Error: {ex.Message}"
-                        }));
+                            var body = await reader.ReadToEndAsync();
+                            var request = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(body);
+
+                            if (request == null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid request body" }));
+                                return;
+                            }
+
+                            var requesterAddress = request["RequesterAddress"]?.ToString();
+                            var timestamp = request["Timestamp"]?.ToObject<long>() ?? 0;
+                            var signature = request["Signature"]?.ToString();
+
+                            if (string.IsNullOrEmpty(requesterAddress) || string.IsNullOrEmpty(signature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Missing required fields" }));
+                                return;
+                            }
+
+                            // Verify timestamp is within ±5 minutes
+                            var now = TimeUtil.GetTime();
+                            if (Math.Abs(now - timestamp) > 300)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Timestamp outside ±5 minute window" }));
+                                return;
+                            }
+
+                            // Verify requester is a registered active validator
+                            var requesterValidator = Services.VBTCValidatorRegistry.GetValidator(requesterAddress);
+                            if (requesterValidator == null || !requesterValidator.IsActive)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Requester is not a registered active validator" }));
+                                return;
+                            }
+
+                            // Verify signature: message = "frost-recovery.{RequesterAddress}.{Timestamp}"
+                            var signMessage = $"frost-recovery.{requesterAddress}.{timestamp}";
+                            var sigValid = SignatureService.VerifySignature(requesterAddress, signMessage, signature);
+                            if (!sigValid)
+                            {
+                                ErrorLogUtility.LogError($"Invalid signature for backup recovery from {requesterAddress}", "FrostStartup.BackupRecover");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid signature" }));
+                                return;
+                            }
+
+                            // Retrieve all stored backups for this owner
+                            var backups = FrostPeerKeyBackup.GetBackupsForOwner(requesterAddress);
+
+                            var backupItems = backups.Select(b => new
+                            {
+                                b.SmartContractUID,
+                                b.EncryptedBlob,
+                                b.PlaintextHash,
+                                b.Version
+                            }).ToList();
+
+                            LogUtility.Log($"[FROST Backup] Recovery: returning {backupItems.Count} backup(s) to {requesterAddress}",
+                                "FrostStartup.BackupRecover");
+
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                Backups = backupItems
+                            }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Backup recover error: {ex.Message}", "FrostStartup.BackupRecover");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/backup/check — Lightweight probe to check if a backup already exists.
+                /// Used by the periodic smart re-broadcast to avoid sending full blobs unnecessarily.
+                /// </summary>
+                endpoints.MapPost("/frost/backup/check", async context =>
+                {
+                    try
+                    {
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var body = await reader.ReadToEndAsync();
+                            var request = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(body);
+
+                            if (request == null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { HasBackup = false, HashMatch = false }));
+                                return;
+                            }
+
+                            var ownerAddress = request["OwnerAddress"]?.ToString();
+                            var smartContractUID = request["SmartContractUID"]?.ToString();
+                            var plaintextHash = request["PlaintextHash"]?.ToString();
+
+                            if (string.IsNullOrEmpty(ownerAddress) || string.IsNullOrEmpty(smartContractUID))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { HasBackup = false, HashMatch = false }));
+                                return;
+                            }
+
+                            var existing = FrostPeerKeyBackup.GetBackup(ownerAddress, smartContractUID);
+                            var hasBackup = existing != null;
+                            var hashMatch = hasBackup && !string.IsNullOrEmpty(plaintextHash)
+                                && existing!.PlaintextHash == plaintextHash;
+
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                HasBackup = hasBackup,
+                                HashMatch = hashMatch
+                            }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Backup check error: {ex.Message}", "FrostStartup.BackupCheck");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { HasBackup = false, HashMatch = false }));
                     }
                 });
 
                 #endregion
+
+                // Unified MPC: Delegation endpoints removed — wallet owners coordinate directly.
             });
         }
 
@@ -2049,6 +2333,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 // Build BTreeMap<Identifier, round1::Package> from commitments (exclude self)
                 // FROST part3 expects only OTHER participants' round1 packages
                 var myAddr2 = Globals.ValidatorAddress;
+                var sortedParticipantOrder = session.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
                 var addrToIdMap = BuildAddressToIdentifierMap(session.ParticipantAddresses);
                 var round1BTreeMap = new Newtonsoft.Json.Linq.JObject();
                 foreach (var kvp in session.Round1Commitments)
@@ -2107,7 +2392,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                 {
                     session.Round3Verifications.TryAdd(myAddr, true);
 
-                    // Persist key package for future signing
+                    // Persist key package for future signing, including the sorted participant order
                     FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
                     {
                         SmartContractUID = session.SmartContractUID,
@@ -2115,6 +2400,7 @@ namespace ReserveBlockCore.Bitcoin.FROST
                         KeyPackage = keyPackage,
                         PubkeyPackage = pubkeyPackage,
                         GroupPublicKey = groupPubkey,
+                        ParticipantOrderJson = Newtonsoft.Json.JsonConvert.SerializeObject(sortedParticipantOrder),
                         CreatedTimestamp = TimeUtil.GetTime()
                     });
                 }
@@ -2148,12 +2434,21 @@ namespace ReserveBlockCore.Bitcoin.FROST
         /// <summary>
         /// Build a lookup from VFX address to FROST Identifier hex string using participant list ordering.
         /// </summary>
+        /// <summary>
+        /// Build a deterministic mapping from participant addresses to FROST Identifiers.
+        /// CRITICAL: Addresses are sorted alphabetically before assigning identifiers so that
+        /// the same set of addresses ALWAYS produces the same identifier mapping, regardless
+        /// of the order they were returned by GetActiveValidators() or any other source.
+        /// This ensures DKG and signing ceremonies use consistent identifiers even when
+        /// the validator list grows, shrinks, or the dictionary iteration order changes.
+        /// </summary>
         private static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
         {
+            var sorted = participantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();
-            for (int i = 0; i < participantAddresses.Count; i++)
+            for (int i = 0; i < sorted.Count; i++)
             {
-                map[participantAddresses[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
+                map[sorted[i]] = ParticipantIndexToFrostIdentifier(i + 1); // 1-based
             }
             return map;
         }

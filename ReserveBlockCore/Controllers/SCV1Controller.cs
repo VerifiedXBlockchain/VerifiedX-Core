@@ -257,7 +257,7 @@ namespace ReserveBlockCore.Controllers
                     //x => x.Phones.Select(p => p.Number).Any(n => n > 5)`'
                     scs = SmartContractMain.SmartContractData.GetSCs()
                     .Find(x => x.Features == null ||
-                        !x.Features.Where(y => y != null && y.FeatureName == FeatureName.Tokenization).Any())
+                        !x.Features.Where(y => y != null && (y.FeatureName == FeatureName.Tokenization || y.FeatureName == FeatureName.TokenizationV2)).Any())
                     .ToList();
                 }
 

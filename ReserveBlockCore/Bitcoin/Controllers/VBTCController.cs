@@ -1,15 +1,21 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Bitcoin.Models;
+using VbtcBaseBridge = ReserveBlockCore.Bitcoin.Services.BaseBridgeService;
+using VbtcBaseBridgeExit = ReserveBlockCore.Bitcoin.Services.BaseBridgeExitWatchService;
 using ReserveBlockCore.Controllers;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.Privacy;
 using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.Privacy;
 using ReserveBlockCore.Services;
 using ReserveBlockCore.Utilities;
+using FrostBlacklist = ReserveBlockCore.Bitcoin.Services.FrostContractBlacklist;
 using System.Collections.Concurrent;
+using System.Text;
 
 namespace ReserveBlockCore.Bitcoin.Controllers
 {
@@ -221,11 +227,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 ceremony.Status = CeremonyStatus.ValidatingValidators;
                 ceremony.ProgressPercentage = 5;
 
-                var currentBlock = Globals.LastBlock.Height;
-                var activeValidators = VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
-                var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+                // Get candidate validators — these are all known active validators.
+                // Some may be offline. We probe reachability to filter to only online ones.
+                var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
 
-                if (activeValidators == null || !activeValidators.Any())
+                if (allValidators == null || !allValidators.Any())
                 {
                     ceremony.Status = CeremonyStatus.Failed;
                     ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
@@ -233,16 +239,26 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return;
                 }
 
-                var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
-                if (activeValidators.Count < requiredActiveValidators)
+                LogUtility.Log($"[MPC Ceremony] Found {allValidators.Count} registered validators. Probing FROST port reachability...", 
+                    "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+
+                // Probe which validators are actually reachable on the FROST port
+                var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+
+                if (activeValidators.Count < 3) // FROST minimum: need at least 3 for threshold signing
                 {
                     ceremony.Status = CeremonyStatus.Failed;
-                    ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}";
+                    ceremony.ErrorMessage = $"Insufficient reachable validators for DKG ceremony. " +
+                        $"Only {activeValidators.Count} of {allValidators.Count} registered validators are online on FROST port " +
+                        $"(minimum 3 required).";
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    LogUtility.Log($"[MPC Ceremony] {ceremony.ErrorMessage}", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
                     return;
                 }
 
-                ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
+                LogUtility.Log($"[MPC Ceremony] Starting DKG with {activeValidators.Count} reachable validators " +
+                    $"(out of {allValidators.Count} registered).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+
                 ceremony.ProgressPercentage = 15;
                 ceremony.Status = CeremonyStatus.Round1InProgress;
 
@@ -271,6 +287,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
+
+                // Snapshot only the validators that actually participated (responded with shares)
+                ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+                LogUtility.Log($"[MPC Ceremony] Validator snapshot built from {dkgResult.ParticipantAddresses.Count} actual respondents " +
+                    $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
 
                 ceremony.DepositAddress = dkgResult.TaprootAddress;
                 ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
@@ -325,14 +346,14 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             try
             {
                 var validators = activeOnly
-                    ? VBTCValidator.GetActiveValidators()
-                    : VBTCValidator.GetAllValidators();
+                    ? Services.VBTCValidatorRegistry.GetActiveValidators()
+                    : Services.VBTCValidatorRegistry.GetActiveValidators();
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Validators retrieved",
-                    Validators = validators ?? new List<VBTCValidator>()
+                    Validators = validators
                 });
             }
             catch (Exception ex)
@@ -353,12 +374,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             try
             {
                 // Update validator's last heartbeat block
-                var validator = VBTCValidator.GetValidator(validatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
                 if (validator == null)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
                 }
-                VBTCValidator.UpdateHeartbeat(validatorAddress, Globals.LastBlock.Height);
+                // No DB update needed — VBTCValidatorRegistry derives state from block scanning
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -385,7 +406,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         {
             try
             {
-                var validator = VBTCValidator.GetValidator(validatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
                 if (validator == null)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator not found" });
@@ -416,12 +437,17 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         /// <returns>Ceremony ID for tracking progress</returns>
         [HttpPost("InitiateMPCCeremony/{ownerAddress}")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> InitiateMPCCeremony(string ownerAddress)
+        public async Task<string> InitiateMPCCeremony(string ownerAddress, bool forcePublic = false)
         {
             try
             {
                 if (string.IsNullOrEmpty(ownerAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address cannot be null" });
+
+                // S3C §2.1: if S3C= is configured but invalid, refuse to mint rather than silently
+                // falling back to the public pool. forcePublic companions (§5) are exempt.
+                if (!forcePublic && Globals.S3CConfigInvalid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "S3C configuration is present but invalid; refusing to mint. Fix the S3C= config and restart." });
 
                 // Anti-spam: Check if this owner already has an active (non-terminal) ceremony
                 var existingActive = _ceremonies.Values.FirstOrDefault(c =>
@@ -463,7 +489,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     InitiatedTimestamp = currentTime,
                     RequiredThreshold = 51,
                     ProgressPercentage = 0,
-                    CurrentRound = 0
+                    CurrentRound = 0,
+                    // S3C §7.1: global config sets the default; companion creation forces public.
+                    IsS3C = forcePublic ? false : Globals.UseS3C
                 };
 
                 // Store in memory
@@ -601,9 +629,106 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
         /// <summary>
         /// Background task that executes the MPC (FROST DKG) ceremony.
-        /// If this node is a validator, it coordinates the ceremony locally.
-        /// If this node is a regular wallet, it delegates to a remote validator.
+        /// Unified MPC: Any VFX wallet owner can coordinate directly — no delegation needed.
         /// </summary>
+        /// <summary>
+        /// S3C §11: pre-flight status — per configured validator, whether it is registered+active+
+        /// IsS3C on-chain, reachable on the FROST port, and whether its config IP differs from the
+        /// on-chain IP (informational; config wins). Operators confirm all-green before minting.
+        /// </summary>
+        [HttpGet("GetS3CStatus")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetS3CStatus()
+        {
+            try
+            {
+                var validators = await Services.S3CService.ValidatePoolStatus();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Enabled = Globals.UseS3C,
+                    ConfigInvalid = Globals.S3CConfigInvalid,
+                    IsS3CValidator = Globals.IsS3CValidator,
+                    Validators = validators.Select(v => new
+                    {
+                        v.IPAddress,
+                        v.ValidatorAddress,
+                        v.RegisteredOnChain,
+                        v.Reachable,
+                        v.ConfigIPMismatch
+                    })
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// S3C §12: one-click auto-bridge — S3C vBTC → public companion → Base. Returns immediately
+        /// with the gas address + ETH balance so the user funds gas during the BTC-withdrawal window.
+        /// In-memory/best-effort: must run on the node that owns (or will create) the companion.
+        /// </summary>
+        [HttpPost("StartS3CAutoBridge")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> StartS3CAutoBridge([FromBody] S3CAutoBridgePayload payload)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.S3CContractUID) ||
+                    string.IsNullOrEmpty(payload.RequesterAddress) || string.IsNullOrEmpty(payload.EvmDestination) ||
+                    payload.Amount <= 0M)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "S3CContractUID, RequesterAddress, EvmDestination, and a positive Amount are required." }));
+
+                var state = Services.S3CAutoBridgeService.StartAutoBridge(
+                    payload.S3CContractUID, payload.RequesterAddress, payload.Amount, payload.EvmDestination);
+
+                return Task.FromResult(JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    state.OrchestrationId,
+                    state.PublicScUID,
+                    state.PublicDepositAddress,
+                    state.BaseGasAddress,
+                    state.BaseGasEthBalance,
+                    Status = state.Status.ToString()
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+            }
+        }
+
+        /// <summary>
+        /// S3C §12: status of an in-memory auto-bridge orchestration (nothing is persisted, so this
+        /// is the only way to track progress). Returns the current state + amounts + lock id + error.
+        /// </summary>
+        [HttpGet("GetS3CAutoBridgeStatus/{orchestrationId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string GetS3CAutoBridgeStatus(string orchestrationId)
+        {
+            var s = Services.S3CAutoBridgeService.GetStatus(orchestrationId);
+            if (s == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Orchestration not found (it may have been lost on restart — finish via the manual path)." });
+
+            return JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                s.OrchestrationId,
+                Status = s.Status.ToString(),
+                s.PublicScUID,
+                s.PublicDepositAddress,
+                s.BaseGasAddress,
+                s.BaseGasEthBalance,
+                s.RequestedAmount,
+                s.ArrivedAmount,
+                s.LockId,
+                s.Error
+            });
+        }
+
         private async Task ExecuteMPCCeremony(string ceremonyId)
         {
             try
@@ -611,14 +736,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (!_ceremonies.TryGetValue(ceremonyId, out var ceremony))
                     return;
 
-                // Non-validator wallet node: delegate the entire ceremony to a remote validator
-                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                {
-                    await ExecuteMPCCeremonyViaRemoteValidator(ceremonyId, ceremony);
-                    return;
-                }
-
-                // Validator node: coordinate the ceremony locally
+                // Unified path: always coordinate locally (owner signs with AddressSignature)
                 await ExecuteMPCCeremonyLocally(ceremonyId, ceremony);
             }
             catch (Exception ex)
@@ -641,12 +759,24 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             ceremony.Status = CeremonyStatus.ValidatingValidators;
             ceremony.ProgressPercentage = 5;
 
-            // Step 1: Get list of active validators
-            var currentBlock = Globals.LastBlock.Height;
-            var activeValidators = VBTCValidator.GetActiveValidatorsSinceBlock(currentBlock - 1000);
-            var totalRegisteredValidators = VBTCValidator.GetAllValidators()?.Count ?? 0;
+            // Get candidate validators. S3C §7.1: route on the ceremony's pool, not global state.
+            // S3C ceremony → the configured private pool (all-or-nothing); public → S3C-excluded.
+            List<ReserveBlockCore.Bitcoin.Models.VBTCValidator> allValidators;
+            try
+            {
+                allValidators = ceremony.IsS3C
+                    ? Services.S3CService.GetValidatorsForCeremony()
+                    : Services.VBTCValidatorRegistry.GetPublicValidators();
+            }
+            catch (Exception s3cEx)
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = s3cEx.Message;
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
 
-            if (activeValidators == null || !activeValidators.Any())
+            if (allValidators == null || !allValidators.Any())
             {
                 ceremony.Status = CeremonyStatus.Failed;
                 ceremony.ErrorMessage = "No active validators available for vBTC V2 contract creation.";
@@ -654,16 +784,26 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 return;
             }
 
-            var requiredActiveValidators = (int)Math.Ceiling(totalRegisteredValidators * 0.75);
-            if (activeValidators.Count < requiredActiveValidators)
+            LogUtility.Log($"[MPC Ceremony] Found {allValidators.Count} registered validators. Probing FROST port reachability...",
+                "VBTCController.ExecuteMPCCeremonyLocally");
+
+            // Probe which validators are actually reachable on the FROST port
+            var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+
+            if (activeValidators.Count < 3) // FROST minimum: need at least 3 for threshold signing
             {
                 ceremony.Status = CeremonyStatus.Failed;
-                ceremony.ErrorMessage = $"Insufficient active validators. Required: {requiredActiveValidators}, Active: {activeValidators.Count}";
+                ceremony.ErrorMessage = $"Insufficient reachable validators for DKG ceremony. " +
+                    $"Only {activeValidators.Count} of {allValidators.Count} registered validators are online on FROST port " +
+                    $"(minimum 3 required).";
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                LogUtility.Log($"[MPC Ceremony] {ceremony.ErrorMessage}", "VBTCController.ExecuteMPCCeremonyLocally");
                 return;
             }
 
-            ceremony.ValidatorSnapshot = activeValidators.Select(v => v.ValidatorAddress).ToList();
+            LogUtility.Log($"[MPC Ceremony] Starting DKG with {activeValidators.Count} reachable validators " +
+                $"(out of {allValidators.Count} registered).", "VBTCController.ExecuteMPCCeremonyLocally");
+
             ceremony.ProgressPercentage = 15;
 
             // Execute FROST DKG Ceremony via FrostMPCService with progress callback
@@ -696,6 +836,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 return;
             }
 
+            // Snapshot only the validators that actually participated (responded with shares)
+            ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+            LogUtility.Log($"[MPC Ceremony] Validator snapshot built from {dkgResult.ParticipantAddresses.Count} actual respondents " +
+                $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocally");
+
             // DKG ceremony completed successfully
             ceremony.DepositAddress = dkgResult.TaprootAddress;
             ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
@@ -705,448 +850,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             ceremony.Status = CeremonyStatus.Completed;
             ceremony.ProgressPercentage = 100;
             ceremony.CompletedTimestamp = TimeUtil.GetTime();
-        }
-
-        /// <summary>
-        /// Execute MPC ceremony by delegating to a remote validator (wallet node path).
-        /// The wallet node sends the ceremony request to a validator, which coordinates the
-        /// actual FROST DKG. The wallet then polls for completion and syncs the results locally.
-        /// </summary>
-        private async Task ExecuteMPCCeremonyViaRemoteValidator(string ceremonyId, MPCCeremonyState ceremony)
-        {
-            ceremony.Status = CeremonyStatus.ValidatingValidators;
-            ceremony.ProgressPercentage = 5;
-
-            // Step 1: Discover active validators from the network
-            var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
-            if (activeValidators == null || !activeValidators.Any())
-            {
-                ceremony.Status = CeremonyStatus.Failed;
-                ceremony.ErrorMessage = "No active validators available on the network. Cannot delegate MPC ceremony.";
-                ceremony.CompletedTimestamp = TimeUtil.GetTime();
-                return;
-            }
-
-            // Step 2: Try each validator until one successfully initiates the ceremony
-            string? remoteValidatorIP = null;
-            string? remoteCeremonyId = null;
-
-            foreach (var validator in activeValidators)
-            {
-                try
-                {
-                    var ip = validator.IPAddress?.Replace("::ffff:", "");
-                    if (string.IsNullOrEmpty(ip)) continue;
-
-                    var url = $"http://{ip}:{Globals.FrostValidatorPort}/frost/mpc/initiate/{ceremony.OwnerAddress}";
-                    using var client = Globals.HttpClientFactory.CreateClient();
-                    client.Timeout = TimeSpan.FromSeconds(15);
-
-                    var response = await client.PostAsync(url, null);
-                    if (!response.IsSuccessStatusCode) continue;
-
-                    var responseBody = await response.Content.ReadAsStringAsync();
-                    var json = Newtonsoft.Json.Linq.JObject.Parse(responseBody);
-
-                    if (json["Success"]?.Value<bool>() == true && !string.IsNullOrEmpty(json["CeremonyId"]?.Value<string>()))
-                    {
-                        remoteValidatorIP = ip;
-                        remoteCeremonyId = json["CeremonyId"]!.Value<string>();
-
-                        LogUtility.Log($"[FROST MPC] Wallet node delegated ceremony to validator {validator.ValidatorAddress} ({ip}). Remote CeremonyId: {remoteCeremonyId}",
-                            "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
-                        break;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogUtility.Log($"[FROST MPC] Failed to delegate to validator {validator.ValidatorAddress}: {ex.Message}",
-                        "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
-                }
-            }
-
-            if (string.IsNullOrEmpty(remoteValidatorIP) || string.IsNullOrEmpty(remoteCeremonyId))
-            {
-                ceremony.Status = CeremonyStatus.Failed;
-                ceremony.ErrorMessage = "Failed to delegate MPC ceremony to any validator. No validator accepted the request.";
-                ceremony.CompletedTimestamp = TimeUtil.GetTime();
-                return;
-            }
-
-            // Step 3: Mark ceremony as remote and store delegation info
-            ceremony.IsRemote = true;
-            ceremony.RemoteValidatorIP = remoteValidatorIP;
-            ceremony.RemoteCeremonyId = remoteCeremonyId;
-            ceremony.ProgressPercentage = 10;
-            ceremony.Status = CeremonyStatus.Round1InProgress;
-
-            // Step 4: Poll the remote validator until the ceremony completes or fails
-            var maxPollAttempts = 120; // Up to ~4 minutes (120 * 2s)
-            var pollInterval = 2000; // 2 seconds
-
-            for (int attempt = 0; attempt < maxPollAttempts; attempt++)
-            {
-                await Task.Delay(pollInterval);
-
-                try
-                {
-                    var statusUrl = $"http://{remoteValidatorIP}:{Globals.FrostValidatorPort}/frost/mpc/status/{remoteCeremonyId}";
-                    using var client = Globals.HttpClientFactory.CreateClient();
-                    client.Timeout = TimeSpan.FromSeconds(10);
-
-                    var response = await client.GetAsync(statusUrl);
-                    if (!response.IsSuccessStatusCode) continue;
-
-                    var responseBody = await response.Content.ReadAsStringAsync();
-                    var json = Newtonsoft.Json.Linq.JObject.Parse(responseBody);
-
-                    if (json["Success"]?.Value<bool>() != true) continue;
-
-                    var remoteStatus = json["Status"]?.Value<string>() ?? "";
-                    var remoteProgress = json["ProgressPercentage"]?.Value<int>() ?? 0;
-                    var remoteRound = json["CurrentRound"]?.Value<int>() ?? 0;
-
-                    // Sync progress to local ceremony state
-                    ceremony.CurrentRound = remoteRound;
-                    ceremony.ProgressPercentage = remoteProgress;
-                    if (Enum.TryParse<CeremonyStatus>(remoteStatus, out var parsedStatus))
-                        ceremony.Status = parsedStatus;
-
-                    // Check for completion
-                    if (remoteStatus == "Completed")
-                    {
-                        ceremony.DepositAddress = json["DepositAddress"]?.Value<string>();
-                        ceremony.FrostGroupPublicKey = json["FrostGroupPublicKey"]?.Value<string>();
-                        ceremony.DKGProof = json["DKGProof"]?.Value<string>();
-                        ceremony.ProofBlockHeight = json["ProofBlockHeight"]?.Value<long>() ?? 0;
-                        ceremony.ValidatorSnapshot = json["ValidatorCount"]?.Value<int>() > 0
-                            ? activeValidators.Select(v => v.ValidatorAddress).ToList()
-                            : new List<string>();
-                        ceremony.Status = CeremonyStatus.Completed;
-                        ceremony.ProgressPercentage = 100;
-                        ceremony.CompletedTimestamp = TimeUtil.GetTime();
-
-                        // CRITICAL FIX: The remote validator generated its own ceremony ID during
-                        // InitiateMPCCeremonyStatic. That remote ID is what was used for the DKG
-                        // ceremony and is what validators stored in FrostValidatorKeyStore.
-                        // We must propagate it so that contract creation stores the correct
-                        // CeremonyId in TokenizationV2Feature, enabling key lookup during signing.
-                        if (!string.IsNullOrEmpty(remoteCeremonyId) && remoteCeremonyId != ceremonyId)
-                        {
-                            LogUtility.Log($"[FROST MPC] Propagating remote ceremony ID for key lookup. " +
-                                $"Local: {ceremonyId}, Remote (used by validators): {remoteCeremonyId}",
-                                "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
-                        }
-
-                        LogUtility.Log($"[FROST MPC] Remote ceremony completed. Deposit address: {ceremony.DepositAddress}",
-                            "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
-                        return;
-                    }
-
-                    // Check for failure
-                    if (remoteStatus == "Failed" || remoteStatus == "TimedOut")
-                    {
-                        ceremony.Status = CeremonyStatus.Failed;
-                        ceremony.ErrorMessage = json["ErrorMessage"]?.Value<string>() ?? "Remote ceremony failed";
-                        ceremony.CompletedTimestamp = TimeUtil.GetTime();
-                        return;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // Network hiccup during poll — continue retrying
-                    LogUtility.Log($"[FROST MPC] Poll attempt {attempt + 1} failed: {ex.Message}",
-                        "VBTCController.ExecuteMPCCeremonyViaRemoteValidator");
-                }
-            }
-
-            // Timed out waiting for remote ceremony
-            ceremony.Status = CeremonyStatus.TimedOut;
-            ceremony.ErrorMessage = $"Timed out waiting for remote validator ({remoteValidatorIP}) to complete MPC ceremony after {maxPollAttempts * pollInterval / 1000} seconds.";
-            ceremony.CompletedTimestamp = TimeUtil.GetTime();
-        }
-
-        #endregion
-
-        #region Withdrawal Delegation (FIND-027 Fix)
-
-        /// <summary>
-        /// FIND-027 Fix: Delegate withdrawal completion to a remote validator.
-        /// Non-validator wallet nodes cannot coordinate FROST signing because they lack
-        /// validator keys and FROST key packages. This mirrors the MPC ceremony delegation pattern.
-        /// </summary>
-        private async Task<string> DelegateWithdrawalToRemoteValidator(string scUID, string withdrawalRequestHash)
-        {
-            try
-            {
-                LogUtility.Log($"[FROST MPC] Non-validator node delegating withdrawal to remote validator. scUID: {scUID}", 
-                    "VBTCController.DelegateWithdrawalToRemoteValidator");
-
-                // Look up the local withdrawal request to include details in the delegation payload.
-                // The remote validator may not have this record in its local DB.
-                decimal? localAmount = null;
-                string? localBTCDestination = null;
-                int? localFeeRate = null;
-
-                var localWithdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
-                if (localWithdrawalRequest != null)
-                {
-                    localAmount = localWithdrawalRequest.Amount;
-                    localBTCDestination = localWithdrawalRequest.BTCDestination;
-                    localFeeRate = localWithdrawalRequest.FeeRate;
-                    LogUtility.Log($"[FROST MPC] Including local withdrawal details in delegation: Amount={localAmount}, Dest={localBTCDestination}, FeeRate={localFeeRate}",
-                        "VBTCController.DelegateWithdrawalToRemoteValidator");
-                }
-                else
-                {
-                    // Also try the local contract's Active* fields as a fallback
-                    var localContract = VBTCContractV2.GetContract(scUID);
-                    if (localContract != null && localContract.ActiveWithdrawalAmount.HasValue && localContract.ActiveWithdrawalAmount.Value > 0)
-                    {
-                        localAmount = localContract.ActiveWithdrawalAmount.Value;
-                        localBTCDestination = localContract.ActiveWithdrawalBTCDestination;
-                        localFeeRate = 10; // Default
-                        LogUtility.Log($"[FROST MPC] Including contract Active* fields in delegation: Amount={localAmount}, Dest={localBTCDestination}",
-                            "VBTCController.DelegateWithdrawalToRemoteValidator");
-                    }
-                    else
-                    {
-                        LogUtility.Log($"[FROST MPC] WARNING: No local withdrawal request or contract Active* fields found. Remote validator will need its own data.",
-                            "VBTCController.DelegateWithdrawalToRemoteValidator");
-                    }
-                }
-
-                // Discover active validators from the network
-                var activeValidators = await VBTCValidator.FetchActiveValidatorsFromNetwork();
-                if (activeValidators == null || !activeValidators.Any())
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available on the network. Cannot delegate withdrawal." });
-                }
-
-                // Try each validator until one successfully handles the withdrawal
-                foreach (var validator in activeValidators)
-                {
-                    try
-                    {
-                        var ip = validator.IPAddress?.Replace("::ffff:", "");
-                        if (string.IsNullOrEmpty(ip)) continue;
-
-                        var url = $"http://{ip}:{Globals.FrostValidatorPort}/frost/mpc/withdrawal/complete";
-                        using var client = Globals.HttpClientFactory.CreateClient();
-                        client.Timeout = TimeSpan.FromSeconds(120); // Withdrawal can take time (FROST signing + BTC broadcast)
-
-                        var payload = JsonConvert.SerializeObject(new
-                        {
-                            SmartContractUID = scUID,
-                            WithdrawalRequestHash = withdrawalRequestHash,
-                            Amount = localAmount,
-                            BTCDestination = localBTCDestination,
-                            FeeRate = localFeeRate
-                        });
-                        var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
-
-                        var response = await client.PostAsync(url, content);
-                        if (!response.IsSuccessStatusCode) continue;
-
-                        var responseBody = await response.Content.ReadAsStringAsync();
-                        var json = JObject.Parse(responseBody);
-
-                        if (json["Success"]?.Value<bool>() == true)
-                        {
-                            LogUtility.Log($"[FROST MPC] FROST signing delegated successfully to validator {validator.ValidatorAddress} ({ip})", 
-                                "VBTCController.DelegateWithdrawalToRemoteValidator");
-
-                            // Extract the signed TX hex from the validator response
-                            var signedTxHex = json["SignedTxHex"]?.Value<string>();
-                            if (string.IsNullOrEmpty(signedTxHex))
-                            {
-                                LogUtility.Log($"[FROST MPC] Validator returned success but no SignedTxHex. Response: {responseBody}",
-                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
-                                continue; // Try next validator
-                            }
-
-                            // Step 1: Broadcast the signed BTC TX locally (single broadcast — only this wallet node)
-                            LogUtility.Log($"[FROST MPC] Broadcasting signed BTC TX locally. Hex length: {signedTxHex.Length}",
-                                "VBTCController.DelegateWithdrawalToRemoteValidator");
-
-                            var btcNetwork = Globals.BTCNetwork;
-                            var signedTx = NBitcoin.Transaction.Parse(signedTxHex, btcNetwork);
-                            var broadcastResult = await ReserveBlockCore.Bitcoin.Services.BitcoinTransactionService.BroadcastTransaction(signedTx);
-
-                            if (!broadcastResult.Success)
-                            {
-                                LogUtility.Log($"[FROST MPC] BTC broadcast failed: {broadcastResult.ErrorMessage}. Will try next validator.",
-                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
-                                continue; // Try next validator
-                            }
-
-                            string btcTxHash = broadcastResult.TxHash;
-                            LogUtility.Log($"[FROST MPC] BTC TX broadcast SUCCESS: {btcTxHash}",
-                                "VBTCController.DelegateWithdrawalToRemoteValidator");
-
-                            // Step 2: Update local contract record
-                            try
-                            {
-                                var localContract = VBTCContractV2.GetContract(scUID);
-                                if (localContract != null)
-                                {
-                                    localContract.LastValidatorActivityBlock = Globals.LastBlock.Height;
-                                    VBTCContractV2.UpdateContract(localContract);
-                                }
-                            }
-                            catch (Exception updateEx)
-                            {
-                                LogUtility.Log($"[FROST MPC] Warning: Failed to update local contract: {updateEx.Message}",
-                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
-                            }
-
-                            // Step 3: Create VFX completion TX locally (wallet node has the withdrawal request)
-                            string vfxTxHash = string.Empty;
-                            try
-                            {
-                                // Find the requestor account to sign the VFX TX
-                                string fromAddress = localWithdrawalRequest?.RequestorAddress ?? string.Empty;
-                                if (string.IsNullOrEmpty(fromAddress))
-                                {
-                                    var localContract = VBTCContractV2.GetContract(scUID);
-                                    fromAddress = localContract?.OwnerAddress ?? string.Empty;
-                                }
-
-                                var account = AccountData.GetSingleAccount(fromAddress);
-                                if (account != null)
-                                {
-                                    var txData = JsonConvert.SerializeObject(new
-                                    {
-                                        Function = "VBTCWithdrawalComplete()",
-                                        ContractUID = scUID,
-                                        WithdrawalRequestHash = withdrawalRequestHash,
-                                        BTCTransactionHash = btcTxHash,
-                                        Amount = localAmount ?? 0M,
-                                        Destination = localBTCDestination ?? ""
-                                    });
-
-                                    var completionTx = new Transaction
-                                    {
-                                        Timestamp = TimeUtil.GetTime(),
-                                        FromAddress = fromAddress,
-                                        ToAddress = fromAddress,
-                                        Amount = 0.0M,
-                                        Fee = 0.0M,
-                                        Nonce = AccountStateTrei.GetNextNonce(fromAddress),
-                                        TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
-                                        Data = txData
-                                    };
-
-                                    completionTx.Fee = FeeCalcService.CalculateTXFee(completionTx);
-                                    completionTx.Build();
-
-                                    var privateKey = account.GetPrivKey;
-                                    var publicKey = account.PublicKey;
-                                    if (privateKey != null)
-                                    {
-                                        var signature = SignatureService.CreateSignature(completionTx.Hash, privateKey, publicKey);
-                                        if (signature != "ERROR")
-                                        {
-                                            completionTx.Signature = signature;
-                                            var verifyResult = await TransactionValidatorService.VerifyTX(completionTx);
-                                            if (verifyResult.Item1)
-                                            {
-                                                await TransactionData.AddTxToWallet(completionTx, true);
-                                                await AccountData.UpdateLocalBalance(fromAddress, completionTx.Fee + completionTx.Amount);
-                                                await TransactionData.AddToPool(completionTx);
-                                                await ReserveBlockCore.P2P.P2PClient.SendTXMempool(completionTx);
-                                                vfxTxHash = completionTx.Hash;
-                                                LogUtility.Log($"[FROST MPC] VFX completion TX broadcast SUCCESS: {vfxTxHash}",
-                                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
-                                            }
-                                            else
-                                            {
-                                                LogUtility.Log($"[FROST MPC] VFX completion TX verify failed: {verifyResult.Item2}. BTC TX already broadcast — VFX TX can be retried.",
-                                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
-                                            }
-                                        }
-                                    }
-                                }
-                                else
-                                {
-                                    LogUtility.Log($"[FROST MPC] Account not found for {fromAddress} — cannot create VFX completion TX. BTC TX already broadcast.",
-                                        "VBTCController.DelegateWithdrawalToRemoteValidator");
-                                }
-                            }
-                            catch (Exception vfxEx)
-                            {
-                                LogUtility.Log($"[FROST MPC] VFX completion TX error (non-blocking): {vfxEx.Message}. BTC TX already broadcast: {btcTxHash}",
-                                    "VBTCController.DelegateWithdrawalToRemoteValidator");
-                            }
-
-                            return JsonConvert.SerializeObject(new
-                            {
-                                Success = true,
-                                Message = "vBTC V2 withdrawal completed successfully with FROST signing",
-                                BTCTransactionHash = btcTxHash,
-                                VFXTransactionHash = vfxTxHash,
-                                Status = "Pending_BTC",
-                                SmartContractUID = scUID
-                            });
-                        }
-                        else
-                        {
-                            var errMsg = json["Message"]?.Value<string>() ?? "Unknown error";
-                            LogUtility.Log($"[FROST MPC] Validator {validator.ValidatorAddress} rejected withdrawal: {errMsg}", 
-                                "VBTCController.DelegateWithdrawalToRemoteValidator");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        LogUtility.Log($"[FROST MPC] Failed to delegate withdrawal to validator {validator.ValidatorAddress}: {ex.Message}", 
-                            "VBTCController.DelegateWithdrawalToRemoteValidator");
-                    }
-                }
-
-                return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to delegate withdrawal to any validator. No validator accepted the request." });
-            }
-            catch (Exception ex)
-            {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error delegating withdrawal: {ex.Message}" });
-            }
-        }
-
-        /// <summary>
-        /// FIND-027 Fix: Static method for withdrawal completion — called by the FrostStartup
-        /// public endpoint when a non-validator wallet node delegates. Runs on a validator node.
-        /// </summary>
-        public static async Task<string> CompleteWithdrawalStatic(string scUID, string withdrawalRequestHash,
-            decimal? delegatedAmount = null, string? delegatedBTCDestination = null, int? delegatedFeeRate = null)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID and WithdrawalRequestHash are required" });
-
-                // signOnly: true — validator only does FROST signing, returns signed TX hex.
-                // The wallet node (caller) handles BTC broadcast and VFX completion TX.
-                var result = await Services.VBTCService.CompleteWithdrawal(scUID, withdrawalRequestHash,
-                    delegatedAmount, delegatedBTCDestination, delegatedFeeRate, signOnly: true);
-
-                if (result.Success)
-                {
-                    return JsonConvert.SerializeObject(new
-                    {
-                        Success = true,
-                        Message = "FROST signing completed. Signed TX hex returned for caller to broadcast.",
-                        SignedTxHex = result.BTCTxHash, // In signOnly mode, BTCTxHash carries the signed hex
-                        SmartContractUID = scUID
-                    });
-                }
-                else
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = result.ErrorMessage });
-                }
-            }
-            catch (Exception ex)
-            {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
-            }
         }
 
         #endregion
@@ -1247,7 +950,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     CeremonyId = effectiveCeremonyId,
-                    ImageBase = payload.ImageBase
+                    ImageBase = payload.ImageBase,
+                    // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
+                    // into the contract so it survives to every node via the state-trei seam.
+                    IsS3C = ceremony.IsS3C,
+                    LinkedContractUID = payload.LinkedContractUID
                 };
 
                 // Create smart contract
@@ -1499,7 +1206,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     CeremonyId = effectiveCeremonyId,
-                    ImageBase = payload.ImageBase
+                    ImageBase = payload.ImageBase,
+                    // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
+                    // into the contract so it survives to every node via the state-trei seam.
+                    IsS3C = ceremony.IsS3C,
+                    LinkedContractUID = payload.LinkedContractUID
                 };
 
                 // Create smart contract
@@ -1669,6 +1380,99 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             return await Services.VBTCService.TransferOwnership(scUID, toAddress);
         }
 
+        /// <summary>
+        /// Get vBTC V2 ownership transfer TX data for raw transaction building (web wallet).
+        /// This is the vBTC equivalent of TXV1Controller.GetNFTTransferData.
+        /// 
+        /// Web wallet flow:
+        ///   Step 1: GET /txapi/txV1/CreateBeaconUploadRequest/{scUID}/{toAddress}/{signature} → { Locator }
+        ///   Step 2: GET /vbtcapi/vbtc/GetVBTCOwnershipTransferData/{scUID}/{toAddress}/{locator} → TX data (this endpoint)
+        ///   Step 3: Build raw TX with Type=TKNZ_TX, Amount=0, Data=payload from Step 2
+        ///           POST /txapi/txV1/GetRawTxFee → fee
+        ///           POST /txapi/txV1/GetTxHash → hash
+        ///           Client signs hash
+        ///           POST /txapi/txV1/SendRawTransaction → broadcast
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <param name="toAddress">New owner address</param>
+        /// <param name="locator">Beacon locator from CreateBeaconUploadRequest</param>
+        /// <returns>TX data JSON payload for raw transaction</returns>
+        [HttpGet("GetVBTCOwnershipTransferData/{scUID}/{toAddress}/{**locator}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetVBTCOwnershipTransferData(string scUID, string toAddress, string locator)
+        {
+            try
+            {
+                toAddress = toAddress.ToAddressNormalize();
+
+                // 1. Load smart contract state
+                var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTrei == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract state not found." });
+
+                // 2. Load vBTC V2 contract
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"vBTC V2 contract not found: {scUID}" });
+
+                // 3. Generate SC in memory from state data
+                var sc = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
+                if (sc == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to generate smart contract from state data." });
+
+                // 4. Validate TokenizationV2 feature exists
+                if (sc.Features == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Contract has no features: {scUID}" });
+
+                var tknzFeature = sc.Features
+                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                    .Select(x => x.FeatureFeatures)
+                    .FirstOrDefault();
+
+                if (tknzFeature == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Contract missing TokenizationV2 feature: {scUID}" });
+
+                // 5. Validate balance > 0 (cannot transfer an empty contract)
+                decimal availableBalance = vbtcContract.Balance;
+                if (scStateTrei.SCStateTreiTokenizationTXes != null)
+                {
+                    var ownerTxes = scStateTrei.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == scStateTrei.OwnerAddress || x.ToAddress == scStateTrei.OwnerAddress)
+                        .ToList();
+
+                    if (ownerTxes.Any())
+                    {
+                        var ledgerDelta = ownerTxes.Sum(x => x.Amount);
+                        availableBalance = vbtcContract.Balance + ledgerDelta;
+                    }
+                }
+
+                if (availableBalance <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cannot transfer a token with zero balance." });
+
+                // 6. Build TX data payload (same structure as NFT Transfer)
+                var newSCInfo = new[]
+                {
+                    new
+                    {
+                        Function = "Transfer()",
+                        ContractUID = sc.SmartContractUID,
+                        ToAddress = toAddress,
+                        Data = scStateTrei.ContractData,
+                        Locators = locator,
+                        MD5List = scStateTrei.MD5List
+                    }
+                };
+
+                var txData = JsonConvert.SerializeObject(newSCInfo);
+                return txData;
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
         #endregion
 
         #region Withdrawal Operations
@@ -1733,9 +1537,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
         /// <summary>
         /// Complete withdrawal by coordinating FROST MPC signing and broadcasting Bitcoin transaction.
-        /// FIND-027 Fix: If this node is NOT a validator, delegates to a remote validator via the
-        /// FROST port, mirroring the MPC ceremony delegation pattern. Only validators have the FROST
-        /// key packages needed to coordinate the signing ceremony.
+        /// Unified MPC: Any VFX wallet owner can coordinate directly — no delegation needed.
         /// </summary>
         /// <param name="payload">Withdrawal completion details</param>
         /// <returns>Both VFX and Bitcoin transaction hashes if successful</returns>
@@ -1751,14 +1553,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
-                // FIND-027 Fix: Non-validator wallet nodes cannot coordinate FROST signing directly
-                // because they don't have validator keys or FROST key packages. Delegate to a remote validator.
-                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                {
-                    return await DelegateWithdrawalToRemoteValidator(payload.SmartContractUID, payload.WithdrawalRequestHash);
-                }
-
-                // Validator path: execute FROST withdrawal locally
+                // Unified path: execute FROST withdrawal locally (owner signs with AddressSignature)
                 var result = await Services.VBTCService.CompleteWithdrawal(
                     payload.SmartContractUID,
                     payload.WithdrawalRequestHash
@@ -1861,7 +1656,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "CancellationUID and ValidatorAddress are required" });
 
                 // Verify validator is active
-                var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
+                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
                 if (validator == null || !validator.IsActive)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
@@ -1890,7 +1685,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
 
                 // Refresh cancellation data after vote
                 cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
-                int totalValidators = VBTCValidator.GetActiveValidatorCount();
+                int totalValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
                 int votePercentage = totalValidators > 0 
                     ? VBTCWithdrawalCancellation.GetVotePercentage(payload.CancellationUID, totalValidators) 
                     : 0;
@@ -1970,11 +1765,12 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Duplicate request detected. This UniqueId has already been processed." });
                 }
 
-                // 4. Check for incomplete withdrawals (only 1 active withdrawal per contract)
-                var hasIncomplete = VBTCWithdrawalRequest.HasIncompleteRequest(payload.VFXAddress, payload.SmartContractUID);
-                if (hasIncomplete)
+                // 4. S3C §0: per-CONTRACT active-withdrawal gate (was per-user). Reject if the
+                // contract already has any active withdrawal (anti-grief expiry inside the check).
+                var hasActive = VBTCWithdrawalRequest.HasActiveContractRequest(payload.SmartContractUID, Globals.LastBlock?.Height ?? 0);
+                if (hasActive)
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "An active withdrawal request already exists for this contract. Complete or cancel it first." });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "A withdrawal is already in progress for this contract; try again once it completes." });
                 }
 
                 // 5. Verify VFX signature
@@ -2016,7 +1812,10 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     FeeRate = payload.FeeRate,
                     TransactionHash = "", // Will be set when completed
                     IsCompleted = false,
-                    Status = VBTCWithdrawalStatus.Requested
+                    Status = VBTCWithdrawalStatus.Requested,
+                    // S3C §0: local fast-feedback height; corrected to the true mined height by
+                    // StateData when the request TX is processed into a block.
+                    RequestBlockHeight = Globals.LastBlock?.Height ?? 0
                 };
 
                 // 8. Save to database
@@ -2052,72 +1851,130 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Complete withdrawal with pre-signed validator authorization (Raw format)
-        /// SECURITY: Verifies validator signature and coordinates FROST signing
+        /// Prepare a complete-withdrawal FROST signing session for a web wallet.
+        /// Returns the exact messages the wallet must sign (same "{sessionId}.{ownerAddress}.{timestamp}" format
+        /// used by PrepareMPCCeremonyRaw). Call this first, sign client-side, then call ExecuteCompleteWithdrawalRaw.
         /// </summary>
-        /// <param name="payload">Raw completion request with validator signature</param>
-        /// <returns>Bitcoin transaction hash if successful</returns>
-        [HttpPost("CompleteWithdrawalRaw")]
+        [HttpPost("PrepareCompleteWithdrawalRaw")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> CompleteWithdrawalRaw([FromBody] VBTCWithdrawalCompleteRawPayload payload)
+        public async Task<string> PrepareCompleteWithdrawalRaw([FromBody] PrepareCompleteWithdrawalRawPayload payload)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress is required" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID is required" });
+
+                if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "WithdrawalRequestHash is required" });
+
+                // Look up withdrawal request to return details for confirmation
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash);
+                decimal amount = 0;
+                string btcDestination = "";
+                int feeRate = 10;
+
+                if (withdrawalRequest != null)
+                {
+                    if (withdrawalRequest.IsCompleted)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request already completed" });
+
+                    amount = withdrawalRequest.Amount;
+                    btcDestination = withdrawalRequest.BTCDestination ?? "";
+                    feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10;
+                }
+
+                // Generate session ID and timestamps for leader auth messages
+                var sessionId = Guid.NewGuid().ToString();
+                var startTimestamp = TimeUtil.GetTime();
+                var shareDistTimestamp = startTimestamp + 1;
+
+                // Construct the exact messages the web wallet needs to sign
+                var startMessage = $"{sessionId}.{payload.OwnerAddress}.{startTimestamp}";
+                var shareDistMessage = $"{sessionId}.{payload.OwnerAddress}.{shareDistTimestamp}";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Sign both LeaderAuthMessages with your private key (ECDSA secp256k1) and submit via ExecuteCompleteWithdrawalRaw.",
+                    SessionId = sessionId,
+                    OwnerAddress = payload.OwnerAddress,
+                    SmartContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    // Withdrawal details for confirmation
+                    Amount = amount,
+                    BTCDestination = btcDestination,
+                    FeeRate = feeRate,
+                    // Messages to sign
+                    StartMessage = startMessage,
+                    StartTimestamp = startTimestamp,
+                    ShareDistributionMessage = shareDistMessage,
+                    ShareDistributionTimestamp = shareDistTimestamp
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Execute a complete-withdrawal using pre-signed leader authentication from a web wallet.
+        /// The wallet must have called PrepareCompleteWithdrawalRaw first and signed the returned messages.
+        /// Calls VBTCService.CompleteWithdrawal with signOnly=true and the pre-signed leader auth,
+        /// returning the FROST-signed BTC transaction hex for the wallet to broadcast.
+        /// </summary>
+        [HttpPost("ExecuteCompleteWithdrawalRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ExecuteCompleteWithdrawalRaw([FromBody] ExecuteCompleteWithdrawalRawPayload payload)
         {
             try
             {
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // 1. Validate required fields
-                if (string.IsNullOrEmpty(payload.SmartContractUID))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID cannot be null" });
+                if (string.IsNullOrEmpty(payload.OwnerAddress) || string.IsNullOrEmpty(payload.SmartContractUID) ||
+                    string.IsNullOrEmpty(payload.WithdrawalRequestHash) || string.IsNullOrEmpty(payload.SessionId) ||
+                    string.IsNullOrEmpty(payload.StartSignature) || string.IsNullOrEmpty(payload.ShareDistributionSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "All fields are required: OwnerAddress, SmartContractUID, WithdrawalRequestHash, SessionId, StartSignature, ShareDistributionSignature" });
 
-                if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request hash cannot be null" });
+                // Verify the start signature
+                var startMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.StartTimestamp}";
+                if (!SignatureService.VerifySignature(payload.OwnerAddress, startMessage, payload.StartSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid start signature" });
 
-                if (string.IsNullOrEmpty(payload.ValidatorAddress))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator address cannot be null" });
+                // Verify the share distribution signature
+                var shareDistMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.ShareDistributionTimestamp}";
+                if (!SignatureService.VerifySignature(payload.OwnerAddress, shareDistMessage, payload.ShareDistributionSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid share distribution signature" });
 
-                if (string.IsNullOrEmpty(payload.UniqueId))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Unique ID cannot be null" });
-
-                if (string.IsNullOrEmpty(payload.ValidatorSignature))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator signature cannot be null" });
-
-                // 2. Timestamp validation
+                // Timestamp validation (reject if older than 5 minutes)
                 var currentTime = TimeUtil.GetTime();
-                var timeDifference = Math.Abs(currentTime - payload.Timestamp);
+                var timeDifference = Math.Abs(currentTime - payload.StartTimestamp);
                 if (timeDifference > 300)
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Request timestamp is too old. Difference: {timeDifference} seconds (max 300)" });
-                }
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Session timestamp is too old. Difference: {timeDifference}s (max 300)" });
 
-                // 3. Verify validator is active and eligible
-                var validator = VBTCValidator.GetValidator(payload.ValidatorAddress);
-                if (validator == null || !validator.IsActive)
+                // Build pre-signed auth object (same pattern as ExecuteMPCCeremonyRaw)
+                var preSignedAuth = new ReserveBlockCore.Bitcoin.FROST.Models.PreSignedLeaderAuth
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
-                }
+                    SessionId = payload.SessionId,
+                    StartSignature = payload.StartSignature,
+                    StartTimestamp = payload.StartTimestamp,
+                    ShareDistributionSignature = payload.ShareDistributionSignature,
+                    ShareDistributionTimestamp = payload.ShareDistributionTimestamp
+                };
 
-                // 4. Verify validator signature (VFX signature over request data)
-                var signatureData = $"{payload.SmartContractUID}{payload.WithdrawalRequestHash}{payload.ValidatorAddress}{payload.Timestamp}{payload.UniqueId}";
-                var isValidSignature = SignatureService.VerifySignature(payload.ValidatorAddress, signatureData, payload.ValidatorSignature);
-                if (!isValidSignature)
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid validator signature" });
-                }
-
-                // FIND-027 Fix: Non-validator wallet nodes cannot coordinate FROST signing directly
-                // because they don't have validator keys or FROST key packages. Delegate to a remote validator.
-                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                {
-                    return await DelegateWithdrawalToRemoteValidator(payload.SmartContractUID, payload.WithdrawalRequestHash);
-                }
-
-                // FIND-024 Fix: Wire to real FROST signing via VBTCService.CompleteWithdrawal
-                // This uses the same path as the non-raw CompleteWithdrawal endpoint,
-                // which coordinates the FROST MPC signing ceremony and broadcasts the BTC TX.
+                // Call CompleteWithdrawal with signOnly=true + preSignedAuth + delegated params
                 var withdrawalResult = await Services.VBTCService.CompleteWithdrawal(
                     payload.SmartContractUID,
-                    payload.WithdrawalRequestHash
+                    payload.WithdrawalRequestHash,
+                    delegatedAmount: payload.Amount > 0 ? payload.Amount : null,
+                    delegatedBTCDestination: !string.IsNullOrEmpty(payload.BTCDestination) ? payload.BTCDestination : null,
+                    delegatedFeeRate: payload.FeeRate > 0 ? payload.FeeRate : null,
+                    signOnly: true,
+                    preSignedAuth: preSignedAuth
                 );
 
                 if (!withdrawalResult.Success)
@@ -2132,10 +1989,8 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Raw withdrawal completed successfully via FROST signing",
-                    BTCTransactionHash = withdrawalResult.BTCTxHash,
-                    VFXTransactionHash = withdrawalResult.VFXTxHash,
-                    Status = "Pending_BTC",
+                    Message = "FROST signing successful. Broadcast the SignedBTCTxHex to the Bitcoin network.",
+                    SignedBTCTxHex = withdrawalResult.BTCTxHash, // In signOnly mode, BTCTxHash contains the signed hex
                     SmartContractUID = payload.SmartContractUID,
                     WithdrawalRequestHash = payload.WithdrawalRequestHash
                 });
@@ -2239,6 +2094,905 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
             }
         }
+
+        #endregion
+
+        #region Raw Transaction Endpoints (Web Wallet / External Signer)
+
+        /// <summary>
+        /// In-memory store for unsigned vBTC transactions waiting to be signed externally.
+        /// Keyed by tx Hash. Web wallet signs the Hash offline and submits via SendRaw* endpoints.
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, Transaction> _pendingRawVbtcTxs = new();
+
+        #region Transfer Raw
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_TRANSFER transaction for offline signing.
+        /// Web wallet signs the returned Hash, then submits via SendRawTransferVBTCTx.
+        /// </summary>
+        [HttpPost("GetRawTransferVBTCData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawTransferVBTCData([FromBody] VBTCTransferPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.FromAddress) ||
+                    string.IsNullOrEmpty(payload.ToAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                // Validate balance
+                var balResult = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(payload.SmartContractUID, payload.FromAddress);
+                if (!balResult.success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Balance lookup failed" });
+
+                if (balResult.availableBalance < payload.Amount)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {payload.Amount}" });
+
+                var toAddress = payload.ToAddress.ToAddressNormalize();
+
+                // Build unsigned transaction
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "TransferVBTCV2()",
+                    ContractUID = payload.SmartContractUID,
+                    FromAddress = payload.FromAddress,
+                    ToAddress = toAddress,
+                    Amount = payload.Amount
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.FromAddress,
+                    ToAddress = toAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.FromAddress),
+                    TransactionType = TransactionType.VBTC_V2_TRANSFER,
+                    Data = txData
+                };
+
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+
+                // Store pending
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    ToAddress = tx.ToAddress,
+                    Amount = tx.Amount,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Message = "Sign the Hash field with your private key (ECDSA secp256k1, UTF-8 encoded hash string) and submit via SendRawTransferVBTCTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_TRANSFER transaction.
+        /// </summary>
+        [HttpPost("SendRawTransferVBTCTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawTransferVBTCTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawTransferVBTCData first." });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "vBTC transfer transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Request Withdrawal Raw TX
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_WITHDRAWAL_REQUEST blockchain transaction for offline signing.
+        /// This creates a real blockchain TX (unlike RequestWithdrawalRaw which only saves to local DB).
+        /// </summary>
+        [HttpPost("GetRawRequestWithdrawalTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawRequestWithdrawalTxData([FromBody] VBTCWithdrawalPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.RequestorAddress) ||
+                    string.IsNullOrEmpty(payload.BTCAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                if (payload.FeeRate <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
+
+                // Check for existing active withdrawal
+                var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(payload.RequestorAddress, payload.SmartContractUID);
+                if (existingRequest != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Active withdrawal already exists. Request Hash: {existingRequest.TransactionHash}" });
+
+                // Validate balance
+                var balResult = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(payload.SmartContractUID, payload.RequestorAddress);
+                if (!balResult.success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Balance lookup failed" });
+
+                if (balResult.availableBalance < payload.Amount)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {payload.Amount}" });
+
+                var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
+
+                // Build unsigned transaction
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalRequest()",
+                    ContractUID = payload.SmartContractUID,
+                    RequestorAddress = payload.RequestorAddress,
+                    BTCAddress = btcAddress,
+                    Amount = payload.Amount,
+                    FeeRate = payload.FeeRate
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.RequestorAddress,
+                    ToAddress = payload.RequestorAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.RequestorAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                    Data = txData
+                };
+
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Message = "Sign the Hash field and submit via SendRawRequestWithdrawalTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_WITHDRAWAL_REQUEST transaction.
+        /// </summary>
+        [HttpPost("SendRawRequestWithdrawalTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawRequestWithdrawalTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawRequestWithdrawalTxData first." });
+
+                if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid TX type: {pendingTx.TransactionType}" });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Withdrawal request transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Complete Withdrawal Raw TX
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_WITHDRAWAL_COMPLETE blockchain transaction for offline signing.
+        /// This is the final step in the web wallet withdrawal flow — after the wallet has broadcast
+        /// the FROST-signed BTC transaction, it calls this to record the completion on the VFX chain.
+        /// No local account lookup is performed; the wallet signs the TX offline.
+        /// </summary>
+        [HttpPost("GetRawCompleteWithdrawalTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawCompleteWithdrawalTxData([FromBody] RawCompleteWithdrawalTxPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID is required" });
+
+                if (string.IsNullOrEmpty(payload.FromAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress is required" });
+
+                if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "WithdrawalRequestHash is required" });
+
+                if (string.IsNullOrEmpty(payload.BTCTransactionHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "BTCTransactionHash is required" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                if (string.IsNullOrEmpty(payload.BTCDestination))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "BTCDestination is required" });
+
+                // Build transaction data (same format as VBTCService.CompleteWithdrawal uses)
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalComplete()",
+                    ContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    BTCTransactionHash = payload.BTCTransactionHash,
+                    Amount = payload.Amount,
+                    Destination = payload.BTCDestination
+                });
+
+                // Build unsigned transaction — self-transaction recording the withdrawal completion
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.FromAddress,
+                    ToAddress = payload.FromAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.FromAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
+                    Data = txData
+                };
+
+                // Withdrawal-complete transactions are fee-free (matches VBTCService.CompleteWithdrawal)
+                tx.Fee = 0M.ToNormalizeDecimal();
+                tx.Build();
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Message = "Sign the Hash field with your private key (ECDSA secp256k1) and submit via SendRawCompleteWithdrawalTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_WITHDRAWAL_COMPLETE transaction.
+        /// This records the withdrawal completion on the VFX chain after the BTC transaction has been broadcast.
+        /// </summary>
+        [HttpPost("SendRawCompleteWithdrawalTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawCompleteWithdrawalTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawCompleteWithdrawalTxData first." });
+
+                if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid TX type: {pendingTx.TransactionType}" });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Withdrawal completion transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Cancel Withdrawal Raw TX
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_WITHDRAWAL_CANCEL blockchain transaction for offline signing.
+        /// </summary>
+        [HttpPost("GetRawCancelWithdrawalTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawCancelWithdrawalTxData([FromBody] VBTCWithdrawalCancelTxPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.RequestorAddress) ||
+                    string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                // Verify the withdrawal request exists and belongs to this user
+                var existingRequest = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash);
+                if (existingRequest == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Withdrawal request not found: {payload.WithdrawalRequestHash}" });
+
+                if (existingRequest.RequestorAddress != payload.RequestorAddress)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Only the original requestor can cancel." });
+
+                if (existingRequest.IsCompleted)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cannot cancel an already completed withdrawal." });
+
+                // Build unsigned transaction
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = "VBTCWithdrawalCancel()",
+                    ContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash
+                });
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.RequestorAddress,
+                    ToAddress = payload.RequestorAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.RequestorAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL,
+                    Data = txData
+                };
+
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Message = "Sign the Hash field and submit via SendRawCancelWithdrawalTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_WITHDRAWAL_CANCEL transaction.
+        /// </summary>
+        [HttpPost("SendRawCancelWithdrawalTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawCancelWithdrawalTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawCancelWithdrawalTxData first." });
+
+                if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid TX type: {pendingTx.TransactionType}" });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Withdrawal cancel transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region MPC Ceremony Raw (DKG with Pre-Signed Auth)
+
+        /// <summary>
+        /// Prepare an MPC ceremony for web wallet use. Probes validators, generates session IDs,
+        /// and returns the exact messages the web wallet must sign for leader authentication.
+        /// Call this first, sign the messages client-side, then call ExecuteMPCCeremonyRaw.
+        /// </summary>
+        [HttpPost("PrepareMPCCeremonyRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> PrepareMPCCeremonyRaw([FromBody] PrepareMPCCeremonyRawPayload payload)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress is required" });
+
+                // Anti-spam: check for existing active ceremony
+                var existingActive = _ceremonies.Values.FirstOrDefault(c =>
+                    c.OwnerAddress == payload.OwnerAddress && !IsCeremonyTerminal(c.Status));
+                if (existingActive != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Active ceremony already in progress.", ExistingCeremonyId = existingActive.CeremonyId });
+
+                // Probe validators
+                var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
+                if (allValidators == null || !allValidators.Any())
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available" });
+
+                var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+                if (activeValidators.Count < 3)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient reachable validators ({activeValidators.Count}/{allValidators.Count})" });
+
+                var threshold = 51; // Default base threshold for DKG ceremonies
+
+                // Generate session ID and ceremony ID
+                var sessionId = Guid.NewGuid().ToString();
+                var ceremonyId = Guid.NewGuid().ToString();
+
+                // Generate timestamps for the leader auth messages
+                var startTimestamp = TimeUtil.GetTime();
+                var shareDistTimestamp = startTimestamp + 1; // Slightly different to avoid collision
+
+                // Construct the exact messages the web wallet needs to sign
+                var startMessage = $"{sessionId}.{payload.OwnerAddress}.{startTimestamp}";
+                var shareDistMessage = $"{sessionId}.{payload.OwnerAddress}.{shareDistTimestamp}";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Sign both LeaderAuthMessages with your private key (ECDSA secp256k1) and submit via ExecuteMPCCeremonyRaw.",
+                    CeremonyId = ceremonyId,
+                    SessionId = sessionId,
+                    OwnerAddress = payload.OwnerAddress,
+                    ValidatorCount = activeValidators.Count,
+                    Threshold = threshold,
+                    // Messages to sign
+                    StartMessage = startMessage,
+                    StartTimestamp = startTimestamp,
+                    ShareDistributionMessage = shareDistMessage,
+                    ShareDistributionTimestamp = shareDistTimestamp
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Execute an MPC ceremony using pre-signed leader authentication.
+        /// The web wallet must have called PrepareMPCCeremonyRaw first and signed the returned messages.
+        /// </summary>
+        [HttpPost("ExecuteMPCCeremonyRaw")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ExecuteMPCCeremonyRaw([FromBody] ExecuteMPCCeremonyRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress) || string.IsNullOrEmpty(payload.CeremonyId) ||
+                    string.IsNullOrEmpty(payload.SessionId) || string.IsNullOrEmpty(payload.StartSignature) ||
+                    string.IsNullOrEmpty(payload.ShareDistributionSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "All fields are required" });
+
+                // Verify the start signature is valid for the owner address
+                var startMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.StartTimestamp}";
+                if (!SignatureService.VerifySignature(payload.OwnerAddress, startMessage, payload.StartSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid start signature" });
+
+                // Verify the share distribution signature
+                var shareDistMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.ShareDistributionTimestamp}";
+                if (!SignatureService.VerifySignature(payload.OwnerAddress, shareDistMessage, payload.ShareDistributionSignature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid share distribution signature" });
+
+                // Anti-spam checks
+                var existingActive = _ceremonies.Values.FirstOrDefault(c =>
+                    c.OwnerAddress == payload.OwnerAddress && !IsCeremonyTerminal(c.Status));
+                if (existingActive != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Active ceremony already in progress.", ExistingCeremonyId = existingActive.CeremonyId });
+
+                var activeCeremonyCount = _ceremonies.Values.Count(c => !IsCeremonyTerminal(c.Status));
+                if (activeCeremonyCount >= MaxConcurrentCeremonies)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Maximum concurrent ceremony limit reached." });
+
+                // Create ceremony state
+                var ceremony = new MPCCeremonyState
+                {
+                    CeremonyId = payload.CeremonyId,
+                    OwnerAddress = payload.OwnerAddress,
+                    Status = CeremonyStatus.Initiated,
+                    InitiatedTimestamp = TimeUtil.GetTime(),
+                    RequiredThreshold = 51,
+                    ProgressPercentage = 0,
+                    CurrentRound = 0
+                };
+
+                if (!_ceremonies.TryAdd(payload.CeremonyId, ceremony))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create ceremony" });
+
+                // Build pre-signed auth object
+                var preSignedAuth = new ReserveBlockCore.Bitcoin.FROST.Models.PreSignedLeaderAuth
+                {
+                    SessionId = payload.SessionId,
+                    StartSignature = payload.StartSignature,
+                    StartTimestamp = payload.StartTimestamp,
+                    ShareDistributionSignature = payload.ShareDistributionSignature,
+                    ShareDistributionTimestamp = payload.ShareDistributionTimestamp
+                };
+
+                // Start background DKG with pre-signed auth
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        ceremony.Status = CeremonyStatus.ValidatingValidators;
+                        ceremony.ProgressPercentage = 5;
+
+                        var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
+                        if (allValidators == null || !allValidators.Any())
+                        {
+                            ceremony.Status = CeremonyStatus.Failed;
+                            ceremony.ErrorMessage = "No active validators available.";
+                            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                            return;
+                        }
+
+                        var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
+                        if (activeValidators.Count < 3)
+                        {
+                            ceremony.Status = CeremonyStatus.Failed;
+                            ceremony.ErrorMessage = $"Insufficient reachable validators ({activeValidators.Count}).";
+                            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                            return;
+                        }
+
+                        ceremony.ProgressPercentage = 15;
+                        ceremony.Status = CeremonyStatus.Round1InProgress;
+
+                        var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                            payload.CeremonyId,
+                            payload.OwnerAddress,
+                            activeValidators,
+                            ceremony.RequiredThreshold,
+                            (round, percentage) =>
+                            {
+                                ceremony.CurrentRound = round;
+                                ceremony.ProgressPercentage = percentage;
+                                if (round == 1) ceremony.Status = CeremonyStatus.Round1InProgress;
+                                else if (round == 2) ceremony.Status = CeremonyStatus.Round2InProgress;
+                                else if (round == 3) ceremony.Status = CeremonyStatus.Round3InProgress;
+                            },
+                            preSignedAuth);
+
+                        if (dkgResult == null)
+                        {
+                            ceremony.Status = CeremonyStatus.Failed;
+                            ceremony.ErrorMessage = "FROST DKG ceremony failed";
+                            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                            return;
+                        }
+
+                        ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+                        ceremony.DepositAddress = dkgResult.TaprootAddress;
+                        ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
+                        ceremony.DKGProof = dkgResult.DKGProof;
+                        ceremony.ProofBlockHeight = Globals.LastBlock.Height;
+                        ceremony.Status = CeremonyStatus.Completed;
+                        ceremony.ProgressPercentage = 100;
+                        ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    }
+                    catch (Exception ex)
+                    {
+                        ceremony.Status = CeremonyStatus.Failed;
+                        ceremony.ErrorMessage = ex.Message;
+                        ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    }
+                });
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "MPC ceremony initiated with pre-signed auth. Poll GetCeremonyStatus for progress.",
+                    CeremonyId = payload.CeremonyId,
+                    Status = ceremony.Status.ToString()
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #region Create Contract Raw TX
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_CONTRACT_CREATE transaction for offline signing.
+        /// Requires a completed MPC ceremony. Unlike CreateVBTCContractRaw which signs internally,
+        /// this returns the unsigned TX hash for the web wallet to sign.
+        /// </summary>
+        [HttpPost("GetRawCreateContractTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawCreateContractTxData([FromBody] VBTCContractRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress) || string.IsNullOrEmpty(payload.Name) || string.IsNullOrEmpty(payload.CeremonyId))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress, Name, and CeremonyId are required" });
+
+                // Verify owner signature
+                if (!string.IsNullOrEmpty(payload.OwnerSignature) && !string.IsNullOrEmpty(payload.UniqueId))
+                {
+                    var signatureData = $"{payload.OwnerAddress}{payload.Name}{payload.Description}{payload.Ticker}{payload.CeremonyId}{payload.Timestamp}{payload.UniqueId}";
+                    if (!SignatureService.VerifySignature(payload.OwnerAddress, signatureData, payload.OwnerSignature))
+                        return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
+                }
+
+                // Retrieve and validate ceremony
+                if (!_ceremonies.TryGetValue(payload.CeremonyId, out var ceremony))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Ceremony not found." });
+
+                if (ceremony.Status != CeremonyStatus.Completed)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Ceremony not complete. Status: {ceremony.Status}" });
+
+                if (ceremony.OwnerAddress != payload.OwnerAddress)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address mismatch." });
+
+                var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
+                    ? ceremony.RemoteCeremonyId : payload.CeremonyId;
+
+                // Create the smart contract object
+                var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
+
+                var tokenizationV2Feature = new TokenizationV2Feature
+                {
+                    AssetName = payload.Name,
+                    AssetTicker = payload.Ticker ?? "vBTC",
+                    DepositAddress = ceremony.DepositAddress!,
+                    Version = 2,
+                    ValidatorAddressesSnapshot = ceremony.ValidatorSnapshot,
+                    FrostGroupPublicKey = ceremony.FrostGroupPublicKey!,
+                    RequiredThreshold = 51,
+                    DKGProof = ceremony.DKGProof!,
+                    ProofBlockHeight = Globals.LastBlock.Height,
+                    CeremonyId = effectiveCeremonyId,
+                    ImageBase = payload.ImageBase,
+                    // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
+                    // into the contract so it survives to every node via the state-trei seam.
+                    IsS3C = ceremony.IsS3C,
+                    LinkedContractUID = payload.LinkedContractUID
+                };
+
+                var scMain = new SmartContractMain
+                {
+                    SmartContractUID = scUID,
+                    Name = payload.Name,
+                    Description = payload.Description,
+                    MinterAddress = payload.OwnerAddress,
+                    MinterName = payload.OwnerAddress,
+                    SCVersion = Globals.SCVersion,
+                    SmartContractAsset = new SmartContractAsset
+                    {
+                        Name = "vbtc_v2_token",
+                        Location = "default",
+                        AssetAuthorName = payload.OwnerAddress,
+                        FileSize = 0
+                    },
+                    Features = new List<SmartContractFeatures>
+                    {
+                        new SmartContractFeatures
+                        {
+                            FeatureName = FeatureName.TokenizationV2,
+                            FeatureFeatures = tokenizationV2Feature
+                        }
+                    }
+                };
+
+                // Write and save smart contract
+                var result = await SmartContractWriterService.WriteSmartContract(scMain);
+                if (string.IsNullOrWhiteSpace(result.Item1))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to generate smart contract code" });
+
+                SmartContractMain.SmartContractData.SaveSmartContract(result.Item2, result.Item1);
+                await VBTCContractV2.SaveSmartContract(result.Item2, result.Item1, payload.OwnerAddress);
+
+                // Build unsigned deploy TX (instead of calling MintSmartContractTx which signs internally)
+                // Compress and Base64 encode the Trillium code (same as NFT mint pipeline)
+                var bytes = Encoding.Unicode.GetBytes(result.Item1);
+                var scBase64 = bytes.ToCompress().ToBase64();
+                var defaultMD5 = "defaultvBTC.png::150b90aa9d06f7e4fc5703ca6d7f01db";
+                string? md5List = null;
+                if (scMain.SmartContractAsset.Location != "default")
+                    md5List = await MD5Utility.GetMD5FromSmartContract(scMain);
+                else
+                    md5List = defaultMD5;
+
+                var txData = JsonConvert.SerializeObject(new[]
+                {
+                    new { Function = "Mint()", ContractUID = scUID, Data = scBase64, MD5List = md5List }
+                });
+
+                var deployTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.OwnerAddress,
+                    ToAddress = payload.OwnerAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.OwnerAddress),
+                    TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE,
+                    Data = txData
+                };
+
+                deployTx.Fee = FeeCalcService.CalculateTXFee(deployTx);
+                deployTx.Build();
+
+                _pendingRawVbtcTxs[deployTx.Hash] = deployTx;
+
+                // Don't consume ceremony yet — wait until TX is signed and broadcast
+                // Store ceremony mapping so SendRawCreateContractTx can clean up
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = deployTx.Hash,
+                    SmartContractUID = scUID,
+                    DepositAddress = ceremony.DepositAddress,
+                    CeremonyId = payload.CeremonyId,
+                    Timestamp = deployTx.Timestamp,
+                    Fee = deployTx.Fee,
+                    Nonce = deployTx.Nonce,
+                    Message = "Sign the Hash field and submit via SendRawCreateContractTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_CONTRACT_CREATE transaction.
+        /// </summary>
+        [HttpPost("SendRawCreateContractTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawCreateContractTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}." });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                // Mark contract as published
+                try
+                {
+                    // Extract scUID from TX data
+                    var txDataArr = JsonConvert.DeserializeObject<dynamic[]>(pendingTx.Data);
+                    if (txDataArr != null && txDataArr.Length > 0)
+                    {
+                        string contractUID = txDataArr[0].ContractUID;
+                        if (!string.IsNullOrEmpty(contractUID))
+                            await TokenizedBitcoin.SetTokenContractIsPublished(contractUID);
+                    }
+                }
+                catch { /* Best-effort publish marking */ }
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "vBTC contract creation transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
 
         #endregion
 
@@ -2565,6 +3319,183 @@ namespace ReserveBlockCore.Bitcoin.Controllers
             }
         }
 
+        /// <summary>
+        /// Get the health status of a vBTC V2 contract by checking how many of the original
+        /// DKG validators are still online (heartbeating). Since 67% of original validators
+        /// must be available for FROST signing, this gives users visibility into whether
+        /// their contract can still process withdrawals.
+        /// </summary>
+        /// <param name="scUID">Smart contract UID</param>
+        /// <returns>Validator health report with online/offline breakdown</returns>
+        [HttpGet("GetContractHealth/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetContractHealth(string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(scUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID is required" });
+
+                // Step 1: Resolve the ValidatorAddressesSnapshot from the contract.
+                // Try local DB first, fall back to State Trei + in-memory decompile (works on any node).
+                List<string>? originalValidators = null;
+                int requiredThreshold = 67;
+                long lastActivityBlock = 0;
+                string? depositAddress = null;
+
+                var vbtcContract = VBTCContractV2.GetContract(scUID);
+                if (vbtcContract != null)
+                {
+                    lastActivityBlock = vbtcContract.LastValidatorActivityBlock;
+                    depositAddress = vbtcContract.DepositAddress;
+                    requiredThreshold = vbtcContract.RequiredThreshold;
+                }
+
+                // Get contract data from State Trei + decompile to extract ValidatorAddressesSnapshot
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState != null && !string.IsNullOrEmpty(scState.ContractData))
+                {
+                    try
+                    {
+                        var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                        if (scMainDecompile?.Features != null)
+                        {
+                            var tknzFeature = scMainDecompile.Features
+                                .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                .Select(x => x.FeatureFeatures)
+                                .FirstOrDefault();
+
+                            if (tknzFeature is TokenizationV2Feature tknz)
+                            {
+                                originalValidators = tknz.ValidatorAddressesSnapshot;
+                                if (requiredThreshold <= 0) requiredThreshold = tknz.RequiredThreshold;
+                                if (lastActivityBlock <= 0) lastActivityBlock = tknz.ProofBlockHeight;
+                                if (string.IsNullOrEmpty(depositAddress)) depositAddress = tknz.DepositAddress;
+                            }
+                        }
+                    }
+                    catch (Exception decompileEx)
+                    {
+                        ErrorLogUtility.LogError($"Failed to decompile contract {scUID} for health check: {decompileEx.Message}",
+                            "VBTCController.GetContractHealth()");
+                    }
+                }
+
+                if (originalValidators == null || !originalValidators.Any())
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "Could not resolve the original validator snapshot for this contract. " +
+                                  "The contract may not exist or may not have a TokenizationV2 feature."
+                    });
+                }
+
+                // Step 2: Get currently active validators from block scanning
+                var activeValidators = Services.VBTCValidatorRegistry.GetActiveValidators();
+                var activeAddressSet = new HashSet<string>(
+                    activeValidators?.Select(v => v.ValidatorAddress) ?? Enumerable.Empty<string>());
+
+                // Step 3: Cross-reference each original validator against the active set
+                var validatorDetails = new List<object>();
+                int onlineCount = 0;
+                int offlineCount = 0;
+
+                foreach (var addr in originalValidators)
+                {
+                    bool isOnline = activeAddressSet.Contains(addr);
+                    long? lastHeartbeat = null;
+
+                    if (isOnline)
+                    {
+                        onlineCount++;
+                        var activeVal = activeValidators!.FirstOrDefault(v => v.ValidatorAddress == addr);
+                        if (activeVal != null)
+                            lastHeartbeat = activeVal.LastHeartbeatBlock;
+                    }
+                    else
+                    {
+                        offlineCount++;
+                    }
+
+                    validatorDetails.Add(new
+                    {
+                        Address = addr,
+                        IsOnline = isOnline,
+                        LastHeartbeatBlock = lastHeartbeat
+                    });
+                }
+
+                // Step 4: Calculate health metrics
+                int totalOriginal = originalValidators.Count;
+                decimal onlinePercentage = totalOriginal > 0
+                    ? Math.Round(((decimal)onlineCount / totalOriginal) * 100m, 2)
+                    : 0m;
+
+                bool meetsThreshold = onlinePercentage >= requiredThreshold;
+                long currentBlock = Globals.LastBlock.Height;
+
+                // Use VBTCThresholdCalculator for adjusted threshold info
+                string thresholdExplanation;
+                int adjustedThreshold;
+                int requiredValidatorCount;
+                try
+                {
+                    adjustedThreshold = Services.VBTCThresholdCalculator.CalculateAdjustedThreshold(
+                        totalOriginal, onlineCount, lastActivityBlock, currentBlock);
+                    requiredValidatorCount = Services.VBTCThresholdCalculator.CalculateRequiredValidators(
+                        adjustedThreshold, onlineCount);
+                    thresholdExplanation = Services.VBTCThresholdCalculator.GetThresholdExplanation(
+                        totalOriginal, onlineCount, lastActivityBlock, currentBlock);
+                }
+                catch
+                {
+                    adjustedThreshold = requiredThreshold;
+                    requiredValidatorCount = (int)Math.Ceiling(onlineCount * (requiredThreshold / 100.0));
+                    thresholdExplanation = $"Original threshold: {requiredThreshold}%. Online: {onlineCount}/{totalOriginal} ({onlinePercentage}%).";
+                }
+
+                // Determine overall health status
+                string healthStatus;
+                if (onlinePercentage >= 80)
+                    healthStatus = "Excellent";
+                else if (onlinePercentage >= 67)
+                    healthStatus = "Healthy";
+                else if (onlinePercentage >= 50)
+                    healthStatus = "Degraded";
+                else if (onlinePercentage > 0)
+                    healthStatus = "Critical";
+                else
+                    healthStatus = "Offline";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Contract health retrieved",
+                    SmartContractUID = scUID,
+                    DepositAddress = depositAddress,
+                    HealthStatus = healthStatus,
+                    TotalOriginalValidators = totalOriginal,
+                    OnlineValidators = onlineCount,
+                    OfflineValidators = offlineCount,
+                    OnlinePercentage = onlinePercentage,
+                    RequiredThreshold = requiredThreshold,
+                    AdjustedThreshold = adjustedThreshold,
+                    RequiredValidatorCount = requiredValidatorCount,
+                    CanProcessWithdrawals = onlineCount >= requiredValidatorCount,
+                    IsHealthy = meetsThreshold,
+                    CurrentBlockHeight = currentBlock,
+                    ScanWindow = Services.VBTCValidatorRegistry.SCAN_WINDOW,
+                    ThresholdExplanation = thresholdExplanation,
+                    Validators = validatorDetails
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
         #endregion
 
         #region Utility
@@ -2610,17 +3541,693 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                     ? VBTCContractV2.GetAllContracts()
                     : VBTCContractV2.GetContractsByOwner(address);
 
+                var contractList = contracts ?? new List<VBTCContractV2>();
+
+                // Enrich each contract with Name/Description from SmartContractMain
+                var enriched = contractList.Select(c =>
+                {
+                    var scMain = SmartContractMain.SmartContractData.GetSmartContract(c.SmartContractUID);
+                    return new
+                    {
+                        c.SmartContractUID,
+                        c.OwnerAddress,
+                        c.DepositAddress,
+                        c.Balance,
+                        c.ValidatorAddressesSnapshot,
+                        c.FrostGroupPublicKey,
+                        c.FrostPubkeyPackage,
+                        c.RequiredThreshold,
+                        c.DKGProof,
+                        c.ProofBlockHeight,
+                        c.LastValidatorActivityBlock,
+                        c.TotalRegisteredValidators,
+                        c.OriginalThreshold,
+                        c.WithdrawalStatus,
+                        c.ActiveWithdrawalBTCDestination,
+                        c.ActiveWithdrawalAmount,
+                        c.ActiveWithdrawalRequestHash,
+                        c.WithdrawalRequestBlock,
+                        c.ActiveWithdrawalFeeRate,
+                        c.ActiveWithdrawalRequestTime,
+                        c.WithdrawalHistory,
+                        Name = scMain?.Name ?? "",
+                        Description = scMain?.Description ?? "",
+                    };
+                }).ToList();
+
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Contract list retrieved",
-                    Contracts = contracts ?? new List<VBTCContractV2>()
+                    Contracts = enriched
                 });
             }
             catch (Exception ex)
             {
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
             }
+        }
+
+        #region Privacy (vBTC shielded pool, Phase 7)
+
+        /// <summary>Transparent vBTC → shielded (T→Z). Optional co-shield warning when local wallet has little shielded VFX for future fees.</summary>
+        [HttpPost("ShieldVBTC")]
+        public async Task<string> ShieldVBTC([FromBody] ShieldVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.FromAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress required." });
+                if (!AddressValidateUtility.ValidateAddress(req.FromAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid FromAddress." });
+                var account = AccountData.GetSingleAccount(req.FromAddress);
+                if (account == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress not in local wallet." });
+
+                var sw = PrivacyDbContext.Wallets().FindOne(x => x.TransparentSourceAddress == req.FromAddress);
+                var vfxUnspent = PrivacyApiHelper.SumVfxUnspent(sw);
+                string? coShieldWarning = vfxUnspent < Globals.PrivateTxFixedFee * 2
+                    ? "Low or no shielded VFX for future ZK fees; consider also shielding VFX."
+                    : null;
+
+                var nonce = AccountStateTrei.GetNextNonce(req.FromAddress);
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildShield(
+                        req.FromAddress,
+                        req.VbtcContractUid,
+                        req.VbtcAmount,
+                        Globals.MinFeePerKB,
+                        nonce,
+                        ts,
+                        req.RecipientZfxAddress,
+                        req.Memo,
+                        out var tx,
+                        out var err,
+                        DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = err ?? "Build failed." });
+
+                tx!.Fee = req.TransparentFee ?? FeeCalcService.CalculateTXFee(tx);
+                tx.BuildPrivate();
+                var pk = account.GetPrivKey;
+                if (pk == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cannot sign (wallet locked?)." });
+                var sig = SignatureService.CreateSignature(tx.Hash, pk, account.PublicKey);
+                if (sig == "ERROR")
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Signature failed." });
+                tx.Signature = sig;
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx);
+                if (!ok)
+                    return json;
+                return JsonConvert.SerializeObject(new { Success = true, Hash = tx.Hash, Message = "Broadcast.", CoShieldWarning = coShieldWarning });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpPost("UnshieldVBTC")]
+        public async Task<string> UnshieldVBTC([FromBody] UnshieldVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "ZfxAddress required." });
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No shielded wallet for zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = kmErr ?? "Keys" });
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var candidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var fee = Globals.PrivateTxFixedFee;
+                if (!CommitmentSelectionService.TrySelectInputs(candidates, req.TransparentVbtcAmount + fee, out var inputs, out _, out var selErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
+
+                var vfxCandidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var vfxFeeNote = vfxCandidates.Where(c => c.Amount >= fee).OrderBy(c => c.Amount).FirstOrDefault();
+                if (vfxFeeNote == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Need at least one shielded VFX note whose amount covers the fixed ZK fee. Co-shield VFX or consolidate notes first." });
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildUnshield(req.VbtcContractUid, inputs, req.TransparentVbtcAmount, req.TransparentToAddress, keys, ts, out var tx, out var berr, vfxFeeNote, DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return ok ? JsonConvert.SerializeObject(new { Success = true, Hash = tx!.Hash, Message = "Broadcast." }) : json;
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpPost("PrivateTransferVBTC")]
+        public async Task<string> PrivateTransferVBTC([FromBody] PrivateTransferVbtcRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "ZfxAddress required." });
+                var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (w == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "No shielded wallet for zfx address." });
+                if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = kmErr ?? "Keys" });
+
+                var asset = VbtcPrivacyAsset.FormatAssetKey(req.VbtcContractUid);
+                var candidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var fee = Globals.PrivateTxFixedFee;
+                if (!CommitmentSelectionService.TrySelectInputs(candidates, req.PaymentAmount + fee, out var inputs, out _, out var selErr))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = selErr ?? "Input selection failed." });
+
+                var vfxCandidates = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList() ?? new List<UnspentCommitment>();
+                var vfxFeeNote = vfxCandidates.Where(c => c.Amount >= fee).OrderBy(c => c.Amount).FirstOrDefault();
+                if (vfxFeeNote == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Need at least one shielded VFX note whose amount covers the fixed ZK fee. Co-shield VFX or consolidate notes first." });
+
+                var ts = TimeUtil.GetTime();
+                if (!VbtcPrivateTransactionBuilder.TryBuildPrivateTransfer(req.VbtcContractUid, inputs, req.PaymentAmount, req.RecipientZfxAddress, keys, ts, out var tx, out var berr, vfxFeeNote, DbContext.DB_Privacy))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = berr ?? "Build failed." });
+
+                var (ok, json) = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+                return ok ? JsonConvert.SerializeObject(new { Success = true, Hash = tx!.Hash, Message = "Broadcast." }) : json;
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpGet("GetShieldedVBTCBalance")]
+        public Task<string> GetShieldedVBTCBalance([FromQuery] string zfxAddress, [FromQuery] string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(zfxAddress) || string.IsNullOrWhiteSpace(scUID))
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "zfxAddress and scUID required." }));
+                var w = ShieldedWalletService.FindByZfxAddress(zfxAddress);
+                if (w == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Balance = 0.0m }));
+                var asset = VbtcPrivacyAsset.FormatAssetKey(scUID);
+                var sum = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, asset, StringComparison.Ordinal)).Sum(c => c.Amount) ?? 0;
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Balance = sum, Asset = asset }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        [HttpGet("GetShieldedVBTCPoolState/{scUID}")]
+        public Task<string> GetShieldedVBTCPoolState(string scUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(scUID))
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "scUID required." }));
+                var st = VBTCPrivacyService.GetPoolState(scUID);
+                if (st == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Asset = VbtcPrivacyAsset.FormatAssetKey(scUID), CurrentMerkleRoot = (string?)null, TotalCommitments = 0L, TotalShieldedSupply = 0.0M, LastUpdateHeight = 0L }));
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, st.AssetType, st.CurrentMerkleRoot, st.TotalCommitments, st.TotalShieldedSupply, st.LastUpdateHeight }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        #endregion
+
+        #region Base Bridge Operations
+
+        /// <summary>
+        /// Lock vBTC for bridging to Base. Creates a bridge lock record and optionally
+        /// triggers immediate relay to mint vBTC.b on Base Sepolia.
+        /// </summary>
+        /// <param name="payload">Bridge lock request</param>
+        /// <returns>Lock ID and status</returns>
+        [HttpPost("BridgeToBase")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> BridgeToBase([FromBody] VBTCBridgeLockPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "SmartContractUID is required" });
+
+                if (string.IsNullOrEmpty(payload.OwnerAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress is required" });
+
+                if (string.IsNullOrEmpty(payload.EvmDestination))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "EvmDestination is required" });
+
+                // Validate EVM address format
+                if (!payload.EvmDestination.StartsWith("0x") || payload.EvmDestination.Length != 42)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "EvmDestination must be a valid EVM address (0x + 40 hex chars)" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                if (AccountData.GetSingleAccount(payload.OwnerAddress) == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "OwnerAddress must be a wallet account on this node (required to sign VBTC_V2_BRIDGE_LOCK)." });
+
+                // Check available balance using existing service
+                var balResult = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(
+                    payload.SmartContractUID, payload.OwnerAddress);
+
+                if (!balResult.success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Failed to check balance" });
+
+                // Deduct local bridge reservations not yet reflected in state trei (see BridgeLockRecord.GetLockedAmount)
+                var alreadyLocked = BridgeLockRecord.GetLockedAmount(payload.OwnerAddress, payload.SmartContractUID);
+                var availableBalance = balResult.availableBalance - alreadyLocked;
+
+                if (payload.Amount > availableBalance)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"Insufficient available balance. Available: {availableBalance} BTC, Requested: {payload.Amount} BTC, Reserved (pending VFX confirmation): {alreadyLocked} BTC"
+                    });
+                }
+
+                var lockId = Guid.NewGuid().ToString("N");
+                var amountSats = (long)(payload.Amount * 100_000_000M);
+
+                var txResult = await Services.VBTCService.CreateBridgeLockTx(
+                    payload.SmartContractUID,
+                    payload.OwnerAddress,
+                    payload.Amount,
+                    payload.EvmDestination,
+                    lockId);
+
+                if (!txResult.Success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = txResult.TxHashOrError, LockId = lockId });
+
+                var vfxTxHash = txResult.TxHashOrError;
+
+                var lockRecord = new BridgeLockRecord
+                {
+                    LockId = lockId,
+                    SmartContractUID = payload.SmartContractUID,
+                    OwnerAddress = payload.OwnerAddress,
+                    Amount = payload.Amount,
+                    AmountSats = amountSats,
+                    EvmDestination = payload.EvmDestination,
+                    Status = BridgeLockStatus.Locked,
+                    CreatedAtUtc = TimeUtil.GetTime(),
+                    VfxLockTxHash = vfxTxHash,
+                    VfxLockConfirmedOnChain = false
+                };
+
+                if (!BridgeLockRecord.Save(lockRecord))
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "VFX lock transaction was broadcast but saving the local bridge record failed. Check wallet transactions.",
+                        LockId = lockId,
+                        VfxLockTxHash = vfxTxHash
+                    });
+                }
+
+                LogUtility.Log($"[BaseBridge] VFX bridge lock broadcast. LockId: {lockId}, Tx: {vfxTxHash}, Amount: {payload.Amount} BTC, To: {payload.EvmDestination}",
+                    "VBTCController.BridgeToBase");
+
+                string status;
+                if (VbtcBaseBridge.IsEnabled)
+                    status = "VFX lock broadcast. After the lock confirms on-chain, validators sign mint attestations and casters submit mintWithProof on Base.";
+                else
+                    status = "VFX lock broadcast. Configure BaseBridgeRpcUrl and BaseBridgeContract in config.txt for Base mint (VBTCb).";
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "vBTC bridge lock transaction broadcast",
+                    LockId = lockId,
+                    VfxLockTxHash = vfxTxHash,
+                    SmartContractUID = payload.SmartContractUID,
+                    Amount = payload.Amount,
+                    AmountSats = amountSats,
+                    EvmDestination = payload.EvmDestination,
+                    Status = status,
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get bridge lock status by lock ID
+        /// </summary>
+        [HttpGet("GetBridgeLockStatus/{lockId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLockStatus(string lockId)
+        {
+            try
+            {
+                var record = BridgeLockRecord.GetByLockId(lockId);
+                if (record == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Bridge lock not found" });
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Bridge lock found",
+                    Lock = record
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Validator node: sign the VBTCb mint message for a confirmed VFX bridge lock.
+        /// Casters POST the same <see cref="MintAttestationRequest"/> body to each validator; response uses lowercase <c>success</c> / <c>signature</c> for collector compatibility.
+        /// </summary>
+        [HttpPost("SignMintAttestation")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SignMintAttestation([FromBody] MintAttestationRequest request)
+        {
+            try
+            {
+                if (request == null)
+                    return JsonConvert.SerializeObject(new { success = false, message = "Payload cannot be null" });
+
+                var (ok, sig, err) = await Services.BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                if (!ok)
+                    return JsonConvert.SerializeObject(new { success = false, message = err ?? "Signing failed" });
+
+                return JsonConvert.SerializeObject(new { success = true, signature = sig });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { success = false, message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Returns in-memory mint attestation progress for a lock ID on this node (caster-collected signatures).
+        /// </summary>
+        [HttpGet("GetMintAttestation/{lockId}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetMintAttestation(string lockId)
+        {
+            try
+            {
+                var state = Services.BaseBridgeAttestationService.GetAttestationState(lockId);
+                if (state == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "No attestation state for this lock on this node" }));
+
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Attestation = state }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// List all bridge locks for a contract
+        /// </summary>
+        [HttpGet("GetBridgeLocks/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLocks(string scUID)
+        {
+            try
+            {
+                var records = BridgeLockRecord.GetBySmartContract(scUID);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = $"Found {records.Count} bridge locks",
+                    Locks = records
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// List all bridge locks for an owner address (across all contracts)
+        /// </summary>
+        [HttpGet("GetBridgeLocksByOwner/{ownerAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeLocksByOwner(string ownerAddress)
+        {
+            try
+            {
+                var records = BridgeLockRecord.GetByOwner(ownerAddress);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = $"Found {records.Count} bridge locks for owner",
+                    Locks = records
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Deprecated: VBTCb does not use a relay-key queue. Mint uses validator attestations and caster-submitted mintWithProof.
+        /// </summary>
+        [HttpPost("RelayPendingBridgeLocks")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> RelayPendingBridgeLocks()
+        {
+            return Task.FromResult(JsonConvert.SerializeObject(new
+            {
+                Success = false,
+                Message = "VBTCb has no relay queue. Use SignMintAttestation on validators and caster flow for mintWithProof after the VFX lock confirms."
+            }));
+        }
+
+        /// <summary>
+        /// Get vBTC.b balance on Base for a given EVM address
+        /// </summary>
+        [HttpGet("GetBaseBalance/{evmAddress}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBaseBalance(string evmAddress)
+        {
+            try
+            {
+                var result = await VbtcBaseBridge.GetBaseBalance(evmAddress);
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = result.Success,
+                    Message = result.Message,
+                    EvmAddress = evmAddress,
+                    VBTCbBalance = result.Balance,
+                    ContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    Network = VbtcBaseBridge.BaseNetworkDisplayName,
+                    ChainId = VbtcBaseBridge.BaseChainId
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get bridge configuration status
+        /// </summary>
+        [HttpGet("GetBridgeStatus")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetBridgeStatus()
+        {
+            try
+            {
+                var pendingAttestations = BridgeLockRecord.GetPendingV2Attestations().Count;
+                var totalSupply = VbtcBaseBridge.CanReadVbtcToken
+                    ? await VbtcBaseBridge.GetBaseTotalSupply()
+                    : (false, 0M, "Not configured");
+
+                var sync = BridgeExitSyncState.GetOrCreate();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
+                    ExitWatchConfigured = VbtcBaseBridgeExit.IsConfigured,
+                    BaseRpcUrl = VbtcBaseBridge.BaseRpcUrl,
+                    VBTCbContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    BaseChainId = VbtcBaseBridge.BaseChainId,
+                    PendingV2Attestations = pendingAttestations,
+                    BaseTotalSupply = totalSupply.Item2,
+                    ExitPollLastScannedBlock = sync.LastScannedBlock,
+                    Network = VbtcBaseBridge.BaseNetworkDisplayName
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Returns the contract address, chainId, and ABI needed by the frontend to call mintWithProof via MetaMask.
+        /// </summary>
+        [HttpGet("GetBridgeConfig")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string GetBridgeConfig()
+        {
+            return JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                IsEnabled = VbtcBaseBridge.IsEnabled,
+                ContractAddress = VbtcBaseBridge.ContractAddress,
+                ChainId = VbtcBaseBridge.BaseChainId,
+                Network = VbtcBaseBridge.BaseNetworkDisplayName,
+                Abi = Services.BaseBridgeService.CONTRACT_ABI
+            });
+        }
+
+        /// <summary>
+        /// Configure the Base bridge at runtime (alternative to environment variables).
+        /// WARNING: Only use in development/demo. In production, use environment variables.
+        /// </summary>
+        [HttpPost("ConfigureBridge")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ConfigureBridge([FromBody] VBTCBridgeConfigPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (!string.IsNullOrEmpty(payload.BaseRpcUrl))
+                    VbtcBaseBridge.BaseRpcUrl = payload.BaseRpcUrl;
+
+                if (!string.IsNullOrEmpty(payload.VBTCbContractAddress))
+                    VbtcBaseBridge.VBTCbContractAddress = payload.VBTCbContractAddress;
+
+                if (payload.BaseChainId > 0)
+                    VbtcBaseBridge.BaseChainId = payload.BaseChainId;
+
+                LogUtility.Log($"[BaseBridge] Configuration updated via API. Enabled: {VbtcBaseBridge.IsEnabled}",
+                    "VBTCController.ConfigureBridge");
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Bridge configuration updated",
+                    BridgeEnabled = VbtcBaseBridge.IsEnabled,
+                    BaseRpcUrl = VbtcBaseBridge.BaseRpcUrl,
+                    VBTCbContractAddress = VbtcBaseBridge.VBTCbContractAddress,
+                    BaseChainId = VbtcBaseBridge.BaseChainId
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Manually poll Base for <c>burnForExit</c> / <c>ExitBurned</c> and unlock matching VFX locks (same as background worker).
+        /// </summary>
+        [HttpPost("PollBaseExitBurns")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> PollBaseExitBurns()
+        {
+            try
+            {
+                var result = await VbtcBaseBridgeExit.PollOnce();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Processed = result.Processed,
+                    ScannedToBlock = result.ScannedToBlock,
+                    Message = result.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Reset the exit burn scan cursor to rescan from a specific Base block number.
+        /// Use this to re-detect missed burn events (e.g. VfxExitBurned, BTCExitBurned).
+        /// The background loop will automatically rescan from the specified block on its next tick.
+        /// </summary>
+        [HttpPost("RescanExitBurns/{fromBlock}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string RescanExitBurns(long fromBlock)
+        {
+            try
+            {
+                var result = VbtcBaseBridgeExit.RescanFromBlock(fromBlock);
+                return JsonConvert.SerializeObject(new
+                {
+                    result.Success,
+                    result.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        #endregion
+
+        #region FROST Contract Blacklist
+
+        /// <summary>
+        /// Manually blacklist a contract's FROST keys (e.g., contracts DKG'd before the participant ordering fix).
+        /// Blacklisted contracts are skipped during BTC exit contract selection.
+        /// </summary>
+        [HttpPost("InvalidateFrostContract/{scUID}")]
+        public IActionResult InvalidateFrostContract(string scUID)
+        {
+            if (string.IsNullOrWhiteSpace(scUID))
+                return BadRequest(new { Success = false, Message = "scUID is required" });
+
+            FrostBlacklist.Blacklist(scUID, "Manually invalidated via API");
+            return Ok(new { Success = true, Message = $"Contract {scUID} has been blacklisted for FROST signing (24h TTL)" });
+        }
+
+        /// <summary>
+        /// Remove a contract from the FROST blacklist (e.g., after successful re-DKG).
+        /// </summary>
+        [HttpPost("RemoveFrostBlacklist/{scUID}")]
+        public IActionResult RemoveFrostBlacklist(string scUID)
+        {
+            if (string.IsNullOrWhiteSpace(scUID))
+                return BadRequest(new { Success = false, Message = "scUID is required" });
+
+            var removed = FrostBlacklist.Remove(scUID);
+            return Ok(new { Success = true, Message = removed ? $"Contract {scUID} removed from blacklist" : $"Contract {scUID} was not in the blacklist" });
+        }
+
+        /// <summary>
+        /// List all currently blacklisted FROST contracts.
+        /// </summary>
+        [HttpGet("GetFrostBlacklist")]
+        public IActionResult GetFrostBlacklist()
+        {
+            var blacklist = FrostBlacklist.GetAll();
+            return Ok(new { Success = true, Blacklist = blacklist });
         }
 
         #endregion
@@ -2641,6 +4248,16 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         /// If not provided, you must call InitiateMPCCeremony first
         /// </summary>
         public string? CeremonyId { get; set; }
+        /// <summary>S3C §5: when minting a public companion, the linked S3C contract's scUID.</summary>
+        public string? LinkedContractUID { get; set; }
+    }
+
+    public class S3CAutoBridgePayload
+    {
+        public string S3CContractUID { get; set; }
+        public string RequesterAddress { get; set; }   // holds S3C vBTC, owns/creates the companion, signs
+        public decimal Amount { get; set; }
+        public string EvmDestination { get; set; }     // where vBTC.b mints (0x...)
     }
 
     public class VBTCTransferPayload
@@ -2712,6 +4329,7 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public long Timestamp { get; set; }              // Unix timestamp
         public string UniqueId { get; set; }             // Unique request ID (prevents replay)
         public string OwnerSignature { get; set; }       // Signature of request data
+        public string? LinkedContractUID { get; set; }   // S3C §5: linked S3C contract for a public companion
     }
 
     // Raw Withdrawal Payload Models (for external/pre-signed requests)
@@ -2729,16 +4347,6 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public bool IsTest { get; set; }                 // Testnet flag
     }
 
-    public class VBTCWithdrawalCompleteRawPayload
-    {
-        public string SmartContractUID { get; set; }
-        public string WithdrawalRequestHash { get; set; }
-        public string ValidatorAddress { get; set; }     // Validator initiating completion
-        public long Timestamp { get; set; }
-        public string UniqueId { get; set; }
-        public string ValidatorSignature { get; set; }   // FROST signature proof
-    }
-
     public class VBTCCancellationRawPayload
     {
         public string SmartContractUID { get; set; }
@@ -2749,6 +4357,105 @@ namespace ReserveBlockCore.Bitcoin.Controllers
         public long Timestamp { get; set; }
         public string UniqueId { get; set; }
         public string OwnerSignature { get; set; }       // VFX signature
+    }
+
+    // Raw TX Submission Model (for all GetRaw*/SendRaw* endpoint pairs)
+
+    public class RawVBTCTxSubmission
+    {
+        /// <summary>TX hash that was returned by GetRaw*Data (the value the client signed).</summary>
+        public string Hash { get; set; } = "";
+        /// <summary>ECDSA base64 signature over UTF8(Hash).</summary>
+        public string Signature { get; set; } = "";
+        /// <summary>Hex-encoded secp256k1 public key of the signing account.</summary>
+        public string PublicKey { get; set; } = "";
+    }
+
+    // Raw Complete Withdrawal TX Payload (for web wallet — records VFX withdrawal completion after BTC broadcast)
+
+    public class RawCompleteWithdrawalTxPayload
+    {
+        public string SmartContractUID { get; set; } = "";
+        /// <summary>The withdrawal requestor's VFX address (FromAddress for the completion TX).</summary>
+        public string FromAddress { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+        /// <summary>The BTC transaction hash from the FROST signing result (after wallet broadcasts to Bitcoin).</summary>
+        public string BTCTransactionHash { get; set; } = "";
+        /// <summary>Withdrawal amount in BTC.</summary>
+        public decimal Amount { get; set; }
+        /// <summary>BTC destination address.</summary>
+        public string BTCDestination { get; set; } = "";
+    }
+
+    // Raw Withdrawal Cancel TX Payload
+
+    public class VBTCWithdrawalCancelTxPayload
+    {
+        public string SmartContractUID { get; set; } = "";
+        public string RequestorAddress { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+    }
+
+    // Raw MPC Ceremony Payload Models (for web wallet pre-signed auth)
+
+    // Raw Complete Withdrawal Payload Models (for web wallet pre-signed FROST auth)
+
+    public class PrepareCompleteWithdrawalRawPayload
+    {
+        public string OwnerAddress { get; set; } = "";
+        public string SmartContractUID { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+    }
+
+    public class ExecuteCompleteWithdrawalRawPayload
+    {
+        public string OwnerAddress { get; set; } = "";
+        public string SmartContractUID { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+        public string SessionId { get; set; } = "";
+        public long StartTimestamp { get; set; }
+        public string StartSignature { get; set; } = "";
+        public long ShareDistributionTimestamp { get; set; }
+        public string ShareDistributionSignature { get; set; } = "";
+        /// <summary>Delegated withdrawal amount (BTC). Passed through if local DB doesn't have the withdrawal request.</summary>
+        public decimal Amount { get; set; }
+        /// <summary>Delegated BTC destination address.</summary>
+        public string BTCDestination { get; set; } = "";
+        /// <summary>Delegated fee rate (sats/vB).</summary>
+        public int FeeRate { get; set; }
+    }
+
+    public class PrepareMPCCeremonyRawPayload
+    {
+        public string OwnerAddress { get; set; } = "";
+    }
+
+    public class ExecuteMPCCeremonyRawPayload
+    {
+        public string OwnerAddress { get; set; } = "";
+        public string CeremonyId { get; set; } = "";
+        public string SessionId { get; set; } = "";
+        public long StartTimestamp { get; set; }
+        public string StartSignature { get; set; } = "";
+        public long ShareDistributionTimestamp { get; set; }
+        public string ShareDistributionSignature { get; set; } = "";
+    }
+
+    // Base Bridge Payload Models
+
+    public class VBTCBridgeLockPayload
+    {
+        public string SmartContractUID { get; set; } = string.Empty;
+        public string OwnerAddress { get; set; } = string.Empty;
+        public decimal Amount { get; set; }
+        public string EvmDestination { get; set; } = string.Empty;
+    }
+
+    public class VBTCBridgeConfigPayload
+    {
+        public string? BaseRpcUrl { get; set; }
+        public string? VBTCbContractAddress { get; set; }
+        public int BaseChainId { get; set; } = 0;
     }
 
     #endregion

@@ -152,7 +152,7 @@ namespace ReserveBlockCore
                 app.UseDeveloperExceptionPage();
             }
 
-            app.UseElmah();
+            //app.UseElmah();
             app.UseSwagger();
             app.UseSwaggerUI(c => {
                 c.SwaggerEndpoint("/swagger/v1/swagger.json", "ReserveBlock API v1");

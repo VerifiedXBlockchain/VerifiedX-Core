@@ -98,6 +98,13 @@ namespace ReserveBlockCore.Bitcoin.Models
         /// </summary>
         public string? RemoteCeremonyId { get; set; }
 
+        /// <summary>
+        /// S3C: whether this ceremony routes to the private S3C validator pool (set at
+        /// creation from Globals.UseS3C; companion creation forces false). Drives executor
+        /// pool selection in ExecuteMPCCeremonyLocally. Default false → public pool.
+        /// </summary>
+        public bool IsS3C { get; set; }
+
         public MPCCeremonyState()
         {
             ValidatorSnapshot = new List<string>();

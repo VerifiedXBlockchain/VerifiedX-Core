@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Data;
 using ReserveBlockCore.Models;
+using ReserveBlockCore.Models.Privacy;
 namespace ReserveBlockCore.Controllers
 {
     [Route("explorer")]
@@ -182,6 +184,47 @@ namespace ReserveBlockCore.Controllers
             }
         }
 
+        // ── Mempool ──────────────────────────────────────────────────────────────
+        [HttpGet("api/mempool")]
+        public IActionResult GetMempoolTransactions()
+        {
+            try
+            {
+                var pool = TransactionData.GetMempool();
+                if (pool == null || pool.Count == 0)
+                    return Ok(Array.Empty<object>());
+
+                var result = pool.Select(tx =>
+                {
+                    object? privacyInfo = null;
+                    if (IsPrivacyTxType(tx.TransactionType) && !string.IsNullOrWhiteSpace(tx.Data))
+                    {
+                        privacyInfo = ParsePrivacyPayloadSummary(tx.Data);
+                    }
+
+                    return new
+                    {
+                        tx.Hash,
+                        tx.FromAddress,
+                        tx.ToAddress,
+                        tx.Amount,
+                        tx.Fee,
+                        tx.Nonce,
+                        tx.Timestamp,
+                        TransactionType = (int)tx.TransactionType,
+                        tx.Data,
+                        privacyInfo
+                    };
+                }).ToList();
+
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = ex.Message });
+            }
+        }
+
         // ── Universal search ─────────────────────────────────────────────────────
         [HttpGet("api/search")]
         public IActionResult Search([FromQuery] string q)
@@ -339,6 +382,47 @@ namespace ReserveBlockCore.Controllers
             }
         }
 
+        // ── Privacy helpers ──────────────────────────────────────────────────────
+        private static bool IsPrivacyTxType(TransactionType txType)
+        {
+            return txType == TransactionType.VFX_SHIELD
+                || txType == TransactionType.VFX_UNSHIELD
+                || txType == TransactionType.VFX_PRIVATE_TRANSFER
+                || txType == TransactionType.VBTC_V2_SHIELD
+                || txType == TransactionType.VBTC_V2_UNSHIELD
+                || txType == TransactionType.VBTC_V2_PRIVATE_TRANSFER;
+        }
+
+        private static object? ParsePrivacyPayloadSummary(string data)
+        {
+            try
+            {
+                var payload = JsonConvert.DeserializeObject<PrivateTxPayload>(data);
+                if (payload == null) return null;
+                return new
+                {
+                    version = payload.Version,
+                    kind = payload.Kind ?? "unknown",
+                    asset = payload.Asset,
+                    outputCount = payload.Outs?.Count ?? 0,
+                    nullifierCount = payload.NullsB64?.Count ?? 0,
+                    hasMerkleRoot = !string.IsNullOrWhiteSpace(payload.MerkleRootB64),
+                    hasProof = !string.IsNullOrWhiteSpace(payload.ProofB64),
+                    hasFeeProof = !string.IsNullOrWhiteSpace(payload.FeeProofB64),
+                    transparentAmount = payload.TransparentAmount,
+                    transparentInput = payload.TransparentInput,
+                    transparentOutput = payload.TransparentOutput,
+                    fee = payload.Fee,
+                    vbtcContractUid = payload.VbtcContractUid,
+                    vbtcTransparentAmount = payload.VbtcTransparentAmount
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         // ── Embedded HTML ────────────────────────────────────────────────────────
         private static string GetHtml() => @"<!DOCTYPE html>
 <html lang='en'>
@@ -375,9 +459,15 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 /* Stats */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:28px}
 .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:5px}
+.stat-card.clk{cursor:pointer;transition:border-color .2s}.stat-card.clk:hover{border-color:var(--accent)}
 .stat-lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
 .stat-val{font-size:24px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
 .stat-val.acc{color:var(--accent)}.stat-val.grn{color:var(--green)}.stat-val.org{color:var(--orange)}
+/* Tab bar */
+.tab-bar{display:flex;gap:4px;margin-bottom:14px}
+.tab-btn{background:var(--surface2);border:1px solid var(--border);color:var(--muted);padding:8px 18px;border-radius:8px 8px 0 0;cursor:pointer;font-size:13px;font-weight:600;transition:all .2s}
+.tab-btn:hover{color:var(--text);border-color:var(--accent)}
+.tab-btn.active{background:var(--surface);color:var(--accent);border-bottom-color:var(--surface)}
 /* Section header */
 .sec-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
 .sec-ttl{font-size:17px;font-weight:700;color:var(--text)}
@@ -427,6 +517,7 @@ code,.hash-t,.addr-t{font-family:'SF Mono','Fira Code',Consolas,monospace;font-s
 .type-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase;background:rgba(88,166,255,.1);color:var(--accent);border:1px solid rgba(88,166,255,.2)}
 .type-badge.t0{background:rgba(63,185,80,.1);color:var(--green);border-color:rgba(63,185,80,.2)}
 .type-badge.t1{background:rgba(188,140,255,.1);color:var(--purple);border-color:rgba(188,140,255,.2)}
+.type-badge.tpriv{background:rgba(188,140,255,.15);color:var(--purple);border-color:rgba(188,140,255,.3)}
 .st-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700}
 .st-ok{background:rgba(63,185,80,.13);color:var(--green)}
 .st-pend{background:rgba(227,179,65,.13);color:var(--orange)}
@@ -437,6 +528,19 @@ pre.data-pre{background:var(--bg);border:1px solid var(--border);border-radius:6
 .no-data-icon{font-size:42px;margin-bottom:14px}
 .sub-ttl{margin:20px 0 12px;font-size:15px;font-weight:700;color:var(--text)}
 .tx-wrap{overflow-x:auto}
+/* Privacy detail section */
+.priv-section{background:var(--bg);border:1px solid rgba(188,140,255,.3);border-radius:8px;padding:16px;margin-top:14px}
+.priv-section h4{color:var(--purple);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px}
+.priv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-bottom:10px}
+.priv-item{display:flex;flex-direction:column;gap:2px}
+.priv-item label{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--muted)}
+.priv-item span{font-size:12px;color:var(--text);word-break:break-all}
+.priv-item span.yes{color:var(--green)}.priv-item span.no{color:var(--muted)}
+.priv-outs-tbl{width:100%;border-collapse:collapse;margin-top:6px}
+.priv-outs-tbl th{font-size:10px;text-transform:uppercase;color:var(--muted);text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)}
+.priv-outs-tbl td{font-size:11px;padding:4px 8px;border-bottom:1px solid var(--border2);font-family:'SF Mono',Consolas,monospace;word-break:break-all}
+/* Mempool section */
+.mp-refresh{font-size:11px;color:var(--muted);margin-left:12px}
 @media(max-width:768px){.hdr{padding:0 14px}.main{padding:14px}.logo-text{display:none}.stats{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.stats{grid-template-columns:1fr}}
 </style>
@@ -459,24 +563,41 @@ pre.data-pre{background:var(--bg);border:1px solid var(--border);border-radius:6
       <div class='stat-card'><div class='stat-lbl'>Block Height</div><div class='stat-val acc' id='s-ht'>--</div></div>
       <div class='stat-card'><div class='stat-lbl'>Network Supply</div><div class='stat-val grn' id='s-sp'>--</div></div>
       <div class='stat-card'><div class='stat-lbl'>Connected Peers</div><div class='stat-val' id='s-pr'>--</div></div>
-      <div class='stat-card'><div class='stat-lbl'>Mempool TXs</div><div class='stat-val org' id='s-mp'>--</div></div>
+      <div class='stat-card clk' onclick='showMempool()'><div class='stat-lbl'>Mempool TXs</div><div class='stat-val org' id='s-mp'>--</div></div>
     </div>
-    <div class='sec-hdr'>
-      <h2 class='sec-ttl'>Latest Blocks</h2>
-      <div class='live' id='li'><div class='live-dot'></div><span>Live</span></div>
+    <div class='tab-bar'>
+      <div class='tab-btn active' id='tab-blocks' onclick='switchTab(""blocks"")'>Latest Blocks</div>
+      <div class='tab-btn' id='tab-mempool' onclick='switchTab(""mempool"")'>Mempool</div>
     </div>
-    <div class='tbl-wrap'>
-      <table class='dtbl'>
-        <thead><tr><th>Height</th><th>Hash</th><th>Age</th><th>Validator</th><th>TXs</th><th>Size</th><th>Reward</th></tr></thead>
-        <tbody id='bt'><tr><td class='ld-row' colspan='7'><span class='spin'></span>Loading blocks...</td></tr></tbody>
-      </table>
+    <div id='blocks-section'>
+      <div class='sec-hdr'>
+        <h2 class='sec-ttl'>Latest Blocks</h2>
+        <div class='live' id='li'><div class='live-dot'></div><span>Live</span></div>
+      </div>
+      <div class='tbl-wrap'>
+        <table class='dtbl'>
+          <thead><tr><th>Height</th><th>Hash</th><th>Age</th><th>Validator</th><th>TXs</th><th>Size</th><th>Reward</th></tr></thead>
+          <tbody id='bt'><tr><td class='ld-row' colspan='7'><span class='spin'></span>Loading blocks...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div id='mempool-section' style='display:none'>
+      <div class='sec-hdr'>
+        <h2 class='sec-ttl'>Mempool Transactions<span class='mp-refresh' id='mp-refresh'></span></h2>
+      </div>
+      <div class='tbl-wrap'>
+        <table class='dtbl'>
+          <thead><tr><th>Hash</th><th>Type</th><th>From</th><th>To</th><th>Amount</th><th>Fee</th><th>Age</th></tr></thead>
+          <tbody id='mpt'><tr><td class='ld-row' colspan='7'><span class='spin'></span>Loading mempool...</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </div>
   <div id='dv' class='detail'><div id='dc'></div></div>
 </main>
 <script>
 (function(){
-var blocks=[],sse=null;
+var blocks=[],sse=null,mpTimer=null,currentTab='blocks';
 
 document.addEventListener('DOMContentLoaded',function(){
   loadStats();loadBlocks();connectSSE();
@@ -491,6 +612,7 @@ function loadStats(){
     set('s-mp',d.mempool!=null?d.mempool:'--');
     set('nb',d.isTestNet?'Testnet':'Mainnet');
   }).catch(function(){});
+  setTimeout(loadStats,10000);
 }
 
 function loadBlocks(){
@@ -513,14 +635,14 @@ function blkRow(b){
   var hs=b.hash?b.hash.substring(0,14)+'...':'N/A';
   var vs=b.validator&&b.validator.length>24?b.validator.substring(0,24)+'...':b.validator||'N/A';
   var tc=b.numOfTx>0?'txcnt has':'txcnt';
-  return '<tr class=""block-row"" onclick=""viewBlock('+b.height+')"">' +
-    '<td><span class=""ht-badge"">'+b.height+'</span></td>' +
-    '<td><code class=""hash-lnk"" title=""'+esc(b.hash)+'"">' +hs+'</code></td>' +
-    '<td class=""muted"">'+ago(b.timestamp)+'</td>' +
-    '<td><code class=""addr-t"" title=""'+esc(b.validator)+'"">' +vs+'</code></td>' +
-    '<td><span class=""'+tc+'"">' +b.numOfTx+'</span></td>' +
-    '<td class=""muted"">'+sz(b.size)+'</td>' +
-    '<td class=""rwd"">'+b.totalReward+' VFX</td>' +
+  return '<tr class=""block-row"" onclick=""viewBlock('+b.height+')"">'+
+    '<td><span class=""ht-badge"">'+b.height+'</span></td>'+
+    '<td><code class=""hash-lnk"" title=""'+esc(b.hash)+'"">' +hs+'</code></td>'+
+    '<td class=""muted"">'+ago(b.timestamp)+'</td>'+
+    '<td><code class=""addr-t"" title=""'+esc(b.validator)+'"">' +vs+'</code></td>'+
+    '<td><span class=""'+tc+'"">'+b.numOfTx+'</span></td>'+
+    '<td class=""muted"">'+sz(b.size)+'</td>'+
+    '<td class=""rwd"">'+b.totalReward+' VFX</td>'+
     '</tr>';
 }
 
@@ -560,13 +682,64 @@ function blkRowInner(b){
   var hs=b.hash?b.hash.substring(0,14)+'...':'N/A';
   var vs=b.validator&&b.validator.length>24?b.validator.substring(0,24)+'...':b.validator||'N/A';
   var tc=b.numOfTx>0?'txcnt has':'txcnt';
-  return '<td><span class=""ht-badge"">'+b.height+'</span></td>' +
-    '<td><code class=""hash-lnk"" title=""'+esc(b.hash)+'"">' +hs+'</code></td>' +
-    '<td class=""muted"">'+ago(b.timestamp)+'</td>' +
-    '<td><code class=""addr-t"" title=""'+esc(b.validator||'')+'"">' +vs+'</code></td>' +
-    '<td><span class=""'+tc+'"">' +b.numOfTx+'</span></td>' +
-    '<td class=""muted"">'+sz(b.size)+'</td>' +
+  return '<td><span class=""ht-badge"">'+b.height+'</span></td>'+
+    '<td><code class=""hash-lnk"" title=""'+esc(b.hash)+'"">' +hs+'</code></td>'+
+    '<td class=""muted"">'+ago(b.timestamp)+'</td>'+
+    '<td><code class=""addr-t"" title=""'+esc(b.validator||'')+'"">' +vs+'</code></td>'+
+    '<td><span class=""'+tc+'"">'+b.numOfTx+'</span></td>'+
+    '<td class=""muted"">'+sz(b.size)+'</td>'+
     '<td class=""rwd"">'+b.totalReward+' VFX</td>';
+}
+
+/* ── Tab switching ── */
+window.switchTab=function(tab){
+  currentTab=tab;
+  el('tab-blocks').className=tab==='blocks'?'tab-btn active':'tab-btn';
+  el('tab-mempool').className=tab==='mempool'?'tab-btn active':'tab-btn';
+  el('blocks-section').style.display=tab==='blocks'?'':'none';
+  el('mempool-section').style.display=tab==='mempool'?'':'none';
+  if(tab==='mempool'){loadMempool();startMpRefresh();}else{stopMpRefresh();}
+};
+
+window.showMempool=function(){switchTab('mempool');};
+
+function startMpRefresh(){stopMpRefresh();mpTimer=setInterval(loadMempool,5000);}
+function stopMpRefresh(){if(mpTimer){clearInterval(mpTimer);mpTimer=null;}}
+
+function loadMempool(){
+  fetch('/explorer/api/mempool').then(function(r){return r.json();}).then(function(data){
+    set('s-mp',data.length);
+    set('mp-refresh','Updated '+new Date().toLocaleTimeString());
+    renderMempool(data);
+  }).catch(function(){
+    el('mpt').innerHTML='<tr><td class=""ld-row"" colspan=""7"">Failed to load mempool.</td></tr>';
+  });
+}
+
+function renderMempool(data){
+  if(!data||!data.length){
+    el('mpt').innerHTML='<tr><td class=""ld-row"" colspan=""7"">Mempool is empty.</td></tr>';return;
+  }
+  el('mpt').innerHTML=data.map(mpRow).join('');
+}
+
+function mpRow(tx){
+  var hs=tx.hash?tx.hash.substring(0,10)+'...':'N/A';
+  var fs=shn(tx.fromAddress,20);var ts2=shn(tx.toAddress,20);
+  var tt=ttype(tx.transactionType);
+  var tc=tCls(tx.transactionType);
+  var pi=tx.privacyInfo;
+  var extra='';
+  if(pi){extra=' title=""'+esc(pi.kind)+' | '+esc(pi.asset)+' | outs:'+pi.outputCount+' nulls:'+pi.nullifierCount+'""';}
+  return '<tr class=""block-row"" onclick=""vt(\''+esc(tx.hash)+'\')"">' +
+    '<td><code class=""hash-lnk"" title=""'+esc(tx.hash)+'"">' +hs+'</code></td>' +
+    '<td><span class=""type-badge'+tc+'""'+extra+'>' +tt+'</span></td>' +
+    '<td><code class=""addr-t clk"" title=""'+esc(tx.fromAddress||'')+'""  onclick=""event.stopPropagation();sa(\''+esc(tx.fromAddress||'')+'\')"">' +fs+'</code></td>' +
+    '<td><code class=""addr-t clk"" title=""'+esc(tx.toAddress||'')+'""  onclick=""event.stopPropagation();sa(\''+esc(tx.toAddress||'')+'\')"">' +ts2+'</code></td>' +
+    '<td class=""rwd"">'+tx.amount+'</td>' +
+    '<td class=""muted"">'+tx.fee+'</td>' +
+    '<td class=""muted"">'+ago(tx.timestamp)+'</td>' +
+    '</tr>';
 }
 
 window.viewBlock=function(h){
@@ -597,7 +770,7 @@ function renderBlkDet(b){
     di('Total Validators',b.totalValidators) +
     '</div>';
   if(txr){
-    h+='<div class=""sub-ttl"">Transactions ('+( b.transactions||[]).length+')</div>' +
+    h+='<div class=""sub-ttl"">Transactions ('+(b.transactions||[]).length+')</div>' +
       '<div class=""tx-wrap""><table class=""dtbl"">' +
       '<thead><tr><th>#</th><th>Hash</th><th>Type</th><th>From</th><th>To</th><th>Amount</th><th>Fee</th><th>Status</th></tr></thead>' +
       '<tbody>'+txr+'</tbody></table></div>';
@@ -616,8 +789,8 @@ function txRow(tx,i){
     '<td class=""muted"">'+(i+1)+'</td>' +
     '<td><code class=""hash-lnk"" title=""'+esc(tx.hash)+'"">' +hs+'</code></td>' +
     '<td><span class=""type-badge'+tCls(tx.transactionType)+'"">' +tt+'</span></td>' +
-    '<td><code class=""addr-t clk"" title=""'+esc(tx.fromAddress||'')+'"" onclick=""event.stopPropagation();sa(\''+esc(tx.fromAddress||'')+'\')"">' +fs+'</code></td>' +
-    '<td><code class=""addr-t clk"" title=""'+esc(tx.toAddress||'')+'"" onclick=""event.stopPropagation();sa(\''+esc(tx.toAddress||'')+'\')"">' +ts2+'</code></td>' +
+    '<td><code class=""addr-t clk"" title=""'+esc(tx.fromAddress||'')+'""  onclick=""event.stopPropagation();sa(\''+esc(tx.fromAddress||'')+'\')"">' +fs+'</code></td>' +
+    '<td><code class=""addr-t clk"" title=""'+esc(tx.toAddress||'')+'""  onclick=""event.stopPropagation();sa(\''+esc(tx.toAddress||'')+'\')"">' +ts2+'</code></td>' +
     '<td class=""rwd"">'+tx.amount+'</td>' +
     '<td class=""muted"">'+tx.fee+'</td>' +
     '<td><span class=""st-badge '+sc+'"">' +st+'</span></td>' +
@@ -632,6 +805,7 @@ window.vt=function(hash){
 
 function renderTxDet(tx){
   var sc=stCls(tx.transactionStatus);var st=stNm(tx.transactionStatus);
+  var isPriv=isPrivTx(tx.transactionType);
   var h=
     '<div class=""det-hdr""><button class=""back-btn"" onclick=""goHome()"">&#8592; Back</button><h2>Transaction</h2></div>' +
     '<div class=""det-grid"">' +
@@ -646,10 +820,70 @@ function renderTxDet(tx){
     di('Nonce',tx.nonce) +
     di('Timestamp',tx.timestamp?new Date(tx.timestamp*1000).toLocaleString():'N/A') +
     (tx.unlockTime?di('Unlock Time',new Date(tx.unlockTime*1000).toLocaleString()):'') +
-    (tx.data?di('Data','<pre class=""data-pre"">'+esc(tx.data)+'</pre>',true):'') +
     '</div>';
+  if(isPriv&&tx.data){
+    h+=renderPrivacyPayload(tx.data);
+  }else if(tx.data){
+    h+='<div class=""sub-ttl"">Transaction Data</div><pre class=""data-pre"">'+esc(tx.data)+'</pre>';
+  }
   showDet(h);
 }
+
+function renderPrivacyPayload(dataStr){
+  try{
+    var p=JSON.parse(dataStr);
+    if(!p||!p.v)return '<div class=""sub-ttl"">Transaction Data</div><pre class=""data-pre"">'+esc(dataStr)+'</pre>';
+    var s='<div class=""priv-section""><h4>&#128274; Privacy Payload</h4>';
+    s+='<div class=""priv-grid"">';
+    s+=pi('Version',p.v);
+    s+=pi('Kind',p.kind||'N/A');
+    if(p.sub_type)s+=pi('Sub Type',p.sub_type);
+    s+=pi('Asset',p.asset||'N/A');
+    s+=pi('Outputs',p.outs?p.outs.length:0);
+    s+=pi('Nullifiers',p.nulls?p.nulls.length:0);
+    s+=pi('Merkle Root',p.merkle_root?shn(p.merkle_root,24):'N/A');
+    s+=pi('Proof','<span class=""'+(p.proof_b64?'yes':'no')+'"">'+(p.proof_b64?'Present':'None')+'</span>');
+    s+=pi('Fee Proof','<span class=""'+(p.fee_proof_b64?'yes':'no')+'"">'+(p.fee_proof_b64?'Present':'None')+'</span>');
+    if(p.transparent_amount!=null)s+=pi('Transparent Amt',p.transparent_amount+' VFX');
+    if(p.transparent_input)s+=pi('Transparent In',shn(p.transparent_input,24));
+    if(p.transparent_output)s+=pi('Transparent Out',shn(p.transparent_output,24));
+    if(p.fee!=null)s+=pi('Payload Fee',p.fee+' VFX');
+    if(p.vbtc_uid)s+=pi('vBTC Contract',shn(p.vbtc_uid,24));
+    if(p.vbtc_amt!=null)s+=pi('vBTC Amount',p.vbtc_amt);
+    if(p.fee_input_nullifier_b64)s+=pi('Fee Nullifier',shn(p.fee_input_nullifier_b64,24));
+    if(p.fee_output_commitment_b64)s+=pi('Fee Out Commit',shn(p.fee_output_commitment_b64,24));
+    if(p.fee_tree_merkle_root)s+=pi('Fee Merkle Root',shn(p.fee_tree_merkle_root,24));
+    if(p.fee_input_spent_tree_position!=null)s+=pi('Fee Spent Pos',p.fee_input_spent_tree_position);
+    if(p.fee_out_note_hash)s+=pi('Fee Note Hash',shn(p.fee_out_note_hash,24));
+    s+='</div>';
+    if(p.outs&&p.outs.length>0){
+      s+='<div style=""margin-top:10px;font-size:12px;font-weight:700;color:var(--purple)"">Shielded Outputs</div>';
+      s+='<table class=""priv-outs-tbl""><thead><tr><th>Idx</th><th>Commitment</th><th>Note Hash</th><th>Enc. Note</th></tr></thead><tbody>';
+      for(var i=0;i<p.outs.length;i++){
+        var o=p.outs[i];
+        s+='<tr><td>'+o.i+'</td><td>'+shn(o.c||'',20)+'</td><td>'+shn(o.nh||'N/A',20)+'</td><td>'+(o.note?shn(o.note,16):'N/A')+'</td></tr>';
+      }
+      s+='</tbody></table>';
+    }
+    if(p.nulls&&p.nulls.length>0){
+      s+='<div style=""margin-top:10px;font-size:12px;font-weight:700;color:var(--purple)"">Nullifiers</div>';
+      s+='<div style=""display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"">';
+      for(var j=0;j<p.nulls.length;j++){
+        var pos=p.spent_tree_positions&&p.spent_tree_positions[j]!=null?' (pos:'+p.spent_tree_positions[j]+')':'';
+        s+='<code style=""background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:11px"">'+shn(p.nulls[j],20)+pos+'</code>';
+      }
+      s+='</div>';
+    }
+    s+='</div>';
+    return s;
+  }catch(ex){
+    return '<div class=""sub-ttl"">Transaction Data (Raw)</div><pre class=""data-pre"">'+esc(dataStr)+'</pre>';
+  }
+}
+
+function pi(lbl,val){return '<div class=""priv-item""><label>'+lbl+'</label><span>'+val+'</span></div>';}
+
+function isPrivTx(t){return t>=31&&t<=36;}
 
 window.sa=function(addr){
   el('si').value=addr;doSearch();
@@ -663,10 +897,10 @@ function renderAddrDet(data){
     '<div class=""bal-cards"">' +
     '<div class=""bal-card""><label>Balance</label><span class=""big-bal"">'+fmtBal(data.balance)+' VFX</span></div>' +
     '<div class=""bal-card""><label>Locked Balance</label><span class=""big-bal lk"">'+fmtBal(data.lockedBalance)+' VFX</span></div>' +
-    '<div class=""bal-card""><label>Nonce</label><span class=""big-bal nm"">'+( data.nonce||0)+'</span></div>' +
+    '<div class=""bal-card""><label>Nonce</label><span class=""big-bal nm"">'+(data.nonce||0)+'</span></div>' +
     '</div>';
   if(txr){
-    h+='<div class=""sub-ttl"">Transactions ('+( data.transactions||[]).length+')</div>' +
+    h+='<div class=""sub-ttl"">Transactions ('+(data.transactions||[]).length+')</div>' +
       '<div class=""tx-wrap""><table class=""dtbl"">' +
       '<thead><tr><th>#</th><th>Hash</th><th>Type</th><th>From</th><th>To</th><th>Amount</th><th>Fee</th><th>Status</th></tr></thead>' +
       '<tbody>'+txr+'</tbody></table></div>';
@@ -709,7 +943,7 @@ window.goHome=function(){
 function el(id){return document.getElementById(id);}
 function set(id,v){var e=el(id);if(e)e.textContent=v;}
 function num(n){return n!=null&&n>=0?n.toLocaleString():'--';}
-function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}
+function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';} 
 function shn(s,max){return s?(s.length>max?s.substring(0,max)+'...':s):'N/A';}
 function fmtBal(n){return n!=null?(+n).toFixed(8):'0.00000000';}
 
@@ -742,10 +976,15 @@ function stNm(s){
   return m[s]!==undefined?m[s]:'Unknown';
 }
 function ttype(t){
-  var n=['TX','NODE','NFT_MINT','NFT_TX','NFT_BURN','NFT_SALE','ADNR','DSTR','VOTE_TOPIC','VOTE','RESERVE','SC_MINT','SC_TX','SC_BURN','FTKN_MINT','FTKN_TX','FTKN_BURN','TKNZ_MINT','TKNZ_TX','TKNZ_BURN','TKNZ_WD_ARB','TKNZ_WD_OWNER','VBTC2_VAL_REG','VBTC2_VAL_HB','VBTC2_VAL_EXIT','VBTC2_CREATE','VBTC2_TX','VBTC2_WD_REQ','VBTC2_WD_COMP','VBTC2_WD_CANCEL','VBTC2_WD_VOTE'];
+  var n=['TX','NODE','NFT_MINT','NFT_TX','NFT_BURN','NFT_SALE','ADNR','DSTR','VOTE_TOPIC','VOTE','RESERVE','SC_MINT','SC_TX','SC_BURN','FTKN_MINT','FTKN_TX','FTKN_BURN','TKNZ_MINT','TKNZ_TX','TKNZ_BURN','TKNZ_WD_ARB','TKNZ_WD_OWNER','VBTC2_VAL_REG','VBTC2_VAL_HB','VBTC2_VAL_EXIT','VBTC2_CREATE','VBTC2_TX','VBTC2_WD_REQ','VBTC2_WD_COMP','VBTC2_WD_CANCEL','VBTC2_WD_VOTE','VFX_SHIELD','VFX_UNSHIELD','VFX_PRIV_XFER','VBTC2_SHIELD','VBTC2_UNSHIELD','VBTC2_PRIV_XFER'];
   return n[t]!==undefined?n[t]:'TYPE_'+t;
 }
-function tCls(t){return t===0?' t0':t===1?' t1':'';}
+function tCls(t){
+  if(t===0)return ' t0';
+  if(t===1)return ' t1';
+  if(t>=31&&t<=36)return ' tpriv';
+  return '';
+}
 })();
 </script>
 </body>
