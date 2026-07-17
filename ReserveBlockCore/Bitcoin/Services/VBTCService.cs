@@ -326,27 +326,7 @@ namespace ReserveBlockCore.Bitcoin.Services
                     return await SCLogUtility.LogAndReturn($"Owner address account not found.", "VBTCService.TransferOwnership()", false);
 
                 // Validate balance > 0 (including state trei tokenization TXs)
-                if (scState.SCStateTreiTokenizationTXes != null)
-                {
-                    var balances = scState.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == account.Address || x.ToAddress == account.Address).ToList();
-                    if (balances.Any())
-                    {
-                        var balance = balances.Sum(x => x.Amount);
-                        var finalBalance = vbtcContract.Balance + balance;
-                        if (finalBalance <= 0)
-                            return await SCLogUtility.LogAndReturn($"Cannot transfer a token with zero balance.", "VBTCService.TransferOwnership()", false);
-                    }
-                    else
-                    {
-                        if (vbtcContract.Balance <= 0M)
-                            return await SCLogUtility.LogAndReturn($"Cannot transfer a token with zero balance.", "VBTCService.TransferOwnership()", false);
-                    }
-                }
-                else
-                {
-                    if (vbtcContract.Balance <= 0M)
-                        return await SCLogUtility.LogAndReturn($"Cannot transfer a token with zero balance.", "VBTCService.TransferOwnership()", false);
-                }
+                //0 balance check remove for ownership transfers
 
                 // Check beacons exist
                 if (!Globals.Beacons.Any())

@@ -1432,23 +1432,9 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 if (tknzFeature == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Contract missing TokenizationV2 feature: {scUID}" });
 
-                // 5. Validate balance > 0 (cannot transfer an empty contract)
-                decimal availableBalance = vbtcContract.Balance;
-                if (scStateTrei.SCStateTreiTokenizationTXes != null)
-                {
-                    var ownerTxes = scStateTrei.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == scStateTrei.OwnerAddress || x.ToAddress == scStateTrei.OwnerAddress)
-                        .ToList();
-
-                    if (ownerTxes.Any())
-                    {
-                        var ledgerDelta = ownerTxes.Sum(x => x.Amount);
-                        availableBalance = vbtcContract.Balance + ledgerDelta;
-                    }
-                }
-
-                if (availableBalance <= 0)
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cannot transfer a token with zero balance." });
+                // 5. Balance check removed for Raw endpoint — butterfly's pre-activation
+                // flow mints a token and immediately transfers ownership before any BTC
+                // is deposited. The non-Raw TransferOwnership still has this check.
 
                 // 6. Build TX data payload (same structure as NFT Transfer)
                 var newSCInfo = new[]
