@@ -8,8 +8,9 @@ namespace ReserveBlockCore.Utilities
     /// Fast fork/crash recovery: restores all chain-derived state from the newest snapshot slot
     /// at or below the rollback target, replays the few local blocks between the snapshot height
     /// and the target through StateData.UpdateTreis, and resyncs the local wallet for the replayed
-    /// range only. Seconds instead of the ~45-minute full genesis replay (ResetTreis), which
-    /// remains the fallback whenever no usable slot covers the target or the restore fails.
+    /// range only. Seconds instead of a full genesis replay. When no usable slot covers the target
+    /// this returns false and callers log a recovery-exhausted warning — the full rebuild
+    /// (ResetTreis) only runs when the operator passes the 'rebuildstate' startup argument.
     /// </summary>
     public static class SnapshotRestoreUtility
     {

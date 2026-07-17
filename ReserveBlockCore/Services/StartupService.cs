@@ -1255,49 +1255,81 @@ namespace ReserveBlockCore.Services
                         }
                         else
                         {
-                            var reason = treiStatus == null
-                                ? "no StateTreiStatus record found (state trie was wiped or never built)"
-                                : $"IsSynced=false (last failure: {treiStatus.LastFailureReason ?? "unknown"})";
-
-                            ConsoleWriterService.Output($"[STARTUP] State trie integrity check FAILED: {reason}");
-                            LogUtility.Log(
-                                $"[STARTUP] State trie not synced: {reason}. Attempting snapshot restore before falling back to ResetTreis.",
-                                "StartupService.DownloadBlocksOnStart");
-
-                            // FAST PATH: restore from a snapshot slot + replay the tail (seconds)
-                            // instead of a full genesis replay (~45 min). Crash-recovery case, so
-                            // the target is the current local tip.
-                            var restoreTarget = BlockchainData.GetLastBlock()?.Height ?? Globals.LastBlock.Height;
-                            var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
-                            if (restored)
+                            // ═══════════════════════════════════════════════════════════════
+                            // TRUST-ON-UPGRADE: a MISSING status record on a populated node is
+                            // the normal first boot after updating from a build that never wrote
+                            // one — NOT corruption. RunSettingChecks runs before this gate and
+                            // writes an explicit IsSynced=false on improper shutdown, so a null
+                            // record here means the previous (pre-upgrade) session shut down
+                            // gracefully with state validated block-by-block by consensus.
+                            // Forcing every updated node through a 45-min ResetTreis takes the
+                            // fleet offline (silent block rejection during rebuild) for nothing.
+                            // Sanity check: the account state trei must actually be populated —
+                            // a wiped trei (deleted db file) must still rebuild.
+                            // ═══════════════════════════════════════════════════════════════
+                            bool trustedExistingState = false;
+                            if (treiStatus == null)
                             {
-                                ConsoleWriterService.Output($"[STARTUP] Snapshot restore complete at height {restoreTarget}. Proceeding with block downloads.");
-                                LogUtility.Log(
-                                    $"[STARTUP] Snapshot restore succeeded at height {restoreTarget}.",
-                                    "StartupService.DownloadBlocksOnStart");
-                            }
-                            else
-                            {
-                                ConsoleWriterService.Output($"[STARTUP] No usable snapshot — running full state rebuild (ResetTreis) before block downloads...");
-                                ConsoleWriterService.Output($"[STARTUP] This will replay {blockCount:N0} blocks. This may take a while...");
+                                long stateRecordCount = 0;
+                                try { stateRecordCount = StateData.GetAccountStateTrei().Count(); } catch { }
 
-                                var rebuilt = await BlockRollbackUtility.ResetTreis();
-                                if (rebuilt)
+                                if (stateRecordCount > 0)
                                 {
-                                    ConsoleWriterService.Output($"[STARTUP] State rebuild complete. Proceeding with block downloads.");
+                                    StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] No StateTreiStatus record (first boot after update) — previous shutdown was clean and " +
+                                        $"state trie is populated ({stateRecordCount:N0} accounts). Trusting existing state; baseline recorded at height {Globals.LastBlock.Height}.");
                                     LogUtility.Log(
-                                        $"[STARTUP] ResetTreis succeeded. State trie is now synced at height {Globals.LastBlock.Height}.",
+                                        $"[STARTUP] TRUST-ON-UPGRADE: StateTreiStatus baseline recorded at height {Globals.LastBlock.Height} " +
+                                        $"({stateRecordCount:N0} state records). Skipping rebuild.",
                                         "StartupService.DownloadBlocksOnStart");
 
-                                    // Snapshot the freshly rebuilt state immediately so the
-                                    // genesis-replay work is never repeated.
                                     await StateSnapshotService.BootstrapAsync();
+                                    trustedExistingState = true;
+                                }
+                            }
+
+                            if (!trustedExistingState)
+                            {
+                                var reason = treiStatus == null
+                                    ? "no StateTreiStatus record found and state trie is EMPTY (wiped or never built)"
+                                    : $"IsSynced=false (last failure: {treiStatus.LastFailureReason ?? "unknown"})";
+
+                                ConsoleWriterService.Output($"[STARTUP] State trie integrity check FAILED: {reason}");
+                                LogUtility.Log(
+                                    $"[STARTUP] State trie not synced: {reason}. Attempting snapshot restore before falling back to ResetTreis.",
+                                    "StartupService.DownloadBlocksOnStart");
+
+                                // FAST PATH: restore from a snapshot slot + replay the tail (seconds)
+                                // instead of a full genesis replay (~45 min). Crash-recovery case, so
+                                // the target is the current local tip.
+                                var restoreTarget = BlockchainData.GetLastBlock()?.Height ?? Globals.LastBlock.Height;
+                                var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
+                                if (restored)
+                                {
+                                    ConsoleWriterService.Output($"[STARTUP] Snapshot restore complete at height {restoreTarget}. Proceeding with block downloads.");
+                                    LogUtility.Log(
+                                        $"[STARTUP] Snapshot restore succeeded at height {restoreTarget}.",
+                                        "StartupService.DownloadBlocksOnStart");
                                 }
                                 else
                                 {
-                                    ConsoleWriterService.Output($"[STARTUP] WARNING: State rebuild had errors. Block sync may fail.");
+                                    // NO AUTOMATIC REBUILD: the multi-hour genesis replay is
+                                    // operator-only (start with the `rebuildstate` argument).
+                                    // The node continues on its existing state — in the common
+                                    // case (improper shutdown before the first snapshot existed)
+                                    // that state is fine, consensus validates every block against
+                                    // it, and the probation counter in BlockValidatorService
+                                    // re-marks it synced after enough clean blocks so snapshot
+                                    // protection resumes. Real corruption surfaces as TX failures
+                                    // and is handled by the recovery paths.
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] WARNING: State trie is flagged unverified and no usable snapshot exists. " +
+                                        $"Continuing on existing state — snapshots will resume automatically after clean block validation. " +
+                                        $"If this node shows persistent TX/balance errors, restart it with the 'rebuildstate' argument for a full rebuild.");
                                     ErrorLogUtility.LogError(
-                                        $"[STARTUP] ResetTreis returned false. State may still be inconsistent.",
+                                        $"[STARTUP] Unverified state with no usable snapshot at height {Globals.LastBlock.Height}. " +
+                                        $"Automatic rebuild is disabled; running on existing state under probation. Manual option: 'rebuildstate' startup argument.",
                                         "StartupService.DownloadBlocksOnStart");
                                 }
                             }

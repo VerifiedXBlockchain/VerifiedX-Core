@@ -38,18 +38,20 @@ namespace ReserveBlockCore.Utilities
                 var height = Globals.LastBlock.Height;
                 var newHeight = height - (long)numBlocksRollback;
 
-                var blocks = Block.GetBlocks();
-                blocks.DeleteManySafe(x => x.Height > newHeight);
-                DbContext.DB.Checkpoint();
-
-                // FAST PATH: restore from a snapshot slot at/below the rollback target and replay
-                // the tail — this is what upgrades every RollbackBlocksFast fallback (blocks with
-                // NFT/token/reserve/SC TXs) from a 45-min genesis replay to seconds.
+                // Snapshot restore performs the block deletion itself (only after a verified slot
+                // is found), so nothing is destroyed unless recovery to the target is possible.
+                // NO AUTOMATIC REBUILD: if no slot covers the target, fail the rollback and leave
+                // the chain untouched — the caller's recovery loop retries/escalates, and the
+                // multi-hour genesis replay stays operator-only ('rebuildstate' startup argument).
                 var restored = await SnapshotRestoreUtility.TryRestoreAsync(newHeight, manageFlags: false);
                 if (restored)
                     return true;
 
-                return await ResetTreis();
+                ErrorLogUtility.LogError(
+                    $"[RollbackBlocks] No usable snapshot covers rollback target {newHeight} (tip {height}). " +
+                    $"Rollback aborted with chain untouched. If this node stays stuck, restart it with the 'rebuildstate' argument.",
+                    "BlockRollbackUtility.RollbackBlocks");
+                return false;
             }
             catch {
                 return default;

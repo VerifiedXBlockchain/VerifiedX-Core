@@ -49,8 +49,18 @@ namespace ReserveBlockCore.Services
         /// <summary>After this many consecutive TX-validation failures (any height), trigger full state rebuild.</summary>
         public const int TX_FAIL_RECOVERY_THRESHOLD = 10;
         /// <summary>Height of the last TX-fail-triggered snapshot restore. A repeat trigger near the
-        /// same height means the snapshot carries the corruption — escalate to ResetTreis instead.</summary>
+        /// same height means the snapshot carries the corruption — recovery is exhausted (manual
+        /// 'rebuildstate' required) instead of looping restores.</summary>
         private static long _lastTxFailRestoreHeight = -1;
+
+        /// <summary>STATE PROBATION: consecutive cleanly-committed blocks while the state trie is
+        /// flagged unverified. Automatic rebuilds are disabled, so a node whose flag is dirty but
+        /// whose state is actually fine (e.g. crash before its first snapshot existed) re-earns
+        /// SetSynced after this streak — every committed block is consensus-validated against the
+        /// state, so a clean streak is direct evidence of consistency. Resumes snapshot protection.</summary>
+        private static int _cleanBlockStreak = 0;
+        private static bool _stateStatusVerified = false;
+        public const int STATE_PROBATION_BLOCKS = 50;
 
         public static void UpdateMemBlocks(Block block)
         {
@@ -1163,25 +1173,18 @@ namespace ReserveBlockCore.Services
                                                 }
                                             }
 
-                                            LogUtility.Log(
-                                                $"[ValidateBlock] STATE-REBUILD: No usable snapshot — starting full chain state rebuild via ResetTreis()...",
+                                            // NO AUTOMATIC REBUILD: snapshot recovery is exhausted (no usable
+                                            // slot, or a restore already ran and TX failures persist — the
+                                            // snapshot likely carries the corruption). The multi-hour genesis
+                                            // replay is operator-only. Flag the state so this is visible.
+                                            StateTreiStatusService.SetFailed(
+                                                $"Repeated TX validation failures at height {Globals.LastBlock.Height}; snapshot recovery exhausted.");
+                                            ErrorLogUtility.LogError(
+                                                $"[ValidateBlock] STATE-RECOVERY-EXHAUSTED: Repeated TX validation failures and no usable snapshot recovery. " +
+                                                $"State may be corrupted. Restart this node with the 'rebuildstate' argument to run a full state rebuild.",
                                                 "BlockValidatorService");
-                                            var rebuilt = await BlockRollbackUtility.ResetTreis();
-                                            if (rebuilt)
-                                            {
-                                                LogUtility.Log(
-                                                    $"[ValidateBlock] STATE-REBUILD-SUCCESS: Full state rebuild complete. " +
-                                                    $"Tip: height={Globals.LastBlock.Height}",
-                                                    "BlockValidatorService");
-                                                await StateSnapshotService.BootstrapAsync();
-                                            }
-                                            else
-                                            {
-                                                LogUtility.Log(
-                                                    $"[ValidateBlock] STATE-REBUILD-PARTIAL: ResetTreis returned false. " +
-                                                    $"State may still be inconsistent.",
-                                                    "BlockValidatorService");
-                                            }
+                                            ConsoleWriterService.Output(
+                                                $"[ValidateBlock] WARNING: State recovery exhausted — restart with 'rebuildstate' to run a full rebuild.");
                                         }
                                         catch (Exception ex)
                                         {
@@ -1233,6 +1236,30 @@ namespace ReserveBlockCore.Services
                             StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
                         }
                         await ReserveService.Run(); //updates treis for reserve pending txs
+
+                        // STATE PROBATION: with automatic rebuilds removed, a dirty-flagged node keeps
+                        // running on its existing state. Each cleanly applied block is evidence of
+                        // consistency; after a clean streak, re-mark synced so snapshots resume.
+                        if (!_stateStatusVerified)
+                        {
+                            if (StateTreiStatusService.IsSynced())
+                            {
+                                _stateStatusVerified = true;
+                            }
+                            else if (!stateApplied)
+                            {
+                                _cleanBlockStreak = 0;
+                            }
+                            else if (++_cleanBlockStreak >= STATE_PROBATION_BLOCKS)
+                            {
+                                StateTreiStatusService.SetSynced(block.Height);
+                                _stateStatusVerified = true;
+                                LogUtility.Log(
+                                    $"[ValidateBlock] STATE-PROBATION-PASSED: {STATE_PROBATION_BLOCKS} consecutive blocks applied cleanly on an " +
+                                    $"unverified state trie — marking synced at height {block.Height}. Snapshot protection resumes.",
+                                    "BlockValidatorService");
+                            }
+                        }
 
                         // Process vBTC V2 validator registration/exit transactions
                         if (block.Transactions.Count() > 0)
