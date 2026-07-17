@@ -193,7 +193,18 @@ namespace ReserveBlockCore.Services
         {
             if (_isSnapshotting) return Task.CompletedTask;
             if (height < MinSnapshotHeight) return Task.CompletedTask;
-            if (DbContext.DB_Snapshot == null) return Task.CompletedTask;
+            if (DbContext.DB_Snapshot == null)
+            {
+                // A missing snapshot DB means the entire fast-recovery layer is inert (every
+                // recovery falls back to the 45-min ResetTreis). This must never be silent —
+                // it hid a bug where Initialize() didn't open the DB at all.
+                ErrorLogUtility.LogError(
+                    $"[Snapshot] SNAPSHOTS DISABLED: DbContext.DB_Snapshot is null at height {height} — " +
+                    $"rsrvsnapshot.db was never opened (DbContext.Initialize?). Fast fork/crash recovery is unavailable.",
+                    "StateSnapshotService.UpdateCycleAsync");
+                LogUtility.Log($"[Snapshot] SNAPSHOTS DISABLED: snapshot DB not open — see error log.", "StateSnapshotService");
+                return Task.CompletedTask;
+            }
 
             if (Globals.TreisUpdating)
             {

@@ -182,6 +182,7 @@ namespace ReserveBlockCore.Data
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            DB_Snapshot = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SNAPSHOT, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
 
             PrivacyDbContext.EnsurePrivacyIndexes(DB_Privacy);
 
