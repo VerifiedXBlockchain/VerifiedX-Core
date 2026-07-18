@@ -275,8 +275,34 @@ def load_map(path):
     return mapping
 
 
-def _map_line(status, ep):
-    return f"{status:8}{ep.verb:7}/{ep.route:60} # {ep.controller}.{ep.action}"
+def load_map_reasons(path):
+    """Return {endpoint_key: reason} for map lines carrying a '-- reason' comment
+    suffix (used on omit lines to document why an endpoint is deliberately not
+    exposed by v2). genmap re-emits these so hand-written reasons survive regen."""
+    reasons = {}
+    if not os.path.exists(path):
+        return reasons
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            body, _, comment = line.partition("#")
+            if " -- " not in comment:
+                continue
+            parts = body.split(None, 2)
+            if len(parts) < 3 or parts[0] not in VALID_STATUSES:
+                continue
+            key = f"{parts[1].upper()} /{_normalize_route(parts[2])}"
+            reasons[key] = comment.split(" -- ", 1)[1].strip()
+    return reasons
+
+
+def _map_line(status, ep, reason=None):
+    line = f"{status:8}{ep.verb:7}/{ep.route:60} # {ep.controller}.{ep.action}"
+    if reason:
+        line += f" -- {reason}"
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +326,7 @@ def cmd_genmap(args):
     root = args.root or REPO_ROOT
     out = args.out or os.path.join(root, DEFAULT_MAP)
     existing = load_map(out)  # preserve any hand-tuned per-endpoint statuses
+    reasons = load_map_reasons(out)  # preserve hand-written '-- reason' comments
     v1 = collect_layer(root, V1_DIRS, is_v2=False)
 
     lines = [
@@ -312,7 +339,7 @@ def cmd_genmap(args):
     ]
     for ep in sorted(v1, key=lambda x: (x.controller, x.route, x.verb)):
         status = existing.get(ep.key) or CONTROLLER_DEFAULT.get(ep.controller, "gap")
-        lines.append(_map_line(status, ep))
+        lines.append(_map_line(status, ep, reasons.get(ep.key)))
     with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print(f"wrote {out} ({len(v1)} endpoints)")
