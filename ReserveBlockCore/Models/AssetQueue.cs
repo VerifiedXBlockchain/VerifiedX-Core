@@ -7,6 +7,8 @@ namespace ReserveBlockCore.Models
 {
     public class AssetQueue
     {
+        public const int StaleTimeoutMinutes = 30;
+
         public int Id { get; set; }
         public string SmartContractUID { get; set; }
         public string FromAddress { get; set; }
@@ -103,20 +105,26 @@ namespace ReserveBlockCore.Models
                 var acRec = aqDB.FindOne(x => x.SmartContractUID == aq.SmartContractUID && x.AssetTransferType == aq.AssetTransferType && x.IsComplete != true);
                 if (acRec != null)
                 {
-                    return false;
+                    var staleCutoff = DateTime.UtcNow.AddMinutes(-StaleTimeoutMinutes);
+                    if (acRec.SubmitDate < staleCutoff)
+                    {
+                        aqDB.DeleteSafe(acRec.Id);
+                        ErrorLogUtility.LogError($"Removed stale incomplete AQ entry while creating new one. SCUID: {acRec.SmartContractUID}, SubmitDate: {acRec.SubmitDate}", "AssetQueue.SaveAssetQueueItem()");
+                    }
+                    else
+                    {
+                        return false;
+                    }
                 }
-                else
+
+                try
                 {
-                    try
-                    {
-                        aqDB.InsertSafe(aq);
-                        return true;
-                    }
-                    catch(Exception ex)
-                    {
-                        ErrorLogUtility.LogError("Failed to saved AQ Item.", "AssetQueue.SaveAssetQueueItem()");
-                    }
-                    
+                    aqDB.InsertSafe(aq);
+                    return true;
+                }
+                catch(Exception ex)
+                {
+                    ErrorLogUtility.LogError("Failed to saved AQ Item.", "AssetQueue.SaveAssetQueueItem()");
                 }
             }
 
