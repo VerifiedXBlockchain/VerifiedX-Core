@@ -27,7 +27,9 @@ namespace ReserveBlockCore.Api.Rest.Infrastructure
             // Bitcoin (BitcoinController) actions that sign with local keys or import them
             "SendBtcTransaction", "ReplaceBtcByFee", "TransferBtcCoin",
             "TransferBtcCoinMulti", "WithdrawBtcCoin", "TokenizeBitcoin",
-            "ImportBtcPrivateKey"
+            "ImportBtcPrivateKey",
+            // Privacy (PrivacyController) actions that use local wallet key material
+            "ShieldVfx", "CreateShieldedAddressFromAccount", "GenerateShieldedAddress"
         };
 
         public override void OnActionExecuting(ActionExecutingContext context)
