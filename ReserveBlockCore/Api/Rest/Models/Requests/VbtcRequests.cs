@@ -236,6 +236,12 @@ namespace ReserveBlockCore.Api.Rest.Models.Requests
         public string WithdrawalRequestHash { get; set; } = "";
     }
 
+    public class BridgeRetryRequest
+    {
+        [Required]
+        public string OwnerAddress { get; set; } = "";
+    }
+
     public class BridgeToBaseRequest
     {
         [Required]

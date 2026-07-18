@@ -352,6 +352,16 @@ namespace ReserveBlockCore.Api.Rest.Controllers
         #region Addresses / keys
 
         /// <summary>
+        /// List local shielded (zfx_) addresses
+        /// </summary>
+        [HttpGet("addresses")]
+        public IActionResult GetShieldedAddresses()
+        {
+            var result = ReserveBlockCore.BrowserWalletServices.WalletPrivacyVfxService.GetShieldedAddresses();
+            return Ok(result);
+        }
+
+        /// <summary>
         /// Create a zfx_ shielded address from a transparent account's private key
         /// </summary>
         [HttpPost("addresses/from-account")]

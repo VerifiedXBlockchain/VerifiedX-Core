@@ -63,6 +63,14 @@ namespace ReserveBlockCore.Api.Rest.Models.Requests
         public int FeeRate { get; set; }
     }
 
+    public class BtcLinkEvmRequest
+    {
+        [Required]
+        public string BtcAddress { get; set; } = "";
+        /// <summary>0x + 40 hex chars; null/empty clears the link.</summary>
+        public string? EvmAddress { get; set; }
+    }
+
     public class BtcTransferOwnershipRequest
     {
         [Required]

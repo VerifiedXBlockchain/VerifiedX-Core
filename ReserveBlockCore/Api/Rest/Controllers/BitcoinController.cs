@@ -148,6 +148,29 @@ namespace ReserveBlockCore.Api.Rest.Controllers
             return Ok(new { Message = "Bitcoin accounts reset." });
         }
 
+        /// <summary>
+        /// ETH + vBTC.b balances on Base for each BTC account with a linked EVM address
+        /// </summary>
+        [HttpGet("base-balances")]
+        public async Task<IActionResult> GetBaseBalances()
+        {
+            var result = await ReserveBlockCore.BrowserWalletServices.WalletBtcBaseService.GetLinkedBaseBalancesAsync();
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Link (or clear) an EVM address on a BTC account
+        /// </summary>
+        [HttpPost("accounts/link-evm")]
+        public IActionResult LinkEvmAddress([FromBody] BtcLinkEvmRequest request)
+        {
+            var ok = BitcoinAccount.SetLinkedEvmAddress(request.BtcAddress, request.EvmAddress);
+            if (!ok)
+                return Fail("VALIDATION", "Invalid BTC address or EVM address format (expect 0x + 40 hex).");
+
+            return Ok(new { Message = "Linked EVM address updated." });
+        }
+
         #endregion
 
         #region Addresses / transactions (read)

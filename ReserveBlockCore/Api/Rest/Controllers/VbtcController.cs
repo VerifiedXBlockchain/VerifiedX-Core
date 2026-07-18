@@ -1632,6 +1632,23 @@ namespace ReserveBlockCore.Api.Rest.Controllers
         }
 
         /// <summary>
+        /// Cancel an active withdrawal by broadcasting a VBTC_V2_WITHDRAWAL_CANCEL
+        /// transaction signed with the local wallet (distinct from the validator-voted
+        /// cancellation record flow at withdrawals/cancel)
+        /// </summary>
+        [HttpPost("withdrawals/cancel-tx")]
+        public async Task<IActionResult> CancelVbtcWithdrawalTx([FromBody] VbtcCancelWithdrawalTxRequest request)
+        {
+            var result = await BtcServices.VBTCService.CancelWithdrawal(
+                request.SmartContractUID, request.RequestorAddress, request.WithdrawalRequestHash);
+
+            if (!result.Item1)
+                return Fail("WITHDRAWAL_CANCEL_FAILED", result.Item2);
+
+            return Created(new { Message = result.Item2, SmartContractUID = request.SmartContractUID });
+        }
+
+        /// <summary>
         /// Request withdrawal with a pre-signed external request (signature, timestamp,
         /// and replay protection). Saves the request without a local wallet key.
         /// </summary>
@@ -2424,6 +2441,50 @@ namespace ReserveBlockCore.Api.Rest.Controllers
         {
             var records = BridgeLockRecord.GetByOwner(ownerAddress);
             return Ok(new { Count = records.Count, Locks = records });
+        }
+
+        /// <summary>
+        /// Bridge preflight for an owner + contract: balance, gas, config readiness
+        /// </summary>
+        [HttpGet("bridge/preflight/{ownerAddress}/{scUID}")]
+        public async Task<IActionResult> BridgePreflight(string ownerAddress, string scUID)
+        {
+            var result = await ReserveBlockCore.BrowserWalletServices.WalletVbtcService.GetBridgePreflight(ownerAddress, scUID);
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Retry a failed bridge mint for a lock
+        /// </summary>
+        [HttpPost("bridge/locks/{lockId}/retry")]
+        public async Task<IActionResult> RetryBridgeMint(string lockId, [FromBody] BridgeRetryRequest request)
+        {
+            var result = await ReserveBlockCore.BrowserWalletServices.WalletVbtcService.RetryBridgeMint(lockId, request.OwnerAddress);
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Force-retry a stuck bridge mint: reconstructs local tracking from on-chain state
+        /// if missing, checks the Base contract, then collects fresh attestations
+        /// </summary>
+        [HttpPost("bridge/locks/{lockId}/force-retry")]
+        public async Task<IActionResult> ForceRetryBridgeMint(string lockId, [FromBody] BridgeRetryRequest request)
+        {
+            var result = await ReserveBlockCore.BrowserWalletServices.WalletVbtcService.ForceRetryBridgeMint(lockId, request.OwnerAddress);
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Deterministic Base (EVM) address for a VFX address (Keccak256 of the secp256k1 key)
+        /// </summary>
+        [HttpGet("bridge/base-address/{vfxAddress}")]
+        public IActionResult GetBaseAddress(string vfxAddress)
+        {
+            var baseAddress = ReserveBlockCore.Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromAccount(vfxAddress);
+            if (string.IsNullOrEmpty(baseAddress))
+                return Fail("DERIVATION_FAILED", "Could not derive Base address. Account not found or key unavailable.", 404);
+
+            return Ok(new { BaseAddress = baseAddress, VfxAddress = vfxAddress });
         }
 
         /// <summary>

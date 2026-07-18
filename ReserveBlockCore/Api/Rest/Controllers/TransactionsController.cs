@@ -71,10 +71,10 @@ namespace ReserveBlockCore.Api.Rest.Controllers
         }
 
         /// <summary>
-        /// List local transactions (filterable by status, paginated)
+        /// List local transactions (filterable by status and address, paginated)
         /// </summary>
         [HttpGet]
-        public IActionResult GetAll([FromQuery] string? status, [FromQuery] PaginationParams paging)
+        public IActionResult GetAll([FromQuery] string? status, [FromQuery] string? address, [FromQuery] PaginationParams paging)
         {
             IEnumerable<Transaction> txList = status?.ToLower() switch
             {
@@ -84,6 +84,9 @@ namespace ReserveBlockCore.Api.Rest.Controllers
                 "mined" => TransactionData.GetLocalMinedTransactions(),
                 _ => TransactionData.GetAllLocalTransactions(true)
             };
+
+            if (!string.IsNullOrWhiteSpace(address))
+                txList = txList.Where(x => x.FromAddress == address || x.ToAddress == address);
 
             var allTxs = txList.ToList();
             var totalCount = allTxs.Count;
