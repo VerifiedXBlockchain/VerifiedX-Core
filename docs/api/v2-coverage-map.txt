@@ -366,72 +366,72 @@ omit    GET    /api/v2/producers                                             # V
 omit    GET    /api/v2/resolveaddressadnr/{address}/{asset}                  # V2Controller.ResolveAddressAdnr
 omit    GET    /api/v2/resolveadnr/{**adnr}                                  # V2Controller.ResolveAdnr
 omit    GET    /api/v2/validatorpool                                         # V2Controller.ValidatorPool
-gap     GET    /vbtcapi/vbtc                                                 # VBTCController.Get
-gap     POST   /vbtcapi/vbtc/bridgetobase                                    # VBTCController.BridgeToBase
-gap     POST   /vbtcapi/vbtc/cancelceremony/{ceremonyid}/{owneraddress}      # VBTCController.CancelCeremony
-gap     POST   /vbtcapi/vbtc/cancelwithdrawal                                # VBTCController.CancelWithdrawal
-gap     POST   /vbtcapi/vbtc/cancelwithdrawalraw                             # VBTCController.CancelWithdrawalRaw
-gap     POST   /vbtcapi/vbtc/completewithdrawal                              # VBTCController.CompleteWithdrawal
-gap     POST   /vbtcapi/vbtc/configurebridge                                 # VBTCController.ConfigureBridge
-gap     POST   /vbtcapi/vbtc/createvbtccontract                              # VBTCController.CreateVBTCContract
-gap     POST   /vbtcapi/vbtc/createvbtccontractraw                           # VBTCController.CreateVBTCContractRaw
-gap     POST   /vbtcapi/vbtc/executecompletewithdrawalraw                    # VBTCController.ExecuteCompleteWithdrawalRaw
-gap     POST   /vbtcapi/vbtc/executempcceremonyraw                           # VBTCController.ExecuteMPCCeremonyRaw
-gap     GET    /vbtcapi/vbtc/getallvbtcbalances/{address}                    # VBTCController.GetAllVBTCBalances
-gap     GET    /vbtcapi/vbtc/getbasebalance/{evmaddress}                     # VBTCController.GetBaseBalance
-gap     GET    /vbtcapi/vbtc/getbridgeconfig                                 # VBTCController.GetBridgeConfig
-gap     GET    /vbtcapi/vbtc/getbridgelocks/{scuid}                          # VBTCController.GetBridgeLocks
-gap     GET    /vbtcapi/vbtc/getbridgelocksbyowner/{owneraddress}            # VBTCController.GetBridgeLocksByOwner
-gap     GET    /vbtcapi/vbtc/getbridgelockstatus/{lockid}                    # VBTCController.GetBridgeLockStatus
-gap     GET    /vbtcapi/vbtc/getbridgestatus                                 # VBTCController.GetBridgeStatus
-gap     GET    /vbtcapi/vbtc/getceremonystatus/{ceremonyid}                  # VBTCController.GetCeremonyStatus
-gap     GET    /vbtcapi/vbtc/getcontractdetails/{scuid}                      # VBTCController.GetContractDetails
-gap     GET    /vbtcapi/vbtc/getcontracthealth/{scuid}                       # VBTCController.GetContractHealth
-gap     GET    /vbtcapi/vbtc/getcontractlist/{address?}                      # VBTCController.GetContractList
-gap     GET    /vbtcapi/vbtc/getdefaultimagebase                             # VBTCController.GetDefaultImageBase
-gap     GET    /vbtcapi/vbtc/getfrostblacklist                               # VBTCController.GetFrostBlacklist
-gap     GET    /vbtcapi/vbtc/getmintattestation/{lockid}                     # VBTCController.GetMintAttestation
-gap     GET    /vbtcapi/vbtc/getmpcdepositaddress/{scuid}                    # VBTCController.GetMPCDepositAddress
-gap     POST   /vbtcapi/vbtc/getrawcancelwithdrawaltxdata                    # VBTCController.GetRawCancelWithdrawalTxData
-gap     POST   /vbtcapi/vbtc/getrawcompletewithdrawaltxdata                  # VBTCController.GetRawCompleteWithdrawalTxData
-gap     POST   /vbtcapi/vbtc/getrawcreatecontracttxdata                      # VBTCController.GetRawCreateContractTxData
-gap     POST   /vbtcapi/vbtc/getrawrequestwithdrawaltxdata                   # VBTCController.GetRawRequestWithdrawalTxData
-gap     POST   /vbtcapi/vbtc/getrawtransfervbtcdata                          # VBTCController.GetRawTransferVBTCData
-gap     GET    /vbtcapi/vbtc/gets3cautobridgestatus/{orchestrationid}        # VBTCController.GetS3CAutoBridgeStatus
-gap     GET    /vbtcapi/vbtc/gets3cstatus                                    # VBTCController.GetS3CStatus
-gap     GET    /vbtcapi/vbtc/getshieldedvbtcbalance                          # VBTCController.GetShieldedVBTCBalance
-gap     GET    /vbtcapi/vbtc/getshieldedvbtcpoolstate/{scuid}                # VBTCController.GetShieldedVBTCPoolState
-gap     GET    /vbtcapi/vbtc/getvalidatorlist/{activeonly?}                  # VBTCController.GetValidatorList
-gap     GET    /vbtcapi/vbtc/getvalidatorstatus/{validatoraddress}           # VBTCController.GetValidatorStatus
-gap     GET    /vbtcapi/vbtc/getvbtcbalance/{address}/{scuid}                # VBTCController.GetVBTCBalance
-gap     GET    /vbtcapi/vbtc/getvbtcownershiptransferdata/{scuid}/{toaddress}/{**locator} # VBTCController.GetVBTCOwnershipTransferData
-gap     GET    /vbtcapi/vbtc/getwithdrawalhistory/{scuid}                    # VBTCController.GetWithdrawalHistory
-gap     GET    /vbtcapi/vbtc/getwithdrawalstatus/{scuid}                     # VBTCController.GetWithdrawalStatus
-gap     POST   /vbtcapi/vbtc/initiatempcceremony/{owneraddress}              # VBTCController.InitiateMPCCeremony
-gap     POST   /vbtcapi/vbtc/invalidatefrostcontract/{scuid}                 # VBTCController.InvalidateFrostContract
-gap     POST   /vbtcapi/vbtc/pollbaseexitburns                               # VBTCController.PollBaseExitBurns
-gap     POST   /vbtcapi/vbtc/preparecompletewithdrawalraw                    # VBTCController.PrepareCompleteWithdrawalRaw
-gap     POST   /vbtcapi/vbtc/preparempcceremonyraw                           # VBTCController.PrepareMPCCeremonyRaw
-gap     POST   /vbtcapi/vbtc/privatetransfervbtc                             # VBTCController.PrivateTransferVBTC
-gap     POST   /vbtcapi/vbtc/relaypendingbridgelocks                         # VBTCController.RelayPendingBridgeLocks
-gap     POST   /vbtcapi/vbtc/removefrostblacklist/{scuid}                    # VBTCController.RemoveFrostBlacklist
-gap     POST   /vbtcapi/vbtc/requestwithdrawal                               # VBTCController.RequestWithdrawal
-gap     POST   /vbtcapi/vbtc/requestwithdrawalraw                            # VBTCController.RequestWithdrawalRaw
-gap     POST   /vbtcapi/vbtc/rescanexitburns/{fromblock}                     # VBTCController.RescanExitBurns
-gap     POST   /vbtcapi/vbtc/sendrawcancelwithdrawaltx                       # VBTCController.SendRawCancelWithdrawalTx
-gap     POST   /vbtcapi/vbtc/sendrawcompletewithdrawaltx                     # VBTCController.SendRawCompleteWithdrawalTx
-gap     POST   /vbtcapi/vbtc/sendrawcreatecontracttx                         # VBTCController.SendRawCreateContractTx
-gap     POST   /vbtcapi/vbtc/sendrawrequestwithdrawaltx                      # VBTCController.SendRawRequestWithdrawalTx
-gap     POST   /vbtcapi/vbtc/sendrawtransfervbtctx                           # VBTCController.SendRawTransferVBTCTx
-gap     POST   /vbtcapi/vbtc/shieldvbtc                                      # VBTCController.ShieldVBTC
-gap     POST   /vbtcapi/vbtc/signmintattestation                             # VBTCController.SignMintAttestation
-gap     POST   /vbtcapi/vbtc/starts3cautobridge                              # VBTCController.StartS3CAutoBridge
-gap     GET    /vbtcapi/vbtc/transferownership/{scuid}/{toaddress}           # VBTCController.TransferOwnership
-gap     POST   /vbtcapi/vbtc/transfervbtc                                    # VBTCController.TransferVBTC
-gap     POST   /vbtcapi/vbtc/transfervbtcmulti                               # VBTCController.TransferVBTCMulti
-gap     POST   /vbtcapi/vbtc/unshieldvbtc                                    # VBTCController.UnshieldVBTC
-gap     POST   /vbtcapi/vbtc/validatorheartbeat/{validatoraddress}           # VBTCController.ValidatorHeartbeat
-gap     POST   /vbtcapi/vbtc/voteoncancellation                              # VBTCController.VoteOnCancellation
+omit    GET    /vbtcapi/vbtc                                                 # VBTCController.Get -- API banner; not part of curated v2 surface
+covered POST   /vbtcapi/vbtc/bridgetobase                                    # VBTCController.BridgeToBase
+covered POST   /vbtcapi/vbtc/cancelceremony/{ceremonyid}/{owneraddress}      # VBTCController.CancelCeremony
+covered POST   /vbtcapi/vbtc/cancelwithdrawal                                # VBTCController.CancelWithdrawal
+covered POST   /vbtcapi/vbtc/cancelwithdrawalraw                             # VBTCController.CancelWithdrawalRaw
+covered POST   /vbtcapi/vbtc/completewithdrawal                              # VBTCController.CompleteWithdrawal
+omit    POST   /vbtcapi/vbtc/configurebridge                                 # VBTCController.ConfigureBridge -- dev/demo-only runtime config; production uses config/env
+covered POST   /vbtcapi/vbtc/createvbtccontract                              # VBTCController.CreateVBTCContract
+covered POST   /vbtcapi/vbtc/createvbtccontractraw                           # VBTCController.CreateVBTCContractRaw
+covered POST   /vbtcapi/vbtc/executecompletewithdrawalraw                    # VBTCController.ExecuteCompleteWithdrawalRaw
+covered POST   /vbtcapi/vbtc/executempcceremonyraw                           # VBTCController.ExecuteMPCCeremonyRaw
+covered GET    /vbtcapi/vbtc/getallvbtcbalances/{address}                    # VBTCController.GetAllVBTCBalances
+covered GET    /vbtcapi/vbtc/getbasebalance/{evmaddress}                     # VBTCController.GetBaseBalance
+covered GET    /vbtcapi/vbtc/getbridgeconfig                                 # VBTCController.GetBridgeConfig
+covered GET    /vbtcapi/vbtc/getbridgelocks/{scuid}                          # VBTCController.GetBridgeLocks
+covered GET    /vbtcapi/vbtc/getbridgelocksbyowner/{owneraddress}            # VBTCController.GetBridgeLocksByOwner
+covered GET    /vbtcapi/vbtc/getbridgelockstatus/{lockid}                    # VBTCController.GetBridgeLockStatus
+covered GET    /vbtcapi/vbtc/getbridgestatus                                 # VBTCController.GetBridgeStatus
+covered GET    /vbtcapi/vbtc/getceremonystatus/{ceremonyid}                  # VBTCController.GetCeremonyStatus
+covered GET    /vbtcapi/vbtc/getcontractdetails/{scuid}                      # VBTCController.GetContractDetails
+covered GET    /vbtcapi/vbtc/getcontracthealth/{scuid}                       # VBTCController.GetContractHealth
+covered GET    /vbtcapi/vbtc/getcontractlist/{address?}                      # VBTCController.GetContractList
+covered GET    /vbtcapi/vbtc/getdefaultimagebase                             # VBTCController.GetDefaultImageBase
+omit    GET    /vbtcapi/vbtc/getfrostblacklist                               # VBTCController.GetFrostBlacklist -- node-operator FROST key blacklist admin
+covered GET    /vbtcapi/vbtc/getmintattestation/{lockid}                     # VBTCController.GetMintAttestation
+covered GET    /vbtcapi/vbtc/getmpcdepositaddress/{scuid}                    # VBTCController.GetMPCDepositAddress
+covered POST   /vbtcapi/vbtc/getrawcancelwithdrawaltxdata                    # VBTCController.GetRawCancelWithdrawalTxData
+covered POST   /vbtcapi/vbtc/getrawcompletewithdrawaltxdata                  # VBTCController.GetRawCompleteWithdrawalTxData
+covered POST   /vbtcapi/vbtc/getrawcreatecontracttxdata                      # VBTCController.GetRawCreateContractTxData
+covered POST   /vbtcapi/vbtc/getrawrequestwithdrawaltxdata                   # VBTCController.GetRawRequestWithdrawalTxData
+covered POST   /vbtcapi/vbtc/getrawtransfervbtcdata                          # VBTCController.GetRawTransferVBTCData
+omit    GET    /vbtcapi/vbtc/gets3cautobridgestatus/{orchestrationid}        # VBTCController.GetS3CAutoBridgeStatus -- S3C node-operator flow (node-local, in-memory); use v1
+omit    GET    /vbtcapi/vbtc/gets3cstatus                                    # VBTCController.GetS3CStatus -- S3C node-operator flow (node-local); use v1
+covered GET    /vbtcapi/vbtc/getshieldedvbtcbalance                          # VBTCController.GetShieldedVBTCBalance
+covered GET    /vbtcapi/vbtc/getshieldedvbtcpoolstate/{scuid}                # VBTCController.GetShieldedVBTCPoolState
+covered GET    /vbtcapi/vbtc/getvalidatorlist/{activeonly?}                  # VBTCController.GetValidatorList
+covered GET    /vbtcapi/vbtc/getvalidatorstatus/{validatoraddress}           # VBTCController.GetValidatorStatus
+covered GET    /vbtcapi/vbtc/getvbtcbalance/{address}/{scuid}                # VBTCController.GetVBTCBalance
+covered GET    /vbtcapi/vbtc/getvbtcownershiptransferdata/{scuid}/{toaddress}/{**locator} # VBTCController.GetVBTCOwnershipTransferData
+covered GET    /vbtcapi/vbtc/getwithdrawalhistory/{scuid}                    # VBTCController.GetWithdrawalHistory
+covered GET    /vbtcapi/vbtc/getwithdrawalstatus/{scuid}                     # VBTCController.GetWithdrawalStatus
+covered POST   /vbtcapi/vbtc/initiatempcceremony/{owneraddress}              # VBTCController.InitiateMPCCeremony
+omit    POST   /vbtcapi/vbtc/invalidatefrostcontract/{scuid}                 # VBTCController.InvalidateFrostContract -- node-operator FROST key blacklist admin
+omit    POST   /vbtcapi/vbtc/pollbaseexitburns                               # VBTCController.PollBaseExitBurns -- node-operator control of background exit-burn scanner
+covered POST   /vbtcapi/vbtc/preparecompletewithdrawalraw                    # VBTCController.PrepareCompleteWithdrawalRaw
+covered POST   /vbtcapi/vbtc/preparempcceremonyraw                           # VBTCController.PrepareMPCCeremonyRaw
+covered POST   /vbtcapi/vbtc/privatetransfervbtc                             # VBTCController.PrivateTransferVBTC
+omit    POST   /vbtcapi/vbtc/relaypendingbridgelocks                         # VBTCController.RelayPendingBridgeLocks -- deprecated in v1 (no relay queue)
+omit    POST   /vbtcapi/vbtc/removefrostblacklist/{scuid}                    # VBTCController.RemoveFrostBlacklist -- node-operator FROST key blacklist admin
+covered POST   /vbtcapi/vbtc/requestwithdrawal                               # VBTCController.RequestWithdrawal
+covered POST   /vbtcapi/vbtc/requestwithdrawalraw                            # VBTCController.RequestWithdrawalRaw
+omit    POST   /vbtcapi/vbtc/rescanexitburns/{fromblock}                     # VBTCController.RescanExitBurns -- node-operator control of background exit-burn scanner
+covered POST   /vbtcapi/vbtc/sendrawcancelwithdrawaltx                       # VBTCController.SendRawCancelWithdrawalTx
+covered POST   /vbtcapi/vbtc/sendrawcompletewithdrawaltx                     # VBTCController.SendRawCompleteWithdrawalTx
+covered POST   /vbtcapi/vbtc/sendrawcreatecontracttx                         # VBTCController.SendRawCreateContractTx
+covered POST   /vbtcapi/vbtc/sendrawrequestwithdrawaltx                      # VBTCController.SendRawRequestWithdrawalTx
+covered POST   /vbtcapi/vbtc/sendrawtransfervbtctx                           # VBTCController.SendRawTransferVBTCTx
+covered POST   /vbtcapi/vbtc/shieldvbtc                                      # VBTCController.ShieldVBTC
+omit    POST   /vbtcapi/vbtc/signmintattestation                             # VBTCController.SignMintAttestation -- caster->validator attestation protocol endpoint; node-facing
+omit    POST   /vbtcapi/vbtc/starts3cautobridge                              # VBTCController.StartS3CAutoBridge -- S3C node-operator flow (node-local, in-memory); use v1
+covered GET    /vbtcapi/vbtc/transferownership/{scuid}/{toaddress}           # VBTCController.TransferOwnership
+covered POST   /vbtcapi/vbtc/transfervbtc                                    # VBTCController.TransferVBTC
+omit    POST   /vbtcapi/vbtc/transfervbtcmulti                               # VBTCController.TransferVBTCMulti -- unimplemented stub in v1 (returns not-supported)
+covered POST   /vbtcapi/vbtc/unshieldvbtc                                    # VBTCController.UnshieldVBTC
+omit    POST   /vbtcapi/vbtc/validatorheartbeat/{validatoraddress}           # VBTCController.ValidatorHeartbeat -- no-op; validator state derives from block scanning
+omit    POST   /vbtcapi/vbtc/voteoncancellation                              # VBTCController.VoteOnCancellation -- validator-operational voting; not integrator-facing
 covered GET    /voapi/vov1/casttopicvote/{topicuid}/{votetype}              # VOV1Controller.CastTopicVote
 omit    GET    /voapi/vov1/getactivetopics                                   # VOV1Controller.GetActiveTopics
 omit    GET    /voapi/vov1/getalltopics                                      # VOV1Controller.GetAllTopics

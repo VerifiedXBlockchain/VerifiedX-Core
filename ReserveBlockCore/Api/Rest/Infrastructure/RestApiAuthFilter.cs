@@ -19,7 +19,11 @@ namespace ReserveBlockCore.Api.Rest.Infrastructure
             "Mint", "Transfer", "Burn", "Evolve", "Devolve",
             "StartSale", "CompleteSale",
             "TransferToken", "BurnToken", "MintToken", "PauseToken",
-            "BanAddress", "TransferOwnership"
+            "BanAddress", "TransferOwnership",
+            // vBTC (VbtcController) actions that sign with the local wallet key
+            "CreateVbtcContract", "CreateVbtcContractRaw", "TransferVbtc",
+            "RequestVbtcWithdrawal", "CompleteVbtcWithdrawal", "ShieldVbtc",
+            "BridgeVbtcToBase"
         };
 
         public override void OnActionExecuting(ActionExecutingContext context)
