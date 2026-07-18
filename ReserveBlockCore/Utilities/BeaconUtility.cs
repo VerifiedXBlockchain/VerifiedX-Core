@@ -9,26 +9,45 @@ namespace ReserveBlockCore.Utilities
 {
     public class BeaconUtility
     {
+        //Serializes connection establishment: the startup warmup and concurrent transfer
+        //requests all check-then-connect, so without a gate two callers can connect to the
+        //same beacon and overwrite each other's Globals.Beacon entry.
+        private static readonly SemaphoreSlim _connectGate = new SemaphoreSlim(1, 1);
+
         public static async Task<bool> EstablishBeaconConnection(bool upload = false, bool download = false)
         {
-            //A single sweep can fail transiently (beacon restart, post-sleep network, brief
-            //unreachability) and previously failed the whole transfer. Each connect attempt is
-            //capped at 3s inside ConnectBeacon_New, so retrying the sweep stays bounded.
-            const int maxAttempts = 3;
-            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            await _connectGate.WaitAsync();
+            try
             {
-                if (await TryEstablishBeaconConnectionOnce(upload, download))
+                //Another caller may have connected while we waited on the gate. Every current
+                //call site requests an upload connection after checking IsConnected, so an
+                //existing live connection satisfies the request.
+                if (Globals.Beacon.Values.Where(x => x.IsConnected).Any())
                     return true;
 
-                if (attempt < maxAttempts)
+                //A single sweep can fail transiently (beacon restart, post-sleep network, brief
+                //unreachability) and previously failed the whole transfer. Each connect attempt is
+                //capped at 3s inside ConnectBeacon_New, so retrying the sweep stays bounded.
+                const int maxAttempts = 3;
+                for (var attempt = 1; attempt <= maxAttempts; attempt++)
                 {
-                    LogUtility.Log($"Beacon connection sweep {attempt}/{maxAttempts} failed. Retrying...", "BeaconUtility.EstablishBeaconConnection()");
-                    await Task.Delay(2500);
-                }
-            }
+                    if (await TryEstablishBeaconConnectionOnce(upload, download))
+                        return true;
 
-            ErrorLogUtility.LogError($"Failed to connect to any beacon after {maxAttempts} sweeps. Please ensure you are not blocking outside connections to 3338, 13338, 23338, or 33338.", "BeaconUtility.EstablishBeaconConnection()");
-            return false;
+                    if (attempt < maxAttempts)
+                    {
+                        LogUtility.Log($"Beacon connection sweep {attempt}/{maxAttempts} failed. Retrying...", "BeaconUtility.EstablishBeaconConnection()");
+                        await Task.Delay(2500);
+                    }
+                }
+
+                ErrorLogUtility.LogError($"Failed to connect to any beacon after {maxAttempts} sweeps. Please ensure you are not blocking outside connections to 3338, 13338, 23338, or 33338.", "BeaconUtility.EstablishBeaconConnection()");
+                return false;
+            }
+            finally
+            {
+                _connectGate.Release();
+            }
         }
 
         private static async Task<bool> TryEstablishBeaconConnectionOnce(bool upload, bool download)

@@ -800,9 +800,14 @@ namespace ReserveBlockCore.Services
                 if (aqDB == null)
                     return;
 
+                //Upload rows only: stale incomplete uploads block new transfers for the same
+                //contract and have no background owner. Download rows belong to the
+                //ClientCallService retry worker (NextAttempt scheduling) — deleting them here
+                //would permanently stop a received asset from downloading.
                 var cutoff = DateTime.UtcNow.AddMinutes(-AssetQueue.StaleTimeoutMinutes);
                 var staleEntries = aqDB.Query()
-                    .Where(x => x.IsComplete != true && x.SubmitDate < cutoff)
+                    .Where(x => x.IsComplete != true && x.SubmitDate < cutoff &&
+                                x.AssetTransferType == AssetQueue.TransferType.Upload)
                     .ToList();
 
                 if (staleEntries.Count == 0)
