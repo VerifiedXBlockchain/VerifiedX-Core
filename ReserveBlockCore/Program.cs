@@ -646,6 +646,8 @@ namespace ReserveBlockCore
 
             StartupService.LoadBeacons();
             await StartupService.EstablishBeaconReference();
+            StartupService.CleanupStaleAssetQueue();
+            StartupService.WarmUpBeaconConnection();
 
             //Removes validator record from DB_Peers as its now within the wallet.
             StartupService.ClearOldValidatorDups();

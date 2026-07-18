@@ -765,8 +765,60 @@ namespace ReserveBlockCore.Services
                         Globals.Beacons.TryAdd(beacon.IPAddress, beacon);
                     }
                 }
-            }                
+            }
 
+        }
+
+        internal static void WarmUpBeaconConnection()
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(5000); //let network settle after startup
+                    if (!Globals.Beacon.Values.Where(x => x.IsConnected).Any())
+                    {
+                        var result = await BeaconUtility.EstablishBeaconConnection(true, false);
+                        if (result)
+                            LogUtility.Log("Beacon connection warmed up at startup.", "StartupService.WarmUpBeaconConnection()");
+                        else
+                            LogUtility.Log("Beacon warmup did not connect. Lazy connect will retry on first request.", "StartupService.WarmUpBeaconConnection()");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Beacon warmup error: {ex}", "StartupService.WarmUpBeaconConnection()");
+                }
+            });
+        }
+
+        internal static void CleanupStaleAssetQueue()
+        {
+            try
+            {
+                var aqDB = AssetQueue.GetAssetQueue();
+                if (aqDB == null)
+                    return;
+
+                var cutoff = DateTime.UtcNow.AddMinutes(-AssetQueue.StaleTimeoutMinutes);
+                var staleEntries = aqDB.Query()
+                    .Where(x => x.IsComplete != true && x.SubmitDate < cutoff)
+                    .ToList();
+
+                if (staleEntries.Count == 0)
+                    return;
+
+                foreach (var entry in staleEntries)
+                {
+                    aqDB.DeleteSafe(entry.Id);
+                    SCLogUtility.Log($"Removed stale asset queue entry. SCUID: {entry.SmartContractUID}, SubmitDate: {entry.SubmitDate}",
+                        "StartupService.CleanupStaleAssetQueue()");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Failed to clean up stale asset queue: {ex}", "StartupService.CleanupStaleAssetQueue()");
+            }
         }
 
         internal static void BootstrapBeacons()

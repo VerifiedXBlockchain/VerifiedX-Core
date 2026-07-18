@@ -445,7 +445,22 @@ namespace ReserveBlockCore.Services
                         {
                             await WalletService.SendReserveTransaction(scTx, rAccount, true);
                         }
-                        
+
+                        //Defensive: ensure AQ entry is marked complete on success path.
+                        //BeaconUtility.SendAssets_New already does this when assets > 0, but if
+                        //assets.Count() == 0 or the background marker was interrupted, the entry
+                        //would otherwise stay IsComplete=false and block future transfers.
+                        if (aq != null)
+                        {
+                            var aqLatest = aqDB.FindOne(x => x.Id == aq.Id);
+                            if (aqLatest != null && !aqLatest.IsComplete)
+                            {
+                                aqLatest.IsComplete = true;
+                                aqLatest.IsDownloaded = true;
+                                aqDB.UpdateSafe(aqLatest);
+                            }
+                        }
+
                         SCLogUtility.Log($"TX Success. SCUID: {scMain.SmartContractUID}", "SmartContractService.TransferSmartContract()");
                         return;
                     }
