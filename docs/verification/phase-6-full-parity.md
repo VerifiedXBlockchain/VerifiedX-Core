@@ -15,7 +15,7 @@ a v2 equivalent or explicitly classified out with a one-line reason.
 | oos (P2P/consensus/internal) | 68 | 68 |
 
 v2 REST surface: 170 → **282 endpoints** across 17 controllers
-(`tools/generate-api-docs.sh` regenerated `docs/api/`). `tools/api_drift.py
+(`tools/generate-api-docs.sh` regenerated `docs/api-v2/`). `tools/api_drift.py
 check` exits 0; the gate is wired into `.github/workflows/dotnet.yml` as the
 `api-drift` job per [drift-policy.md](../api/drift-policy.md).
 
@@ -140,5 +140,7 @@ layer (StateData +647, TransactionData +324 since March):
 - `dotnet build ReserveBlockCore` → 0 errors after every commit.
 - `dotnet test --filter SecretPreservation|StateSnapshot` → 16/16 after every
   commit.
-- Docs: `tools/generate-api-docs.sh` regenerated `docs/api/` (282 endpoints,
-  17 controllers; new `vbtc.md`, `bitcoin.md`, `privacy.md`, updated index).
+- Docs: `tools/generate-api-docs.sh` regenerated the v2 reference docs (282
+  endpoints, 17 controllers; new `vbtc.md`, `bitcoin.md`, `privacy.md`,
+  updated index). Generated reference docs live in `docs/api-v2/`; the parity
+  ledger (`v2-coverage-map.txt`) and `drift-policy.md` stay in `docs/api/`.

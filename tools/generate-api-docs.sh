@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJ="$REPO_ROOT/ReserveBlockCore/ReserveBlockCore.csproj"
 DLL="$REPO_ROOT/ReserveBlockCore/bin/Release/net6.0/ReserveBlockCore.dll"
-OUT_DIR="$REPO_ROOT/docs/api"
+OUT_DIR="$REPO_ROOT/docs/api-v2"
 SWAGGER_JSON="$OUT_DIR/swagger.json"
 
 echo "==> Building project..."
@@ -21,4 +21,4 @@ echo "==> Generating markdown docs..."
 python3 "$REPO_ROOT/tools/generate-api-docs.py" "$SWAGGER_JSON" "$OUT_DIR"
 
 echo ""
-echo "==> Done. Docs written to docs/api/"
+echo "==> Done. Docs written to docs/api-v2/"
