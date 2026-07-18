@@ -11,6 +11,28 @@ namespace ReserveBlockCore.Utilities
     {
         public static async Task<bool> EstablishBeaconConnection(bool upload = false, bool download = false)
         {
+            //A single sweep can fail transiently (beacon restart, post-sleep network, brief
+            //unreachability) and previously failed the whole transfer. Each connect attempt is
+            //capped at 3s inside ConnectBeacon_New, so retrying the sweep stays bounded.
+            const int maxAttempts = 3;
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                if (await TryEstablishBeaconConnectionOnce(upload, download))
+                    return true;
+
+                if (attempt < maxAttempts)
+                {
+                    LogUtility.Log($"Beacon connection sweep {attempt}/{maxAttempts} failed. Retrying...", "BeaconUtility.EstablishBeaconConnection()");
+                    await Task.Delay(2500);
+                }
+            }
+
+            ErrorLogUtility.LogError($"Failed to connect to any beacon after {maxAttempts} sweeps. Please ensure you are not blocking outside connections to 3338, 13338, 23338, or 33338.", "BeaconUtility.EstablishBeaconConnection()");
+            return false;
+        }
+
+        private static async Task<bool> TryEstablishBeaconConnectionOnce(bool upload, bool download)
+        {
             var userInputedBeaconsUsed = false;
             var selfBeacon = Globals.SelfBeacon;
             if (selfBeacon?.SelfBeaconActive == true)
@@ -23,7 +45,7 @@ namespace ReserveBlockCore.Utilities
                 }
                 else
                 {
-                    ErrorLogUtility.LogError("There was an issue with your self hosted beacon. Please ensure all ports are open and the beacon is properly configured.", "BeaconUtility.EstablishBeaconConnection()");
+                    ErrorLogUtility.LogError("There was an issue with your self hosted beacon. Please ensure all ports are open and the beacon is properly configured.", "BeaconUtility.TryEstablishBeaconConnectionOnce()");
                     return false;
                 }
             }
@@ -71,7 +93,7 @@ namespace ReserveBlockCore.Utilities
                 return conResult;
             }
 
-            ErrorLogUtility.LogError("Failed to connect to every beacon stored in wallet. Please ensure you are not blocking outside connections to 3338, 13338, 23338, or 33338.", "BeaconUtility.EstablishBeaconConnection()");
+            ErrorLogUtility.LogError("Failed to connect to every beacon stored in wallet. Please ensure you are not blocking outside connections to 3338, 13338, 23338, or 33338.", "BeaconUtility.TryEstablishBeaconConnectionOnce()");
             return false; //something failed if we reach here. This means ZERO connections were made to beacon
         }
 
