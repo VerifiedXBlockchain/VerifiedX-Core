@@ -124,16 +124,16 @@ covered POST   /dstapi/dstv1/sendbuynowbid                                  # DS
 covered POST   /dstapi/dstv1/sendchatmessage                                # DSTV1Controller.SendChatMessage
 covered POST   /dstapi/dstv1/sendchatmessagethirdparty                      # DSTV1Controller.SendChatMessageThirdParty
 covered POST   /dstapi/dstv1/sendshopchatmessage                            # DSTV1Controller.SendShopChatMessage
-gap     GET    /explorer                                                     # ExplorerController.Index
-gap     GET    /explorer/api/address/{address}                               # ExplorerController.GetAddress
-gap     GET    /explorer/api/block/hash/{hash}                               # ExplorerController.GetBlockByHash
-gap     GET    /explorer/api/block/{height}                                  # ExplorerController.GetBlock
-gap     GET    /explorer/api/blocks                                          # ExplorerController.GetBlocks
-gap     GET    /explorer/api/mempool                                         # ExplorerController.GetMempoolTransactions
-gap     GET    /explorer/api/search                                          # ExplorerController.Search
-gap     GET    /explorer/api/stats                                           # ExplorerController.GetStats
-gap     GET    /explorer/api/stream                                          # ExplorerController.Stream
-gap     GET    /explorer/api/tx/{hash}                                       # ExplorerController.GetTransaction
+omit    GET    /explorer                                                     # ExplorerController.Index -- explorer HTML UI page, not an API endpoint
+covered GET    /explorer/api/address/{address}                               # ExplorerController.GetAddress
+covered GET    /explorer/api/block/hash/{hash}                               # ExplorerController.GetBlockByHash
+covered GET    /explorer/api/block/{height}                                  # ExplorerController.GetBlock
+covered GET    /explorer/api/blocks                                          # ExplorerController.GetBlocks
+covered GET    /explorer/api/mempool                                         # ExplorerController.GetMempoolTransactions
+omit    GET    /explorer/api/search                                          # ExplorerController.Search -- explorer UI universal search; per-resource v2 lookups cover blocks/txs/addresses
+covered GET    /explorer/api/stats                                           # ExplorerController.GetStats
+omit    GET    /explorer/api/stream                                          # ExplorerController.Stream -- SSE push stream for the explorer UI; not a REST resource
+covered GET    /explorer/api/tx/{hash}                                       # ExplorerController.GetTransaction
 oos     GET    /iapi/integrationsv1/height                                   # IntegrationsV1Controller.Height
 oos     GET    /iapi/integrationsv1/lastblock                                # IntegrationsV1Controller.LastBlock
 oos     GET    /iapi/integrationsv1/network                                  # IntegrationsV1Controller.Network

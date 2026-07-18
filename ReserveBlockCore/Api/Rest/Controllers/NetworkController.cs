@@ -45,6 +45,32 @@ namespace ReserveBlockCore.Api.Rest.Controllers
         }
 
         /// <summary>
+        /// Chain stats: height, circulating network supply, peer count, mempool size
+        /// </summary>
+        [HttpGet("stats")]
+        public IActionResult GetStats()
+        {
+            var height = -1L;
+            var peerCount = 0;
+            var mempoolCount = 0;
+            decimal supply = 0;
+
+            try { height = Globals.LastBlock?.Height ?? -1; } catch { }
+            try { peerCount = Globals.Nodes?.Count ?? 0; } catch { }
+            try { mempoolCount = Data.TransactionData.GetPool()?.Count() ?? 0; } catch { }
+            try { supply = AccountStateTrei.GetNetworkTotal(); } catch { }
+
+            return Ok(new
+            {
+                Height = height,
+                NetworkSupply = supply,
+                Peers = peerCount,
+                Mempool = mempoolCount,
+                IsTestNet = Globals.IsTestNet
+            });
+        }
+
+        /// <summary>
         /// Block timing metrics
         /// </summary>
         [HttpGet("metrics")]
