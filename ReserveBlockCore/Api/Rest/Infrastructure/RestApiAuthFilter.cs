@@ -1,0 +1,70 @@
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
+using ReserveBlockCore.Api.Rest.Models;
+using ReserveBlockCore.Extensions;
+
+namespace ReserveBlockCore.Api.Rest.Infrastructure
+{
+    public class RestApiAuthFilter : ActionFilterAttribute
+    {
+        private static readonly HashSet<string> TokenBypassActions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "GetStatus"
+        };
+
+        private static readonly HashSet<string> EncryptionRequiredActions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Send", "CreateAdnr", "TransferAdnr", "DeleteAdnr",
+            "ImportKey", "CreateSignature", "CastVote", "CreateTopic",
+            "Mint", "Transfer", "Burn", "Evolve", "Devolve",
+            "StartSale", "CompleteSale",
+            "TransferToken", "BurnToken", "MintToken", "PauseToken",
+            "BanAddress", "TransferOwnership",
+            // vBTC (VbtcController) actions that sign with the local wallet key
+            "CreateVbtcContract", "CreateVbtcContractRaw", "TransferVbtc",
+            "RequestVbtcWithdrawal", "CompleteVbtcWithdrawal", "ShieldVbtc",
+            "BridgeVbtcToBase", "CancelVbtcWithdrawalTx",
+            // Bitcoin (BitcoinController) actions that sign with local keys or import them
+            "SendBtcTransaction", "ReplaceBtcByFee", "TransferBtcCoin",
+            "TransferBtcCoinMulti", "WithdrawBtcCoin", "TokenizeBitcoin",
+            "ImportBtcPrivateKey",
+            // Privacy (PrivacyController) actions that use local wallet key material
+            "ShieldVfx", "CreateShieldedAddressFromAccount", "GenerateShieldedAddress",
+            // Key-exposing / destructive actions (Greptile review, PR #23): account creation
+            // returns fresh private keys that cannot be password-protected while the wallet
+            // is locked; ResetAccounts wipes BTC UTXOs and balances; ExportViewingKey hands
+            // out stored shielded key material. "CreateAccount" covers both the VFX
+            // (AccountsController) and BTC (BitcoinController) creation actions by name.
+            "CreateAccount", "ResetAccounts", "ExportViewingKey"
+        };
+
+        public override void OnActionExecuting(ActionExecutingContext context)
+        {
+            var actionName = context.RouteData.Values["action"]?.ToString() ?? "";
+
+            if (Globals.APIToken != null)
+            {
+                bool bypass = TokenBypassActions.Contains(actionName);
+                var headerToken = context.HttpContext.Request.Headers["apitoken"].ToString();
+                if (!bypass && headerToken != Globals.APIToken.ToUnsecureString())
+                {
+                    context.Result = new ObjectResult(
+                        ApiResponse<object>.Fail("UNAUTHORIZED", "Invalid or missing API token."))
+                    { StatusCode = 403 };
+                    return;
+                }
+            }
+
+            if (Globals.IsWalletEncrypted && Globals.EncryptPassword.Length == 0)
+            {
+                if (EncryptionRequiredActions.Contains(actionName))
+                {
+                    context.Result = new ObjectResult(
+                        ApiResponse<object>.Fail("WALLET_LOCKED", "Wallet is encrypted and locked. Unlock it first."))
+                    { StatusCode = 401 };
+                    return;
+                }
+            }
+        }
+    }
+}

@@ -8,6 +8,8 @@ using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Models;
 using ReserveBlockCore.Models.DST;
 using ReserveBlockCore.Models.SmartContracts;
+using ReserveBlockCore.Api.Rest.Infrastructure;
+using ReserveBlockCore.Api.Rest.Models;
 using ReserveBlockCore.Utilities;
 using System;
 using System.Collections.Generic;
@@ -38,6 +40,23 @@ namespace ReserveBlockCore
             var logDirectory = path;
             var logFilePath = Path.Combine(logDirectory, "elmah.xml");
 
+            services.AddScoped<RestExceptionFilter>();
+            services.Configure<Microsoft.AspNetCore.Mvc.ApiBehaviorOptions>(options =>
+            {
+                options.InvalidModelStateResponseFactory = context =>
+                {
+                    var errors = context.ModelState
+                        .Where(e => e.Value?.Errors.Count > 0)
+                        .Select(e => $"{e.Key}: {e.Value!.Errors.First().ErrorMessage}")
+                        .ToList();
+
+                    var response = ApiResponse<object>.Fail(
+                        "VALIDATION_ERROR",
+                        string.Join("; ", errors));
+
+                    return new Microsoft.AspNetCore.Mvc.BadRequestObjectResult(response);
+                };
+            });
             services.AddControllers();
             //services.AddApiVersioning(options =>
             //{
@@ -45,9 +64,20 @@ namespace ReserveBlockCore
             //    options.DefaultApiVersion = new Microsoft.AspNetCore.Mvc.ApiVersion(1, 0);
             //});
             services.AddSwaggerGen(c => {
-                c.CustomSchemaIds(type => type.ToString());
-                c.CustomSchemaIds(type => $"{type.Name}_{System.Guid.NewGuid().ToString().Replace("-", "")}");
+                c.CustomSchemaIds(type => type.FullName);
+                c.DocInclusionPredicate((docName, apiDesc) =>
+                {
+                    if (docName == "rest")
+                        return apiDesc.RelativePath?.StartsWith("api/rest/") == true;
+                    return !apiDesc.RelativePath?.StartsWith("api/rest/") ?? true;
+                });
                 c.SwaggerDoc("v1", new OpenApiInfo { Title = "ReserveBlock CLI API", Version = "v1" });
+                c.SwaggerDoc("rest", new OpenApiInfo
+                {
+                    Title = "VFX REST API",
+                    Version = "1.0",
+                    Description = "Clean, resource-oriented API for VFX wallet integration."
+                });
                 c.DocumentFilter<SwaggerDocumentFilter<Account>>();
                 c.DocumentFilter<SwaggerDocumentFilter<AccountKeystore>>();
                 c.DocumentFilter<SwaggerDocumentFilter<AccountStateTrei>>();
@@ -126,6 +156,7 @@ namespace ReserveBlockCore
             app.UseSwagger();
             app.UseSwaggerUI(c => {
                 c.SwaggerEndpoint("/swagger/v1/swagger.json", "ReserveBlock API v1");
+                c.SwaggerEndpoint("/swagger/rest/swagger.json", "VFX REST API");
                 c.DisplayRequestDuration();
             });
 
@@ -152,7 +183,12 @@ namespace ReserveBlockCore
                     {
                         var now = DateTime.UtcNow;
                         var target = context.Request.Path.HasValue ? context.Request.Path.Value.ToLower() : "NA";
-                        if(target.Contains("/api/v1/unlockwallet/"))
+                        if(target.Contains("/api/v1/unlockwallet/") ||
+                            target.Contains("/api/rest/wallets/unlock"))
+                        {
+                            return func.Invoke();
+                        }
+                        if(target.Contains("/api/rest/wallets/status"))
                         {
                             return func.Invoke();
                         }
