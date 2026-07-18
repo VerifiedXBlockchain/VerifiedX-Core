@@ -23,7 +23,11 @@ namespace ReserveBlockCore.Api.Rest.Infrastructure
             // vBTC (VbtcController) actions that sign with the local wallet key
             "CreateVbtcContract", "CreateVbtcContractRaw", "TransferVbtc",
             "RequestVbtcWithdrawal", "CompleteVbtcWithdrawal", "ShieldVbtc",
-            "BridgeVbtcToBase"
+            "BridgeVbtcToBase",
+            // Bitcoin (BitcoinController) actions that sign with local keys or import them
+            "SendBtcTransaction", "ReplaceBtcByFee", "TransferBtcCoin",
+            "TransferBtcCoinMulti", "WithdrawBtcCoin", "TokenizeBitcoin",
+            "ImportBtcPrivateKey"
         };
 
         public override void OnActionExecuting(ActionExecutingContext context)

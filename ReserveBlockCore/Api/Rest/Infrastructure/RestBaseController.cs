@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using ReserveBlockCore.Api.Rest.Models;
 
 namespace ReserveBlockCore.Api.Rest.Infrastructure
@@ -48,6 +49,32 @@ namespace ReserveBlockCore.Api.Rest.Infrastructure
                 ContentType = "application/json",
                 StatusCode = status
             };
+        }
+
+        /// <summary>
+        /// Wrap a legacy v1-style {"Success":bool,"Message":...} JSON string from a shared
+        /// service into the v2 envelope. On success the parsed object becomes the data
+        /// payload (original field names preserved); on failure its Message becomes the error.
+        /// </summary>
+        protected IActionResult FromLegacyJson(string json, string failCode, int successStatus = 200)
+        {
+            JObject parsed;
+            try
+            {
+                parsed = JObject.Parse(json);
+            }
+            catch
+            {
+                return Fail(failCode, json);
+            }
+
+            var success = parsed.Value<bool?>("Success") ?? false;
+            if (!success)
+                return Fail(failCode, parsed.Value<string>("Message") ?? json);
+
+            if (successStatus == 201)
+                return Created((object)parsed);
+            return Ok((object)parsed);
         }
     }
 }
