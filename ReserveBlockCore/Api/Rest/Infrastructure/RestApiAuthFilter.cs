@@ -29,7 +29,13 @@ namespace ReserveBlockCore.Api.Rest.Infrastructure
             "TransferBtcCoinMulti", "WithdrawBtcCoin", "TokenizeBitcoin",
             "ImportBtcPrivateKey",
             // Privacy (PrivacyController) actions that use local wallet key material
-            "ShieldVfx", "CreateShieldedAddressFromAccount", "GenerateShieldedAddress"
+            "ShieldVfx", "CreateShieldedAddressFromAccount", "GenerateShieldedAddress",
+            // Key-exposing / destructive actions (Greptile review, PR #23): account creation
+            // returns fresh private keys that cannot be password-protected while the wallet
+            // is locked; ResetAccounts wipes BTC UTXOs and balances; ExportViewingKey hands
+            // out stored shielded key material. "CreateAccount" covers both the VFX
+            // (AccountsController) and BTC (BitcoinController) creation actions by name.
+            "CreateAccount", "ResetAccounts", "ExportViewingKey"
         };
 
         public override void OnActionExecuting(ActionExecutingContext context)

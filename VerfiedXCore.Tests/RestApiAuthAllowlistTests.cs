@@ -42,7 +42,9 @@ namespace VerfiedXCore.Tests
             "TransferBtcCoinMulti", "WithdrawBtcCoin", "TokenizeBitcoin",
             "ImportBtcPrivateKey",
             // Privacy
-            "ShieldVfx", "CreateShieldedAddressFromAccount", "GenerateShieldedAddress"
+            "ShieldVfx", "CreateShieldedAddressFromAccount", "GenerateShieldedAddress",
+            // Key-exposing / destructive (Greptile review, PR #23)
+            "CreateAccount", "ResetAccounts", "ExportViewingKey"
         };
 
         private static HashSet<string> GetFilterSet(string fieldName)

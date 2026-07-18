@@ -21,7 +21,7 @@ List all accounts with balances
 
 ## POST /Accounts
 
-Create a new address
+Create a new address (returns the new private key material)
 
 ### Response
 

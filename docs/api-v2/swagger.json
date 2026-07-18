@@ -44,7 +44,7 @@
         "tags": [
           "Accounts"
         ],
-        "summary": "Create a new address",
+        "summary": "Create a new address (returns the new private key material)",
         "responses": {
           "200": {
             "description": "Success"

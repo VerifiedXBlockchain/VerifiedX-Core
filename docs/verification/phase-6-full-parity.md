@@ -129,6 +129,15 @@ layer (StateData +647, TransactionData +324 since March):
   `CreateShieldedAddressFromAccount`, `GenerateShieldedAddress`.
   Actions already gated by name (`TransferOwnership`, `CreateAdnr`,
   `TransferAdnr`, `DeleteAdnr`, `ShieldVbtc` for the privacy twin) inherit.
+- Post-review additions (Greptile on PR #23): `CreateAccount` (VFX + BTC account
+  creation returns fresh private keys that cannot be password-protected while
+  the wallet is locked), `ResetAccounts` (wipes BTC UTXOs/balances), and
+  `ExportViewingKey` (exports stored shielded key material — stricter than the
+  ungated v1 posture, consistent with v2's safe-by-default stance). The
+  shielded spend endpoints also gained broadcast-exception rollback (notes are
+  unmarked if the broadcast throws, not just when it reports failure) — the
+  mark-without-rollback-on-throw pattern is inherited from v1 and flagged for
+  the v1 track.
 - Raw/pre-signed flows (client signs offline) and shielded-password flows are
   deliberately **not** gated, matching v1 posture.
 - The pre-existing posture that a null `Globals.APIToken` leaves the surface

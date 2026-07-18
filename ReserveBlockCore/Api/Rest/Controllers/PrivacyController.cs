@@ -146,7 +146,17 @@ namespace ReserveBlockCore.Api.Rest.Controllers
                 return Fail("BUILD_FAILED", berr ?? "Build failed.");
             }
 
-            var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            (bool ok, string json) br;
+            try
+            {
+                br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            }
+            catch
+            {
+                //Broadcast threw (pool add / peer send) — unmark or the notes stay unusable.
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
+                throw;
+            }
 
             if (!br.ok)
             {
@@ -201,7 +211,17 @@ namespace ReserveBlockCore.Api.Rest.Controllers
                 return Fail("BUILD_FAILED", berr ?? "Build failed.");
             }
 
-            var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            (bool ok, string json) br;
+            try
+            {
+                br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            }
+            catch
+            {
+                //Broadcast threw (pool add / peer send) — unmark or the notes stay unusable.
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, "VFX");
+                throw;
+            }
 
             if (!br.ok)
             {
@@ -267,7 +287,17 @@ namespace ReserveBlockCore.Api.Rest.Controllers
                 return Fail("BUILD_FAILED", berr ?? "Build failed.");
             }
 
-            var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            (bool ok, string json) br;
+            try
+            {
+                br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            }
+            catch
+            {
+                //Broadcast threw (pool add / peer send) — unmark or the notes stay unusable.
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), "VFX");
+                throw;
+            }
 
             if (!br.ok)
             {
@@ -783,7 +813,18 @@ namespace ReserveBlockCore.Api.Rest.Controllers
                 return Fail("BUILD_FAILED", berr ?? "Build failed.");
             }
 
-            var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            (bool ok, string json) br;
+            try
+            {
+                br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            }
+            catch
+            {
+                //Broadcast threw (pool add / peer send) — unmark or the notes stay unusable.
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                throw;
+            }
 
             if (!br.ok)
             {
@@ -861,7 +902,18 @@ namespace ReserveBlockCore.Api.Rest.Controllers
                 return Fail("BUILD_FAILED", berr ?? "Build failed.");
             }
 
-            var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            (bool ok, string json) br;
+            try
+            {
+                br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            }
+            catch
+            {
+                //Broadcast threw (pool add / peer send) — unmark or the notes stay unusable.
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs, asset);
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                throw;
+            }
 
             if (!br.ok)
             {
@@ -941,7 +993,18 @@ namespace ReserveBlockCore.Api.Rest.Controllers
                 return Fail("BUILD_FAILED", berr ?? "Build failed.");
             }
 
-            var br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            (bool ok, string json) br;
+            try
+            {
+                br = await PrivacyApiHelper.BroadcastVerifiedPrivateTxAsync(tx!);
+            }
+            catch
+            {
+                //Broadcast threw (pool add / peer send) — unmark or the notes stay unusable.
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, inputs.ToArray(), asset);
+                PrivacyApiHelper.UnmarkInputsSpentLocally(req.ZfxAddress, new[] { vfxFeeInput }, "VFX");
+                throw;
+            }
 
             if (!br.ok)
             {

@@ -45,10 +45,10 @@ namespace ReserveBlockCore.Api.Rest.Controllers
         }
 
         /// <summary>
-        /// Create a new address
+        /// Create a new address (returns the new private key material)
         /// </summary>
         [HttpPost]
-        public IActionResult Create()
+        public IActionResult CreateAccount()
         {
             Account account;
             if (Globals.HDWallet == true)
@@ -60,7 +60,7 @@ namespace ReserveBlockCore.Api.Rest.Controllers
                 account = AccountData.CreateNewAccount();
             }
 
-            LogUtility.Log("New Address Created: " + account.Address, "AccountsController.Create()");
+            LogUtility.Log("New Address Created: " + account.Address, "AccountsController.CreateAccount()");
 
             return Created(new { Address = account.Address, PrivateKey = account.GetKey });
         }
