@@ -506,6 +506,856 @@
         }
       }
     },
+    "/api/rest/Bitcoin/accounts": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Create a new Bitcoin address (returns the new private key material)",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "List Bitcoin accounts. Keys are omitted unless omitKeys=false is passed explicitly\r\n(v1 defaults to including keys; v2 is safe-by-default).",
+        "parameters": [
+          {
+            "name": "omitKeys",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/accounts/import": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Import a Bitcoin address from a private key (hex or WIF)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ImportBtcKeyRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ImportBtcKeyRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ImportBtcKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/accounts/{address}": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Get a Bitcoin account by address. Keys omitted unless omitKeys=false.",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "omitKeys",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/accounts/reset": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Reset Bitcoin accounts and their UTXOs (rate-limited to once per 5 minutes,\r\nshared with the v1 endpoint via Globals.LastRanBTCReset)",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/base-balances": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "ETH + vBTC.b balances on Base for each BTC account with a linked EVM address",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/accounts/link-evm": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Link (or clear) an EVM address on a BTC account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcLinkEvmRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcLinkEvmRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcLinkEvmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/addresses/{address}/utxos": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "UTXO list for an address",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/addresses/{address}/transactions": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Transaction list for an address",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/transactions": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "All local Bitcoin transactions.\r\nParity note: v1's includeTokens=false branch computes a filtered list and then\r\ndiscards it — every call returns all TXs. Mirrored; the parameter is accepted\r\nfor interface parity only.",
+        "parameters": [
+          {
+            "name": "includeTokens",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/sync/last": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Last account sync time and next scheduled check",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/sync/status": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "BTC chain sync status",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/electrumx/state": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "ElectrumX connection state",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/transactions/send": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Send a Bitcoin transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcSendTransactionRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcSendTransactionRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcSendTransactionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/transactions/fee": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Calculate the fee for a prospective transaction",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "amount",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "feeRate",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/transactions/{txid}/replace": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Replace a transaction by fee (RBF)",
+        "parameters": [
+          {
+            "name": "txid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcReplaceByFeeRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcReplaceByFeeRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcReplaceByFeeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/transactions/broadcast": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Broadcast a signed transaction hex",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcBroadcastRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcBroadcastRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcBroadcastRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/transactions/{txid}/rebroadcast": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Rebroadcast a locally known transaction by txid",
+        "parameters": [
+          {
+            "name": "txid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/adnr": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Create a BTC ADNR and associate it to an address",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcCreateAdnrRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcCreateAdnrRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcCreateAdnrRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/adnr/transfer": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Transfer a BTC ADNR to another address",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcTransferAdnrRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcTransferAdnrRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcTransferAdnrRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/adnr/delete": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Permanently remove a BTC ADNR from an address",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcDeleteAdnrRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcDeleteAdnrRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcDeleteAdnrRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/tokenize": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Tokenize Bitcoin (mints a vBTC v1 arbiter-model token contract)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizePayload"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizePayload"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizePayload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/tokenize/details/{vfxAddress}": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Get tokenization details (arbiter deposit address + proof) for a VFX address",
+        "parameters": [
+          {
+            "name": "vfxAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/tokenize/list": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "List tokenized BTC contracts",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/tokenize/{scUID}/transfer-ownership": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Transfer ownership of a tokenized BTC contract",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcTransferOwnershipRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcTransferOwnershipRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BtcTransferOwnershipRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/transfer": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Transfer tokenized BTC to a VFX address",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransaction"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransaction"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransaction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/transfer-multi": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Transfer tokenized BTC to multiple recipients",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransactionMulti"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransactionMulti"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransactionMulti"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/withdraw": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Withdraw tokenized BTC to a Bitcoin address",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransaction"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransaction"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeTransaction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/withdraw/raw": {
+      "post": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Withdraw tokenized BTC with a pre-signed external request",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeWithdrawalRaw"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeWithdrawalRaw"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Bitcoin.Models.BTCTokenizeWithdrawalRaw"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/tokenized-balances/{address}/{scUID}": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Tokenized BTC balance for an address in a specific contract",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/tokenized-balances/{address}": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "All tokenized BTC balances and contract IDs for an address",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/default-image": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Default vBTC image (Base64)",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Bitcoin/addresses/type-default": {
+      "get": {
+        "tags": [
+          "Bitcoin"
+        ],
+        "summary": "Default Bitcoin address type for new accounts",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
     "/api/rest/Blocks": {
       "get": {
         "tags": [
@@ -607,6 +1457,19 @@
           "Network"
         ],
         "summary": "Network overview",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Network/stats": {
+      "get": {
+        "tags": [
+          "Network"
+        ],
+        "summary": "Chain stats: height, circulating network supply, peer count, mempool size",
         "responses": {
           "200": {
             "description": "Success"
@@ -746,6 +1609,656 @@
           "Network"
         ],
         "summary": "List masternodes (validator pool)",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/plonk-status": {
+      "get": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Native PLONK capabilities, strict proof flag, params mirror size",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/shield": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Transparent VFX → shielded (T→Z). Signs with the local account key.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVfxRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVfxRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVfxRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/unshield": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Shielded VFX → transparent (Z→T)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVfxRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVfxRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVfxRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/private-transfer": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Shielded VFX → shielded VFX (Z→Z)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVfxRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVfxRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVfxRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/consolidate": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Combine the two smallest unspent VFX notes into one (Z→Z to self)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ConsolidateShieldedVfxRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ConsolidateShieldedVfxRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ConsolidateShieldedVfxRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/balance": {
+      "get": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Per-asset shielded balances from the local wallet row",
+        "parameters": [
+          {
+            "name": "zfxAddress",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "includeCommitments",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/pool-state": {
+      "get": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Pool state for an asset (e.g. VFX or VBTC:uid)",
+        "parameters": [
+          {
+            "name": "asset",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "VFX"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/addresses": {
+      "get": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "List local shielded (zfx_) addresses",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/addresses/from-account": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Create a zfx_ shielded address from a transparent account's private key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.CreateShieldedAddressFromAccountRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.CreateShieldedAddressFromAccountRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.CreateShieldedAddressFromAccountRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/addresses/generate": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Derive a zfx_ address from an HD seed (local HD wallet or explicit hex)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.GenerateShieldedAddressRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.GenerateShieldedAddressRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.GenerateShieldedAddressRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/viewing-key/export": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Export the 32-byte viewing key (Base64) for watch-only import",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ExportViewingKeyRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ExportViewingKeyRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ExportViewingKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/viewing-key/import": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Import a view-only wallet from a viewing key + zfx address",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ImportViewingKeyRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ImportViewingKeyRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ImportViewingKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/scan": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Scan blocks for notes decryptable with the wallet encryption key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ScanShieldedRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ScanShieldedRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ScanShieldedRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/resync": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Wipe cached notes/balances and rescan from FromHeight (fixes corrupted balances)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ResyncShieldedWalletRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ResyncShieldedWalletRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ResyncShieldedWalletRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/vbtc/shield": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Transparent vBTC → shielded (T→Z). Signs with the local account key.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVbtcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/vbtc/unshield": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Shielded vBTC → transparent (Z→T). Requires vBTC inputs plus a VFX fee note.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVbtcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/vbtc/private-transfer": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Shielded vBTC → shielded vBTC (Z→Z). Requires vBTC inputs plus a VFX fee note.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVbtcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/vbtc/consolidate": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Combine the two smallest unspent vBTC notes into one (Z→Z to self)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ConsolidateShieldedVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ConsolidateShieldedVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ConsolidateShieldedVbtcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/vbtc/balance": {
+      "get": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Shielded vBTC balance for a specific contract UID",
+        "parameters": [
+          {
+            "name": "zfxAddress",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vbtcContractUid",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "includeCommitments",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/vbtc/pool-state": {
+      "get": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Pool state for a vBTC contract (asset key VBTC:{uid})",
+        "parameters": [
+          {
+            "name": "vbtcContractUid",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/vbtc/scan": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Scan blocks for vBTC notes for a specific contract UID",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ScanShieldedVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ScanShieldedVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ScanShieldedVbtcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Privacy/vbtc/resync": {
+      "post": {
+        "tags": [
+          "Privacy"
+        ],
+        "summary": "Wipe cached vBTC notes for a contract and rescan from FromHeight",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ResyncShieldedVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ResyncShieldedVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ResyncShieldedVbtcRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Success"
@@ -3426,10 +4939,17 @@
         "tags": [
           "Transactions"
         ],
-        "summary": "List local transactions (filterable by status, paginated)",
+        "summary": "List local transactions (filterable by status and address, paginated)",
         "parameters": [
           {
             "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address",
             "in": "query",
             "schema": {
               "type": "string"
@@ -3870,6 +5390,1627 @@
           "Validators"
         ],
         "summary": "Get network validator pool",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "List vBTC contracts, optionally filtered by owner address",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Create a vBTC contract from a completed (v2-initiated) MPC ceremony.\r\nSigns and broadcasts the mint transaction with the local wallet key.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/{scUID}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Get vBTC contract details",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/{scUID}/deposit-address": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Get the MPC-generated BTC deposit address for a vBTC contract",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/{scUID}/health": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Contract health: how many of the original DKG validators are still online,\r\nand whether FROST withdrawals can currently be processed",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/{scUID}/withdrawals": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Withdrawal history for a contract",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/{scUID}/withdrawal-status": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Current withdrawal status for a contract",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/{scUID}/ownership-transfer-data/{toAddress}/{locator}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Ownership-transfer TX data for raw transaction building (web wallet flow).\r\nLocator comes from the beacon upload request endpoint.",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "toAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "locator",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/balances/{address}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "All vBTC balances for an address across contracts",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/balances/{address}/{scUID}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "vBTC balance for an address in a specific contract. Owner balance includes the\r\nlive BTC deposit-address balance (ElectrumX) plus the tokenization ledger.",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/validators": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "List registered vBTC validators",
+        "parameters": [
+          {
+            "name": "activeOnly",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/validators/{validatorAddress}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Validator status and details",
+        "parameters": [
+          {
+            "name": "validatorAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/ceremonies": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Initiate an MPC (FROST DKG) ceremony to generate a deposit address.\r\nRuns in the background — poll GET ceremonies/{ceremonyId} for progress.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.InitiateCeremonyRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.InitiateCeremonyRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.InitiateCeremonyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/ceremonies/{ceremonyId}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Status of an ongoing or completed MPC ceremony (v2-initiated ceremonies only)",
+        "parameters": [
+          {
+            "name": "ceremonyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/ceremonies/{ceremonyId}/cancel": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Cancel an active MPC ceremony. Only the original owner can cancel.",
+        "parameters": [
+          {
+            "name": "ceremonyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CancelCeremonyRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CancelCeremonyRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CancelCeremonyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/ceremonies/prepare-raw": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Prepare an MPC ceremony for web-wallet use: probes validators and returns the\r\nexact leader-auth messages the wallet must sign, then call execute-raw.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.PrepareCeremonyRawRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.PrepareCeremonyRawRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.PrepareCeremonyRawRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/ceremonies/execute-raw": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Execute an MPC ceremony using pre-signed leader authentication from prepare-raw",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ExecuteCeremonyRawRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ExecuteCeremonyRawRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ExecuteCeremonyRawRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/raw": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Create a vBTC contract from a pre-signed external request (signature +\r\ntimestamp + replay protection). Still signs the mint TX with the local wallet key.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRawRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRawRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRawRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/raw-tx": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Build an unsigned VBTC_V2_CONTRACT_CREATE transaction for offline signing.\r\nRequires a completed (v2-initiated) MPC ceremony.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRawRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRawRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRawRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/raw-tx/send": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Submit a pre-signed VBTC_V2_CONTRACT_CREATE transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/transfers": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Transfer vBTC (signs and broadcasts with the local wallet)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/transfers/raw-tx": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Build an unsigned VBTC_V2_TRANSFER transaction for offline signing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/transfers/raw-tx/send": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Submit a pre-signed VBTC_V2_TRANSFER transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/contracts/{scUID}/transfer-ownership": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Transfer ownership of a vBTC contract to another address",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferOwnershipRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferOwnershipRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferOwnershipRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Request withdrawal of vBTC to a Bitcoin address (signs with the local wallet)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRequestModel"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRequestModel"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRequestModel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/complete": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Complete a withdrawal: coordinates FROST MPC signing and broadcasts the BTC transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCompleteWithdrawalRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCompleteWithdrawalRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCompleteWithdrawalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/cancel": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Request cancellation of a failed withdrawal (creates a validator-voted cancellation record)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/cancel-tx": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Cancel an active withdrawal by broadcasting a VBTC_V2_WITHDRAWAL_CANCEL\r\ntransaction signed with the local wallet (distinct from the validator-voted\r\ncancellation record flow at withdrawals/cancel)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalTxRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalTxRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalTxRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/raw": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Request withdrawal with a pre-signed external request (signature, timestamp,\r\nand replay protection). Saves the request without a local wallet key.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRawRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRawRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRawRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/cancel-raw": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Cancel a withdrawal with pre-signed owner authorization (validator-voted)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalRawRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalRawRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalRawRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/complete-raw/prepare": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Prepare a complete-withdrawal FROST signing session for a web wallet.\r\nReturns the exact leader-auth messages the wallet must sign; then call complete-raw/execute.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.PrepareCompleteWithdrawalRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.PrepareCompleteWithdrawalRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.PrepareCompleteWithdrawalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/complete-raw/execute": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Execute a complete-withdrawal using pre-signed leader authentication.\r\nReturns the FROST-signed BTC transaction hex for the wallet to broadcast.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ExecuteCompleteWithdrawalRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ExecuteCompleteWithdrawalRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.ExecuteCompleteWithdrawalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/request-raw-tx": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Build an unsigned VBTC_V2_WITHDRAWAL_REQUEST blockchain transaction for offline signing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRequestModel"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRequestModel"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRequestModel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/request-raw-tx/send": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Submit a pre-signed VBTC_V2_WITHDRAWAL_REQUEST transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/complete-raw-tx": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Build an unsigned VBTC_V2_WITHDRAWAL_COMPLETE transaction for offline signing\r\n(records the completion on the VFX chain after the BTC broadcast)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawCompleteWithdrawalTxRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawCompleteWithdrawalTxRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawCompleteWithdrawalTxRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/complete-raw-tx/send": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Submit a pre-signed VBTC_V2_WITHDRAWAL_COMPLETE transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/cancel-raw-tx": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Build an unsigned VBTC_V2_WITHDRAWAL_CANCEL transaction for offline signing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalTxRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalTxRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalTxRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/withdrawals/cancel-raw-tx/send": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Submit a pre-signed VBTC_V2_WITHDRAWAL_CANCEL transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/shield": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Shield transparent vBTC into the shielded pool (T→Z). Signs with the local wallet.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.ShieldVbtcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/unshield": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Unshield vBTC back to a transparent address (Z→T)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.UnshieldVbtcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/private-transfer": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Shielded-to-shielded vBTC transfer (Z→Z)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVbtcRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVbtcRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Models.Privacy.PrivateTransferVbtcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/shielded-balance": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Shielded vBTC balance for a zfx address and contract",
+        "parameters": [
+          {
+            "name": "zfxAddress",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scUID",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/shielded-pool/{scUID}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Shielded pool state for a vBTC contract",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/to-base": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Lock vBTC for bridging to Base (broadcasts a VBTC_V2_BRIDGE_LOCK signed by the local wallet)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeToBaseRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeToBaseRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeToBaseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/status": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Bridge configuration and operational status",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/config": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Contract address, chainId, and ABI the frontend needs to call mintWithProof",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/locks/{lockId}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Bridge lock status by lock ID",
+        "parameters": [
+          {
+            "name": "lockId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/locks/{lockId}/attestation": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "In-memory mint attestation progress for a lock ID on this node",
+        "parameters": [
+          {
+            "name": "lockId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/contracts/{scUID}/locks": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "All bridge locks for a contract",
+        "parameters": [
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/owners/{ownerAddress}/locks": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "All bridge locks for an owner address (across contracts)",
+        "parameters": [
+          {
+            "name": "ownerAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/preflight/{ownerAddress}/{scUID}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Bridge preflight for an owner + contract: balance, gas, config readiness",
+        "parameters": [
+          {
+            "name": "ownerAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scUID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/locks/{lockId}/retry": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Retry a failed bridge mint for a lock",
+        "parameters": [
+          {
+            "name": "lockId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeRetryRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeRetryRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeRetryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/locks/{lockId}/force-retry": {
+      "post": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Force-retry a stuck bridge mint: reconstructs local tracking from on-chain state\r\nif missing, checks the Base contract, then collects fresh attestations",
+        "parameters": [
+          {
+            "name": "lockId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeRetryRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeRetryRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveBlockCore.Api.Rest.Models.Requests.BridgeRetryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/base-address/{vfxAddress}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Deterministic Base (EVM) address for a VFX address (Keccak256 of the secp256k1 key)",
+        "parameters": [
+          {
+            "name": "vfxAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/bridge/base-balance/{evmAddress}": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "vBTC.b balance on Base for an EVM address",
+        "parameters": [
+          {
+            "name": "evmAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/rest/Vbtc/default-image": {
+      "get": {
+        "tags": [
+          "Vbtc"
+        ],
+        "summary": "Default vBTC image metadata (Base64)",
         "responses": {
           "200": {
             "description": "Success"
@@ -4361,6 +7502,198 @@
         },
         "additionalProperties": false
       },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BridgeRetryRequest": {
+        "required": [
+          "ownerAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BridgeToBaseRequest": {
+        "required": [
+          "evmDestination",
+          "ownerAddress",
+          "smartContractUID"
+        ],
+        "type": "object",
+        "properties": {
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "amount": {
+            "type": "number",
+            "format": "double"
+          },
+          "evmDestination": {
+            "minLength": 1,
+            "type": "string",
+            "description": "EVM destination address on Base (0x + 40 hex chars) where vBTC.b mints."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BtcBroadcastRequest": {
+        "required": [
+          "hex"
+        ],
+        "type": "object",
+        "properties": {
+          "hex": {
+            "minLength": 1,
+            "type": "string",
+            "description": "Raw signed transaction hex."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BtcCreateAdnrRequest": {
+        "required": [
+          "address",
+          "btcAddress",
+          "name"
+        ],
+        "type": "object",
+        "properties": {
+          "address": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "btcAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BtcDeleteAdnrRequest": {
+        "required": [
+          "btcFromAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "btcFromAddress": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BtcLinkEvmRequest": {
+        "required": [
+          "btcAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "btcAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "evmAddress": {
+            "type": "string",
+            "description": "0x + 40 hex chars; null/empty clears the link.",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BtcReplaceByFeeRequest": {
+        "type": "object",
+        "properties": {
+          "feeRate": {
+            "maximum": 2147483647,
+            "minimum": 1,
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BtcSendTransactionRequest": {
+        "required": [
+          "fromAddress",
+          "toAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "fromAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "toAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "amount": {
+            "type": "number",
+            "format": "double"
+          },
+          "feeRate": {
+            "maximum": 2147483647,
+            "minimum": 1,
+            "type": "integer",
+            "format": "int32"
+          },
+          "overrideInternalSend": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BtcTransferAdnrRequest": {
+        "required": [
+          "btcFromAddress",
+          "btcToAddress",
+          "toAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "toAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "btcFromAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "btcToAddress": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.BtcTransferOwnershipRequest": {
+        "required": [
+          "toAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "toAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "backupURL": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
       "ReserveBlockCore.Api.Rest.Models.Requests.BurnTokenRequest": {
         "required": [
           "amount",
@@ -4386,6 +7719,19 @@
         "type": "object",
         "properties": {
           "password": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.CancelCeremonyRequest": {
+        "required": [
+          "ownerAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
             "minLength": 1,
             "type": "string"
           }
@@ -4635,6 +7981,98 @@
         },
         "additionalProperties": false
       },
+      "ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRawRequest": {
+        "required": [
+          "ceremonyId",
+          "name",
+          "ownerAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "ticker": {
+            "type": "string",
+            "nullable": true
+          },
+          "imageBase": {
+            "type": "string",
+            "nullable": true
+          },
+          "ceremonyId": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "uniqueId": {
+            "type": "string",
+            "nullable": true
+          },
+          "ownerSignature": {
+            "type": "string",
+            "nullable": true
+          },
+          "linkedContractUID": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.CreateVbtcContractRequest": {
+        "required": [
+          "ceremonyId",
+          "name",
+          "ownerAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "ticker": {
+            "type": "string",
+            "nullable": true
+          },
+          "imageBase": {
+            "type": "string",
+            "nullable": true
+          },
+          "ceremonyId": {
+            "minLength": 1,
+            "type": "string",
+            "description": "Ceremony ID from a completed MPC ceremony (required — run the ceremony first)."
+          },
+          "linkedContractUID": {
+            "type": "string",
+            "description": "S3C §5: when minting a public companion, the linked S3C contract's scUID.",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
       "ReserveBlockCore.Api.Rest.Models.Requests.DevolveRequest": {
         "required": [
           "toAddress"
@@ -4661,6 +8099,126 @@
         },
         "additionalProperties": false
       },
+      "ReserveBlockCore.Api.Rest.Models.Requests.ExecuteCeremonyRawRequest": {
+        "required": [
+          "ceremonyId",
+          "ownerAddress",
+          "sessionId",
+          "shareDistributionSignature",
+          "startSignature"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "ceremonyId": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sessionId": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "startTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "startSignature": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "shareDistributionTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shareDistributionSignature": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.ExecuteCompleteWithdrawalRequest": {
+        "required": [
+          "ownerAddress",
+          "sessionId",
+          "shareDistributionSignature",
+          "smartContractUID",
+          "startSignature",
+          "withdrawalRequestHash"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "withdrawalRequestHash": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sessionId": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "startTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "startSignature": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "shareDistributionTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shareDistributionSignature": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "amount": {
+            "type": "number",
+            "description": "Delegated withdrawal amount (BTC). Passed through if local DB doesn't have the withdrawal request.",
+            "format": "double"
+          },
+          "btcDestination": {
+            "type": "string",
+            "description": "Delegated BTC destination address.",
+            "nullable": true
+          },
+          "feeRate": {
+            "type": "integer",
+            "description": "Delegated fee rate (sats/vB).",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.ImportBtcKeyRequest": {
+        "required": [
+          "privateKey"
+        ],
+        "type": "object",
+        "properties": {
+          "privateKey": {
+            "minLength": 50,
+            "type": "string"
+          },
+          "addressFormat": {
+            "type": "string",
+            "description": "Segwit (default), SegwitP2SH, or Taproot.",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
       "ReserveBlockCore.Api.Rest.Models.Requests.ImportKeyRequest": {
         "required": [
           "privateKey"
@@ -4673,6 +8231,23 @@
           },
           "scan": {
             "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.InitiateCeremonyRequest": {
+        "required": [
+          "ownerAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "forcePublic": {
+            "type": "boolean",
+            "description": "S3C §5: set true when minting a public companion for an S3C contract."
           }
         },
         "additionalProperties": false
@@ -4708,6 +8283,42 @@
         },
         "additionalProperties": false
       },
+      "ReserveBlockCore.Api.Rest.Models.Requests.PrepareCeremonyRawRequest": {
+        "required": [
+          "ownerAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.PrepareCompleteWithdrawalRequest": {
+        "required": [
+          "ownerAddress",
+          "smartContractUID",
+          "withdrawalRequestHash"
+        ],
+        "type": "object",
+        "properties": {
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "withdrawalRequestHash": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "ReserveBlockCore.Api.Rest.Models.Requests.PublishReserveAccountRequest": {
         "required": [
           "password"
@@ -4720,6 +8331,74 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.RawCompleteWithdrawalTxRequest": {
+        "required": [
+          "btcDestination",
+          "btcTransactionHash",
+          "fromAddress",
+          "smartContractUID",
+          "withdrawalRequestHash"
+        ],
+        "type": "object",
+        "properties": {
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "fromAddress": {
+            "minLength": 1,
+            "type": "string",
+            "description": "The withdrawal requestor's VFX address (FromAddress for the completion TX)."
+          },
+          "withdrawalRequestHash": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "btcTransactionHash": {
+            "minLength": 1,
+            "type": "string",
+            "description": "The BTC transaction hash from the FROST signing result (after wallet broadcasts to Bitcoin)."
+          },
+          "amount": {
+            "type": "number",
+            "description": "Withdrawal amount in BTC.",
+            "format": "double"
+          },
+          "btcDestination": {
+            "minLength": 1,
+            "type": "string",
+            "description": "BTC destination address."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.RawVbtcTxSubmissionRequest": {
+        "required": [
+          "hash",
+          "publicKey",
+          "signature"
+        ],
+        "type": "object",
+        "properties": {
+          "hash": {
+            "minLength": 1,
+            "type": "string",
+            "description": "TX hash returned by the matching build endpoint (the value the client signed)."
+          },
+          "signature": {
+            "minLength": 1,
+            "type": "string",
+            "description": "ECDSA base64 signature over UTF8(Hash)."
+          },
+          "publicKey": {
+            "minLength": 1,
+            "type": "string",
+            "description": "Hex-encoded secp256k1 public key of the signing account."
+          }
+        },
+        "additionalProperties": false,
+        "description": "Submission body for every raw-tx build/send pair (client signed the Hash offline)."
       },
       "ReserveBlockCore.Api.Rest.Models.Requests.RecoverReserveAccountRequest": {
         "required": [
@@ -5031,6 +8710,245 @@
         },
         "additionalProperties": false
       },
+      "ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalRawRequest": {
+        "required": [
+          "ownerAddress",
+          "ownerSignature",
+          "smartContractUID",
+          "uniqueId",
+          "withdrawalRequestHash"
+        ],
+        "type": "object",
+        "properties": {
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "withdrawalRequestHash": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "btcTxHash": {
+            "type": "string",
+            "nullable": true
+          },
+          "failureProof": {
+            "type": "string",
+            "nullable": true
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "uniqueId": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "ownerSignature": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalRequest": {
+        "required": [
+          "ownerAddress",
+          "smartContractUID",
+          "withdrawalRequestHash"
+        ],
+        "type": "object",
+        "properties": {
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "ownerAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "withdrawalRequestHash": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "btcTxHash": {
+            "type": "string",
+            "nullable": true
+          },
+          "failureProof": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.VbtcCancelWithdrawalTxRequest": {
+        "required": [
+          "requestorAddress",
+          "smartContractUID",
+          "withdrawalRequestHash"
+        ],
+        "type": "object",
+        "properties": {
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "requestorAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "withdrawalRequestHash": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.VbtcCompleteWithdrawalRequest": {
+        "required": [
+          "smartContractUID",
+          "withdrawalRequestHash"
+        ],
+        "type": "object",
+        "properties": {
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "withdrawalRequestHash": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferOwnershipRequest": {
+        "required": [
+          "toAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "toAddress": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.VbtcTransferRequest": {
+        "required": [
+          "fromAddress",
+          "smartContractUID",
+          "toAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "fromAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "toAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "amount": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRawRequest": {
+        "required": [
+          "btcAddress",
+          "smartContractUID",
+          "uniqueId",
+          "vfxAddress",
+          "vfxSignature"
+        ],
+        "type": "object",
+        "properties": {
+          "vfxAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "btcAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "amount": {
+            "type": "number",
+            "format": "double"
+          },
+          "feeRate": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "uniqueId": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "vfxSignature": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "isTest": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Api.Rest.Models.Requests.VbtcWithdrawalRequestModel": {
+        "required": [
+          "btcAddress",
+          "requestorAddress",
+          "smartContractUID"
+        ],
+        "type": "object",
+        "properties": {
+          "smartContractUID": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "requestorAddress": {
+            "minLength": 1,
+            "type": "string",
+            "description": "The VFX address requesting withdrawal. Any address with a vBTC balance — not just the contract owner."
+          },
+          "btcAddress": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "amount": {
+            "type": "number",
+            "format": "double"
+          },
+          "feeRate": {
+            "maximum": 2147483647,
+            "minimum": 1,
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
       "ReserveBlockCore.Api.Rest.Models.Requests.VerifyOwnershipRequest": {
         "required": [
           "ownershipScript"
@@ -5271,6 +9189,11 @@
           },
           "isValidating": {
             "type": "boolean"
+          },
+          "linkedEvmAddress": {
+            "type": "string",
+            "description": "Optional Base (EVM) address linked to this BTC account for wallet Base ETH / vBTC.b balance display.",
+            "nullable": true
           }
         },
         "additionalProperties": false
@@ -5592,6 +9515,11 @@
               "$ref": "#/components/schemas/ReserveBlockCore.Models.TokenAccount"
             },
             "nullable": true
+          },
+          "lastModifiedHeight": {
+            "type": "integer",
+            "description": "Block height at which this record was last inserted/updated. Stamped automatically by\r\nthe typed overloads in ReserveBlockCore.Extensions.StateTreiStampExtensions and used by\r\nStateSnapshotService to diff-copy only changed records into snapshot slots.\r\nLegacy records without the field deserialize as 0 (always older than any snapshot).",
+            "format": "int64"
           }
         },
         "additionalProperties": false
@@ -5958,6 +9886,9 @@
             "type": "string",
             "nullable": true
           },
+          "consensusCertificate": {
+            "$ref": "#/components/schemas/ReserveBlockCore.Models.ConsensusCertificate"
+          },
           "transactions": {
             "type": "array",
             "items": {
@@ -5972,6 +9903,54 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.CasterAttestation": {
+        "type": "object",
+        "properties": {
+          "casterAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "signature": {
+            "type": "string",
+            "nullable": true
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.ConsensusCertificate": {
+        "type": "object",
+        "properties": {
+          "blockHeight": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blockHash": {
+            "type": "string",
+            "nullable": true
+          },
+          "winnerAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "prevHash": {
+            "type": "string",
+            "nullable": true
+          },
+          "attestations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReserveBlockCore.Models.CasterAttestation"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Caster quorum attestation bundle (embedded on Block; excluded from block hash — CONSENSUS_DECENTRALIZATION_PLAN)."
       },
       "ReserveBlockCore.Models.DST.Auction": {
         "type": "object",
@@ -6822,6 +10801,353 @@
         },
         "additionalProperties": false
       },
+      "ReserveBlockCore.Models.Privacy.ConsolidateShieldedVbtcRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          },
+          "vbtcContractUid": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Merges the two smallest unspent vBTC notes into one via Z→Z to the same `zfx_` address."
+      },
+      "ReserveBlockCore.Models.Privacy.ConsolidateShieldedVfxRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Merges the two smallest unspent VFX notes into one via Z→Z to the same `zfx_` address (repeat to fold more dust)."
+      },
+      "ReserveBlockCore.Models.Privacy.CreateShieldedAddressFromAccountRequest": {
+        "type": "object",
+        "properties": {
+          "transparentAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Create a shielded address from a single transparent account (no HD wallet required)."
+      },
+      "ReserveBlockCore.Models.Privacy.ExportViewingKeyRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.GenerateShieldedAddressRequest": {
+        "type": "object",
+        "properties": {
+          "useLocalHdWallet": {
+            "type": "boolean",
+            "description": "When true, uses ReserveBlockCore.Models.HDWallet seed from local DB (must exist)."
+          },
+          "walletSeedHex": {
+            "type": "string",
+            "nullable": true
+          },
+          "coinType": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "addressIndex": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.ImportViewingKeyRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "viewingKeyBase64": {
+            "type": "string",
+            "nullable": true
+          },
+          "transparentSourceAddress": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.PrivateTransferVbtcRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          },
+          "vbtcContractUid": {
+            "type": "string",
+            "nullable": true
+          },
+          "recipientZfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "paymentAmount": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.PrivateTransferVfxRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          },
+          "recipientZfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "paymentAmount": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.ResyncShieldedVbtcRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "vbtcContractUid": {
+            "type": "string",
+            "nullable": true
+          },
+          "fromHeight": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "toHeight": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Wipes cached vBTC notes/balances for a specific contract and rescans from FromHeight."
+      },
+      "ReserveBlockCore.Models.Privacy.ResyncShieldedWalletRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "fromHeight": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "toHeight": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Wipes cached notes/balances and rescans from FromHeight to rebuild. Fixes corrupted balances."
+      },
+      "ReserveBlockCore.Models.Privacy.ScanShieldedRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          },
+          "fromHeight": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "toHeight": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.ScanShieldedVbtcRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          },
+          "vbtcContractUid": {
+            "type": "string",
+            "nullable": true
+          },
+          "fromHeight": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "toHeight": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.ShieldVbtcRequest": {
+        "type": "object",
+        "properties": {
+          "fromAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "vbtcContractUid": {
+            "type": "string",
+            "nullable": true
+          },
+          "vbtcAmount": {
+            "type": "number",
+            "format": "double"
+          },
+          "transparentFee": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "recipientZfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "memo": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.ShieldVfxRequest": {
+        "type": "object",
+        "properties": {
+          "fromAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "shieldAmount": {
+            "type": "number",
+            "format": "double"
+          },
+          "transparentFee": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "recipientZfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "memo": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.UnshieldVbtcRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          },
+          "vbtcContractUid": {
+            "type": "string",
+            "nullable": true
+          },
+          "transparentToAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "transparentVbtcAmount": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReserveBlockCore.Models.Privacy.UnshieldVfxRequest": {
+        "type": "object",
+        "properties": {
+          "zfxAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "walletPassword": {
+            "type": "string",
+            "nullable": true
+          },
+          "transparentToAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "transparentAmount": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "additionalProperties": false
+      },
       "ReserveBlockCore.Models.Provider": {
         "enum": [
           0,
@@ -7093,6 +11419,11 @@
               "$ref": "#/components/schemas/ReserveBlockCore.Models.SmartContractStateTreiTokenizationTX"
             },
             "nullable": true
+          },
+          "lastModifiedHeight": {
+            "type": "integer",
+            "description": "Block height at which this record was last inserted/updated. Stamped automatically by\r\nthe typed overloads in ReserveBlockCore.Extensions.StateTreiStampExtensions and used by\r\nStateSnapshotService to diff-copy only changed records into snapshot slots.\r\nLegacy records without the field deserialize as 0 (always older than any snapshot).",
+            "format": "int64"
           }
         },
         "additionalProperties": false
@@ -7681,7 +12012,19 @@
           27,
           28,
           29,
-          30
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42
         ],
         "type": "integer",
         "format": "int32"
@@ -7818,6 +12161,11 @@
           },
           "stateRoot": {
             "type": "string",
+            "nullable": true
+          },
+          "shieldedStateRoot": {
+            "type": "string",
+            "description": "Hash of `DB_Privacy` shielded pool state after the block (see M:ReserveBlockCore.Privacy.ShieldedStateRoot.Compute).",
             "nullable": true
           }
         },

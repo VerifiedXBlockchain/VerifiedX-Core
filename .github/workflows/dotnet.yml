@@ -7,6 +7,15 @@ on:
     branches: [ main ]
 
 jobs:
+  api-drift:
+    # v1<->v2 API drift gate: fails if any live v1 endpoint is missing from
+    # docs/api/v2-coverage-map.txt. Stdlib-only python, no restore needed.
+    # See docs/api/drift-policy.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/api_drift.py check
+
   build:
     strategy:
       fail-fast: false

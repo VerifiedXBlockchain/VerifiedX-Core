@@ -107,3 +107,13 @@ Unban a peer by IP
 ### Response
 
 `200` Success
+
+---
+
+## GET /Network/stats
+
+Chain stats: height, circulating network supply, peer count, mempool size
+
+### Response
+
+`200` Success

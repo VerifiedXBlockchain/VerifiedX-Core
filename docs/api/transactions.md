@@ -4,13 +4,14 @@
 
 ## GET /Transactions
 
-List local transactions (filterable by status, paginated)
+List local transactions (filterable by status and address, paginated)
 
 ### Parameters
 
 | Name | In | Type | Required | Description |
 |------|----|------|----------|-------------|
 | `status` | query | string | No | — |
+| `address` | query | string | No | — |
 | `Page` | query | int32 | No | — |
 | `PageSize` | query | int32 | No | — |
 
