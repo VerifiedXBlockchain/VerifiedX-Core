@@ -1873,6 +1873,11 @@ namespace ReserveBlockCore.Services
                     AnsiConsole.MarkupLine("[blue]|          **Validator Active**        |[/]");
                     AnsiConsole.MarkupLine($"[blue]|  {Globals.ValidatorAddress}  |[/]");
                 }
+                if (Globals.IsBlockCaster)
+                {
+                    AnsiConsole.MarkupLine("[purple]|        **Block Caster Active**       |[/]");
+                    AnsiConsole.MarkupLine($"[purple]|  Casters: {Globals.BlockCasters.Count}/{Globals.MaxBlockCasters}                        |[/]");
+                }
                 if(!Globals.MemoryOverload)
                 {
 
@@ -1944,6 +1949,11 @@ namespace ReserveBlockCore.Services
             {
                 AnsiConsole.MarkupLine("[blue]|          **Validator Active**        |[/]");
                 AnsiConsole.MarkupLine($"[blue]|  {Globals.ValidatorAddress}  |[/]");
+            }
+            if (Globals.IsBlockCaster)
+            {
+                AnsiConsole.MarkupLine("[purple]|        **Block Caster Active**       |[/]");
+                AnsiConsole.MarkupLine($"[purple]|  Casters: {Globals.BlockCasters.Count}/{Globals.MaxBlockCasters}                        |[/]");
             }
         }
     }

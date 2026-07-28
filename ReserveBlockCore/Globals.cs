@@ -444,11 +444,36 @@ namespace ReserveBlockCore
         {
             lock (KnownCastersLock)
             {
-                KnownCasters.Clear();
-                foreach (var p in BlockCasters)
+                // 6/5-OVERFLOW FIX: self-heal duplicate entries (same validator address added
+                // twice, e.g. under two IP spellings) by rebuilding the bag with one entry per
+                // address. Keep is deterministic (lowest normalized IP) so every node that holds
+                // the same duplicated list heals to the same result. Distinct casters beyond
+                // MaxBlockCasters are NOT trimmed here — only logged — since trimming a live
+                // caster on some nodes but not others would diverge quorum views.
+                var casterSnapshot = BlockCasters.Where(p => !string.IsNullOrEmpty(p.ValidatorAddress)).ToList();
+                if (casterSnapshot.GroupBy(p => p.ValidatorAddress).Any(g => g.Count() > 1))
                 {
-                    if (string.IsNullOrEmpty(p.ValidatorAddress))
-                        continue;
+                    var deduped = casterSnapshot
+                        .GroupBy(p => p.ValidatorAddress)
+                        .Select(g => g.OrderBy(p => (p.PeerIP ?? "").Replace("::ffff:", ""), StringComparer.Ordinal).First())
+                        .ToList();
+                    var addressless = BlockCasters.Where(p => string.IsNullOrEmpty(p.ValidatorAddress)).ToList();
+                    BlockCasters = new ConcurrentBag<Peers>(deduped.Concat(addressless));
+                    Utilities.CasterLogUtility.Log(
+                        $"SyncKnownCastersFromBlockCasters: removed {casterSnapshot.Count - deduped.Count} duplicate caster entr(ies). Count now {deduped.Count}",
+                        "CasterFlow");
+                    casterSnapshot = deduped;
+                }
+                if (casterSnapshot.Count > MaxBlockCasters)
+                {
+                    Utilities.CasterLogUtility.Log(
+                        $"SyncKnownCastersFromBlockCasters WARNING — caster count {casterSnapshot.Count} exceeds MaxBlockCasters {MaxBlockCasters}. addrs=[{string.Join(",", casterSnapshot.Select(p => p.ValidatorAddress))}]",
+                        "CasterFlow");
+                }
+
+                KnownCasters.Clear();
+                foreach (var p in casterSnapshot)
+                {
                     KnownCasters.Add(new CasterInfo
                     {
                         Address = p.ValidatorAddress,

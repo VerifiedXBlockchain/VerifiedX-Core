@@ -70,6 +70,11 @@ namespace ReserveBlockCore.Services
 
             lock (_promotionLock)
             {
+                // 6/5-OVERFLOW FIX: normalize the IP before storing/comparing. Entries arrive in
+                // both "::ffff:x.x.x.x" and clean forms depending on origin, so a raw string
+                // compare lets the same caster in twice under two IP spellings.
+                newCaster.PeerIP = (newCaster.PeerIP ?? "").Replace("::ffff:", "");
+
                 if (Globals.BlockCasters.Count >= MaxCasters)
                 {
                     CasterLogUtility.Log(
@@ -77,7 +82,8 @@ namespace ReserveBlockCore.Services
                         "CasterFlow");
                     return false;
                 }
-                if (Globals.BlockCasters.Any(c => c.ValidatorAddress == newCaster.ValidatorAddress))
+                if (Globals.BlockCasters.Any(c => c.ValidatorAddress == newCaster.ValidatorAddress ||
+                    (!string.IsNullOrEmpty(newCaster.PeerIP) && (c.PeerIP ?? "").Replace("::ffff:", "") == newCaster.PeerIP)))
                 {
                     CasterLogUtility.Log(
                         $"AddBlockCasterIfRoomAndUnique REJECT — duplicate. candidate={newCaster.ValidatorAddress}",

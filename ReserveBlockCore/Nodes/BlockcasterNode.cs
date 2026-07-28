@@ -254,7 +254,9 @@ namespace ReserveBlockCore.Nodes
                                                 string pk = c.PublicKey?.ToString() ?? "";
                                                 if (!string.IsNullOrEmpty(addr) && !Globals.BlockCasters.Any(x => x.ValidatorAddress == addr))
                                                 {
-                                                    Globals.BlockCasters.Add(new Peers { ValidatorAddress = addr, PeerIP = pip, ValidatorPublicKey = pk });
+                                                    // 6/5-OVERFLOW FIX: use the atomic capped add so a merged peer list
+                                                    // can't push BlockCasters past MaxCasters or duplicate an entry.
+                                                    CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers { ValidatorAddress = addr, PeerIP = pip, ValidatorPublicKey = pk });
                                                 }
                                             }
                                         }
@@ -844,23 +846,14 @@ namespace ReserveBlockCore.Nodes
         #endregion
 
         #region Add Casters
-        public static async Task AddCaster(Peers caster)
+        public static Task AddCaster(Peers caster)
         {
-            var casterExist = Globals.BlockCasters.Any(x => x.PeerIP == caster.PeerIP);
-
-            if(!casterExist)
-            {
-                Stopwatch sw = Stopwatch.StartNew();
-                while(sw.Elapsed.Seconds < 10)
-                {
-                    Globals.BlockCasters.Add(caster);
-                    if (Globals.BlockCasters.Any(x => x.PeerIP == caster.PeerIP))
-                        break;
-
-                    //Adding delay to prevent infinite loop and cpu throttling
-                    await Task.Delay(10);
-                }
-            }
+            // 6/5-OVERFLOW FIX: all caster additions must go through the atomic add in
+            // CasterDiscoveryService, which enforces the MaxCasters cap and dedups by
+            // validator address + normalized IP under _promotionLock. The old raw
+            // BlockCasters.Add here had no cap and matched on raw PeerIP only.
+            CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(caster);
+            return Task.CompletedTask;
         }
 
         #endregion
