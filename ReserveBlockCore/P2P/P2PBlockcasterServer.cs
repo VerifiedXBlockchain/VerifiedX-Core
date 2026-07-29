@@ -146,6 +146,25 @@ namespace ReserveBlockCore.P2P
 
                 var walletVersionVerify = WalletVersionUtility.Verify(walletVersion);
 
+                // A2 FIX: this result was previously computed and never used.
+                if (!walletVersionVerify)
+                {
+                    _ = EndOnConnect(peerIP,
+                        "Wallet version below minimum. You are being disconnected.",
+                        "Wallet version below minimum from: " + peerIP + " version: " + walletVersion);
+                    return;
+                }
+
+                // A2: strict consensus-compatibility gate. Missing header = old binary → rejected.
+                var consver = httpContext.Request.Headers["consver"].ToString();
+                if (!ConsensusVersionGate.Check(consver))
+                {
+                    _ = EndOnConnect(peerIP,
+                        "Consensus version mismatch. You are being disconnected.",
+                        $"Consensus version mismatch from: {peerIP} (got '{consver}', need {Globals.ConsensusVersion})");
+                    return;
+                }
+
                 // Address-PublicKey binding validation
                 if (!ValidateAddressPublicKeyBinding(address, publicKey))
                 {
@@ -299,6 +318,17 @@ namespace ReserveBlockCore.P2P
             }
 
             Context?.Abort();
+        }
+
+        #endregion
+
+        #region Get Consensus Version
+        // A2: lets clients verify the SERVER's consensus version after connecting
+        // (headers only authenticate client→server). Old servers lack this method,
+        // so the client's invoke fails → disconnect.
+        public async Task<int> GetConsensusVersion()
+        {
+            return Globals.ConsensusVersion;
         }
 
         #endregion

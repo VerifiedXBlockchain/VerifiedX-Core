@@ -312,6 +312,29 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// F.2: trimmed node-health mirror for non-validator nodes / orchestration scripts.
+        /// Full detail lives at valapi/validator/Health.
+        /// </summary>
+        [HttpGet("Health")]
+        public async Task<string> Health()
+        {
+            var lastBlock = Globals.LastBlock;
+            var payload = new
+            {
+                Version = Globals.CLIVersion,
+                ConsensusVersion = Globals.ConsensusVersion,
+                Height = lastBlock?.Height ?? -1L,
+                TipHash = lastBlock?.Hash ?? "",
+                IsChainSynced = Globals.IsChainSynced,
+                IsValidator = !string.IsNullOrEmpty(Globals.ValidatorAddress),
+                IsBlockCaster = Globals.IsBlockCaster,
+                StateTreiSynced = Services.StateTreiStatusService.IsSynced(),
+                PeerCount = Globals.Nodes.Count
+            };
+            return JsonConvert.SerializeObject(payload);
+        }
+
+        /// <summary>
         /// Converts wallet to an HD Wallet. Must choose strength of 12 or 24.
         /// </summary>
         /// <param name="strength"></param>

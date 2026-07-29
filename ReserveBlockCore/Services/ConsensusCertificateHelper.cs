@@ -9,6 +9,71 @@ namespace ReserveBlockCore.Services
 {
     public static class ConsensusCertificateHelper
     {
+        /// <summary>
+        /// A4: shared attestation-quorum check. Collects attestations for the exact
+        /// (height, hash, winner, prevHash) tuple from the local store first, then from peer
+        /// casters' GetAttestations endpoints. Every signature is verified against the canonical
+        /// payload and signers must be current casters. Returns true only when a majority of the
+        /// operational caster committee has attested this exact block.
+        /// </summary>
+        public static async Task<bool> TryGetMajorityAttestationsAsync(long height, string blockHash, string winner, string prevHash, int maxPollRounds = 4)
+        {
+            var need = ConsensusCertificateVerifier.RequiredAttestations(ConsensusCertificateVerifier.OperationalBlockCasterCount());
+            if (need == int.MaxValue)
+                return false;
+
+            var msg = ConsensusMessageFormatter.FormatAttestationV1(height, blockHash, winner, prevHash);
+            var merged = new Dictionary<string, CasterAttestation>(StringComparer.Ordinal);
+
+            void MergeVerified(IEnumerable<CasterAttestation>? list)
+            {
+                if (list == null) return;
+                foreach (var a in list)
+                {
+                    if (string.IsNullOrEmpty(a.CasterAddress) || string.IsNullOrEmpty(a.Signature))
+                        continue;
+                    if (merged.ContainsKey(a.CasterAddress))
+                        continue;
+                    if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == a.CasterAddress))
+                        continue;
+                    if (!SignatureService.VerifySignature(a.CasterAddress, msg, a.Signature))
+                        continue;
+                    merged[a.CasterAddress] = a;
+                }
+            }
+
+            MergeVerified(ConsensusAttestationStore.GetForHeight(height));
+            if (merged.Count >= need)
+                return true;
+
+            for (var i = 0; i < maxPollRounds && merged.Count < need; i++)
+            {
+                foreach (var peer in Globals.BlockCasters.ToList())
+                {
+                    if (string.IsNullOrEmpty(peer.PeerIP))
+                        continue;
+                    try
+                    {
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        var ip = peer.PeerIP.Replace("::ffff:", "");
+                        var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetAttestations/{height}";
+                        using var resp = await client.GetAsync(uri).WaitAsync(TimeSpan.FromSeconds(3));
+                        if (!resp.IsSuccessStatusCode)
+                            continue;
+                        var body = await resp.Content.ReadAsStringAsync();
+                        MergeVerified(JsonConvert.DeserializeObject<List<CasterAttestation>>(body));
+                    }
+                    catch { }
+                }
+
+                if (merged.Count >= need)
+                    break;
+                await Task.Delay(250);
+            }
+
+            return merged.Count >= need;
+        }
+
         /// <summary>Collect M-of-N attestations (eager polling) and set <see cref="Block.ConsensusCertificate"/> before P2P broadcast.</summary>
         public static async Task TryAttachCertificateAsync(Block block, string? winnerAddress = null)
         {

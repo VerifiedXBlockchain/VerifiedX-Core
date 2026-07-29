@@ -25,6 +25,8 @@ namespace ReserveBlockCore.Config
         public bool ChainCheckPoint { get; set; }
 		public int ChainCheckPointInterval { get; set; }
         public int ChainCheckPointRetain { get; set; }
+        /// <summary>Phase E: disaster-recovery override letting a lone seed bootstrap without 2-of-3 agreement.</summary>
+        public bool ForceSoloBootstrap { get; set; }
 		public string ChainCheckpointLocation { get; set; }
 		public bool APICallURLLogging { get; set; }
 		public string? ValidatorAddress { get; set; }
@@ -122,6 +124,7 @@ namespace ReserveBlockCore.Config
 				config.ValidatorName = dict.ContainsKey("ValidatorName") ? dict["ValidatorName"] : Guid.NewGuid().ToString();
 				config.WalletUnlockTime = dict.ContainsKey("WalletUnlockTime") ? Convert.ToInt32(dict["WalletUnlockTime"]) : 15;
 				config.ChainCheckPoint = dict.ContainsKey("ChainCheckPoint") ? Convert.ToBoolean(dict["ChainCheckPoint"]) : false;
+				config.ForceSoloBootstrap = dict.ContainsKey("ForceSoloBootstrap") ? Convert.ToBoolean(dict["ForceSoloBootstrap"]) : false;
 				config.APICallURLLogging = dict.ContainsKey("APICallURLLogging") ? Convert.ToBoolean(dict["APICallURLLogging"]) : false;
 				config.ChainCheckPointInterval = dict.ContainsKey("ChainCheckPointInternal") ? Convert.ToInt32(dict["ChainCheckPointInternal"]) : 12;
 				config.ChainCheckPointRetain = dict.ContainsKey("ChainCheckPointRetain") ? Convert.ToInt32(dict["ChainCheckPointRetain"]) : 2;
@@ -551,6 +554,11 @@ namespace ReserveBlockCore.Config
 				Globals.ChainCheckPointRetain = config.ChainCheckPointRetain;
 				Globals.ChainCheckpointLocation = config.ChainCheckpointLocation;
             }
+
+			if (config.ForceSoloBootstrap)
+			{
+				Globals.ForceSoloBootstrap = true;
+			}
 
 			if(!string.IsNullOrWhiteSpace(config.ValidatorAddress))
             {

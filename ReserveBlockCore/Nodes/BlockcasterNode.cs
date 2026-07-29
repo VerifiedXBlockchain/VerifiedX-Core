@@ -49,7 +49,10 @@ namespace ReserveBlockCore.Nodes
     private static long _acceptedHeight = -1;
     /// <summary>Timestamp (Environment.TickCount64) of the last successful block acceptance. Used for desync recovery.</summary>
     private static long _lastBlockAcceptedTick = Environment.TickCount64;
-    const int DESYNC_RECOVERY_TIMEOUT_MS = 45000; // 45 seconds without a new block → bypass consensus gate
+    const int DESYNC_RECOVERY_TIMEOUT_MS = 45000; // 45 seconds without a new block → trigger reconcile (A4: no longer a gate bypass)
+    /// <summary>A4: single-flight guard + attempt counter for the desync reconcile path that replaced the gate bypass.</summary>
+    private static int _desyncReconcileRunning = 0;
+    private static int _desyncReconcileAttempts = 0;
         /// <summary>Throttle for "block rejected" log messages — tracks last logged height per validator to prevent spam.</summary>
         private static readonly ConcurrentDictionary<string, long> _rejectionLogTracker = new();
 
@@ -403,6 +406,10 @@ namespace ReserveBlockCore.Nodes
             try
             {
                 var data = JsonConvert.SerializeObject(new { Height = height, BlockJson = blockJson });
+                // A1 FIX: the "FC" handler lives on the GetValMessage channel (ValidatorNode.ProcessData).
+                // The caster-channel broadcast below only reaches peer casters (handled by the new
+                // "FC" case in BlockcasterNode.ProcessData) — validators need the val-channel send.
+                await ValidatorNode.Broadcast("FC", data);
                 await Broadcast("FC", data, "");
                 CasterLogUtility.Log(
                     $"[ForkCorrection] Broadcasted correction for height {height} to all connected validators.",
@@ -881,6 +888,121 @@ namespace ReserveBlockCore.Nodes
 
         #endregion
 
+        /// <summary>
+        /// FIX D1 / Phase E: fresh-startup detection. On a stale tip (>FRESH_STARTUP_THRESHOLD_SECONDS)
+        /// the destructive NetworkValidators clear + seed reseed now runs ONLY on a seed that holds an
+        /// active cooperative-bootstrap agreement. Non-seed nodes never clear (their view refreshes via
+        /// P2P); a seed still polling leaves the check pending so it re-runs once agreement is reached.
+        /// Also fixes the silent-skip gotcha: a seed Peers entry missing ValidatorPublicKey is now
+        /// hydrated from that seed's BootstrapStatus instead of being dropped from proof generation.
+        /// </summary>
+        private static async Task RunFreshStartupReseedIfNeeded()
+        {
+            if (_freshStartupChecked) return;
+
+            var lastBlockAge = TimeUtil.GetTime() - Globals.LastBlock.Timestamp;
+            if (lastBlockAge <= FRESH_STARTUP_THRESHOLD_SECONDS)
+            {
+                _freshStartupChecked = true;
+                CasterLogUtility.Log(
+                    $"FRESH-STARTUP: Last block is {lastBlockAge}s old (<={FRESH_STARTUP_THRESHOLD_SECONDS}s). " +
+                    $"Keeping {Globals.NetworkValidators.Count} NetworkValidators.",
+                    "BOOT");
+                return;
+            }
+
+            if (!Globals.IsLocalBootstrapCaster)
+            {
+                // Phase E: non-seed nodes never run the destructive clear on a stale tip.
+                _freshStartupChecked = true;
+                CasterLogUtility.Log(
+                    $"FRESH-STARTUP: stale tip ({lastBlockAge}s) but this node is not a bootstrap seed — keeping {Globals.NetworkValidators.Count} NetworkValidators.",
+                    "BOOT");
+                return;
+            }
+
+            if (!BootstrapCoordinationService.AgreementActive)
+                return; // seed without agreement: leave pending; re-checked each loop iteration
+
+            _freshStartupChecked = true;
+            var staleCount = Globals.NetworkValidators.Count;
+            Globals.NetworkValidators.Clear();
+            CasterLogUtility.Log(
+                $"FRESH-STARTUP: Last block is {lastBlockAge}s old (>{FRESH_STARTUP_THRESHOLD_SECONDS}s) and bootstrap agreement is ACTIVE. " +
+                $"Cleared {staleCount} stale NetworkValidators. Validators will repopulate via P2P.",
+                "BOOT");
+            ConsoleWriterService.OutputValCaster(
+                $"[FRESH-STARTUP] Cleared {staleCount} stale validators. Last block age: {lastBlockAge}s.");
+
+            // FIX D1b: Re-seed bootstrap casters (including self) into NetworkValidators
+            // so they can generate proofs for themselves and be selected as winners.
+            //
+            // CRITICAL: Must populate PublicKey from Peers.ValidatorPublicKey. The legacy proof
+            // generation path (GenerateProofsFromNetworkValidatorsLegacy) requires PublicKey to be
+            // non-null — without it the foreach skips the entry, allProofs comes back empty, and
+            // the consensus loop falls through silently with no winner candidate ever produced.
+            // FirstSeenAtHeight is set to 0 so genesis-trusted bootstrap casters bypass any
+            // height-based maturity gate that compares against `LastBlock.Height`.
+            foreach (var caster in Globals.BlockCasters.ToList())
+            {
+                if (!string.IsNullOrEmpty(caster.ValidatorAddress) && !string.IsNullOrEmpty(caster.PeerIP))
+                {
+                    var pubKey = caster.ValidatorPublicKey;
+                    if (string.IsNullOrEmpty(pubKey))
+                    {
+                        // Phase E fix: hydrate the missing public key from the seed's BootstrapStatus
+                        // instead of silently skipping (a skipped seed = empty legacy proofs = no-winner stall).
+                        pubKey = await FetchPeerValidatorPublicKeyAsync(caster.PeerIP);
+                        if (string.IsNullOrEmpty(pubKey))
+                        {
+                            CasterLogUtility.Log(
+                                $"FRESH-STARTUP: skip re-seed for {caster.ValidatorAddress} @ {caster.PeerIP} — no ValidatorPublicKey locally or via BootstrapStatus",
+                                "BOOT");
+                            continue;
+                        }
+                        caster.ValidatorPublicKey = pubKey;
+                    }
+
+                    var nv = new NetworkValidator
+                    {
+                        Address = caster.ValidatorAddress,
+                        PublicKey = pubKey,
+                        IPAddress = caster.PeerIP,
+                        IsFullyTrusted = true,
+                        LastSeen = TimeUtil.GetTime(),
+                        FirstSeenAtHeight = 0,
+                        CheckFailCount = 0,
+                    };
+                    Globals.NetworkValidators.TryAdd(caster.ValidatorAddress, nv);
+                }
+            }
+            // FIX E: Set gossip cooldown to prevent P2P gossip from re-adding stale validators
+            Globals.GossipCooldownUntil = TimeUtil.GetTime() + 60;
+            CasterLogUtility.Log(
+                $"FRESH-STARTUP: Re-seeded {Globals.NetworkValidators.Count} bootstrap casters into NetworkValidators. Gossip cooldown until {Globals.GossipCooldownUntil}.",
+                "BOOT");
+        }
+
+        private static async Task<string?> FetchPeerValidatorPublicKeyAsync(string peerIP)
+        {
+            try
+            {
+                using var client = Globals.HttpClientFactory.CreateClient();
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                var uri = $"http://{peerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/BootstrapStatus";
+                var resp = await client.GetAsync(uri, cts.Token);
+                if (!resp.IsSuccessStatusCode)
+                    return null;
+                var body = await resp.Content.ReadAsStringAsync();
+                var status = JsonConvert.DeserializeAnonymousType(body, new { ValidatorPublicKey = "" });
+                return string.IsNullOrEmpty(status?.ValidatorPublicKey) ? null : status.ValidatorPublicKey;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static async Task StartCastingRounds()
         {
             //start consensus run here.  
@@ -894,77 +1016,27 @@ namespace ReserveBlockCore.Nodes
             CasterLogUtility.Clear();
             CasterLogUtility.Log($"=== Consensus loop starting. Validator={Globals.ValidatorAddress} ===", "BOOT");
 
-            // FIX D1: Fresh startup detection — if the last block is older than 5 minutes,
-            // clear NetworkValidators so bootstrap casters start with only themselves.
-            // New validators will populate as they connect via P2P.
-            if (!_freshStartupChecked)
-            {
-                _freshStartupChecked = true;
-                var lastBlockAge = TimeUtil.GetTime() - Globals.LastBlock.Timestamp;
-                if (lastBlockAge > FRESH_STARTUP_THRESHOLD_SECONDS)
-                {
-                    var staleCount = Globals.NetworkValidators.Count;
-                    Globals.NetworkValidators.Clear();
-                    CasterLogUtility.Log(
-                        $"FRESH-STARTUP: Last block is {lastBlockAge}s old (>{FRESH_STARTUP_THRESHOLD_SECONDS}s). " +
-                        $"Cleared {staleCount} stale NetworkValidators. Validators will repopulate via P2P.",
-                        "BOOT");
-                    ConsoleWriterService.OutputValCaster(
-                        $"[FRESH-STARTUP] Cleared {staleCount} stale validators. Last block age: {lastBlockAge}s.");
-
-                    // FIX D1b: Re-seed bootstrap casters (including self) into NetworkValidators
-                    // so they can generate proofs for themselves and be selected as winners.
-                    //
-                    // CRITICAL: Must populate PublicKey from Peers.ValidatorPublicKey. The legacy proof
-                    // generation path (GenerateProofsFromNetworkValidatorsLegacy) requires PublicKey to be
-                    // non-null — without it the foreach skips the entry, allProofs comes back empty, and
-                    // the consensus loop falls through silently with no winner candidate ever produced.
-                    // FirstSeenAtHeight is set to 0 so genesis-trusted bootstrap casters bypass any
-                    // height-based maturity gate that compares against `LastBlock.Height`.
-                    int reseedSkippedNoPubKey = 0;
-                    foreach (var caster in Globals.BlockCasters.ToList())
-                    {
-                        if (!string.IsNullOrEmpty(caster.ValidatorAddress) && !string.IsNullOrEmpty(caster.PeerIP))
-                        {
-                            if (string.IsNullOrEmpty(caster.ValidatorPublicKey))
-                            {
-                                reseedSkippedNoPubKey++;
-                                CasterLogUtility.Log(
-                                    $"FRESH-STARTUP: skip re-seed for {caster.ValidatorAddress} @ {caster.PeerIP} — Peers entry has no ValidatorPublicKey",
-                                    "BOOT");
-                                continue;
-                            }
-
-                            var nv = new NetworkValidator
-                            {
-                                Address = caster.ValidatorAddress,
-                                PublicKey = caster.ValidatorPublicKey,
-                                IPAddress = caster.PeerIP,
-                                IsFullyTrusted = true,
-                                LastSeen = TimeUtil.GetTime(),
-                                FirstSeenAtHeight = 0,
-                                CheckFailCount = 0,
-                            };
-                            Globals.NetworkValidators.TryAdd(caster.ValidatorAddress, nv);
-                        }
-                    }
-                    // FIX E: Set gossip cooldown to prevent P2P gossip from re-adding stale validators
-                    Globals.GossipCooldownUntil = TimeUtil.GetTime() + 60;
-                    CasterLogUtility.Log(
-                        $"FRESH-STARTUP: Re-seeded {Globals.NetworkValidators.Count} bootstrap casters into NetworkValidators. Gossip cooldown until {Globals.GossipCooldownUntil}.",
-                        "BOOT");
-                }
-                else
-                {
-                    CasterLogUtility.Log(
-                        $"FRESH-STARTUP: Last block is {lastBlockAge}s old (<={FRESH_STARTUP_THRESHOLD_SECONDS}s). " +
-                        $"Keeping {Globals.NetworkValidators.Count} NetworkValidators.",
-                        "BOOT");
-                }
-            }
+            // FIX D1 / Phase E: fresh-startup detection is now agreement-gated — see
+            // RunFreshStartupReseedIfNeeded. Also re-checked at loop top so a seed that
+            // reaches bootstrap agreement AFTER boot still runs the reseed.
+            await RunFreshStartupReseedIfNeeded();
 
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
+                // A3: casting sync gate — never run rounds while stopped, unsynced, or resyncing.
+                // Strict OR (not the StopAllTimers && !IsChainSynced idiom) because casting must
+                // pause during a mid-life resync even if IsChainSynced was true earlier. In-loop
+                // placement means fork recovery setting IsResyncing pauses casting automatically.
+                if (Globals.StopAllTimers || !Globals.IsChainSynced || Globals.IsResyncing)
+                {
+                    await Task.Delay(2000);
+                    continue;
+                }
+
+                // Phase E: a seed that reaches bootstrap agreement after boot still needs the
+                // fresh-startup reseed — no-op once the check has completed.
+                await RunFreshStartupReseedIfNeeded();
+
                 if (!Globals.BlockCasters.Any())
                 {
                     await ValidatorNode.GetBlockcasters();
@@ -976,6 +1048,21 @@ namespace ReserveBlockCore.Nodes
                 var wasCaster = Globals.IsBlockCaster;
                 var selfInList = casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress);
                 Globals.IsBlockCaster = selfInList;
+
+                // A3: on becoming a caster, verify height + tip-hash agreement with the majority
+                // of caster peers before entering rounds. Observe first, cast second.
+                if (!wasCaster && selfInList)
+                {
+                    var syncReady = await EnsureCasterSyncReadyAsync();
+                    if (!syncReady)
+                    {
+                        CasterLogUtility.Log(
+                            "A3-SYNC-GATE: became caster but not yet height/hash-synced with peers. Retrying.",
+                            "CasterFlow");
+                        await Task.Delay(2000);
+                        continue;
+                    }
+                }
 
                 if (wasCaster && !selfInList)
                 {
@@ -2741,12 +2828,44 @@ namespace ReserveBlockCore.Nodes
                 case "7":
                     _ = ReceiveConfirmedBlock(data);
                     break;
+                case "FC":
+                    _ = ReceiveForkCorrection(data, ipAddress);
+                    break;
                 case "7777":
                     _ = TxMessage(data);
                     break;
                 case "9999":
                     _ = FailedToConnect(data);
                     break;
+            }
+        }
+
+        //FC — Fork Correction pushed by a peer caster on the caster channel (A1 fix: this case
+        //was missing, so corrections broadcast on GetCasterMessage were silently dropped).
+        private static async Task ReceiveForkCorrection(string data, string casterIP)
+        {
+            if (string.IsNullOrEmpty(data)) return;
+            try
+            {
+                // Only accept corrections from known casters (membership record hardens this later).
+                var cleanIP = (casterIP ?? "").Replace("::ffff:", "");
+                if (!Globals.BlockCasters.Any(x => (x.PeerIP ?? "").Replace("::ffff:", "") == cleanIP))
+                {
+                    CasterLogUtility.Log(
+                        $"[ForkCorrection] Rejected correction from non-caster IP {cleanIP}.",
+                        "FORK-CORRECTION");
+                    return;
+                }
+
+                var correction = JsonConvert.DeserializeAnonymousType(data, new { Height = 0L, BlockJson = "" });
+                if (correction != null && correction.Height > 0 && !string.IsNullOrEmpty(correction.BlockJson))
+                {
+                    await ForkCorrectionService.HandleForkCorrectionAsync(correction.Height, correction.BlockJson, cleanIP);
+                }
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"[ForkCorrection] Error processing correction from {casterIP}: {ex.Message}", "FORK-CORRECTION");
             }
         }
 
@@ -2839,6 +2958,47 @@ namespace ReserveBlockCore.Nodes
             }
         }
 
+        /// <summary>
+        /// A4: replacement for the old desync gate bypass. On a prolonged stall (no accepted
+        /// block for DESYNC_RECOVERY_TIMEOUT_MS) the node reconciles hash/height with peers and
+        /// re-downloads, escalating to ForkRecoveryUtility after 2 failed attempts — it never
+        /// accepts a block that bypasses the consensus/agreed-hash gates. Single-flight.
+        /// </summary>
+        private static void TriggerDesyncReconcile(long stalledMs)
+        {
+            if (Interlocked.CompareExchange(ref _desyncReconcileRunning, 1, 0) != 0)
+                return;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var attempt = Interlocked.Increment(ref _desyncReconcileAttempts);
+                    ConsoleWriterService.OutputValCaster($"[Desync Recovery] Stuck for {stalledMs}ms — reconciling with peers (attempt {attempt}). Gates remain enforced.");
+                    CasterLogUtility.Log($"DesyncReconcile attempt {attempt} (stalled {stalledMs}ms)", "DESYNC");
+
+                    await SyncBlockHashWithPeersAsync();
+                    await SyncHeightWithPeersAsync();
+                    try { await BlockDownloadService.GetAllBlocks(); } catch { }
+
+                    if (Interlocked.CompareExchange(ref _desyncReconcileAttempts, 0, 0) >= 2)
+                    {
+                        CasterLogUtility.Log("DesyncReconcile escalating to ForkRecoveryUtility.RecoverAsync after 2 attempts.", "DESYNC");
+                        await ForkRecoveryUtility.RecoverAsync(Globals.LastBlock.Height, "DesyncReconcile");
+                        Interlocked.Exchange(ref _desyncReconcileAttempts, 0);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CasterLogUtility.Log($"DesyncReconcile error: {ex.Message}", "DESYNC");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _desyncReconcileRunning, 0);
+                }
+            });
+        }
+
         //7
         public static async Task ReceiveConfirmedBlock(string data)
         {
@@ -2864,11 +3024,15 @@ namespace ReserveBlockCore.Nodes
 
                 // Consensus gate: verify this block's validator matches what consensus determined.
                 // If CasterRoundDict has a consensus entry for this height, the block's validator must match.
-                // DESYNC-FIX: Bypass the consensus gate if we've been stuck for too long (desync recovery).
+                // A4 FIX: the old desyncRecoveryMode bypassed this gate AND the agreed-hash gate after a
+                // 45s stall, accepting any producer's block — the exact mechanism that let disjoint
+                // groups feed each other divergent blocks in the fork incident. A stall now triggers a
+                // reconcile/recovery path instead, and the gates below ALWAYS apply.
                 var timeSinceLastBlock = Environment.TickCount64 - Interlocked.Read(ref _lastBlockAcceptedTick);
-                bool desyncRecoveryMode = timeSinceLastBlock > DESYNC_RECOVERY_TIMEOUT_MS;
+                if (timeSinceLastBlock > DESYNC_RECOVERY_TIMEOUT_MS)
+                    TriggerDesyncReconcile(timeSinceLastBlock);
 
-                if (!desyncRecoveryMode && Globals.CasterRoundDict.TryGetValue(nextBlock.Height, out var consensusRound))
+                if (Globals.CasterRoundDict.TryGetValue(nextBlock.Height, out var consensusRound))
                 {
                     if (!string.IsNullOrEmpty(consensusRound?.Validator) && nextBlock.Validator != consensusRound.Validator)
                     {
@@ -2885,22 +3049,18 @@ namespace ReserveBlockCore.Nodes
                         return;
                     }
                 }
-                else if (desyncRecoveryMode)
-                {
-                    ConsoleWriterService.OutputValCaster($"[Desync Recovery] Stuck for {timeSinceLastBlock}ms — bypassing consensus gate for block {nextBlock.Height} from {nextBlock.Validator}");
-                }
 
                 // ── Agreed-hash gate (4-case logic) ──────────────────────────────
                 // Case 1: Agreed hash exists AND matches → accept (fall through)
                 // Case 2: Agreed hash exists AND differs → reject (actual fork)
-                // Case 3: No agreed hash + no CasterRoundDict entry → accept (we haven't started consensus for this height)
-                // Case 4: No agreed hash + CasterRoundDict entry exists → spin-wait briefly, then accept (mid-round)
+                // Case 3: No agreed hash + no CasterRoundDict entry → accept ONLY with majority attestations (A4)
+                // Case 4: No agreed hash + CasterRoundDict entry exists → spin-wait, then accept ONLY with majority attestations (A4)
                 string? agreedHashForGate = null;
                 Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
 
                 bool hasCasterRoundEntry = Globals.CasterRoundDict.ContainsKey(nextBlock.Height);
 
-                if (!desyncRecoveryMode && Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
                     && string.IsNullOrEmpty(agreedHashForGate) && hasCasterRoundEntry)
                 {
                     // Case 4: We're mid-round for this height — spin-wait briefly for the agreement to land
@@ -2916,18 +3076,37 @@ namespace ReserveBlockCore.Nodes
                     }
                     if (string.IsNullOrEmpty(agreedHashForGate))
                     {
-                        ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round accept: height {nextBlock.Height} — CasterRoundDict entry exists but agreement not yet resolved after {spin.ElapsedMilliseconds}ms spin.");
+                        // A4 FIX: mid-round accept now requires a majority of casters to have attested
+                        // this exact block — never a blind accept.
+                        var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
+                            nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
+                        if (!attested)
+                        {
+                            ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round REJECT: height {nextBlock.Height} — no agreement after {spin.ElapsedMilliseconds}ms spin and no majority attestation quorum. Round retry will resolve.");
+                            Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
+                            return;
+                        }
+                        ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round accept (attested): height {nextBlock.Height} — majority caster attestations verified.");
                     }
                 }
-                else if (!desyncRecoveryMode && Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                else if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
                     && string.IsNullOrEmpty(agreedHashForGate) && !hasCasterRoundEntry)
                 {
-                    // Case 3: No CasterRoundDict entry — we haven't started consensus for this height, trust peer broadcast
-                    ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round accept: height {nextBlock.Height} — no CasterRoundDict entry, trusting peer broadcast.");
+                    // Case 3: No CasterRoundDict entry — we missed/haven't started this round.
+                    // A4 FIX: require a majority attestation quorum instead of trusting the broadcast.
+                    var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
+                        nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
+                    if (!attested)
+                    {
+                        ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round REJECT: height {nextBlock.Height} — no majority attestation quorum for peer broadcast. Reconcile will resolve.");
+                        Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
+                        return;
+                    }
+                    ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round accept (attested): height {nextBlock.Height} — majority caster attestations verified.");
                 }
 
                 // Case 2: Agreed hash exists but doesn't match → reject (actual fork)
-                if (!desyncRecoveryMode && !string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
+                if (!string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
                 {
                     ConsoleWriterService.OutputValCaster($"[Consensus Gate] Block at height {nextBlock.Height} hash mismatch — expected {agreedHashForGate[..Math.Min(12, agreedHashForGate.Length)]}… got {nextBlock.Hash?[..Math.Min(12, nextBlock.Hash?.Length ?? 0)]}…");
                     Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
@@ -2947,6 +3126,8 @@ namespace ReserveBlockCore.Nodes
                 {
                     // DESYNC-FIX: Update last block accepted timestamp for desync recovery tracking
                     Interlocked.Exchange(ref _lastBlockAcceptedTick, Environment.TickCount64);
+                    // A4: block flow resumed — reset the reconcile escalation counter.
+                    Interlocked.Exchange(ref _desyncReconcileAttempts, 0);
 
                     // ROUND-SYNC-FIX: Reset timing references when a block is committed via message-7.
                     // This anchors all casters' round timing to the same event (block commit), preventing
@@ -3111,8 +3292,21 @@ namespace ReserveBlockCore.Nodes
                 await Task.Delay((int)waitTime);
             }
 
-            // CASTER-SYNC-FIX: Startup readiness barrier — ensure all casters are at same height before first round
-            await WaitForCasterReadiness();
+            // CASTER-SYNC-FIX: Startup readiness barrier — ensure all casters are at same height before first round.
+            // A3 FIX: barrier is no longer fail-open — retry with a hash re-sync between attempts,
+            // then escalate to fork recovery instead of casting desynced.
+            int readinessAttempts = 0;
+            while (!await WaitForCasterReadiness())
+            {
+                readinessAttempts++;
+                if (readinessAttempts >= 3)
+                {
+                    ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Readiness failed 3x — triggering recovery instead of casting desynced.");
+                    _ = ForkRecoveryUtility.RecoverAsync(Globals.LastBlock.Height, "CasterReadiness");
+                    break;
+                }
+                await SyncBlockHashWithPeersAsync();
+            }
         }
 
         /// <summary>
@@ -3121,7 +3315,27 @@ namespace ReserveBlockCore.Nodes
         /// This prevents a slow-booting caster from generating proofs independently and picking
         /// a different winner than its peers.
         /// </summary>
-        private static async Task WaitForCasterReadiness()
+        /// <summary>
+        /// A3: composes the existing sync helpers into a single "safe to cast" check.
+        /// Returns true only when the readiness barrier reports a supermajority of casters
+        /// online and height-matched after a height + tip-hash reconcile.
+        /// </summary>
+        private static async Task<bool> EnsureCasterSyncReadyAsync()
+        {
+            try
+            {
+                await SyncHeightWithPeersAsync();
+                await SyncBlockHashWithPeersAsync();
+                return await WaitForCasterReadiness();
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"EnsureCasterSyncReadyAsync error: {ex.Message}", "CasterFlow");
+                return false;
+            }
+        }
+
+        private static async Task<bool> WaitForCasterReadiness()
         {
             ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Waiting for peer casters to be ready...");
             var sw = Stopwatch.StartNew();
@@ -3136,7 +3350,7 @@ namespace ReserveBlockCore.Nodes
                 if (casters.Count <= 1)
                 {
                     ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Only 1 caster (self); proceeding.");
-                    break;
+                    return true;
                 }
 
                 var requiredReady = Math.Max(2, casters.Count / 2 + 1); // supermajority
@@ -3181,16 +3395,16 @@ namespace ReserveBlockCore.Nodes
                 if (readyCount >= requiredReady && matchingHeightCount >= requiredReady)
                 {
                     ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Supermajority of casters ready and height-synced. Starting consensus.");
-                    break;
+                    return true;
                 }
 
                 await Task.Delay(READINESS_CHECK_INTERVAL_MS);
             }
 
-            if (sw.ElapsedMilliseconds >= READINESS_MAX_WAIT_MS)
-            {
-                ConsoleWriterService.OutputValCaster("[ReadinessBarrier] WARNING: Timed out waiting for peer readiness. Proceeding anyway — peers may be unavailable.");
-            }
+            // A3 FIX: no longer fail-open. A caster that can't confirm a ready, height-matched
+            // supermajority must not cast — the caller retries and escalates to recovery.
+            ConsoleWriterService.OutputValCaster("[ReadinessBarrier] WARNING: Timed out waiting for peer readiness. NOT proceeding — will retry/escalate.");
+            return false;
         }
 
         /// <summary>

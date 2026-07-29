@@ -390,11 +390,27 @@ namespace ReserveBlockCore
             }
         }
 
-        /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.</summary>
-        public static bool IsBootstrapMode => IsLocalBootstrapCaster && IsChainStalledForBootstrap;
+        /// <summary>Phase E: operator disaster-recovery override — lets a LONE seed bootstrap without
+        /// 2-of-3 agreement. Default false; set ForceSoloBootstrap=true in config.txt only when the
+        /// other seeds are unrecoverable. Bypassing agreement risks a fork if other seeds are alive.</summary>
+        public static bool ForceSoloBootstrap = false;
+
+        /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
+        /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>
+        public static bool IsBootstrapMode => IsLocalBootstrapCaster && IsChainStalledForBootstrap && Services.BootstrapCoordinationService.AgreementActive;
 
         /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/> (when not bootstrap). Edit the initializer here only — not loaded from config.txt.</summary>
         public static long CertEnforceHeight = long.MaxValue;
+
+        /// <summary>Strict consensus-compatibility version exchanged in the validator/blockcaster handshakes.
+        /// Bump on ANY consensus-behavior change; peers with a different (or missing) value are refused
+        /// consensus connections. Changes only with a coordinated network release.</summary>
+        public static int ConsensusVersion = 1;
+
+        /// <summary>Height boundary of the coordinated full-network restart. Phase B's genesis membership
+        /// record EffectiveFromHeight and Phase C's CertEnforceHeight are both set to this at cutover.
+        /// Ships as long.MaxValue (inactive) until the cutover release. Edit the initializer here only.</summary>
+        public static long ConsensusRestartHeight = long.MaxValue;
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;

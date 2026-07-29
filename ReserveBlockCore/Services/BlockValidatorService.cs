@@ -62,6 +62,17 @@ namespace ReserveBlockCore.Services
         private static bool _stateStatusVerified = false;
         public const int STATE_PROBATION_BLOCKS = 50;
 
+        /// <summary>F.2: exposes the state-probation status for the Health endpoint.
+        /// Active = state trie still unverified (streak in progress toward STATE_PROBATION_BLOCKS).</summary>
+        public static (bool Active, int Streak) GetProbationStatus()
+        {
+            if (_stateStatusVerified)
+                return (false, _cleanBlockStreak);
+            // Not yet observed by the block loop — fall back to the persisted flag so a healthy
+            // node doesn't read as "on probation" before its first post-boot block.
+            return (!StateTreiStatusService.IsSynced(), _cleanBlockStreak);
+        }
+
         public static void UpdateMemBlocks(Block block)
         {
             foreach (var trans in block.Transactions)

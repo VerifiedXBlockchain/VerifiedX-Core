@@ -1207,6 +1207,94 @@ namespace ReserveBlockCore.Controllers
             return Ok(Globals.CLIVersion);
         }
 
+        /// <summary>
+        /// A2: returns this node's consensus-compatibility version. Used by the caster
+        /// version audit — a mismatch (or 404 from an old binary) demotes the caster
+        /// through the existing outdated-version flow.
+        /// </summary>
+        [HttpGet]
+        [Route("GetConsensusVersion")]
+        public ActionResult<string> GetConsensusVersion()
+        {
+            return Ok(Globals.ConsensusVersion.ToString());
+        }
+
+        /// <summary>
+        /// Phase E: combined status used by the cooperative bootstrap agreement between seeds
+        /// (tip + stall candidacy + identity in one call).
+        /// </summary>
+        [HttpGet]
+        [Route("BootstrapStatus")]
+        public ActionResult<string> BootstrapStatus()
+        {
+            var lastBlock = Globals.LastBlock;
+            var account = AccountData.GetLocalValidator();
+            var payload = new
+            {
+                Height = lastBlock?.Height ?? -1L,
+                TipHash = lastBlock?.Hash ?? "",
+                IsBootstrapCandidate = Globals.IsLocalBootstrapCaster && Globals.IsChainStalledForBootstrap,
+                IsChainSynced = Globals.IsChainSynced,
+                CasterCount = Globals.BlockCasters.Count,
+                ValidatorAddress = Globals.ValidatorAddress ?? "",
+                ValidatorPublicKey = account?.PublicKey ?? "",
+                Version = Globals.CLIVersion
+            };
+            return Ok(JsonConvert.SerializeObject(payload));
+        }
+
+        /// <summary>
+        /// Phase E: receives a peer seed's signed bootstrap-agreement notice. If this node is
+        /// itself a stalled bootstrap candidate and its hash at the notice height matches, it
+        /// counter-signs and returns its own notice; otherwise 409.
+        /// </summary>
+        [HttpPost]
+        [Route("BootstrapAgree")]
+        public ActionResult<string> BootstrapAgree([FromBody] BootstrapAgreementNotice? notice)
+        {
+            if (notice == null)
+                return BadRequest();
+
+            var counterSigned = BootstrapCoordinationService.HandleAgreeRequest(notice);
+            if (counterSigned == null)
+                return Conflict("Not a concurring bootstrap candidate.");
+
+            return Ok(JsonConvert.SerializeObject(counterSigned));
+        }
+
+        /// <summary>
+        /// F.2: single-call node health for update orchestration and runbooks.
+        /// Green criteria for upgrades: IsChainSynced && StateTreiSynced && !Probation.Active
+        /// && ForkStatus == "None" && height within ~1 of peers.
+        /// </summary>
+        [HttpGet]
+        [Route("Health")]
+        public ActionResult<string> Health()
+        {
+            var lastBlock = Globals.LastBlock;
+            var probation = BlockValidatorService.GetProbationStatus();
+            var payload = new
+            {
+                Version = Globals.CLIVersion,
+                ConsensusVersion = Globals.ConsensusVersion,
+                Height = lastBlock?.Height ?? -1L,
+                TipHash = lastBlock?.Hash ?? "",
+                IsChainSynced = Globals.IsChainSynced,
+                IsValidator = !string.IsNullOrEmpty(Globals.ValidatorAddress),
+                IsBlockCaster = Globals.IsBlockCaster,
+                InBootstrap = Globals.IsBootstrapMode,
+                BootstrapState = BootstrapCoordinationService.State.ToString(),
+                StateTreiSynced = StateTreiStatusService.IsSynced(),
+                Probation = new { Active = probation.Active, Streak = probation.Streak },
+                ForkStatus = "Unknown", // Phase D (fork detection) populates this
+                PeerCount = Globals.Nodes.Count,
+                ValidatorPeerCount = Globals.ValidatorNodes.Count,
+                CasterCount = Globals.BlockCasters.Count,
+                UpTimeSeconds = (long)(DateTime.UtcNow - System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds
+            };
+            return Ok(JsonConvert.SerializeObject(payload));
+        }
+
         [HttpGet]
         [Route("SendSeedPart")]
         public ActionResult<string> SendSeedPart()

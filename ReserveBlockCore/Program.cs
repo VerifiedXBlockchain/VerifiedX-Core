@@ -126,6 +126,8 @@ namespace ReserveBlockCore
             //Perform network time sync
             _ = NetworkTimeService.Run();
             _ = VersionControlService.RunVersionControl();
+            // Phase E: cooperative seed bootstrap coordination (no-op on non-seed nodes)
+            BootstrapCoordinationService.Start();
 
             await Task.Delay(800);
 

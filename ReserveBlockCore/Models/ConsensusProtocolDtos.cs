@@ -175,6 +175,20 @@ namespace ReserveBlockCore.Models
     }
 
 
+    /// <summary>
+    /// Phase E (cooperative bootstrap): signed inter-seed agreement that the chain is stalled
+    /// at a specific tip. A seed may only enter bootstrap mode once ≥2 distinct seeds have
+    /// signed the same {Height, TipHash}. Signature of BOOTSTRAP|{SeedAddress}|{Height}|{TipHash}|{Timestamp}.
+    /// </summary>
+    public class BootstrapAgreementNotice
+    {
+        public string SeedAddress { get; set; } = "";
+        public long Height { get; set; }
+        public string TipHash { get; set; } = "";
+        public long Timestamp { get; set; }
+        public string Signature { get; set; } = "";
+    }
+
     /// <summary>Graceful caster departure; MUST be signed by the departing caster.</summary>
     public class CasterDepartureNotice
     {

@@ -696,6 +696,28 @@ namespace ReserveBlockCore.Services
                         $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} reports version '{peerVersion}' — outdated (need major >= {Globals.MajorVer}). Skipping.");
                     return new VersionCheckInfo(VersionCheckResult.Outdated, peerVersion ?? "");
                 }
+
+                // A2: also require a matching consensus version. 404 = old binary → Outdated;
+                // transient errors → Unreachable (retry/threshold path), same as above.
+                var consUri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetConsensusVersion";
+                var consResponse = await client.GetAsync(consUri, cts.Token);
+                if (consResponse == null || !consResponse.IsSuccessStatusCode)
+                {
+                    var consClassification = consResponse?.StatusCode == System.Net.HttpStatusCode.NotFound
+                        ? VersionCheckResult.Outdated
+                        : VersionCheckResult.Unreachable;
+                    ConsoleWriterService.OutputValCaster(
+                        $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} — GetConsensusVersion returned {consResponse?.StatusCode} → {consClassification}. Skipping.");
+                    return new VersionCheckInfo(consClassification, peerVersion);
+                }
+                var peerConsVer = (await consResponse.Content.ReadAsStringAsync())?.Trim().Trim('"');
+                if (!int.TryParse(peerConsVer, out var parsedConsVer) || parsedConsVer != Globals.ConsensusVersion)
+                {
+                    ConsoleWriterService.OutputValCaster(
+                        $"[CasterDiscovery] VersionGate: Candidate {address} at {ip} reports consensus version '{peerConsVer}' (need {Globals.ConsensusVersion}) — outdated. Skipping.");
+                    return new VersionCheckInfo(VersionCheckResult.Outdated, peerVersion);
+                }
+
                 return new VersionCheckInfo(VersionCheckResult.Ok, peerVersion);
             }
             catch (Exception ex)

@@ -297,6 +297,30 @@ namespace ReserveBlockCore.P2P
 
         #region Connect
 
+        /// <summary>
+        /// A2: post-connect check that the server side runs the same ConsensusVersion.
+        /// Old binaries don't implement the hub method, so the invoke fails → disconnect.
+        /// </summary>
+        private static async Task<bool> VerifyServerConsensusVersionAsync(HubConnection hubConnection, string peerIP)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(4000);
+                var serverConsVer = await hubConnection.InvokeAsync<int>("GetConsensusVersion", cts.Token);
+                if (serverConsVer != Globals.ConsensusVersion)
+                {
+                    LogUtility.Log($"Consensus version mismatch with {peerIP}: server={serverConsVer}, local={Globals.ConsensusVersion}. Disconnecting.", "P2PValidatorClient");
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"Consensus version check failed for {peerIP} (old binary?): {ex.Message}. Disconnecting.", "P2PValidatorClient");
+                return false;
+            }
+        }
+
         private static ConcurrentDictionary<string, bool> ConnectLock = new ConcurrentDictionary<string, bool>();
         private static async Task Connect(Peers peer)
         {
@@ -324,6 +348,7 @@ namespace ReserveBlockCore.P2P
                         options.Headers.Add("uName", validator.UniqueName);
                         options.Headers.Add("signature", signature);
                         options.Headers.Add("walver", Globals.CLIVersion);
+                        options.Headers.Add("consver", Globals.ConsensusVersion.ToString());
                         options.Headers.Add("publicKey", account.PublicKey);
                         options.Headers.Add("nonce", nonce);
                         // Try both WebSockets and LongPolling
@@ -353,7 +378,15 @@ namespace ReserveBlockCore.P2P
                     Peers.GetAll()?.UpdateSafe(peer);
                     return;
                 }
-                    
+
+                // A2: verify the SERVER's consensus version (headers only authenticate us to them).
+                if (!await VerifyServerConsensusVersionAsync(hubConnection, IPAddress))
+                {
+                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    try { await hubConnection.DisposeAsync(); } catch { }
+                    return;
+                }
+
                 var node = new NodeInfo
                 {
                     Connection = hubConnection,
@@ -641,6 +674,7 @@ namespace ReserveBlockCore.P2P
                         options.Headers.Add("uName", validator.UniqueName);
                         options.Headers.Add("signature", signature);
                         options.Headers.Add("walver", Globals.CLIVersion);
+                        options.Headers.Add("consver", Globals.ConsensusVersion.ToString());
                         options.Headers.Add("publicKey", account.PublicKey);
                         options.Headers.Add("nonce", nonce);
                         options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
@@ -665,6 +699,14 @@ namespace ReserveBlockCore.P2P
                     if (peer.FailCount > 600)
                         peer.IsOutgoing = false;
                     Peers.GetAll()?.UpdateSafe(peer);
+                    return;
+                }
+
+                // A2: verify the SERVER's consensus version (headers only authenticate us to them).
+                if (!await VerifyServerConsensusVersionAsync(hubConnection, IPAddress))
+                {
+                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    try { await hubConnection.DisposeAsync(); } catch { }
                     return;
                 }
 
