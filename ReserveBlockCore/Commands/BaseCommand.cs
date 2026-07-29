@@ -255,6 +255,20 @@ namespace ReserveBlockCore.Commands
                     BaseCommandServices.RemoveBadTx();
                     Globals.StopConsoleOutput = false;
                     break;
+                case "/depart":
+                    // Wave 2: graceful caster departure — broadcast, wait for the network to
+                    // confirm removal (replacement promotion is driven by the receivers), then exit.
+                    Globals.StopConsoleOutput = true;
+                    await DepartureService.DepartAndWaitAsync(TimeSpan.FromSeconds(60));
+                    Globals.StopConsoleOutput = false;
+                    commandResult = "_EXIT";
+                    break;
+                case "/safe-update":
+                    // Wave 2: depart gracefully → download latest release for this OS → apply → restart.
+                    Globals.StopConsoleOutput = true;
+                    await DepartureService.SafeUpdateAsync();
+                    Globals.StopConsoleOutput = false;
+                    break;
                 case "/restart":
                     Globals.StopConsoleOutput = true;
                     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

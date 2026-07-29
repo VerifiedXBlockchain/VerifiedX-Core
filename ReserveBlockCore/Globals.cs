@@ -395,6 +395,10 @@ namespace ReserveBlockCore
         /// other seeds are unrecoverable. Bypassing agreement risks a fork if other seeds are alive.</summary>
         public static bool ForceSoloBootstrap = false;
 
+        /// <summary>Wave 2 (/depart): set when a graceful departure is in progress — the casting
+        /// loop stops entering rounds immediately and the node winds down toward shutdown.</summary>
+        public static bool IsDeparting = false;
+
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>
         public static bool IsBootstrapMode => IsLocalBootstrapCaster && IsChainStalledForBootstrap && Services.BootstrapCoordinationService.AgreementActive;

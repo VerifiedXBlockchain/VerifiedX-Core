@@ -1023,6 +1023,13 @@ namespace ReserveBlockCore.Nodes
 
             while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
+                // Wave 2 (/depart): a departing node must not enter another round.
+                if (Globals.IsDeparting)
+                {
+                    await Task.Delay(2000);
+                    continue;
+                }
+
                 // A3: casting sync gate — never run rounds while stopped, unsynced, or resyncing.
                 // Strict OR (not the StopAllTimers && !IsChainSynced idiom) because casting must
                 // pause during a mid-life resync even if IsChainSynced was true earlier. In-loop
