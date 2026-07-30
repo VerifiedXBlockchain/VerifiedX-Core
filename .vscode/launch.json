@@ -2,13 +2,13 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "ReserveBlockCore",
+      "name": "VerifiedXCore",
       "type": "coreclr",
       "request": "launch",
       "preLaunchTask": "build",
-      "program": "${workspaceFolder}/ReserveBlockCore/bin/Debug/net6.0/ReserveBlockCore.dll",
+      "program": "${workspaceFolder}/VerifiedXCore/bin/Debug/net6.0/VerifiedXCore.dll",
       "args": [],
-      "cwd": "${workspaceFolder}/ReserveBlockCore",
+      "cwd": "${workspaceFolder}/VerifiedXCore",
       "stopAtEntry": false,
       "console": "integratedTerminal",
       "env": {

@@ -1,0 +1,1046 @@
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR.Client;
+using Newtonsoft.Json;
+using VerifiedXCore.Bitcoin.ElectrumX;
+using VerifiedXCore.Data;
+using VerifiedXCore.Extensions;
+using VerifiedXCore.Models;
+using VerifiedXCore.P2P;
+using VerifiedXCore.Services;
+using VerifiedXCore.Utilities;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Linq;
+using System.Net;
+using System.Reflection.Metadata;
+using System.Text;
+using System.Threading.Tasks.Dataflow;
+
+
+namespace VerifiedXCore.Nodes
+{
+    public class ValidatorNode : IHostedService, IDisposable
+    {
+        public static IHubContext<P2PValidatorServer> HubContext;
+        private readonly IHubContext<P2PValidatorServer> _hubContext;
+        private readonly IHostApplicationLifetime _appLifetime;
+        private static SemaphoreSlim ConsensusLock = new SemaphoreSlim(1, 1);
+        private static bool ActiveValidatorRequestDone = false;
+        private static bool AlertValidatorsOfStatusDone = false;
+        static SemaphoreSlim NotifyExplorerLock = new SemaphoreSlim(1, 1);
+        
+        // HAL-16 Fix: Throttle concurrent broadcasts to prevent thread pool exhaustion
+        // Limits to 5 concurrent broadcasts (50 max SignalR connections if 10 validators)
+        private static SemaphoreSlim BroadcastSemaphore = new SemaphoreSlim(5, 5);
+        
+        private static ConcurrentBag<(string, long, string)> ValidatorApprovalBag = new ConcurrentBag<(string, long, string)>();
+        const int PROOF_COLLECTION_TIME = 7000; // 7 seconds
+        const int APPROVAL_WINDOW = 12000;      // 12 seconds
+        const int BLOCK_REQUEST_WINDOW = 12000;  // 12 seconds
+
+        public ValidatorNode(IHubContext<P2PValidatorServer> hubContext, IHostApplicationLifetime appLifetime)
+        {
+            _hubContext = hubContext;
+            HubContext = hubContext;
+            _appLifetime = appLifetime;
+        }
+
+        public async Task StartAsync(CancellationToken stoppingToken)
+        {
+            _ = ActiveValidatorRequest();
+
+            await GetBlockcasters();
+
+            //_ = BlockCasterMonitor();
+
+            //_ = ValidatorHeartbeat();
+
+            _ = NotifyExplorer();
+
+            _ = GenerateValidBlock();
+            //return Task.CompletedTask;
+        }
+        public static async Task ActiveValidatorRequest()
+        {
+            bool waitForStartup = true;
+            while (waitForStartup)
+            {
+                var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                if ((Globals.StopAllTimers || !Globals.IsChainSynced))
+                {
+                    await delay;
+                    continue;
+                }
+                waitForStartup = false;
+            }
+
+            await P2PValidatorClient.RequestActiveValidators();
+
+            ActiveValidatorRequestDone = true;
+        }
+
+        public static async Task GenerateValidBlock()
+        {
+            var account = AccountData.GetLocalValidator();
+            var validators = Validators.Validator.GetAll();
+            var validator = validators.FindOne(x => x.Address == account.Address);
+
+            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                // FIX: Allow block generation even if Globals.Nodes is empty, as long as
+                // we have NetworkValidators or BlockCasters. The validator needs to keep
+                // NextValidatorBlock current so casters can fetch blocks via VerifyBlock.
+                if (Globals.StopAllTimers || !Globals.IsChainSynced)
+                {
+                    await delay;
+                    continue;
+                }
+                if (Globals.Nodes.Count == 0 && Globals.NetworkValidators.Count == 0 && Globals.BlockCasters.Count == 0)
+                {
+                    await delay;
+                    continue;
+                }
+                if (validator == null)
+                {
+                    await delay;
+                    continue;
+                }
+                var currentHeight = Globals.LastBlock.Height;
+                var prevHash = Globals.LastBlock.Hash;
+                var nextHeight = currentHeight + 1;
+                var height = Globals.NextValidatorBlock.Height;
+
+                var proof = await ProofUtility.CreateProof(validator.Address, account.PublicKey, nextHeight, prevHash);
+
+                if (currentHeight >= height)
+                {
+                    //generate new block
+                    //produce proof
+                    if (Globals.NextValidatorBlock != null)
+                    {
+                        if (Globals.NextValidatorBlock.Height == nextHeight)
+                        {
+                            await Task.Delay(1000);
+                            continue;
+                        }
+                    }
+                    var totalVals = !Globals.IsBootstrapMode && ValidatorSnapshotService.CurrentSnapshot.Count > 0
+                        ? ValidatorSnapshotService.CurrentSnapshot.Count
+                        : Globals.NetworkValidators.Count;
+                    var block = await BlockchainData.CraftBlock_V5(
+                                                    Globals.ValidatorAddress,
+                                                    totalVals,
+                                                    proof.Item2, nextHeight, false, true);
+
+                    if (block != null)
+                    {
+                        Globals.NextValidatorBlock = block;
+                    }
+                }
+
+                await Task.Delay(1000);
+                continue;
+            }
+        }
+
+        #region Get Block Casters and Caster Monitor
+
+        public static async Task BlockCasterMonitor(bool comingOnline = true)
+        {
+            if (comingOnline)
+            {
+                while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+                {
+                    var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                    if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+                    {
+                        await delay;
+                        continue;
+                    }
+
+                    await GetBlockcasters();
+
+                    comingOnline = false;
+                    AlertValidatorsOfStatusDone = true;
+                    await Task.Delay(new TimeSpan(0, 1, 0));
+                }
+            }
+        }
+
+        public static async Task GetBlockcasters()
+        {
+            if (Globals.StopAllTimers && !Globals.IsChainSynced)
+                return;
+            // Hardcoded bootstrap caster list does not require P2P; allow injection while Nodes is still empty.
+            if (Globals.Nodes.Count == 0 && !SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
+                return;
+
+            if (!SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
+            {
+                Globals.SyncKnownCastersFromBlockCasters();
+                return;
+            }
+
+            // Phase E: seed list construction moved to SeedNodeService.GetBootstrapSeedPeers()
+            // so the bootstrap coordination service and injection gating share one source.
+            var peerList = SeedNodeService.GetBootstrapSeedPeers();
+
+            // EVICTION-AWARE: Before blindly injecting hardcoded bootstrap peers, check if the
+            // chain is already running with live casters. If so, fetch the REAL caster list from
+            // peers instead of using the hardcoded list. This prevents a previously-evicted
+            // bootstrap caster from re-adding itself and creating a 6/5 overflow.
+            var bootstrapIPs = peerList
+                .Where(p => !string.IsNullOrEmpty(p.PeerIP) && p.PeerIP != Globals.ReportedIP)
+                .Select(p => p.PeerIP!)
+                .ToList();
+
+            if (Globals.IsChainSynced || Globals.LastBlock.Height > 0)
+            {
+                // Chain is running — try to get the live caster list from peers first
+                var liveCasters = await CasterDiscoveryService.FetchLiveCasterListFromPeersAsync(bootstrapIPs);
+                if (liveCasters != null && liveCasters.Count > 0)
+                {
+                    // Peers are reachable and have a live caster list — use THAT instead of hardcoded.
+                    // Check if we are in the live list before adding ourselves.
+                    var selfInLiveList = liveCasters.Any(c => c.ValidatorAddress == Globals.ValidatorAddress);
+
+                    CasterLogUtility.Log(
+                        $"GetBlockcasters EVICTION-AWARE: live list has {liveCasters.Count} casters. " +
+                        $"Self ({Globals.ValidatorAddress}) in live list: {selfInLiveList}",
+                        "EVICTION-AWARE");
+
+                    // Replace BlockCasters with live list (respecting MaxCasters)
+                    foreach (var liveCaster in liveCasters)
+                    {
+                        if (liveCaster != null && !string.IsNullOrEmpty(liveCaster.ValidatorAddress))
+                        {
+                            if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == liveCaster.ValidatorAddress))
+                            {
+                                CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(liveCaster);
+                            }
+                        }
+                    }
+
+                    // If we're NOT in the live list, do NOT add self — we were evicted
+                    if (!selfInLiveList && Globals.IsLocalBootstrapCaster)
+                    {
+                        Globals.IsBlockCaster = false;
+                        CasterLogUtility.Log(
+                            $"GetBlockcasters EVICTION-AWARE: self NOT in live caster list — standing down. " +
+                            $"Will wait for re-promotion through normal flow.",
+                            "EVICTION-AWARE");
+                        ConsoleWriterService.OutputValCaster(
+                            $"[EVICTION-AWARE] Bootstrap caster {Globals.ValidatorAddress} not in peer caster lists. " +
+                            $"Standing down to regular validator.");
+                    }
+
+                    Globals.SyncKnownCastersFromBlockCasters();
+                    return;
+                }
+
+                // No peers responded — fall through to hardcoded injection (cold start / all peers down)
+                CasterLogUtility.Log(
+                    "GetBlockcasters EVICTION-AWARE: no peers responded to live caster query — using hardcoded fallback",
+                    "EVICTION-AWARE");
+            }
+
+            // Cold start or no peers reachable — use hardcoded list with MaxCasters cap
+            foreach (var caster in peerList)
+            {
+                if (caster != null)
+                {
+                    if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == caster.ValidatorAddress))
+                    {
+                        // Use atomic add to enforce MaxCasters cap
+                        CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(caster);
+                    }
+                }
+            }
+
+            Globals.SyncKnownCastersFromBlockCasters();
+        }
+
+        /// <summary>Phase 2: request the same height from two casters; require matching hash when both respond.</summary>
+        /// <summary>
+        /// CASTER-SYNC-FIX: Enhanced block fetch — queries ALL reachable casters in parallel
+        /// and requires a supermajority to agree on the same block hash.
+        /// Previously only checked 2 casters, allowing split-brain when they disagreed.
+        /// </summary>
+        public static async Task<Block?> FetchBlockWithRedundantCasterAgreementAsync(long height, string winnerAddress)
+        {
+            var peers = Globals.BlockCasters.Where(x => !string.IsNullOrEmpty(x.PeerIP)).ToList();
+            if (peers.Count == 0)
+                return null;
+
+            // Fetch from ALL casters in parallel
+            var fetchTasks = peers.Select(async peer =>
+            {
+                try
+                {
+                    var block = await CasterBlockFetch.TryFetchBlockAsync(peer, height, winnerAddress);
+                    if (block != null && block.Validator == winnerAddress)
+                        return (block, peer.PeerIP);
+                }
+                catch { }
+                return ((Block?)null, peer.PeerIP);
+            }).ToList();
+
+            var results = await Task.WhenAll(fetchTasks);
+            var validResults = results.Where(r => r.Item1 != null).ToList();
+
+            if (validResults.Count == 0)
+                return null;
+
+            // Group by hash and find the supermajority
+            var requiredAgreement = Math.Max(2, peers.Count / 2 + 1);
+            var hashGroups = validResults
+                .GroupBy(r => r.Item1!.Hash)
+                .OrderByDescending(g => g.Count())
+                .ToList();
+
+            var bestGroup = hashGroups.First();
+            if (bestGroup.Count() >= requiredAgreement)
+            {
+                // Supermajority agrees on this hash
+                return bestGroup.First().Item1;
+            }
+
+            // If only one caster responded, accept it (better than nothing)
+            if (validResults.Count == 1)
+                return validResults[0].Item1;
+
+            // No supermajority — return null to signal disagreement
+            ConsoleWriterService.OutputValCaster($"[FetchBlock] No hash agreement at height {height}: {string.Join(", ", hashGroups.Select(g => $"{g.Key?[..Math.Min(8, g.Key?.Length ?? 0)]}={g.Count()}"))}");
+            return null;
+        }
+
+        #endregion
+
+        #region ValidatorHeartbeat
+
+        public static async Task ValidatorHeartbeat()
+        {
+            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                if ((Globals.StopAllTimers && !Globals.IsChainSynced) || Globals.Nodes.Count == 0)
+                {
+                    await delay;
+                    continue;
+                }
+
+                var peerList = Globals.BlockCasterNodes.Values.ToList();
+
+                if (!peerList.Any())
+                {
+                    await delay;
+                    continue;
+                }
+
+                var peerDB = Peers.GetAll();
+
+                var coreCount = Environment.ProcessorCount;
+                if (coreCount >= 4 || Globals.RunUnsafeCode)
+                {
+                    var tasks = peerList.Select(async peer =>
+                    {
+                        try
+                        {
+                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            {
+                                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
+
+                                var sw = Stopwatch.StartNew();
+                                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
+                                sw.Stop();
+                                await Task.Delay(100);
+
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    if (response.StatusCode == HttpStatusCode.Accepted)
+                                    {
+                                        var account = AccountData.GetLocalValidator();
+                                        var validators = Validators.Validator.GetAll();
+                                        var validator = validators.FindOne(x => x.Address == account.Address);
+                                        if (validator != null)
+                                        {
+                                            var time = TimeUtil.GetTime().ToString();
+                                            var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+
+                                            var networkVal = new NetworkValidator
+                                            {
+                                                Address = validator.Address,
+                                                IPAddress = "0.0.0.0",
+                                                CheckFailCount = 0,
+                                                PublicKey = account.PublicKey,
+                                                Signature = signature,
+                                                UniqueName = validator.UniqueName,
+                                                SignatureMessage = validator.Address + ":" + time + ":" + account.PublicKey
+                                            };
+
+                                            var postData = JsonConvert.SerializeObject(networkVal);
+                                            var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
+
+                                            try
+                                            {
+                                                uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/status";
+                                                await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 4));
+                                                await Task.Delay(100);
+                                            }
+                                            catch (Exception ex) { }
+                                        }
+
+
+                                        //TODO
+                                        //send peer details
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+
+                        }
+                    }).ToList();
+
+                    // Wait for all tasks to complete
+                    await Task.WhenAll(tasks);
+                }
+                else
+                {
+                    foreach (var peer in peerList)
+                    {
+                        try
+                        {
+                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            {
+                                var uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat/{Globals.ValidatorAddress}";
+
+                                var sw = Stopwatch.StartNew();
+                                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
+                                sw.Stop();
+                                await Task.Delay(100);
+
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    if (response.StatusCode == HttpStatusCode.Accepted)
+                                    {
+                                        var account = AccountData.GetLocalValidator();
+                                        var validators = Validators.Validator.GetAll();
+                                        var validator = validators.FindOne(x => x.Address == account.Address);
+                                        if (validator != null)
+                                        {
+                                            var time = TimeUtil.GetTime().ToString();
+                                            var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+
+                                            var networkVal = new NetworkValidator
+                                            {
+                                                Address = validator.Address,
+                                                IPAddress = "0.0.0.0",
+                                                CheckFailCount = 0,
+                                                PublicKey = account.PublicKey,
+                                                Signature = signature,
+                                                UniqueName = validator.UniqueName,
+                                                SignatureMessage = validator.Address + ":" + time + ":" + account.PublicKey
+                                            };
+
+                                            var postData = JsonConvert.SerializeObject(networkVal);
+                                            var httpContent = new StringContent(postData, Encoding.UTF8, "application/json");
+
+                                            try
+                                            {
+                                                uri = $"http://{peer.NodeIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/status";
+                                                await client.PostAsync(uri, httpContent).WaitAsync(new TimeSpan(0, 0, 4));
+                                                await Task.Delay(100);
+                                            }
+                                            catch (Exception ex) { }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+
+                        }
+                    }
+                }
+
+                await Task.Delay(new TimeSpan(0, 0, 30));
+            }
+        }
+
+        #endregion
+
+        #region Process Data
+        public static async Task ProcessData(string message, string data, string ipAddress)
+        {
+            if (string.IsNullOrEmpty(message))
+                return;
+
+            switch (message)
+            {
+                case "1":
+                    _ = IpMessage(data);
+                    break;
+                case "2":
+                    _ = ReceiveVote(data);
+                    break;
+                case "3":
+                    _ = ReceiveNetworkValidator(data);
+                    break;
+                case "4":
+                    _ = FailedToReachConsensus(data);
+                    break;
+                case "7":
+                    _ = ReceiveConfirmedBlock(data);
+                    break;
+                case "FC":
+                    _ = ReceiveForkCorrection(data, ipAddress);
+                    break;
+                case "7777":
+                    _ = TxMessage(data);
+                    break;
+                case "9999":
+                    _ = FailedToConnect(data);
+                    break;
+            }
+        }
+
+        #endregion
+
+        #region Messages
+        //1
+        private static async Task IpMessage(string data)
+        {
+            var IP = data.ToString();
+            if (Globals.ReportedIPs.TryGetValue(IP, out int Occurrences))
+                Globals.ReportedIPs[IP]++;
+            else
+                Globals.ReportedIPs[IP] = 1;
+            P2P.P2PClient.TryAutoUpdateReportedIP();
+        }
+
+        //2
+        private static async Task ReceiveVote(string data)
+        {
+            if (string.IsNullOrEmpty(data)) return;
+            try
+            {
+                var proof = JsonConvert.DeserializeObject<Proof>(data);
+                if (proof != null)
+                {
+                    if (proof.VerifyProof())
+                        Globals.Proofs.Add(proof);
+                }
+            }
+            catch (Exception ex)
+            {
+            }
+        }
+
+        //3
+        private static async Task ReceiveNetworkValidator(string data)
+        {
+            try
+            {
+                var netVal = JsonConvert.DeserializeObject<NetworkValidator>(data);
+                if (netVal == null)
+                    return;
+
+                await NetworkValidator.AddValidatorToPool(netVal);
+            }
+            catch (Exception ex)
+            {
+
+            }
+        }
+        //4
+        public static async Task FailedToReachConsensus(string data)
+        {
+            if (string.IsNullOrEmpty(data)) return;
+
+            var failedProducersList = JsonConvert.DeserializeObject<List<string>>(data);
+
+            if (failedProducersList == null) return;
+
+            foreach (var val in failedProducersList)
+            {
+                Globals.FailedProducerDict.TryGetValue(val, out var failRec);
+                if (failRec.Item1 != 0)
+                {
+                    var currentTime = TimeUtil.GetTime(0, 0, -1);
+                    failRec.Item2 += 1;
+                    Globals.FailedProducerDict[val] = failRec;
+                    if (failRec.Item2 >= 10)
+                    {
+                        if (currentTime > failRec.Item1)
+                        {
+                            var exist = Globals.FailedProducers.Where(x => x == val).FirstOrDefault();
+                            if (exist == null)
+                                Globals.FailedProducers.Add(val);
+                        }
+                    }
+
+                    //Reset timer
+                    if (failRec.Item2 < 10)
+                    {
+                        if (failRec.Item1 < currentTime)
+                        {
+                            failRec.Item1 = TimeUtil.GetTime();
+                            failRec.Item2 = 1;
+                            Globals.FailedProducerDict[val] = failRec;
+                        }
+                    }
+                }
+            }
+        }
+
+        //7
+        public static async Task ReceiveConfirmedBlock(string data)
+        {
+            if (string.IsNullOrEmpty(data)) return;
+
+            var nextBlock = JsonConvert.DeserializeObject<Block>(data);
+
+            if (nextBlock == null) return;
+
+            var lastBlockHeight = Globals.LastBlock.Height;
+            if (lastBlockHeight < nextBlock.Height)
+            {
+                string? agreedHashForGate = null;
+                Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
+
+                if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                    && string.IsNullOrEmpty(agreedHashForGate))
+                {
+                    var spin = Stopwatch.StartNew();
+                    while (spin.ElapsedMilliseconds < 300 && string.IsNullOrEmpty(agreedHashForGate))
+                    {
+                        if (Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out var h) && !string.IsNullOrEmpty(h))
+                        {
+                            agreedHashForGate = h;
+                            break;
+                        }
+                        await Task.Delay(10);
+                    }
+                }
+
+                if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
+                    && string.IsNullOrEmpty(agreedHashForGate))
+                {
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting height {nextBlock.Height}: no caster-agreed hash yet.");
+                    return;
+                }
+
+                if (!string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
+                {
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting block {nextBlock.Height}: hash does not match caster-agreed value.");
+                    return;
+                }
+
+                if (nextBlock.Height != Globals.LastBlock.Height + 1)
+                {
+                    ConsoleWriterService.OutputValCaster($"[Consensus] Rejecting height {nextBlock.Height}: expected next height {Globals.LastBlock.Height + 1}.");
+                    return;
+                }
+
+                // Wave 4: complete a missing/short certificate from the attestation store + peers
+                // before validation (the verifier still enforces the quorum).
+                await ConsensusCertificateHelper.TryCompleteCertificateAsync(nextBlock);
+
+                var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
+                if (result)
+                {
+                    if (nextBlock.Height > lastBlockHeight)
+                    {
+                        _ = P2PValidatorClient.BroadcastBlock(nextBlock, false);
+                    }
+
+                }
+            }
+        }
+
+        //7777
+        private static async Task TxMessage(string data)
+        {
+            var transaction = JsonConvert.DeserializeObject<Transaction>(data);
+            if (transaction != null)
+            {
+                var ablList = Globals.ABL.ToList();
+                if (ablList.Exists(x => x == transaction.FromAddress))
+                {
+                    return;
+                }
+
+                var isTxStale = await TransactionData.IsTxTimestampStale(transaction);
+                if (!isTxStale)
+                {
+                    var mempool = TransactionData.GetPool();
+
+                    if (mempool.Count() != 0)
+                    {
+                        var txFound = mempool.FindOne(x => x.Hash == transaction.Hash);
+                        if (txFound == null)
+                        {
+                            var twSkipVerify = transaction.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
+                            var txResult = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
+                            if (txResult.Item1 == true)
+                            {
+                                var dblspndChk = await TransactionData.DoubleSpendReplayCheck(transaction);
+                                var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(transaction);
+                                var rating = await TransactionRatingService.GetTransactionRating(transaction);
+                                transaction.TransactionRating = rating;
+
+                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                {
+                                    mempool.InsertSafe(transaction);
+                                    
+                                    // Broadcast guard: Only broadcast if we haven't broadcast this TX recently
+                                    var now = TimeUtil.GetTime();
+                                    var shouldBroadcast = false;
+                                    
+                                    if (Globals.TxLastBroadcastTime.TryGetValue(transaction.Hash, out var lastBroadcastTime))
+                                    {
+                                        // Allow rebroadcast only if it's been > 30 seconds
+                                        if (now - lastBroadcastTime > 30)
+                                        {
+                                            shouldBroadcast = true;
+                                            Globals.TxLastBroadcastTime[transaction.Hash] = now;
+                                        }
+                                        else
+                                        {
+                                            if (Globals.OptionalLogging)
+                                            {
+                                                LogUtility.Log($"TX {transaction.Hash.Substring(0, 8)}... skip broadcast (last: {now - lastBroadcastTime}s ago)", 
+                                                    "BroadcastThrottle");
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // First time, broadcast it
+                                        shouldBroadcast = true;
+                                        Globals.TxLastBroadcastTime.TryAdd(transaction.Hash, now);
+                                    }
+                                    
+                                    if (shouldBroadcast)
+                                    {
+                                        _ = Broadcast("7777", transaction, "SendTxToMempoolVals");
+                                    }
+
+                                }
+                            }
+
+                        }
+                        else
+                        {
+                            //TODO Add this to also check in-mem blocks
+                            var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(transaction);
+                            if (isCraftedIntoBlock)
+                            {
+                                try
+                                {
+                                    mempool.DeleteManySafe(x => x.Hash == transaction.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(transaction.Hash);
+                                }
+                                catch (Exception ex)
+                                {
+                                    //delete failed
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var twSkipVerify = transaction.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
+                        var txResult = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
+                        if (txResult.Item1 == true)
+                        {
+                            var dblspndChk = await TransactionData.DoubleSpendReplayCheck(transaction);
+                            var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(transaction);
+                            var rating = await TransactionRatingService.GetTransactionRating(transaction);
+                            transaction.TransactionRating = rating;
+
+                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                            {
+                                mempool.InsertSafe(transaction);
+                            }
+                        }
+                    }
+                }
+
+            }
+        }
+
+        //FC — Fork Correction from caster
+        /// <summary>
+        /// PHASE 2: Handles incoming fork correction messages from casters.
+        /// When a caster detects a hash divergence via SyncBlockHashWithPeersAsync and
+        /// corrects its own block, it broadcasts the canonical block to all connected
+        /// validators. This handler delegates to ForkCorrectionService for validation
+        /// and application.
+        /// </summary>
+        private static async Task ReceiveForkCorrection(string data, string casterIP)
+        {
+            if (string.IsNullOrEmpty(data)) return;
+            try
+            {
+                // Wave 3: in the record era, corrections must come from a current committee member.
+                var committee = CasterMembershipStore.GetCommitteeForHeight(Globals.LastBlock.Height + 1);
+                if (committee != null)
+                {
+                    var cleanIP = (casterIP ?? "").Replace("::ffff:", "");
+                    var senderAddr = Globals.BlockCasters.FirstOrDefault(x => (x.PeerIP ?? "").Replace("::ffff:", "") == cleanIP)?.ValidatorAddress;
+                    if (string.IsNullOrEmpty(senderAddr) || !committee.Contains(senderAddr))
+                    {
+                        LogUtility.Log($"[ForkCorrection] Rejected correction from {casterIP} — sender not in membership committee.", "ValidatorNode");
+                        return;
+                    }
+                }
+
+                var correction = JsonConvert.DeserializeAnonymousType(data, new { Height = 0L, BlockJson = "" });
+                if (correction != null && correction.Height > 0 && !string.IsNullOrEmpty(correction.BlockJson))
+                {
+                    await ForkCorrectionService.HandleForkCorrectionAsync(correction.Height, correction.BlockJson, casterIP ?? "unknown");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[ForkCorrection] Error processing correction from {casterIP}: {ex.Message}", "ValidatorNode");
+            }
+        }
+
+        //9999
+        public static async Task FailedToConnect(string data)
+        {
+
+        }
+        #endregion
+
+        #region Added ConsensusHeader to Queue
+        public static async Task AddConsensusHeaderQueue(ConsensusHeader cHeader)
+        {
+            Globals.ConsensusHeaderQueue.Enqueue(cHeader);
+
+            if (Globals.ConsensusHeaderQueue.Count() > 3456)
+                Globals.ConsensusHeaderQueue.TryDequeue(out _);
+        }
+
+        #endregion
+
+        #region Notify Explorer Status
+        public static async Task NotifyExplorer()
+        {
+            while (true && !string.IsNullOrEmpty(Globals.ValidatorAddress))
+            {
+                var delay = Task.Delay(new TimeSpan(0, 1, 0));
+                try
+                {
+                    if (Globals.StopAllTimers && !Globals.IsChainSynced)
+                    {
+                        await delay;
+                        continue;
+                    }
+
+                    // Don't notify explorer if ports haven't been verified open
+                    if (!Globals.PortsOpened)
+                    {
+                        await delay;
+                        continue;
+                    }
+
+                    var account = AccountData.GetLocalValidator();
+                    if (account == null)
+                        return;
+
+                    var validator = Validators.Validator.GetAll().FindOne(x => x.Address == account.Address);
+                    if (validator == null)
+                        return;
+
+                    var fortis = new FortisPool
+                    {
+                        Address = Globals.ValidatorAddress,
+                        ConnectDate = Globals.ValidatorStartDate,
+                        IpAddress = P2PClient.MostLikelyIP(),
+                        LastAnswerSendDate = DateTime.UtcNow,
+                        UniqueName = validator.UniqueName,
+                        WalletVersion = validator.WalletVersion
+                    };
+
+                    List<FortisPool> fortisPool = new List<FortisPool> { fortis };
+
+                    var listFortisPool = fortisPool.Select(x => new
+                    {
+                        ConnectionId = "NA",
+                        x.ConnectDate,
+                        x.LastAnswerSendDate,
+                        x.IpAddress,
+                        x.Address,
+                        x.UniqueName,
+                        x.WalletVersion
+                    }).ToList();
+
+                    //await NotifyExplorerLock.WaitAsync();
+
+                    var fortisPoolStr = JsonConvert.SerializeObject(listFortisPool);
+
+                    using (var client = Globals.HttpClientFactory.CreateClient())
+                    {
+                        string endpoint = Globals.IsTestNet ? "https://data-testnet.verifiedx.io/api/masternodes/send/" : "https://data.verifiedx.io/api/masternodes/send/";
+                        var httpContent = new StringContent(fortisPoolStr, Encoding.UTF8, "application/json");
+                        using (var Response = await client.PostAsync(endpoint, httpContent))
+                        {
+                            if (Response.StatusCode == System.Net.HttpStatusCode.OK)
+                            {
+                                //success
+                                Globals.ExplorerValDataLastSend = DateTime.Now;
+                                Globals.ExplorerValDataLastSendSuccess = true;
+                                Globals.ExplorerValDataLastSendResponseCode = "200-OK";
+                            }
+                            else
+                            {
+                                //ErrorLogUtility.LogError($"Error sending payload to explorer. Response Code: {Response.StatusCode}. Reason: {Response.ReasonPhrase}", "ClientCallService.DoFortisPoolWork()");
+                                Globals.ExplorerValDataLastSendSuccess = false;
+                                Globals.ExplorerValDataLastSendResponseCode = Response.StatusCode.ToString();
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to send validator list to explorer API. Error: {ex.ToString()}", "ValidatorService.NotifyExplorer()");
+                    Globals.ExplorerValDataLastSendSuccess = false;
+                }
+                finally
+                {
+                    //NotifyExplorerLock.Release();
+                }
+                await delay;
+            }
+
+        }
+
+        #endregion
+
+        #region Broadcast
+        /// <summary>
+        /// Broadcasts a raw string payload to all connected validators on the GetValMessage
+        /// channel. Used for fork corrections ("FC") — the handler for FC lives in
+        /// ValidatorNode.ProcessData, which only receives GetValMessage traffic.
+        /// </summary>
+        public static async Task Broadcast(string messageType, string data)
+        {
+            await HubContext.Clients.All.SendAsync("GetValMessage", messageType, data);
+        }
+
+        public static async Task Broadcast(string messageType, Transaction data, string method = "")
+        {
+            await HubContext.Clients.All.SendAsync("GetValMessage", messageType, data);
+
+            if (method == "") return;
+
+            if (!Globals.ValidatorNodes.Any()) return;
+
+            var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+            if (valNodeList == null || valNodeList.Count() == 0) return;
+
+            // HAL-16 Fix: Throttle broadcasts to prevent thread pool exhaustion
+            await BroadcastSemaphore.WaitAsync();
+            try
+            {
+                // HAL-16 Fix: Parallel broadcasts instead of sequential
+                // Reduces broadcast time from 20s (10 validators × 2s) to 2s (all in parallel)
+                var broadcastTasks = valNodeList.Select(async val =>
+                {
+                    try
+                    {
+                        using var source = new CancellationTokenSource(2000);
+                        await val.Connection.InvokeCoreAsync(method, args: new object?[] { data }, source.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log but don't fail entire broadcast if one validator fails
+                        if (Globals.OptionalLogging)
+                        {
+                            LogUtility.Log($"Failed to broadcast to validator: {ex.Message}", "Broadcast");
+                        }
+                    }
+                }).ToList();
+
+                // Wait for all broadcasts to complete in parallel
+                await Task.WhenAll(broadcastTasks);
+            }
+            finally
+            {
+                BroadcastSemaphore.Release();
+            }
+        }
+
+        #endregion
+
+
+        #region Get Val List
+        public static async Task<Peers[]?> GetValList(bool skipConnectedNodes = false)
+        {
+            var peerDB = Peers.GetAll();
+
+            var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+            .Union(Globals.BannedIPs.Keys)
+            .Union(Globals.SkipValPeers.Keys)
+            .Union(Globals.ReportedIPs.Keys));
+
+            if (!skipConnectedNodes)
+            {
+                var connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
+
+                foreach (var validator in connectedNodes)
+                {
+                    SkipIPs.Add(validator.NodeIP);
+                }
+            }
+
+            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
+            {
+                SkipIPs.Add("40.160.225.225");
+            }
+
+            var peerList = peerDB.Find(x => x.IsValidator).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray();
+
+            if (!peerList.Any())
+            {
+                //clear out skipped peers to try again
+                Globals.SkipValPeers.Clear();
+
+                SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+                peerList = peerDB.Find(x => x.IsValidator).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray();
+            }
+
+            return peerList;
+        }
+        #endregion
+
+        #region Stop/Dispose
+        public Task StopAsync(CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+
+        public void Dispose()
+        {
+
+        }
+
+        #endregion
+    }
+}

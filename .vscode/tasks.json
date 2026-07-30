@@ -7,7 +7,7 @@
       "type": "process",
       "args": [
         "build",
-        "${workspaceFolder}/ReserveBlockCore/ReserveBlockCore.csproj",
+        "${workspaceFolder}/VerifiedXCore/VerifiedXCore.csproj",
         "/property:GenerateFullPaths=true",
         "/consoleloggerparameters:NoSummary;ForceNoAlign"
       ],

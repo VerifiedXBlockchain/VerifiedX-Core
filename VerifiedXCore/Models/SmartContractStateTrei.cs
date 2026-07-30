@@ -1,0 +1,128 @@
+﻿using VerifiedXCore.Extensions;
+using VerifiedXCore.Data;
+using VerifiedXCore.Models.SmartContracts;
+
+namespace VerifiedXCore.Models
+{
+    public class SmartContractStateTrei
+    {
+        public long Id { get; set; }
+        public string SmartContractUID { get; set; }
+        public string ContractData { get; set; }
+        public string MinterAddress { get; set; }
+        public string OwnerAddress { get; set; }
+        public string? NextOwner { get; set; }
+        public bool IsLocked { get; set; }
+        public string? Locators { get; set; }
+        public long Nonce { get; set; }
+        public bool KeyRevealed { get; set; }
+        public bool? IsToken { get; set; }
+        public string? MD5List { get; set; }
+        public bool? MinterManaged { get; set; }
+        public decimal? PurchaseAmount { get; set; } //Royalty is included in this.
+        public List<string>? PurchaseKeys { get; set; }
+        public TokenDetails? TokenDetails { get; set; }
+        public List<SmartContractStateTreiTokenizationTX>? SCStateTreiTokenizationTXes { get; set; }
+
+        /// <summary>
+        /// Block height at which this record was last inserted/updated. Stamped automatically by
+        /// the typed overloads in <see cref="Extensions.StateTreiStampExtensions"/> and used by
+        /// StateSnapshotService to diff-copy only changed records into snapshot slots.
+        /// Legacy records without the field deserialize as 0 (always older than any snapshot).
+        /// </summary>
+        public long LastModifiedHeight { get; set; }
+
+        public static LiteDB.ILiteCollection<SmartContractStateTrei> GetSCST()
+        {
+            var scs = DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI);
+            return scs;
+        }
+
+        public static SmartContractStateTrei? GetSmartContractState(string smartContractUID)
+        {
+            var scs = GetSCST();
+            if (scs != null)
+            {
+                var sc = scs.FindOne(x => x.SmartContractUID == smartContractUID);
+                if (sc != null)
+                {
+                    return sc;
+                }
+            }
+
+            return null;
+        }
+
+        public static IEnumerable<SmartContractStateTrei>? GetSmartContractsOwnedByAddress(string address)
+        {
+            var scs = GetSCST();
+            if (scs != null)
+            {
+                var scList = scs.Query().Where(x => x.OwnerAddress == address).ToEnumerable();
+                if (scList.Count() > 0)
+                {
+                    return scList;
+                }
+            }
+
+            return null;
+        }
+
+        public static IEnumerable<SmartContractStateTrei>? GetvBTCSmartContracts(string address)
+        {
+            var scs = GetSCST();
+            if (scs == null)
+                return null;
+
+            // First, get contracts where user is direct owner - this part works fine with LiteDB
+            var ownerContracts = scs.Query()
+                .Where(contract => contract.OwnerAddress == address)
+                .ToEnumerable();
+
+            // Then, load all contracts and filter in memory for transaction matches
+            // This is less efficient but works around LiteDB limitations
+            var allContracts = scs.Query().ToEnumerable();
+            var txContracts = allContracts.Where(contract =>
+                contract.SCStateTreiTokenizationTXes != null &&
+                contract.SCStateTreiTokenizationTXes.Any(tx =>
+                    tx.ToAddress == address || tx.FromAddress == address));
+
+            // Combine and return results
+            var result = ownerContracts.Union(txContracts).Distinct();
+            if (result.Any())
+                return result;
+
+            return null;
+        }
+
+        public static void SaveSmartContract(SmartContractStateTrei scMain)
+        {
+
+            var scs = GetSCST();
+
+            var exist = scs.FindOne(x => x.SmartContractUID == scMain.SmartContractUID);
+
+            if(exist == null)
+            {
+                scs.InsertSafe(scMain);
+            }
+        }
+        public static void UpdateSmartContract(SmartContractStateTrei scMain)
+        {
+            var scs = GetSCST();
+
+            scs.UpdateSafe(scMain);
+        }
+
+        public static void DeleteSmartContract(SmartContractStateTrei scMain)
+        {
+            var scs = GetSCST();
+
+            scs.DeleteManySafe(x => x.SmartContractUID == scMain.SmartContractUID);
+
+            // Snapshot diff queries can't see deletions — record a tombstone so
+            // StateSnapshotService propagates the delete into snapshot slots.
+            StateTombstone.Record(StateTombstone.COLL_SCSTATE, scMain.SmartContractUID);
+        }
+    }
+}

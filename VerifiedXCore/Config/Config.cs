@@ -1,0 +1,702 @@
+using Microsoft.AspNetCore.Hosting.Server;
+using VerifiedXCore.Models;
+using VerifiedXCore.Utilities;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection.PortableExecutable;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace VerifiedXCore.Config
+{
+    public class Config
+    {
+        public int Port { get; set; }
+        public int APIPort { get; set; }
+		public bool TestNet { get; set; }
+		public string? WalletPassword { get; set; }
+		public bool AlwaysRequireWalletPassword { get; set; }
+		public string? APIPassword { get; set; }
+		public bool AlwaysRequireAPIPassword { get; set; }
+		public string? ArbiterPassword { get; set; }
+		public string? APICallURL { get; set; }
+		public int WalletUnlockTime { get; set; }
+        public bool ChainCheckPoint { get; set; }
+		public int ChainCheckPointInterval { get; set; }
+        public int ChainCheckPointRetain { get; set; }
+        /// <summary>Phase E: disaster-recovery override letting a lone seed bootstrap without 2-of-3 agreement.</summary>
+        public bool ForceSoloBootstrap { get; set; }
+		public string ChainCheckpointLocation { get; set; }
+		public bool APICallURLLogging { get; set; }
+		public string? ValidatorAddress { get; set; }
+		public string ValidatorName { get; set; }
+		public int NFTTimeout { get; set; }
+		public int PasswordClearTime { get; set; }
+        public bool AutoDownloadNFTAsset { get; set; }
+        public bool IgnoreIncomingNFTs { get; set; }
+		public string? MotherAddress { get; set; }
+		public string? MotherPassword { get; set; }
+        public List<string> RejectAssetExtensionTypes { get; set; }
+		public List<string> AllowedExtensionsTypes { get; set; }
+		public string? CustomPath { get; set; }
+		public bool LogAPI { get; set; }
+		public bool RefuseToCallSeed { get; set; }
+		public bool OpenAPI { get; set; }
+		public bool RunUnsafeCode { get; set; }
+		public int DSTClientPort { get; set; }
+		public string? STUNServers { get; set; }
+		public bool SelfSTUNServer { get; set; }
+        public int SelfSTUNPort { get; set; }
+		public string? ElectrumServers { get; set; }
+		public bool LogMemory { get; set; }
+		public bool BlockSeedCalls { get; set; }
+		public string? SkipIPs { get; set; }
+		public int ElmahFileStore { get; set; }
+		public string? ReportedIP { get; set; }
+        public string? TestNetName { get; set; }
+        public Bitcoin.Bitcoin.BitcoinAddressFormat BitcoinAddressFormat { get; set; }
+        
+        // HAL-17 Fix: Configurable timeout settings
+        public int SignalRShortTimeoutMs { get; set; }
+        public int SignalRLongTimeoutMs { get; set; }
+        public int BlockProcessingDelayMs { get; set; }
+        public int NetworkOperationTimeoutMs { get; set; }
+        
+        // HAL-19 Fix: DoS protection settings for block validation
+        public int MaxBlockSizeBytes { get; set; }
+        public int BlockValidationTimeoutMs { get; set; }
+
+        // Base Bridge configuration (config.txt keys)
+        public string? BaseBridgeRpcUrl { get; set; }
+        public string? BaseBridgeRpcUrl2 { get; set; }
+        public string? BaseBridgeRpcUrl3 { get; set; }
+        public string? BaseBridgeContract { get; set; }
+        public int BaseBridgeChainId { get; set; }
+
+        /// <summary>When true, enables casterlog.txt and caster-scoped validator console diagnostics.</summary>
+        public bool CasterLog { get; set; }
+
+        // S3C (Self-Sovereign Smart Contracts)
+        public string? S3C { get; set; }            // minting node: comma-separated IP:ValidatorAddress pairs
+        public bool S3CValidator { get; set; }      // validator node: this validator is private/S3C-only
+
+        public static Config ReadConfigFile()
+        {
+            var path = GetPathUtility.GetConfigPath();
+
+			Config config = new Config();
+
+			using (StreamReader sr = new StreamReader(path + "config.txt"))
+			{
+				// Declare the dictionary outside the loop:
+				var dict = new Dictionary<string, string>();
+
+				// (This loop reads every line until EOF or the first blank line.)
+				string line;
+				while (!string.IsNullOrEmpty((line = sr.ReadLine())))
+				{
+					// Split each line around '=':
+					var tmp = line.Split(new[] { '=' },
+										 StringSplitOptions.RemoveEmptyEntries);
+					// Add the key-value pair to the dictionary:
+					dict[tmp[0]] = tmp[1];
+				}
+
+                config.CustomPath = dict.ContainsKey("CustomPath") ? dict["CustomPath"] : null;
+                if (!string.IsNullOrEmpty(config.CustomPath))
+                {
+                    Globals.CustomPath = config.CustomPath;
+                    _  = GetPathUtility.GetConfigPath();
+                }
+                // Assign the values that you need:
+                config.Port = dict.ContainsKey("Port") ? Convert.ToInt32(dict["Port"]) : 3338;
+				config.APIPort = dict.ContainsKey("APIPort") ? Convert.ToInt32(dict["APIPort"]) : 7292;
+				config.TestNet = dict.ContainsKey("TestNet") ? Convert.ToBoolean(dict["TestNet"]) : false;
+				config.NFTTimeout = dict.ContainsKey("NFTTimeout") ? Convert.ToInt32(dict["NFTTimeout"]) : 15;
+				config.WalletPassword = dict.ContainsKey("WalletPassword") ? dict["WalletPassword"] : null;
+				config.AlwaysRequireWalletPassword = dict.ContainsKey("AlwaysRequireWalletPassword") ? Convert.ToBoolean(dict["AlwaysRequireWalletPassword"]) : false;
+				config.APIPassword = dict.ContainsKey("APIPassword") ? dict["APIPassword"] : null;
+                config.ArbiterPassword = dict.ContainsKey("ArbiterPassword") ? dict["ArbiterPassword"] : null;
+                config.AlwaysRequireAPIPassword = dict.ContainsKey("AlwaysRequireAPIPassword") ? Convert.ToBoolean(dict["AlwaysRequireAPIPassword"]) : false;
+				config.APICallURL = dict.ContainsKey("APICallURL") ? dict["APICallURL"] : null;
+				config.ValidatorAddress = dict.ContainsKey("ValidatorAddress") ? dict["ValidatorAddress"] : null;
+				config.ValidatorName = dict.ContainsKey("ValidatorName") ? dict["ValidatorName"] : Guid.NewGuid().ToString();
+				config.WalletUnlockTime = dict.ContainsKey("WalletUnlockTime") ? Convert.ToInt32(dict["WalletUnlockTime"]) : 15;
+				config.ChainCheckPoint = dict.ContainsKey("ChainCheckPoint") ? Convert.ToBoolean(dict["ChainCheckPoint"]) : false;
+				config.ForceSoloBootstrap = dict.ContainsKey("ForceSoloBootstrap") ? Convert.ToBoolean(dict["ForceSoloBootstrap"]) : false;
+				config.APICallURLLogging = dict.ContainsKey("APICallURLLogging") ? Convert.ToBoolean(dict["APICallURLLogging"]) : false;
+				config.ChainCheckPointInterval = dict.ContainsKey("ChainCheckPointInternal") ? Convert.ToInt32(dict["ChainCheckPointInternal"]) : 12;
+				config.ChainCheckPointRetain = dict.ContainsKey("ChainCheckPointRetain") ? Convert.ToInt32(dict["ChainCheckPointRetain"]) : 2;
+				config.ChainCheckpointLocation = dict.ContainsKey("ChainCheckpointLocation") ? dict["ChainCheckpointLocation"] : GetPathUtility.GetCheckpointPath();
+				config.PasswordClearTime = dict.ContainsKey("PasswordClearTime") ? Convert.ToInt32(dict["PasswordClearTime"]) : 10;
+                config.LogAPI = dict.ContainsKey("LogAPI") ? Convert.ToBoolean(dict["LogAPI"]) : false;
+                config.RefuseToCallSeed = dict.ContainsKey("RefuseToCallSeed") ? Convert.ToBoolean(dict["RefuseToCallSeed"]) : false;
+                config.OpenAPI = dict.ContainsKey("OpenAPI") ? Convert.ToBoolean(dict["OpenAPI"]) : false;
+                config.RunUnsafeCode = dict.ContainsKey("RunUnsafeCode") ? Convert.ToBoolean(dict["RunUnsafeCode"]) : false;
+                config.DSTClientPort = dict.ContainsKey("DSTClientPort") ? Convert.ToInt32(dict["DSTClientPort"]) : 3341;
+                config.STUNServers = dict.ContainsKey("STUNServers") ? dict["STUNServers"] : null;
+                config.SelfSTUNServer = dict.ContainsKey("STUN") ? Convert.ToBoolean(dict["STUN"]) : false;
+                config.SelfSTUNPort = dict.ContainsKey("SelfSTUNPort") ? Convert.ToInt32(dict["SelfSTUNPort"]) : 3340;
+                config.ElectrumServers = dict.ContainsKey("ElectrumServers") ? dict["ElectrumServers"] : null;
+                config.LogMemory = dict.ContainsKey("LogMemory") ? Convert.ToBoolean(dict["LogMemory"]) : false;
+                config.BlockSeedCalls = dict.ContainsKey("BlockSeedCalls") ? Convert.ToBoolean(dict["BlockSeedCalls"]) : false;
+                config.BitcoinAddressFormat = dict.ContainsKey("BitcoinAddressFormat") ? (Bitcoin.Bitcoin.BitcoinAddressFormat)Convert.ToInt32(dict["BitcoinAddressFormat"]) : Bitcoin.Bitcoin.BitcoinAddressFormat.Segwit;
+                config.SkipIPs = dict.ContainsKey("SkipIPs") ? dict["SkipIPs"] : null;
+                config.ReportedIP = dict.ContainsKey("IPAddress") ? dict["IPAddress"] : 
+                                    dict.ContainsKey("ReportedIP") ? dict["ReportedIP"] : null;
+                config.TestNetName = dict.ContainsKey("TestNetName") ? dict["TestNetName"] : null;
+
+                config.AutoDownloadNFTAsset = dict.ContainsKey("AutoDownloadNFTAsset") ? Convert.ToBoolean(dict["AutoDownloadNFTAsset"]) : false;
+                config.IgnoreIncomingNFTs = dict.ContainsKey("IgnoreIncomingNFTs") ? Convert.ToBoolean(dict["IgnoreIncomingNFTs"]) : false;
+			config.RejectAssetExtensionTypes = new List<string>();
+                config.ElmahFileStore = dict.ContainsKey("ElmahFileStore") ? Convert.ToInt32(dict["ElmahFileStore"]) : 1000;
+
+                // HAL-17 Fix: Load timeout configuration with backward-compatible defaults
+                config.SignalRShortTimeoutMs = dict.ContainsKey("SignalRShortTimeoutMs") ? Convert.ToInt32(dict["SignalRShortTimeoutMs"]) : 2000;
+                config.SignalRLongTimeoutMs = dict.ContainsKey("SignalRLongTimeoutMs") ? Convert.ToInt32(dict["SignalRLongTimeoutMs"]) : 6000;
+                config.BlockProcessingDelayMs = dict.ContainsKey("BlockProcessingDelayMs") ? Convert.ToInt32(dict["BlockProcessingDelayMs"]) : 2000;
+                config.NetworkOperationTimeoutMs = dict.ContainsKey("NetworkOperationTimeoutMs") ? Convert.ToInt32(dict["NetworkOperationTimeoutMs"]) : 1000;
+
+                // HAL-19 Fix: Load DoS protection configuration with secure defaults
+                config.MaxBlockSizeBytes = dict.ContainsKey("MaxBlockSizeBytes") ? Convert.ToInt32(dict["MaxBlockSizeBytes"]) : 10485760; // 10MB default
+                config.BlockValidationTimeoutMs = dict.ContainsKey("BlockValidationTimeoutMs") ? Convert.ToInt32(dict["BlockValidationTimeoutMs"]) : 5000;
+
+                var rejExtList = new List<string> { ".exe", ".pif", ".application", ".gadget", ".msi", ".msp", ".com", ".scr", ".hta",
+					".cpl", ".msc", ".jar", ".bat", ".cmd", ".vb", ".vbs", ".vbe", ".js", ".jse", ".ws", ".wsf" , ".wsc", ".wsh", ".ps1",
+					".ps1xml", ".ps2", ".ps2xml", ".psc1", ".psc2", ".msh", ".msh1", ".msh2", ".mshxml", ".msh1xml", ".msh2xml", ".scf",
+					".lnk", ".inf", ".reg", ".doc", ".xls", ".ppt", ".docm", ".dotm", ".xlsm", ".xltm", ".xlam", ".pptm", ".potm", ".ppam",
+					".ppsm", ".sldm", ".sys", ".dll", ".zip", ".rar"};
+
+				var knownVirusMalwareExt = new List<string> {".xnxx", ".ozd", ".aur", ".boo", ".386", ".sop", ".dxz", ".hlp", ".tsa", ".exe1", 
+					".bkd", "exe_.", ".rhk", ".vbx", ".lik", ".osa", ".9", ".cih", ".mjz", ".dlb", ".php3", ".dyz", ".wsc", ".dom", ".hlw", 
+					".s7p", ".cla", ".mjg", ".mfu", ".dyv", ".kcd", ".spam", ".bup", ".rsc_tmp", ".mcq", ".upa", ".bxz", ".dli", ".txs", 
+					".xir", ".cxq", ".fnr", ".xdu", ".xlv", ".wlpginstall", ".ska", ".tti", ".cfxxe", ".dllx", ".smtmp", ".vexe", ".qrn", 
+					".xtbl", ".fag", ".oar", ".ceo", ".tko", ".uzy", ".bll", ".dbd", ".plc", ".smm", ".ssy", ".blf", ".zvz", ".cc", ".ce0", 
+					".nls", ".ctbl", ".crypt1", ".hsq", ".iws", ".vzr", ".lkh", ".ezt", ".rna", ".aepl", ".hts", ".atm", ".fuj", ".aut", 
+					".fjl", ".delf", ".buk", ".bmw", ".capxml", ".bps", ".cyw", ".iva", ".pid", ".lpaq5", ".dx", ".bqf", ".qit", ".pr", ".lok", 
+					".xnt"};
+
+                // Base Bridge (optional). Accepts BaseBridgeContract or legacy BaseBridgeV2Contract key.
+                config.BaseBridgeRpcUrl = dict.ContainsKey("BaseBridgeRpcUrl") ? dict["BaseBridgeRpcUrl"] : null;
+                config.BaseBridgeRpcUrl2 = dict.ContainsKey("BaseBridgeRpcUrl2") ? dict["BaseBridgeRpcUrl2"] : null;
+                config.BaseBridgeRpcUrl3 = dict.ContainsKey("BaseBridgeRpcUrl3") ? dict["BaseBridgeRpcUrl3"] : null;
+                if (dict.ContainsKey("BaseBridgeContract"))
+                    config.BaseBridgeContract = dict["BaseBridgeContract"];
+                else if (dict.ContainsKey("BaseBridgeV2Contract"))
+                    config.BaseBridgeContract = dict["BaseBridgeV2Contract"];
+                else
+                    config.BaseBridgeContract = null;
+                config.BaseBridgeChainId = dict.ContainsKey("BaseBridgeChainId") ? Convert.ToInt32(dict["BaseBridgeChainId"]) : 0;
+
+                config.CasterLog = dict.ContainsKey("CasterLog") ? Convert.ToBoolean(dict["CasterLog"]) : false;
+
+                // S3C — value may contain ':' and ',', preserved as the whole right-hand side.
+                config.S3C = dict.ContainsKey("S3C") ? dict["S3C"] : null;
+                config.S3CValidator = dict.ContainsKey("S3CValidator") ? Convert.ToBoolean(dict["S3CValidator"]) : false;
+
+                config.MotherAddress = dict.ContainsKey("MotherAddress") ? dict["MotherAddress"] : null;
+                config.MotherPassword = dict.ContainsKey("MotherPassword") ? dict["MotherPassword"] : null;
+
+                if (dict.ContainsKey("RejectAssetExtensionTypes"))
+				{
+					string rejectedExtensions = dict["RejectAssetExtensionTypes"].ToString();
+					var rejExtListConfig = rejectedExtensions.Split(',');
+					foreach (var rejExt in rejExtListConfig)
+					{
+						config.RejectAssetExtensionTypes.Add(rejExt);
+					}
+
+					config.RejectAssetExtensionTypes.AddRange(rejExtList);
+                    config.RejectAssetExtensionTypes.AddRange(knownVirusMalwareExt);
+                }
+				else
+				{
+                    config.RejectAssetExtensionTypes.AddRange(rejExtList);
+                    config.RejectAssetExtensionTypes.AddRange(knownVirusMalwareExt);
+                }
+				if (dict.ContainsKey("AllowedExtensionsTypes"))
+				{
+                    string allowedExtensions = dict["AllowedExtensionsTypes"].ToString();
+                    var allowedExtensionsList = allowedExtensions.Split(',');
+					foreach(var allowedExtension in allowedExtensionsList)
+					{
+						if(config.RejectAssetExtensionTypes.Contains(allowedExtension))
+						{
+							config.RejectAssetExtensionTypes.Remove(allowedExtension);
+						}
+					}
+                }
+            }
+
+			return config;
+		}
+
+		public static void ProcessConfig(Config config)
+        {
+			Globals.Port = config.Port;
+			Globals.APIPort = config.APIPort;
+			Globals.ElmahFileStore = config.ElmahFileStore;
+            Globals.APICallURL = config.APICallURL;
+			Globals.APICallURLLogging = config.APICallURLLogging;
+			Globals.NFTTimeout = config.NFTTimeout;
+			Globals.PasswordClearTime = config.PasswordClearTime;
+			if (config.RejectAssetExtensionTypes != null)
+				foreach (var type in config.RejectAssetExtensionTypes)
+					Globals.RejectAssetExtensionTypes.Add(type);
+			Globals.IgnoreIncomingNFTs = config.IgnoreIncomingNFTs;
+			Globals.AutoDownloadNFTAsset = config.AutoDownloadNFTAsset;
+			Globals.LogAPI = config.LogAPI;
+			Globals.RefuseToCallSeed = config.RefuseToCallSeed;
+			Globals.OpenAPI = Globals.OpenAPI != true ? config.OpenAPI : true;
+			Globals.RunUnsafeCode = config.RunUnsafeCode;
+			Globals.DSTClientPort = config.DSTClientPort;
+            Globals.SelfSTUNPort = config.SelfSTUNPort;
+			Globals.SelfSTUNServer = config.SelfSTUNServer;
+			Globals.LogMemory = config.LogMemory;
+			Globals.BlockSeedCalls = config.BlockSeedCalls;
+			Globals.CasterLogEnabled = config.CasterLog;
+            Globals.IsS3CValidator = config.S3CValidator;
+            if (!string.IsNullOrEmpty(config.S3C))
+            {
+                if (Bitcoin.Services.S3CService.ParseAndValidate(config.S3C))
+                    Console.WriteLine($"[S3C] Self-Sovereign Smart Contract mode enabled with {Globals.S3CPool!.Count} validators.");
+                else
+                    Console.WriteLine("[S3C] S3C= present but INVALID — vBTC minting will refuse until corrected (see errors above).");
+            }
+
+            Globals.BTCNetwork = NBitcoin.Network.Main;
+			Globals.SegwitP2SHStartPrefix = "3";
+			Globals.SegwitTaprootStartPrefix = "bc1";
+			Globals.BitcoinAddressFormat = config.BitcoinAddressFormat;
+
+			if(!string.IsNullOrEmpty(config.ReportedIP))
+			{
+				Globals.ReportedIP = config.ReportedIP;
+				Globals.ReportedIPManuallySet = true;
+				Globals.ReportedIPs.TryAdd(Globals.ReportedIP, 99999);
+			}
+
+            Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "electrum.blockstream.info",
+                        Port = 50002,
+                        UseSsl = true,
+						Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "bitcoin.lu.ke",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "electrum.emzy.de",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "electrum.bitaroo.net",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "electrum.diynodes.com",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "fulcrum.sethforprivacy.com",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    }
+                };
+
+            Globals.ScriptPubKeyType = Globals.BitcoinAddressFormat == Bitcoin.Bitcoin.BitcoinAddressFormat.SegwitP2SH ? NBitcoin.ScriptPubKeyType.SegwitP2SH :
+				Globals.BitcoinAddressFormat == Bitcoin.Bitcoin.BitcoinAddressFormat.Segwit ? NBitcoin.ScriptPubKeyType.Segwit : NBitcoin.ScriptPubKeyType.TaprootBIP86;
+
+			if(!string.IsNullOrEmpty(config.SkipIPs))
+			{
+				var ips = config.SkipIPs.Split(',').ToList();
+				foreach(var ip in ips) 
+				{
+					if(!string.IsNullOrEmpty(ip))
+					{
+                        var ipSani = ip.Replace(" ", "");
+                        Globals.SkipPeers.TryAdd(ipSani, 0);
+						Globals.SkipValPeers.TryAdd(ipSani, 0);
+                    }
+                }
+			}
+
+            if (config.TestNet == true || Globals.IsTestNet)
+            {
+                Globals.BeaconPort = 33338;
+                Globals.BeaconWebPort = 33339;
+                Globals.ADJPort = 13339;
+                Globals.ValPort = 13339;
+                Globals.ArbiterPort = 13342;
+                Globals.IsTestNet = true;
+                Globals.GenesisAddress = "xAfPR4w2cBsvmB7Ju5mToBLtJYuv1AZSyo";
+                Globals.Port = 13338;
+                Globals.APIPort = 17292;
+                Globals.ValAPIPort = 17294;
+                Globals.FrostValidatorPort = 17295;
+                Globals.APIPortSSL = 17777;
+                Globals.AddressPrefix = 0x89; //address prefix 'x'
+                Globals.V1ValHeight = 200;
+                Globals.TXHeightRule1 = 200;
+                Globals.TXHeightRule2 = 200;
+                Globals.DSTClientPort = 13341;
+                Globals.SelfSTUNPort = 13340;
+                Globals.BTCNetwork = NBitcoin.Network.TestNet4;
+                Globals.SegwitP2SHStartPrefix = "2";
+                Globals.SegwitTaprootStartPrefix = "tb1";
+                Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString();
+                Globals.TotalArbiterParties = 2;
+                Globals.TotalArbiterThreshold = 2;
+                Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "mempool.space",
+                        Port = 40002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    //new Bitcoin.ElectrumX.ClientSettings {
+                    //    Host = "testnet4-electrumx.wakiyamap.dev",
+                    //    Port = 51002,
+                    //    UseSsl = true,
+                    //    Count = 0,
+                    //    FailCount = 0
+                    //},
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "blackie.c3-soft.com",
+                        Port = 57010,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    }
+
+                };
+            }
+
+            if(!string.IsNullOrEmpty(config.TestNetName ))
+            {
+                if(config.TestNetName.ToLower() == "marigold")
+                {
+                    //Marigold Testnet
+                    Globals.IsCustomTestNet = true;
+                    Globals.CustomTestNetName = "Marigold";
+                    Globals.ADJPort = 23339;
+                    Globals.ValPort = 23339;
+                    Globals.ArbiterPort = 23342;
+                    Globals.IsTestNet = true;
+                    Globals.GenesisAddress = "xAfPR4w2cBsvmB7Ju5mToBLtJYuv1AZSyo";
+                    Globals.Port = 23338;
+                    Globals.APIPort = 27292;
+                    Globals.ValAPIPort = 27294;
+                    Globals.FrostValidatorPort = 27295;
+                    Globals.APIPortSSL = 27777;
+                    Globals.AddressPrefix = 0x89; //address prefix 'x'
+                    Globals.V1ValHeight = 200;
+                    Globals.TXHeightRule1 = 200;
+                    Globals.TXHeightRule2 = 200;
+                    Globals.DSTClientPort = 23341;
+                    Globals.SelfSTUNPort = 23340;
+                    Globals.BTCNetwork = NBitcoin.Network.TestNet4;
+                    Globals.SegwitP2SHStartPrefix = "2";
+                    Globals.SegwitTaprootStartPrefix = "tb1";
+                    Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString();
+                    Globals.TotalArbiterParties = 2;
+                    Globals.TotalArbiterThreshold = 2;
+                    Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
+                        new Bitcoin.ElectrumX.ClientSettings {
+                            Host = "mempool.space",
+                            Port = 40002,
+                            UseSsl = true,
+                            Count = 0,
+                            FailCount = 0
+                        },
+                        //new Bitcoin.ElectrumX.ClientSettings {
+                        //    Host = "testnet4-electrumx.wakiyamap.dev",
+                        //    Port = 51002,
+                        //    UseSsl = true,
+                        //    Count = 0,
+                        //    FailCount = 0
+                        //},
+                        new Bitcoin.ElectrumX.ClientSettings {
+                            Host = "blackie.c3-soft.com",
+                            Port = 57010,
+                            UseSsl = true,
+                            Count = 0,
+                            FailCount = 0
+                        }
+
+                    };
+                }
+                else if(config.TestNetName == "someothernet")
+                {
+                    //setup other testnet here.
+                }
+                else
+                {
+                    //do nothing
+                }
+            }
+
+
+            if (config.STUNServers?.Count() > 0)
+			{
+				var serverList = config.STUNServers.Split(',');
+				foreach( var server in serverList)
+				{
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = server, Group = 999, IsNetwork = false });
+                }
+			}
+			else
+			{
+                var port = Globals.SelfSTUNPort; //needs to be 3340 **patched  DSTServer.cs Line: 20**
+
+				if(!Globals.IsTestNet)
+				{
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"162.248.14.123:{port}", Group = 1, IsNetwork = true});
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.149.104:{port}", Group = 1, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.150.118:{port}", Group = 2, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"89.117.21.39:{port}", Group = 2, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"89.117.21.40:{port}", Group = 3, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"209.126.11.92:{port}", Group = 3, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"149.102.144.58:{port}", Group = 4, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"194.233.77.39:{port}", Group = 4, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"185.188.249.117:{port}", Group = 5, IsNetwork = true });
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"154.26.155.35:{port}", Group = 5, IsNetwork = true });
+
+					//failover
+                    Globals.STUNServers.Add(new StunServer { ServerIPPort = $"173.254.253.106:{port}", Group = 0, IsNetwork = true });
+                }
+				else
+				{
+                    if (Globals.IsCustomTestNet)
+                    {
+                        Globals.STUNServers.Add(new StunServer { ServerIPPort = $"144.126.152.4:{port}", Group = 1, IsNetwork = true });
+                    }
+                    else
+                    {
+                        Globals.STUNServers.Add(new StunServer { ServerIPPort = $"40.160.233.196:{port}", Group = 1, IsNetwork = true });
+                    }
+                }
+            }
+
+            if (config.ElectrumServers != null)
+            {
+                var clientSettings = new List<Bitcoin.ElectrumX.ClientSettings>();
+                Globals.ClientSettings.Clear();
+
+                var serverList = config.ElectrumServers.Split(',');
+                foreach (var server in serverList)
+                {
+                    bool isSsl = server.ToLower().Contains("https://") ? true : false;
+                    string serverFormat = isSsl ? server.ToLower().Replace("https://", "") : server.ToLower().Replace("http://", "");
+                    var hostport = serverFormat.Split(':');
+                    var host = hostport[0];
+                    var port = hostport[1];
+                    var clientSetting = new Bitcoin.ElectrumX.ClientSettings
+                    {
+                        Host = host,
+                        Port = Convert.ToInt32(port),
+                        UseSsl = isSsl,
+                        Count = 0,
+                        FailCount = 0
+                    };
+
+                    clientSettings.Add(clientSetting);
+                }
+
+                Globals.ClientSettings = clientSettings;
+            }
+
+            if (!string.IsNullOrEmpty(config.ArbiterPassword))
+			{
+                Globals.ArbiterEncryptPassword = config.ArbiterPassword.ToSecureString();
+            }
+
+			if (!string.IsNullOrWhiteSpace(config.WalletPassword))
+			{
+				Globals.WalletPassword = config.WalletPassword.ToEncrypt();
+				Globals.CLIWalletUnlockTime = DateTime.UtcNow;
+				Globals.WalletUnlockTime = config.WalletUnlockTime;
+				Globals.AlwaysRequireWalletPassword = config.AlwaysRequireWalletPassword;
+			}
+
+			if (!string.IsNullOrWhiteSpace(config.APIPassword))
+            {
+				//create API Password method that locks password in encrypted string
+				Globals.APIPassword = config.APIPassword.ToEncrypt();
+				Globals.APIUnlockTime = DateTime.UtcNow;
+				Globals.WalletUnlockTime = config.WalletUnlockTime;
+				Globals.AlwaysRequireAPIPassword = config.AlwaysRequireAPIPassword;
+
+			}
+			if(config.ChainCheckPoint == true)
+            {
+				//establish chain checkpoint parameters here.
+				Globals.ChainCheckPointInterval = config.ChainCheckPointInterval;
+				Globals.ChainCheckPointRetain = config.ChainCheckPointRetain;
+				Globals.ChainCheckpointLocation = config.ChainCheckpointLocation;
+            }
+
+			if (config.ForceSoloBootstrap)
+			{
+				Globals.ForceSoloBootstrap = true;
+			}
+
+			if(!string.IsNullOrWhiteSpace(config.ValidatorAddress))
+            {
+				Globals.ConfigValidator = config.ValidatorAddress;
+				Globals.ConfigValidatorName = config.ValidatorName;
+            }
+
+		if(!string.IsNullOrEmpty(config.MotherAddress))
+		{
+			Globals.MotherAddress = config.MotherAddress;
+			Globals.MotherPassword = config.MotherPassword != null ? config.MotherPassword.ToSecureString() : null;
+			Globals.ConnectToMother = true;
+		}
+
+		// HAL-17 Fix: Process timeout configuration
+		Globals.SignalRShortTimeoutMs = config.SignalRShortTimeoutMs;
+		Globals.SignalRLongTimeoutMs = config.SignalRLongTimeoutMs;
+		Globals.BlockProcessingDelayMs = config.BlockProcessingDelayMs;
+		Globals.NetworkOperationTimeoutMs = config.NetworkOperationTimeoutMs;
+		
+		// HAL-19 Fix: Process DoS protection configuration
+		Globals.MaxBlockSizeBytes = config.MaxBlockSizeBytes;
+	Globals.BlockValidationTimeoutMs = config.BlockValidationTimeoutMs;
+
+		// Base Bridge: apply config.txt (primary RPC + optional fallbacks + contract)
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl))
+			Bitcoin.Services.BaseBridgeService.BaseRpcUrl = config.BaseBridgeRpcUrl.Trim();
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl2))
+			Bitcoin.Services.BaseBridgeService.BaseRpcUrl2 = config.BaseBridgeRpcUrl2.Trim();
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeRpcUrl3))
+			Bitcoin.Services.BaseBridgeService.BaseRpcUrl3 = config.BaseBridgeRpcUrl3.Trim();
+		if (!string.IsNullOrWhiteSpace(config.BaseBridgeContract))
+			Bitcoin.Services.BaseBridgeService.ContractAddress = config.BaseBridgeContract.Trim();
+		if (config.BaseBridgeChainId > 0)
+			Bitcoin.Services.BaseBridgeService.BaseChainId = config.BaseBridgeChainId;
+        }
+        public static void ProcessABL()
+        {
+            var path = GetPathUtility.GetConfigPath();
+            if (File.Exists(path + "abl.txt"))
+            {
+                try
+                {
+                    var records = ReadAblFile(path + "abl.txt");
+
+                    Globals.ABL.Clear();
+                    Globals.ABL = new List<string>();
+                    Globals.ABL = records;
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError("Error processing ABL File.", "Config.ProcessABL()");
+                }
+            }
+
+        }
+        private static List<string> ReadAblFile(string filePath)
+        {
+            var records = new List<string>();
+
+            var sigs = Bitcoin.Bitcoin.ReadSigScripts();
+            string[] sigArray = sigs.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+            List<string> sigList = new List<string>(sigArray);
+
+            records = sigList;
+
+            using (var reader = new StreamReader(filePath))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    records.Add(line);
+                }
+            }
+
+            return records;
+        }
+
+        public static async void EstablishConfigFile()
+		{
+			var path = GetPathUtility.GetConfigPath();
+			var fileExist = File.Exists(path + "config.txt");
+
+			if(!fileExist)
+            {
+				if (Globals.IsTestNet == false) //mainnet
+				{
+				File.AppendAllText(path + "config.txt", "Port=3338");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=7292");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=false");
+				File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge V2 defaults (mainnet — set BaseBridgeContract to your proxy)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://mainnet.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=8453");
+                }
+                else if(Globals.IsCustomTestNet) //devnet
+                {
+                    File.AppendAllText(path + "config.txt", "Port=23338");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=27292");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNetName=marigold");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge V2 defaults (devnet — Base Sepolia)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x1154DDB476A38c01A389E1324121E15Df6703D19");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
+                }
+                else //testnet
+                {
+                    File.AppendAllText(path + "config.txt", "Port=13338");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "APIPort=17292");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "TestNet=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "NFTTimeout=15");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "AutoDownloadNFTAsset=true");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
+                    // Base Bridge V2 defaults (testnet — Base Sepolia)
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x1154DDB476A38c01A389E1324121E15Df6703D19");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
+                }
+				
+			}
+		}
+
+        public static async void EstablishABLFile()
+        {
+            var path = GetPathUtility.GetABLPath();
+            var fileExist = File.Exists(path + "abl.txt");
+
+            if (!fileExist)
+            {
+                File.AppendAllText(path + "abl.txt", "");
+            }
+        }
+    }
+}

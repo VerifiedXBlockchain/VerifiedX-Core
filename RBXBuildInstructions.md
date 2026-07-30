@@ -4,7 +4,7 @@ The most important step is to install .net core 6.
 
 For Linux you can find install instructions here https://docs.microsoft.com/en-us/dotnet/core/install/linux. This document will cover how to install for Ubuntu.
 
-In the last step for *dotnet ReserveBlockCore(.dll or .exe or blank)* if that does not work you can also try *dotnet run ReserveBlockCore(.dll or .exe or blank)*
+In the last step for *dotnet VerifiedXCore(.dll or .exe or blank)* if that does not work you can also try *dotnet run VerifiedXCore(.dll or .exe or blank)*
 
 ## Linux
 Linux Install For Ubuntu 22.04:
@@ -27,7 +27,7 @@ rm packages-microsoft-prod.deb
 9. 'dotnet build' - There should be 0 (zero) errors.
 10. 'dotnet publish -c Release -r linux-x64 --output ./rbxpublished' **please note the 'linux-x64' can be changed if you are on a different architecture
 11. 'cd rbxpublished'
-12. 'dotnet ReserveBlockCore.dll'
+12. 'dotnet VerifiedXCore.dll'
 
 You are done! You should now see a wallet running! Some common errors are usually related to file permissions. Please ensure you have given proper permission to the newly created RBX folder
 
@@ -43,7 +43,7 @@ Once that is installed follow steps below.
 5. dotnet build - There should be 0 (zero) errors.
 6. dotnet publish -c Release -r win-x64 --output ./rbxpublished **please note the 'win-x64' can be changed if you are on a different architecture
 7. cd rbxpublished
-8. dotnet ReserveBlockCore.exe
+8. dotnet VerifiedXCore.exe
 
 ## Mac OSX
 Install the latest dotnet sdk from here: https://dotnet.microsoft.com/en-us/download/dotnet/6.0
@@ -57,7 +57,7 @@ Once that is installed follow steps below.
 5. dotnet build - There should be 0 (zero) errors.
 6. dotnet publish -c Release -r osx-x64 --output ./rbxpublished **please note the 'osx-x64' can be changed if you are on a different architecture like arm.
 7. cd rbxpublished
-8. dotnet ReserveBlockCore
+8. dotnet VerifiedXCore
 
 
 ## Build RIDs

@@ -126,8 +126,8 @@ This document was adapted from the open-source contribution guidelines for [Face
 
 - Install .net core 6 on your machine. Install can be found here: https://dotnet.microsoft.com/en-us/download/dotnet/6.0
 - Once .net is installed you can either download a pre-built binary or compile your own. 
-- Deploy the wallet by either opening the ReserveBlockCore.exe or the GUI
-- For Linux you can run the wallet with dotnet ReserveBlockCore.dll 
+- Deploy the wallet by either opening the VerifiedXCore.exe or the GUI
+- For Linux you can run the wallet with dotnet VerifiedXCore.dll 
 
 # Who do I talk to? ###
 

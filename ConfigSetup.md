@@ -69,7 +69,7 @@ The point of this paper is to outline the config file setup and features it has.
 14.	ValidatorAddress (default is null)
 	+ a.	Type string
 	+ b.	Ex: ValidatorAddress=RBcHyS2AF4Z4jgzTLZNBVLvtxQ6MtB2vUN
-	+ c.	You can input a default validator address to instantly start validating. Please note you must also import the wallet address through the launch commands. Ex: ReserveBlockCore.exe privKey=MyPrivateKey.
+	+ c.	You can input a default validator address to instantly start validating. Please note you must also import the wallet address through the launch commands. Ex: VerifiedXCore.exe privKey=MyPrivateKey.
 
 15.	ValidatorName (default is new guid)
 	+ a.	Type string

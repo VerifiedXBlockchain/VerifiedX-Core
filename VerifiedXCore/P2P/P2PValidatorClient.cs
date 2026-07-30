@@ -1,0 +1,1487 @@
+﻿using VerifiedXCore.Extensions;
+using Microsoft.AspNetCore.SignalR.Client;
+using Newtonsoft.Json;
+using VerifiedXCore.Beacon;
+using VerifiedXCore.Data;
+using VerifiedXCore.EllipticCurve;
+using VerifiedXCore.Models;
+using VerifiedXCore.Nodes;
+using VerifiedXCore.Services;
+using VerifiedXCore.Utilities;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Numerics;
+using System.Text;
+using System.Threading.Tasks;
+using System.Collections.Concurrent;
+using Microsoft.AspNetCore.SignalR;
+using System.Xml.Linq;
+using System.Net;
+using System.Reflection.Metadata.Ecma335;
+using Microsoft.AspNetCore.Http.Connections;
+using System.Security.Cryptography;
+
+namespace VerifiedXCore.P2P
+{
+    public class P2PValidatorClient : P2PClient
+    {
+        #region HubConnection Variables        
+
+        private static long _MaxHeight = -1;
+
+        #endregion
+
+        #region Stale Peer Management Constants
+
+        /// <summary>
+        /// Peers with FailCount at or above this value are excluded from connection attempts.
+        /// They will be rehabilitated when PopulateValidatorPeersFromBlocks detects a fresh
+        /// on-chain heartbeat/register TX and resets their FailCount.
+        /// </summary>
+        private const int MAX_FAIL_COUNT_FOR_CONNECT = 200;
+
+        /// <summary>
+        /// Peers with FailCount at or above this value get demoted (IsValidator = false).
+        /// This prevents them from being selected at all until re-discovered on-chain.
+        /// </summary>
+        private const int FAIL_COUNT_DEMOTION_THRESHOLD = 2000;
+
+        /// <summary>
+        /// For peers with FailCount above this value, only log every Nth failure to reduce noise.
+        /// </summary>
+        private const int FAIL_LOG_THROTTLE_AFTER = 50;
+        private const int FAIL_LOG_THROTTLE_INTERVAL = 100;
+
+        #endregion
+
+        #region Security Helper Methods
+
+        /// <summary>
+        /// Generate a cryptographically secure nonce for replay attack prevention
+        /// </summary>
+        private static string GenerateSecureNonce()
+        {
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                var bytes = new byte[16]; // 128-bit nonce
+                rng.GetBytes(bytes);
+                return Convert.ToBase64String(bytes);
+            }
+        }
+
+        #endregion
+
+        #region Wallet Version Validation Helper
+
+        /// <summary>
+        /// Safely extracts the first 3 characters from wallet version string with proper validation
+        /// HAL-12 Fix: Prevents ArgumentOutOfRangeException from malformed wallet version strings
+        /// </summary>
+        /// <param name="walletVersion">The wallet version string to process</param>
+        /// <returns>A safe 3-character version prefix or default fallback</returns>
+        private static string GetSafeWalletVersionPrefix(string? walletVersion)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(walletVersion))
+                {
+                    ErrorLogUtility.LogError("Received null or empty wallet version from peer", "GetSafeWalletVersionPrefix");
+                    return "2.1"; // Default fallback version
+                }
+
+                // Validate minimum length requirement
+                if (walletVersion.Length < 3)
+                {
+                    ErrorLogUtility.LogError($"Received short wallet version from peer: '{walletVersion}' (length: {walletVersion.Length})", "GetSafeWalletVersionPrefix");
+                    // Pad short versions with zeros to meet 3-character requirement
+                    return walletVersion.PadRight(3, '0');
+                }
+
+                // Validate that the first 3 characters are reasonable (basic format check)
+                var versionPrefix = walletVersion.Substring(0, 3);
+                if (System.Text.RegularExpressions.Regex.IsMatch(versionPrefix, @"^[0-9]+\.?[0-9]*$"))
+                {
+                    return versionPrefix;
+                }
+                else
+                {
+                    ErrorLogUtility.LogError($"Received malformed wallet version from peer: '{walletVersion}' - prefix: '{versionPrefix}'", "GetSafeWalletVersionPrefix");
+                    return "2.1"; // Default fallback for invalid format
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Unexpected error processing wallet version '{walletVersion}': {ex.Message}", "GetSafeWalletVersionPrefix");
+                return "2.1"; // Safe fallback on any error
+            }
+        }
+
+        #endregion
+
+        #region Remove Node from Validator Nodes
+        public static async Task RemoveNode(NodeInfo node)
+        {
+            if(!string.IsNullOrEmpty(Globals.ValidatorAddress) && Globals.ValidatorNodes.TryRemove(node.NodeIP, out _) && node.Connection != null)
+                await node.Connection.DisposeAsync();            
+        }
+
+        #endregion
+
+        #region Check which HubConnections are actively connected
+
+        public static async Task<bool> AreValidatorsConnected()
+        {
+            await DropDisconnectedValidator();
+            return Globals.ValidatorNodes.Any();
+        }
+
+        public static async Task DropDisconnectedValidator()
+        {
+            foreach (var node in Globals.ValidatorNodes.Values)
+            {
+                if (!node.IsConnected)
+                    await RemoveNode(node);
+            }
+        }
+
+        public static async Task DropDisconnectedBlockcaster()
+        {
+            foreach (var node in Globals.BlockCasterNodes.Values)
+            {
+                if (!node.IsConnected)
+                    await RemoveNode(node);
+            }
+        }
+
+        public static string MostLikelyIP()
+        {
+            return Globals.ReportedIPs.Count != 0 ?
+                Globals.ReportedIPs.OrderByDescending(y => y.Value).Select(y => y.Key).First() : "NA";
+        }
+
+        //This will need work
+        public static async Task DropLowBandwidthPeers()
+        {
+            if (Globals.AdjudicateAccount != null)
+                return;
+
+            await DropDisconnectedValidator();
+
+            var PeersWithSamples = Globals.ValidatorNodes.Where(x => x.Value.SendingBlockTime > 60000)
+                .Select(x => new
+                {
+                    Node = x.Value,
+                    BandWidth = x.Value.TotalDataSent / ((double)x.Value.SendingBlockTime)
+                })
+                .OrderBy(x => x.BandWidth)
+                .ToArray();
+
+            var Length = PeersWithSamples.Length;
+            if (Length < 3)
+                return;
+
+            var MedianBandWidth = Length % 2 == 0 ? .5 * (PeersWithSamples[Length / 2 - 1].BandWidth + PeersWithSamples[Length / 2].BandWidth) :
+                PeersWithSamples[Length / 2 - 1].BandWidth;
+
+            foreach (var peer in PeersWithSamples.Where(x => x.BandWidth < .5 * MedianBandWidth))
+                await RemoveNode(peer.Node);                        
+        }
+
+        public static void UpdateMaxHeight(long height)
+        {
+            _MaxHeight = height;
+        }
+
+        public static long MaxHeight()
+        {
+            return Math.Max(Globals.LastBlock.Height, _MaxHeight);
+        }
+
+        #endregion
+
+        #region Hub Dispose
+        public void Dispose()
+        {
+            Dispose(disposing: true);
+            GC.SuppressFinalize(this);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await DisposeAsyncCore().ConfigureAwait(false);
+
+            Dispose(disposing: false);
+            #pragma warning disable CA1816
+            GC.SuppressFinalize(this);
+            #pragma warning restore CA1816
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            // All disposal logic has been moved to DisposeAsyncCore to avoid sync-over-async deadlocks.
+            // For proper resource cleanup, always prefer DisposeAsync() over Dispose().
+        }
+
+        protected override async ValueTask DisposeAsyncCore()
+        {
+            const int timeoutSeconds = 30;
+            using var disposalCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var disposalTasks = new List<Task>();
+
+            // Dispose validator nodes
+            foreach (var node in Globals.ValidatorNodes.Values)
+            {
+                if (node.Connection != null)
+                {
+                    disposalTasks.Add(DisposeValidatorNodeConnectionSafely(node, disposalCts.Token));
+                }
+            }
+
+            // Also dispose regular nodes (call base class logic)
+            foreach (var node in Globals.Nodes.Values)
+            {
+                if (node.Connection != null)
+                {
+                    disposalTasks.Add(DisposeNodeConnectionSafely(node, disposalCts.Token));
+                }
+            }
+
+            if (disposalTasks.Count > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(disposalTasks).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Log timeout but continue - graceful degradation
+                    LogUtility.Log($"Validator node disposal timed out after {timeoutSeconds} seconds, some connections may not be properly closed", "P2PValidatorClient.DisposeAsyncCore");
+                }
+                catch (Exception ex)
+                {
+                    // Log general errors but don't throw to ensure disposal completes
+                    ErrorLogUtility.LogError($"Error during validator node disposal: {ex}", "P2PValidatorClient.DisposeAsyncCore");
+                }
+            }
+        }
+
+        private static async Task DisposeValidatorNodeConnectionSafely(NodeInfo node, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await node.Connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - continue disposing other nodes
+                ErrorLogUtility.LogError($"Error disposing validator connection for node {node.NodeIP}: {ex.Message}", "P2PValidatorClient.DisposeValidatorNodeConnectionSafely");
+            }
+        }
+
+        private static async Task DisposeNodeConnectionSafely(NodeInfo node, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await node.Connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - continue disposing other nodes
+                ErrorLogUtility.LogError($"Error disposing connection for node {node.NodeIP}: {ex.Message}", "P2PValidatorClient.DisposeNodeConnectionSafely");
+            }
+        }
+
+        #endregion
+
+        #region Connect
+
+        /// <summary>
+        /// A2: post-connect check that the server side runs the same ConsensusVersion.
+        /// Old binaries don't implement the hub method, so the invoke fails → disconnect.
+        /// </summary>
+        private static async Task<bool> VerifyServerConsensusVersionAsync(HubConnection hubConnection, string peerIP)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(4000);
+                var serverConsVer = await hubConnection.InvokeAsync<int>("GetConsensusVersion", cts.Token);
+                if (serverConsVer != Globals.ConsensusVersion)
+                {
+                    LogUtility.Log($"Consensus version mismatch with {peerIP}: server={serverConsVer}, local={Globals.ConsensusVersion}. Disconnecting.", "P2PValidatorClient");
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"Consensus version check failed for {peerIP} (old binary?): {ex.Message}. Disconnecting.", "P2PValidatorClient");
+                return false;
+            }
+        }
+
+        private static ConcurrentDictionary<string, bool> ConnectLock = new ConcurrentDictionary<string, bool>();
+        private static async Task Connect(Peers peer)
+        {
+            var url = "http://" + peer.PeerIP.Replace("::ffff:", "") + ":" + Globals.ValPort + "/consensus";
+            try
+            {
+                if (!ConnectLock.TryAdd(url, true))
+                    return;
+
+                var account = AccountData.GetLocalValidator();
+                var validators = Validators.Validator.GetAll();
+                var validator = validators.FindOne(x => x.Address == account.Address);
+                if (validator == null)
+                    return;
+
+                var time = TimeUtil.GetTime().ToString();
+                var nonce = GenerateSecureNonce();
+                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey + ":" + nonce);
+
+                var hubConnection = new HubConnectionBuilder()
+                    .WithUrl(url, options =>
+                    {
+                        options.Headers.Add("address", validator.Address);
+                        options.Headers.Add("time", time);
+                        options.Headers.Add("uName", validator.UniqueName);
+                        options.Headers.Add("signature", signature);
+                        options.Headers.Add("walver", Globals.CLIVersion);
+                        options.Headers.Add("consver", Globals.ConsensusVersion.ToString());
+                        options.Headers.Add("publicKey", account.PublicKey);
+                        options.Headers.Add("nonce", nonce);
+                        // Try both WebSockets and LongPolling
+                        options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
+                        options.SkipNegotiation = false;
+                        // Increase timeouts
+                        options.CloseTimeout = TimeSpan.FromSeconds(15);
+                        options.WebSocketConfiguration = conf => {
+                            conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
+                        };
+                    })
+                    .Build();
+
+                var IPAddress = GetPathUtility.IPFromURL(url);
+                hubConnection.On<string, string>("GetValMessage", async (message, data) =>
+                {
+                    _ = ValidatorNode.ProcessData(message, data, IPAddress);
+                });
+
+                await hubConnection.StartAsync(new CancellationTokenSource(8000).Token);
+                if (hubConnection.ConnectionId == null)
+                {
+                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    peer.FailCount += 1;
+                    if (peer.FailCount > 600)
+                        peer.IsOutgoing = false;
+                    Peers.GetAll()?.UpdateSafe(peer);
+                    return;
+                }
+
+                // A2: verify the SERVER's consensus version (headers only authenticate us to them).
+                if (!await VerifyServerConsensusVersionAsync(hubConnection, IPAddress))
+                {
+                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    try { await hubConnection.DisposeAsync(); } catch { }
+                    return;
+                }
+
+                var node = new NodeInfo
+                {
+                    Connection = hubConnection,
+                    NodeIP = IPAddress,
+                    NodeHeight = 0,
+                    NodeLastChecked = null,
+                    NodeLatency = 0,
+                    IsSendingBlock = 0,
+                    SendingBlockTime = 0,
+                    TotalDataSent = 0
+                };
+                (node.NodeHeight, node.NodeLastChecked, node.NodeLatency) = await GetNodeHeight(hubConnection);
+
+                node.IsValidator = await GetValidatorStatus(node.Connection);
+                var walletVersion = await GetWalletVersion(node.Connection);
+
+                if (walletVersion != null)
+                {
+                    // HAL-12 Fix: Use safe wallet version processing to prevent ArgumentOutOfRangeException
+                    var safeVersion = GetSafeWalletVersionPrefix(walletVersion);
+                    peer.WalletVersion = safeVersion;
+                    node.WalletVersion = safeVersion;
+
+                    Globals.ValidatorNodes.TryAdd(IPAddress, node);
+
+                    if (Globals.ValidatorNodes.TryGetValue(IPAddress, out var currentNode))
+                    {
+                        currentNode.Connection = hubConnection;
+                        currentNode.NodeIP = IPAddress;
+                        currentNode.NodeHeight = node.NodeHeight;
+                        currentNode.NodeLastChecked = node.NodeLastChecked;
+                        currentNode.NodeLatency = node.NodeLatency;
+                    }
+
+                    ConsoleWriterService.OutputSameLine($"Connected to Validators {Globals.ValidatorNodes.Count}/{Globals.MaxValPeers}");
+                    peer.IsOutgoing = true;
+                    peer.FailCount = 0; //peer responded. Reset fail count
+                    Peers.GetAll()?.UpdateSafe(peer);
+                }
+                else
+                {
+                    peer.WalletVersion = "2.1";
+                    Peers.GetAll()?.UpdateSafe(peer);
+                    //not on latest version. Disconnecting
+                    await node.Connection.DisposeAsync();
+                }                                
+            }
+            catch (Exception ex)
+            {
+                peer.FailCount += 1;
+
+                // Throttle logging for high-fail-count peers to reduce log noise
+                if (peer.FailCount <= FAIL_LOG_THROTTLE_AFTER || peer.FailCount % FAIL_LOG_THROTTLE_INTERVAL == 0)
+                {
+                    LogUtility.Log(
+                        $"CONNECT-FAIL: Validator connection to {peer.PeerIP} failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                        "P2PValidatorClient.Connect");
+                }
+
+                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+
+                if (peer.FailCount > 600)
+                    peer.IsOutgoing = false;
+
+                // Demote peers that have been unreachable for a very long time
+                if (peer.FailCount >= FAIL_COUNT_DEMOTION_THRESHOLD)
+                {
+                    peer.IsValidator = false;
+                    LogUtility.Log(
+                        $"PEER-DEMOTED: Demoting {peer.PeerIP} from validator status after {peer.FailCount} consecutive failures. " +
+                        $"Will be re-enabled if a fresh on-chain heartbeat is detected.",
+                        "P2PValidatorClient.Connect");
+                }
+
+                Peers.GetAll()?.UpdateSafe(peer);
+            }
+            finally
+            {
+                ConnectLock.TryRemove(url, out _);
+            }
+        }
+
+        #endregion
+
+
+        #region Connect to Validators
+        public static async Task<bool> ConnectToValidators()
+        {
+            await NodeConnector.StartNodeConnecting(); //TODO: update this for validator peers!
+            var peerDB = Peers.GetAll();
+
+            await DropDisconnectedValidator();
+
+            //Force unban quicker
+            await BanService.RunUnban();
+
+            var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+            var connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
+
+            foreach (var validator in connectedNodes)
+            {
+                SkipIPs.Add(validator.NodeIP);
+            }
+
+            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
+            {
+                SkipIPs.Add("40.160.225.225");
+            }
+
+            Random rnd = new Random();
+            // Filter out peers with excessive failures — they'll be rehabilitated when
+            // PopulateValidatorPeersFromBlocks detects a fresh on-chain heartbeat.
+            var newPeers = peerDB.Find(x => x.IsValidator).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP) && x.FailCount < MAX_FAIL_COUNT_FOR_CONNECT)
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .ThenBy(x => x.FailCount)
+                .ToArray();
+
+            if(!newPeers.Any())
+            {
+                //clear out skipped peers to try again
+                Globals.SkipValPeers.Clear();
+
+                SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+                connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
+
+                foreach (var validator in connectedNodes)
+                {
+                    SkipIPs.Add(validator.NodeIP);
+                }
+
+                // Still respect FailCount ceiling even after clearing SkipValPeers
+                newPeers = peerDB.Find(x => x.IsValidator).ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP) && x.FailCount < MAX_FAIL_COUNT_FOR_CONNECT)
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .ThenBy(x => x.FailCount)
+                .ToArray();
+            }
+
+            var Diff = Globals.MaxValPeers - Globals.ValidatorNodes.Count;
+            newPeers.Take(Diff).ToArray().ParallelLoop(peer =>
+            {
+                _ = Connect(peer);
+            });
+
+            return Globals.MaxValPeers != 0;         
+        }
+
+        public static async Task ManualConnectToVal(Peers peer)
+        {
+            _ = Connect(peer);
+        }
+
+        #endregion
+
+        #region Disconnect Validators
+        public static async Task DisconnectValidators()
+        {
+            try
+            {
+                Globals.ValidatorAddress = "";
+                Globals.ValidatorPublicKey = "";
+                foreach (var node in Globals.ValidatorNodes.Values)
+                    if (node.Connection != null)
+                        await node.Connection.DisposeAsync();
+
+                foreach (var caster in Globals.BlockCasterNodes.Values)
+                    if (caster.Connection != null)
+                        await caster.Connection.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                ValidatorLogUtility.Log("Failed! Did not disconnect from Adjudicator: Reason - " + ex.ToString(), "DisconnectAdjudicator()");
+            }
+        }
+
+
+        #endregion
+
+        #region Connect to Blockcaster
+
+        public static async Task<bool> ConnectToBlockcaster()
+        {
+            await NodeConnector.StartNodeConnecting(); //TODO: update this for validator peers!
+            var peerDB = Peers.GetAll();
+
+            await DropDisconnectedBlockcaster();
+
+            //Force unban quicker
+            await BanService.RunUnban();
+
+            var SkipIPs = new HashSet<string>(Globals.BlockCasterNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+            var connectedNodes = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).ToArray();
+
+            foreach (var validator in connectedNodes)
+            {
+                SkipIPs.Add(validator.NodeIP);
+            }
+
+            if (Globals.ValidatorAddress == "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC")
+            {
+                SkipIPs.Add("40.160.225.225");
+            }
+
+            Random rnd = new Random();
+            var newPeers = Globals.BlockCasters.ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .ThenBy(x => x.FailCount)
+                .ToArray();
+
+            if (!newPeers.Any())
+            {
+                //clear out skipped peers to try again
+                Globals.SkipValPeers.Clear();
+
+                SkipIPs = new HashSet<string>(Globals.BlockCasterNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
+                .Union(Globals.BannedIPs.Keys)
+                .Union(Globals.SkipValPeers.Keys)
+                .Union(Globals.ReportedIPs.Keys));
+
+                connectedNodes = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).ToArray();
+
+                foreach (var validator in connectedNodes)
+                {
+                    SkipIPs.Add(validator.NodeIP);
+                }
+
+                newPeers = Globals.BlockCasters.ToArray()
+                .Where(x => !SkipIPs.Contains(x.PeerIP))
+                .ToArray()
+                .OrderBy(x => rnd.Next())
+                .ThenBy(x => x.FailCount)
+                .ToArray();
+            }
+
+            var Diff = Globals.MaxBlockCasterPeers - Globals.BlockCasterNodes.Count;
+            newPeers.Take(Diff).ToArray().ParallelTwoLoop(peer =>
+            {
+                _ = ConnectBlockcaster(peer);
+            });
+
+            return Globals.MaxValPeers != 0;
+        }
+
+        private static ConcurrentDictionary<string, bool> ConnectBlockcasterLock = new ConcurrentDictionary<string, bool>();
+        public static async Task ConnectBlockcaster(Peers peer)
+        {
+            var url = "http://" + peer.PeerIP.Replace("::ffff:", "") + ":" + Globals.ValPort + "/blockcaster";
+            try
+            {
+                if (!ConnectBlockcasterLock.TryAdd(url, true))
+                    return;
+
+                var account = AccountData.GetLocalValidator();
+                var validators = Validators.Validator.GetAll();
+                var validator = validators.FindOne(x => x.Address == account.Address);
+                if (validator == null)
+                    return;
+
+                var time = TimeUtil.GetTime().ToString();
+                var nonce = GenerateSecureNonce();
+                var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey + ":" + nonce);
+
+                var hubConnection = new HubConnectionBuilder()
+                    .WithUrl(url, options =>
+                    {
+                        options.Headers.Add("address", validator.Address);
+                        options.Headers.Add("time", time);
+                        options.Headers.Add("uName", validator.UniqueName);
+                        options.Headers.Add("signature", signature);
+                        options.Headers.Add("walver", Globals.CLIVersion);
+                        options.Headers.Add("consver", Globals.ConsensusVersion.ToString());
+                        options.Headers.Add("publicKey", account.PublicKey);
+                        options.Headers.Add("nonce", nonce);
+                        options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
+                        options.SkipNegotiation = false;
+                        options.WebSocketConfiguration = conf => {
+                            conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
+                        };
+                    })
+                    .Build();
+
+                var IPAddress = GetPathUtility.IPFromURL(url);
+                hubConnection.On<string, string>("GetCasterMessage", async (message, data) =>
+                {
+                    _ = BlockcasterNode.ProcessData(message, data, IPAddress);
+                });
+
+                await hubConnection.StartAsync(new CancellationTokenSource(8000).Token);
+                if (hubConnection.ConnectionId == null)
+                {
+                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    peer.FailCount += 1;
+                    if (peer.FailCount > 600)
+                        peer.IsOutgoing = false;
+                    Peers.GetAll()?.UpdateSafe(peer);
+                    return;
+                }
+
+                // A2: verify the SERVER's consensus version (headers only authenticate us to them).
+                if (!await VerifyServerConsensusVersionAsync(hubConnection, IPAddress))
+                {
+                    Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    try { await hubConnection.DisposeAsync(); } catch { }
+                    return;
+                }
+
+                var node = new NodeInfo
+                {
+                    Connection = hubConnection,
+                    NodeIP = IPAddress,
+                    NodeHeight = 0,
+                    NodeLastChecked = null,
+                    NodeLatency = 0,
+                    IsSendingBlock = 0,
+                    SendingBlockTime = 0,
+                    TotalDataSent = 0
+                };
+                (node.NodeHeight, node.NodeLastChecked, node.NodeLatency) = await GetNodeHeight(hubConnection);
+
+                node.IsValidator = await GetValidatorStatus(node.Connection);
+                var walletVersion = await GetWalletVersion(node.Connection);
+
+                if (walletVersion != null)
+                {
+                    // HAL-12 Fix: Use safe wallet version processing to prevent ArgumentOutOfRangeException
+                    var safeVersion = GetSafeWalletVersionPrefix(walletVersion);
+                    peer.WalletVersion = safeVersion;
+                    node.WalletVersion = safeVersion;
+
+                    Globals.BlockCasterNodes.TryAdd(IPAddress, node);
+
+                    if (Globals.BlockCasterNodes.TryGetValue(IPAddress, out var currentNode))
+                    {
+                        currentNode.Connection = hubConnection;
+                        currentNode.NodeIP = IPAddress;
+                        currentNode.NodeHeight = node.NodeHeight;
+                        currentNode.NodeLastChecked = node.NodeLastChecked;
+                        currentNode.NodeLatency = node.NodeLatency;
+                    }
+
+                    ConsoleWriterService.OutputSameLine($"Connected to Block Casters {Globals.BlockCasterNodes.Count}/{Globals.MaxBlockCasterPeers}");
+                    peer.IsOutgoing = true;
+                    peer.FailCount = 0; //peer responded. Reset fail count
+                    Peers.GetAll()?.UpdateSafe(peer);
+                }
+                else
+                {
+                    peer.WalletVersion = "2.1";
+                    Peers.GetAll()?.UpdateSafe(peer);
+                    //not on latest version. Disconnecting
+                    await node.Connection.DisposeAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                peer.FailCount += 1;
+
+                // Throttle logging for high-fail-count peers to reduce log noise
+                if (peer.FailCount <= FAIL_LOG_THROTTLE_AFTER || peer.FailCount % FAIL_LOG_THROTTLE_INTERVAL == 0)
+                {
+                    LogUtility.Log(
+                        $"CONNECT-CASTER-FAIL: Blockcaster connection to {peer.PeerIP} ({url}) failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                        "P2PValidatorClient.ConnectBlockcaster");
+                }
+
+                Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+
+                if (peer.FailCount > 600)
+                    peer.IsOutgoing = false;
+
+                // Demote peers that have been unreachable for a very long time
+                if (peer.FailCount >= FAIL_COUNT_DEMOTION_THRESHOLD)
+                {
+                    peer.IsValidator = false;
+                    LogUtility.Log(
+                        $"PEER-DEMOTED: Demoting caster {peer.PeerIP} from validator status after {peer.FailCount} consecutive failures. " +
+                        $"Will be re-enabled if a fresh on-chain heartbeat is detected.",
+                        "P2PValidatorClient.ConnectBlockcaster");
+                }
+
+                Peers.GetAll()?.UpdateSafe(peer);
+            }
+            finally
+            {
+                ConnectBlockcasterLock.TryRemove(url, out _);
+            }
+        }
+
+        #endregion
+
+        #region Get Height of Nodes for Timed Events
+
+        public static async Task<(long, DateTime, int)> GetNodeHeight(HubConnection conn)
+        {
+            try
+            {
+                var startTimer = DateTime.UtcNow;
+                var source = new CancellationTokenSource(10000);
+                long remoteNodeHeight = await conn.InvokeAsync<long>("SendBlockHeightForVals", source.Token);
+                var endTimer = DateTime.UtcNow;
+                var totalMS = (endTimer - startTimer).Milliseconds;
+
+                return (remoteNodeHeight, startTimer, totalMS); 
+            }
+            catch { }
+            return (-1, DateTime.UtcNow, 0);
+        }
+
+        public static async Task UpdateMethodCodes()
+        {
+            if (Globals.AdjudicateAccount == null)
+                return;
+            var Address = Globals.AdjudicateAccount.Address;
+            var Height = -1L;
+            while (true)
+            {
+                if (Height != Globals.LastBlock.Height)
+                {
+                    Height = Globals.LastBlock.Height;
+
+                    Globals.ValidatorNodes.Values.ToArray().ParallelLoop(node =>
+                    {
+                        if (node.Address != Address && !UpdateMethodCodeAddresses.ContainsKey(node.NodeIP))
+                        {
+                            UpdateMethodCodeAddresses[node.NodeIP] = true;
+                            _ = UpdateMethodCode(node);
+                        }
+                    });
+                }
+
+                await Task.Delay(1000);
+            }
+        }
+
+        private static ConcurrentDictionary<string, bool> UpdateMethodCodeAddresses = new ConcurrentDictionary<string, bool>();
+
+        private static async Task UpdateMethodCode(NodeInfo node)
+        {
+            while (true)
+            {                
+                try
+                {
+                    if (!node.IsConnected)
+                    {
+                        await Task.Delay(20);
+                        continue;
+                    }
+                    
+                    var Now = TimeUtil.GetMillisecondTime();
+                    var Diff = 1000 - (int)(Now - node.LastMethodCodeTime);
+                    if (Diff > 0)
+                    {
+                        await Task.Delay(Diff);
+                        continue;
+                    }
+
+                    var state = ConsensusServer.GetState();
+                    var Response = await node.Connection.InvokeCoreAsync<string>("RequestMethodCode",
+                        new object[] { Globals.LastBlock.Height, state.MethodCode, state.Status == ConsensusStatus.Finalized },
+                        new CancellationTokenSource(10000).Token);                         
+
+                    if (Response != null)
+                    {
+                        // HAL-10 Fix: Handle new signed response format or legacy format
+                        var responseParts = Response.Split('|');
+                        
+                        string consensusData;
+                        bool isSignedResponse = responseParts.Length == 4; // consensusData|timestamp|nonce|signature
+                        
+                        if (isSignedResponse)
+                        {
+                            // New signed format: consensusData|timestamp|nonce|signature
+                            consensusData = responseParts[0];
+                            var timestamp = responseParts[1];
+                            var nonce = responseParts[2];
+                            var signature = responseParts[3];
+
+                            // Verify signature for enhanced security
+                            if (signature != "unsigned" && signature != "error")
+                            {
+                                var messageToVerify = $"{consensusData}|{timestamp}|{nonce}";
+                                
+                                // Verify signature using the node's address (if available)
+                                bool signatureValid = false;
+                                try
+                                {
+                                    if (!string.IsNullOrEmpty(node.Address))
+                                    {
+                                        signatureValid = SignatureService.VerifySignature(node.Address, messageToVerify, signature);
+                                    }
+                                    else
+                                    {
+                                        // If no node address available, accept response but log it
+                                        signatureValid = true;
+                                        ErrorLogUtility.LogError($"No node address available for signature verification from {node.NodeIP}", "UpdateMethodCode");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    ErrorLogUtility.LogError($"Signature verification failed for {node.NodeIP}: {ex.Message}", "UpdateMethodCode");
+                                    signatureValid = false;
+                                }
+
+                                if (!signatureValid)
+                                {
+                                    ErrorLogUtility.LogError($"Invalid signature in consensus response from {node.NodeIP}", "UpdateMethodCode");
+                                    continue; // Skip this response
+                                }
+                            }
+
+                            // Validate timestamp freshness (within reasonable window)
+                            if (long.TryParse(timestamp, out var responseTimestamp))
+                            {
+                                var currentTime = TimeUtil.GetTime();
+                                var timeDiff = Math.Abs(currentTime - responseTimestamp);
+                                
+                                if (timeDiff > 30) // 30 second window for consensus coordination
+                                {
+                                    ErrorLogUtility.LogError($"Consensus response timestamp too old from {node.NodeIP}. Diff: {timeDiff}s", "UpdateMethodCode");
+                                    continue;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Legacy format: height:methodCode:isFinalized
+                            consensusData = Response;
+                        }
+
+                        // Parse consensus data (height:methodCode:isFinalized)
+                        var remoteMethodCode = consensusData.Split(':');
+                        
+                        // Validate we have exactly 3 parts before accessing array
+                        if (remoteMethodCode.Length != 3)
+                        {
+                            ErrorLogUtility.LogError($"Invalid consensus data format from {node.NodeIP}. Expected 3 parts, got {remoteMethodCode.Length}: {consensusData}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Use safe parsing with bounds validation
+                        if (!long.TryParse(remoteMethodCode[0], out var nodeHeight))
+                        {
+                            ErrorLogUtility.LogError($"Invalid height value from {node.NodeIP}: {remoteMethodCode[0]}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        if (!int.TryParse(remoteMethodCode[1], out var methodCode))
+                        {
+                            ErrorLogUtility.LogError($"Invalid method code from {node.NodeIP}: {remoteMethodCode[1]}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Validate reasonable bounds for height and method code
+                        if (nodeHeight < 0 || nodeHeight > long.MaxValue - 1000000) // Reasonable upper bound
+                        {
+                            ErrorLogUtility.LogError($"Height value out of bounds from {node.NodeIP}: {nodeHeight}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        if (methodCode < 0 || methodCode > 1000) // Reasonable method code range
+                        {
+                            ErrorLogUtility.LogError($"Method code out of bounds from {node.NodeIP}: {methodCode}", "UpdateMethodCode");
+                            continue;
+                        }
+
+                        // Parse finalized flag (only "1" is true, everything else is false)
+                        var isFinalized = remoteMethodCode[2] == "1";
+
+                        if (Now > node.LastMethodCodeTime)
+                        {
+                            lock (ConsensusServer.UpdateNodeLock)
+                            {
+                                node.LastMethodCodeTime = Now;
+                                node.NodeHeight = nodeHeight;
+                                node.MethodCode = methodCode;
+                                node.IsFinalized = isFinalized;
+                            }
+
+                            ConsensusServer.RemoveStaleCache(node);
+                        }
+                    }
+                }
+                catch (OperationCanceledException ex)
+                { 
+                    // Connection timeout - log with limited frequency to prevent log flooding
+                    if (TimeUtil.GetMillisecondTime() - node.LastMethodCodeTime > 30000) // Log only every 30 seconds
+                    {
+                        ErrorLogUtility.LogError($"Connection timeout to {node.NodeIP} in UpdateMethodCode", "UpdateMethodCode");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Unexpected error updating method code for {node.NodeIP}: {ex.Message}", "UpdateMethodCode");
+                }
+
+                await Task.Delay(20);
+            }
+        }
+
+        public static async Task UpdateNodeHeights()
+        {
+            foreach (var node in Globals.ValidatorNodes.Values)
+                (node.NodeHeight, node.NodeLastChecked, node.NodeLatency) = await GetNodeHeight(node.Connection);
+
+            if(Globals.BlockCasterNodes.Any())
+            {
+                foreach (var node in Globals.BlockCasterNodes.Values)
+                    (node.NodeHeight, node.NodeLastChecked, node.NodeLatency) = await GetNodeHeight(node.Connection);
+            }
+        }
+
+        #endregion
+
+        #region Get Current Height of Nodes
+        public static async Task<(bool, long)> GetCurrentHeight()
+        {
+            bool newHeightFound = false;
+            long height = -1;
+
+            while (!await AreValidatorsConnected())
+                await Task.Delay(20);
+
+            var myHeight = Globals.LastBlock.Height;
+            await UpdateNodeHeights();
+
+            foreach (var node in Globals.ValidatorNodes.Values)
+            {
+                var remoteNodeHeight = node.NodeHeight;
+                if (myHeight < remoteNodeHeight)
+                {
+                    newHeightFound = true;
+                    if (remoteNodeHeight > height)
+                    {
+                        height = remoteNodeHeight > height ? remoteNodeHeight : height;
+                    }
+                }
+            }
+
+            return (newHeightFound, height);
+        }
+
+        #endregion
+
+        #region Send Transactions to mempool 
+        public static async Task SendTXMempool(Transaction txSend)
+        {
+            var peersConnected = await AreValidatorsConnected();
+
+            if (!peersConnected)
+            {
+                //Need peers
+                Console.WriteLine("Failed to broadcast Transaction. No peers are connected to you.");
+                LogUtility.Log("TX failed. No Peers: " + txSend.Hash, "P2PClient.SendTXMempool()");
+            }
+            else
+            {
+                try
+                {
+                    var txJson = JsonConvert.SerializeObject(txSend);
+                    _ = ValidatorNode.Broadcast("7777", txSend, "SendTxToMempoolVals");
+                }
+                catch (Exception ex)
+                {
+
+                }
+            }
+        }
+
+        #endregion
+
+        #region Broadcast Blocks to Peers
+        public static async Task BroadcastBlock(Block block, bool isQueueBlock = false)
+        {
+            var peersConnected = await AreValidatorsConnected();
+
+            if (!peersConnected)
+                return;
+
+            else
+            {
+                foreach (var node in Globals.ValidatorNodes.Values)
+                {
+                    try
+                    {
+                        var source = new CancellationTokenSource(5000);
+                        _ = node.Connection.InvokeCoreAsync<bool>("ReceiveBlockVal", new object?[] { block }, source.Token);                      
+                    }
+                    catch (Exception ex)
+                    {
+                        //possible dead connection, or node is offline
+                        Console.WriteLine("Error Sending Transaction. Please try again!");
+                    }
+                }
+            }
+        }
+        #endregion
+
+        #region Broadcast Blocks to Peers
+        public static async Task FailedToReachConsensus(List<string> failedProducers)
+        {
+            var peersConnected = await AreValidatorsConnected();
+
+            if (!peersConnected)
+                return;
+
+            else
+            {
+                foreach (var node in Globals.ValidatorNodes.Values)
+                {
+                    try
+                    {
+                        var source = new CancellationTokenSource(5000);
+                        _ = node.Connection.InvokeCoreAsync<bool>("FailedToReachConsensus", new object?[] { failedProducers }, source.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        //possible dead connection, or node is offline
+                        Console.WriteLine("Error Sending FailedToReachConsensus. Please try again!");
+                    }
+                }
+            }
+        }
+        #endregion
+
+        #region Request Active Validators
+
+        public static async Task RequestActiveValidators()
+        {
+            bool waitForVals = true;
+            while (waitForVals)
+            {
+                var delay = Task.Delay(new TimeSpan(0, 0, 5));
+                var valNodeListCheck = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+                if (valNodeListCheck.Count() == 0)
+                {
+                    await delay;
+                    continue;
+                }
+
+                var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+                foreach (var validator in valNodeList)
+                {
+                    try
+                    {
+                        var source = new CancellationTokenSource(2000);
+                        string activeValJson = await validator.Connection.InvokeAsync<string>("SendActiveVals", source.Token);
+
+                        if (activeValJson != null && activeValJson != "0")
+                        {
+                            var activeVals = JsonConvert.DeserializeObject<List<NetworkValidator>>(activeValJson.ToDecompress().ToStringFromBase64());
+                            if (activeVals != null)
+                            {
+                                var peerDB = Peers.GetAll();
+                                var advertisingPeerIP = validator.NodeIP;
+
+                                // HAL-11 Fix: Enhanced validation with rate limiting and cross-verification
+                                LogUtility.Log($"Processing {activeVals.Count} validator advertisements from peer {advertisingPeerIP}", "RequestActiveValidators");
+
+                                int addedCount = 0;
+                                int failedCount = 0;
+                                int skippedCount = 0;
+
+                                foreach (var val in activeVals)
+                                {
+                                    try
+                                    {
+                                        // HAL-11 Fix: Enhanced validation with timestamp and nonce validation
+                                        if (string.IsNullOrEmpty(val.Address) || string.IsNullOrEmpty(val.IPAddress))
+                                        {
+                                            ErrorLogUtility.LogError($"Invalid validator entry from {advertisingPeerIP}: missing address or IP", "RequestActiveValidators");
+                                            skippedCount++;
+                                            continue;
+                                        }
+
+                                        // FIX: Always refresh advertisement timestamp when receiving validator lists
+                                        // from peers. The original timestamp was set when the validator first registered
+                                        // and becomes stale (>300s) by the time new nodes request the list, causing
+                                        // AddValidatorToPool to reject them as "timestamp too old".
+                                        val.AdvertisementTimestamp = TimeUtil.GetTime();
+
+                                        if (string.IsNullOrEmpty(val.AdvertisementNonce))
+                                        {
+                                            val.AdvertisementNonce = GenerateSecureNonce();
+                                        }
+
+                                        // HAL-11 Fix: Pass advertising peer IP for rate limiting and source tracking
+                                        var addResult = await NetworkValidator.AddValidatorToPool(val, advertisingPeerIP);
+
+                                        if (!addResult)
+                                        {
+                                            ErrorLogUtility.LogError($"Failed to add validator {val.Address} from peer {advertisingPeerIP}", "RequestActiveValidators");
+                                            failedCount++;
+                                            continue;
+                                        }
+
+                                        addedCount++;
+
+                                        // HAL-11 Fix: Only update peer database for fully trusted validators
+                                        if (val.IsFullyTrusted)
+                                        {
+                                            var singleVal = peerDB.FindOne(x => x.PeerIP == val.IPAddress);
+                                            if (singleVal != null)
+                                            {
+                                                singleVal.IsValidator = true;
+
+                                                if(singleVal.ValidatorAddress == null)
+                                                    singleVal.ValidatorAddress = val.Address;
+
+                                                if(singleVal.ValidatorPublicKey == null)
+                                                    singleVal.ValidatorPublicKey = val.PublicKey;
+
+                                                peerDB.UpdateSafe(singleVal);
+                                            }
+                                            else
+                                            {
+                                                Peers nPeer = new Peers
+                                                {
+                                                    IsIncoming = false,
+                                                    IsOutgoing = true,
+                                                    PeerIP = val.IPAddress,
+                                                    FailCount = 0,
+                                                    IsValidator = true,
+                                                    ValidatorAddress = val.Address,
+                                                    ValidatorPublicKey = val.PublicKey,
+                                                    WalletVersion = Globals.CLIVersion,
+                                                };
+
+                                                peerDB.InsertSafe(nPeer);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            LogUtility.Log($"Validator {val.Address} added to pending validation, not updating peer database yet", "RequestActiveValidators");
+                                        }
+                                    }
+                                    catch (Exception valEx)
+                                    {
+                                        ErrorLogUtility.LogError($"Error processing validator {val?.Address} from {advertisingPeerIP}: {valEx.Message}", "RequestActiveValidators");
+                                    }
+                                }
+
+                                LogUtility.Log($"Completed processing validator advertisements from peer {advertisingPeerIP}: added={addedCount}, failed={failedCount}, skipped={skippedCount}, NetworkValidators.Count={Globals.NetworkValidators.Count}, BlockCasters.Count={Globals.BlockCasters.Count}", "RequestActiveValidators");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Error requesting active validators from {validator.NodeIP}: {ex.Message}", "RequestActiveValidators");
+                    }
+                }
+
+                waitForVals = false;
+            }
+
+            // HAL-11 Fix: Cleanup stale pending validators after processing
+            NetworkValidator.CleanupStaleValidators();
+        }
+
+        #endregion
+
+        #region Request a Queued Block
+        public static async Task RequestQueuedBlock(long height)
+        {
+            var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+            if (valNodeList.Count() == 0)
+            {
+                return;
+            }
+
+            foreach (var val in valNodeList)
+            {
+                try
+                {
+                    var source = new CancellationTokenSource(2000);
+                    var qBlock = await val.Connection.InvokeCoreAsync<Block>("SendQueuedBlock", args: new object?[] { height }, source.Token);
+                    if (qBlock != null)
+                    {
+                        var result = await BlockValidatorService.ValidateBlock(qBlock, false, false, true);
+                        
+                        if(result)
+                        {
+                            if (Globals.NetworkBlockQueue.TryAdd(qBlock.Height, qBlock))
+                            {
+                                _ = BroadcastBlock(qBlock, true);
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch(Exception ex) { }
+            }
+        }
+        #endregion
+
+        #region Get Validator Status
+        private static async Task<bool> GetValidatorStatus(HubConnection hubConnection)
+        {
+            var result = false;
+            try
+            {
+                result = await hubConnection.InvokeAsync<bool>("GetValidatorStatus");
+            }
+            catch { }
+
+            return result;
+        }
+
+        #endregion
+
+        #region Get Node Wallet Version
+        private static async Task<string?> GetWalletVersion(HubConnection hubConnection)
+        {
+            try
+            {
+                var result = await hubConnection.InvokeAsync<string>("GetWalletVersion");
+                if (result != null)
+                    return result;
+            }
+            catch { }
+
+            return null;
+        }
+
+        #endregion
+
+        #region Request Current Winner List
+        public static async Task RequestCurrentWinners()
+        {
+            var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+            if (valNodeList.Count() == 0)
+            {
+                return;
+            }
+
+            foreach (var val in valNodeList)
+            {
+                try
+                {
+                    var source = new CancellationTokenSource(2000);
+                    var winnerProofList = await val.Connection.InvokeAsync<string>("GetWinningProofList", source.Token);
+                    if (winnerProofList != null)
+                    {
+                        if (winnerProofList != "0")
+                        {
+                            var proofList = JsonConvert.DeserializeObject<List<Proof>>(winnerProofList);
+                            if (proofList != null)
+                                await ProofUtility.SortProofs(proofList, true);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        #endregion
+
+        #region Send Current Winner List
+
+        public static async Task<string> SendCurrentWinners()
+        {
+            try
+            {
+                var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+                if (valNodeList.Count() == 0)
+                {
+                    return "0";
+                }
+
+                List<Proof> winningProofs = new List<Proof>();
+                for (int i = 1; i < 5; i++)
+                {
+                    var nextBlock = Globals.LastBlock.Height + i;
+                    if (!Globals.FinalizedWinner.TryGetValue(nextBlock, out _))
+                    {
+                        if (Globals.WinningProofs.TryGetValue(nextBlock, out var proof))
+                        {
+                            winningProofs.Add(proof);
+                        }
+                    }
+                }
+
+                var proofsJson = JsonConvert.SerializeObject(winningProofs);
+
+                foreach (var val in valNodeList)
+                {
+                    try
+                    {
+                        var source = new CancellationTokenSource(2000);
+                        _ = val.Connection.InvokeCoreAsync("SendWinningProofList", args: new object?[] { proofsJson }, source.Token);
+                    }
+                    catch (Exception ex) { }
+                }
+
+                return proofsJson;
+            }
+            catch
+            { }
+
+            return "0";
+        }
+
+        #endregion
+
+        #region Request Finalized Winner List
+        public static async Task RequestFinalizedWinners()
+        {
+            var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+            if (valNodeList.Count() == 0)
+            {
+                return;
+            }
+
+            foreach (var val in valNodeList)
+            {
+                try
+                {
+                    var source = new CancellationTokenSource(2000);
+                    var finalizedWinnerList = await val.Connection.InvokeAsync<string>("GetFinalizedWinnersList", source.Token);
+                    if (finalizedWinnerList != null)
+                    {
+                        if (finalizedWinnerList != "0")
+                        {
+                            var fList = JsonConvert.DeserializeObject<ConcurrentDictionary<long, string>>(finalizedWinnerList);
+                            if (fList != null)
+                                Globals.FinalizedWinner = fList;
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        #endregion
+
+        #region Request Locked Winner
+        public static async Task<Dictionary<string, int>> RequestLockedWinner(long height)
+        {
+            Dictionary<string, int> LockedWinnerDict = new Dictionary<string, int>();
+            var valNodeList = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToList();
+
+            if (valNodeList.Count() == 0)
+            {
+                return LockedWinnerDict;
+            }
+
+            foreach (var val in valNodeList)
+            {
+                try
+                {
+                    var source = new CancellationTokenSource(2000);
+                    var lockedWinner = await val.Connection.InvokeCoreAsync<string>("SendLockedWinner", args: new object?[] { height }, source.Token);
+                    if (lockedWinner != null)
+                    {
+                        if (lockedWinner != "0")
+                        {
+                            if(LockedWinnerDict.ContainsKey(lockedWinner))
+                            {
+                                LockedWinnerDict[lockedWinner]++;
+                            }
+                            else
+                            {
+                                LockedWinnerDict.Add(lockedWinner, 1);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return LockedWinnerDict;
+        }
+
+        #endregion
+    }
+}
