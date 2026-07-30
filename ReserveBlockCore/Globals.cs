@@ -399,11 +399,26 @@ namespace ReserveBlockCore
         /// loop stops entering rounds immediately and the node winds down toward shutdown.</summary>
         public static bool IsDeparting = false;
 
+        /// <summary>Wave 5: state-driven producer readiness. False while this node is recovering
+        /// (resync, fork recovery/reorg, snapshot restore, state probation, or unsynced) so
+        /// casters exclude it from winner selection — no timers, clears itself when recovery
+        /// completes. Round-retry + shared exclusion remain the backstop for mid-round failures.</summary>
+        public static bool ProducerReady =>
+            !IsResyncing
+            && IsChainSynced
+            && !IsDeparting
+            && !Utilities.ForkRecoveryUtility.IsRecoveryInProgress
+            && !Utilities.SnapshotRestoreUtility.IsRestoreRunning
+            && !Services.BlockValidatorService.GetProbationStatus().Active;
+
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>
         public static bool IsBootstrapMode => IsLocalBootstrapCaster && IsChainStalledForBootstrap && Services.BootstrapCoordinationService.AgreementActive;
 
-        /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/> (when not bootstrap). Edit the initializer here only — not loaded from config.txt.</summary>
+        /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/>.
+        /// Wave 6: armed automatically from the genesis membership record's EffectiveFromHeight
+        /// (CasterMembershipStore.TryArmFromGenesis) — NOT hand-edited. long.MaxValue until a
+        /// genesis record is minted at the coordinated restart, so historical blocks stay valid.</summary>
         public static long CertEnforceHeight = long.MaxValue;
 
         /// <summary>Strict consensus-compatibility version exchanged in the validator/blockcaster handshakes.
@@ -411,10 +426,10 @@ namespace ReserveBlockCore
         /// consensus connections. Changes only with a coordinated network release.</summary>
         public static int ConsensusVersion = 1;
 
-        /// <summary>Height boundary of the coordinated full-network restart. Phase B's genesis membership
-        /// record EffectiveFromHeight and Phase C's CertEnforceHeight are both set to this at cutover.
-        /// Ships as long.MaxValue (inactive) until the cutover release. Edit the initializer here only.</summary>
-        public static long ConsensusRestartHeight = long.MaxValue;
+        // Wave 6: the restart boundary is no longer a compile-time constant. It is the genesis
+        // membership record's EffectiveFromHeight — minted by the seeds at the coordinated
+        // restart's bootstrap agreement and adopted by every node via the signed record chain.
+        // CertEnforceHeight (above) is armed from it by CasterMembershipStore.TryArmFromGenesis.
         public static long LastProofBlockheight = 0;
         public static ConcurrentDictionary<string, int> ReportedIPs = new ConcurrentDictionary<string, int>();
         public static ConcurrentDictionary<string, Peers> BannedIPs;

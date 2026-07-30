@@ -16,10 +16,56 @@ namespace ReserveBlockCore.Services
                 .Distinct(StringComparer.Ordinal)
                 .Count();
 
+        /// <summary>
+        /// Wave 3: height-aware quorum basis — the membership committee for the height when the
+        /// record era is active, else the legacy live-bag count. Attach-need and verify-need are
+        /// provably identical because both call this.
+        /// </summary>
+        public static int OperationalBlockCasterCount(long height)
+        {
+            var committee = CasterMembershipStore.GetCommitteeForHeight(height);
+            return committee != null ? committee.Count : OperationalBlockCasterCount();
+        }
+
+        /// <summary>
+        /// Wave 3: the set of addresses whose attestations COUNT for a block at this height —
+        /// the membership committee when active, else the legacy BlockCasters ∪ KnownCasters view.
+        /// Wave 4: during cooperative bootstrap the agreed seeds are always eligible attestors.
+        /// </summary>
+        public static HashSet<string> AttestorSetForHeight(long height)
+        {
+            var committee = CasterMembershipStore.GetCommitteeForHeight(height);
+            var set = committee ?? BuildCasterAddressSet();
+            if (Globals.IsBootstrapMode)
+            {
+                foreach (var seed in BootstrapCoordinationService.AgreedSeedAddresses)
+                    if (!string.IsNullOrEmpty(seed))
+                        set.Add(seed);
+            }
+            return set;
+        }
+
+        /// <summary>
+        /// Wave 4: single source of truth for how many attestations a block at this height needs.
+        /// Bootstrap: majority of the AGREED seeds, floored at 2 — the first post-restart blocks
+        /// carry ≥2 seed attestations instead of none. Normal: majority of the committee.
+        /// </summary>
+        public static int RequiredAttestationsForHeight(long height)
+        {
+            if (Globals.IsBootstrapMode)
+                return Math.Max(2, BootstrapCoordinationService.AgreedSeedCount / 2 + 1);
+            var operational = OperationalBlockCasterCount(height);
+            if (operational > 0)
+                return RequiredAttestations(operational);
+            return RequiredAttestations(AttestorSetForHeight(height).Count);
+        }
+
         /// <summary>True if certificate is not required, or present and valid (M-of-N caster ECDSA on §12.1 payload).</summary>
         public static bool VerifyOrNotRequired(Block block)
         {
-            if (Globals.IsBootstrapMode || block.Height < Globals.CertEnforceHeight || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
+            // Wave 4: bootstrap no longer skips certs — bootstrap blocks carry ≥2 seed
+            // attestations (RequiredAttestationsForHeight handles the reduced quorum).
+            if (block.Height < Globals.CertEnforceHeight || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
                 return true;
 
             var cert = block.ConsensusCertificate;
@@ -32,14 +78,13 @@ namespace ReserveBlockCore.Services
                 || ConsensusMessageFormatter.NormalizeHash(cert.PrevHash) != ConsensusMessageFormatter.NormalizeHash(block.PrevHash))
                 return false;
 
-            var casterSet = BuildCasterAddressSet();
+            // Wave 3: committee for the block's height when the record era is active; legacy view otherwise.
+            var casterSet = AttestorSetForHeight(block.Height);
             if (casterSet.Count == 0)
                 return false;
 
-            // Must match TryAttachCertificateAsync: quorum is majority of the operational caster committee (BlockCasters),
-            // not BlockCasters ∪ KnownCasters (discovery can inflate N and make collected attestations never enough).
-            var operational = OperationalBlockCasterCount();
-            var need = RequiredAttestations(operational > 0 ? operational : casterSet.Count);
+            // Wave 4: single shared need computation (matches the attach + top-up paths exactly).
+            var need = RequiredAttestationsForHeight(block.Height);
             var validSigners = new HashSet<string>(StringComparer.Ordinal);
 
             if (cert.Attestations == null)

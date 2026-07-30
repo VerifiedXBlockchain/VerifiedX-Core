@@ -1595,10 +1595,19 @@ namespace ReserveBlockCore.Services
                         && !Globals.IsResyncing
                         && !BlockRollbackUtility.IsResetTreisRunning)
                     {
-                        await StateSnapshotService.UpdateCycleAsync(block.Height, block.Hash);
+                        // Wave 5 deep anchors: coarse-cadence slots so even a deep fork restores in
+                        // minutes (never a genesis rebuild). Anchor refresh runs INSTEAD of the fine
+                        // cycle on its heights — it snapshots the same state, one copy is enough.
+                        if (block.Height % SnapshotManifest.AnchorCadence1000 == 0)
+                            await StateSnapshotService.UpdateAnchorCycleAsync(block.Height, block.Hash, SnapshotManifest.AnchorSlot1000);
+                        else if (block.Height % SnapshotManifest.AnchorCadence100 == 0)
+                            await StateSnapshotService.UpdateAnchorCycleAsync(block.Height, block.Hash, SnapshotManifest.AnchorSlot100);
+                        else
+                            await StateSnapshotService.UpdateCycleAsync(block.Height, block.Hash);
                     }
 
-                    if (!validateOnly && !blockDownloads && ConsensusCertificateRules.SupportsConsensusCertificate(block.Version) && !Globals.IsBootstrapMode)
+                    // Wave 4: publish during bootstrap too — bootstrap blocks carry seed attestations.
+                    if (!validateOnly && !blockDownloads && ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
                         _ = ConsensusAttestationPublisher.PublishLocalAsync(block);
 
                     return result;//block accepted

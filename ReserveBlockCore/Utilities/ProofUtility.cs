@@ -861,6 +861,28 @@ namespace ReserveBlockCore.Utilities
                         }
                     }
 
+                    // Wave 5 PRODUCER-READY GATE: a validator mid-recovery (fork recovery/reorg,
+                    // snapshot restore, resync, state probation) advertises ProducerReady=false —
+                    // skip it instead of wasting a round on a winner that can't produce. State-driven:
+                    // clears itself when its recovery completes. A 404 (pre-Wave-5 node) is treated
+                    // as ready; only an explicit "false" rejects.
+                    try
+                    {
+                        var prUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/ProducerReady";
+                        var prResp = await client.GetAsync(prUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
+                        if (prResp != null && prResp.IsSuccessStatusCode)
+                        {
+                            var prBody = (await prResp.Content.ReadAsStringAsync())?.Trim().Trim('"').ToLowerInvariant();
+                            if (prBody == "false")
+                            {
+                                CasterLogUtility.Log($"ProducerReadyGate: Winner {winningProof.Address} at {cleanIP} reports NOT READY (recovering). Skipping this round.", "PRODUCER-READY");
+                                ClearProofGenerationCache();
+                                return (false, null);
+                            }
+                        }
+                    }
+                    catch { /* unreachable/legacy — fall through to the block-fetch check */ }
+
                     var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/{winningProof.ProofHash}";
                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
 

@@ -1687,6 +1687,9 @@ namespace ReserveBlockCore.Services
                             await P2PValidatorClient.RemoveNode(node);
                     }
 
+                    // Wave 5: hash-based fork detection for validators (previously height-only).
+                    _ = ForkDetectionService.CheckAsync("ValidatorService.BlockHeightCheck");
+
                     //Removing for now, but might be needed for validators
                     //if(Globals.BlockCasterNodes.Any())
                     //{

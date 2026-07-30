@@ -513,11 +513,26 @@ namespace ReserveBlockCore.Services
                         continue;
                     }
 
+                    // Wave 3 RECORD-FIRST: the promotion must become a majority-signed membership
+                    // record BEFORE the live set mutates. No-op (returns true) in the legacy era.
+                    var rotationOk = await CasterMembershipService.ProposeRotationAsync(
+                        "Promotion", v.Address,
+                        new CasterInfo { Address = v.Address, PeerIP = ip, PublicKey = v.PublicKey ?? "" });
+                    if (!rotationOk)
+                    {
+                        CasterLogUtility.Log($"  <<  membership rotation FAILED for {v.Address} — promotion aborted (set unchanged).", "CasterFlow");
+                        ConsoleWriterService.OutputValCaster($"[CasterDiscovery] Promotion of {v.Address} aborted — membership record could not be signed by majority.");
+                        continue;
+                    }
+
                     // CONSENSUS-V2 (Fix #2): Atomic add via helper — re-checks Count<MaxCasters
                     // and uniqueness under _promotionLock just before mutating the bag, so two
                     // simultaneous promotion paths (e.g. local Eval + inbound promotion announce)
                     // can't blow past MaxCasters even if both passed earlier checks.
-                    if (!AddBlockCasterIfRoomAndUnique(newCaster))
+                    // Wave 3: in the record era the rotation reconcile may have already added the
+                    // caster — a "duplicate" result is success in that case.
+                    if (!AddBlockCasterIfRoomAndUnique(newCaster)
+                        && !Globals.BlockCasters.Any(x => x.ValidatorAddress == v.Address))
                     {
                         CasterLogUtility.Log($"  <<  Atomic add failed (pool full or duplicate). Skipping.", "CasterFlow");
                         continue;
@@ -827,6 +842,24 @@ namespace ReserveBlockCore.Services
 
                 if (toRemove.Count > 0)
             {
+                // Wave 3 RECORD-FIRST: each demotion must become a majority-signed membership
+                // record before the live set mutates. Rotations that fail are deferred to the
+                // next audit cycle (set stays consistent). Legacy era: no-op, all pass.
+                if (CasterMembershipStore.RecordEraActive)
+                {
+                    var rotated = new List<string>();
+                    foreach (var addr in toRemove)
+                    {
+                        if (await CasterMembershipService.ProposeRotationAsync("Demotion", addr, null))
+                            rotated.Add(addr);
+                        else
+                            CasterLogUtility.Log($"[CasterDiscovery] VersionAudit: demotion of {addr} DEFERRED — membership rotation not signed by majority.", "MEMBERSHIP");
+                    }
+                    toRemove = rotated;
+                    if (toRemove.Count == 0)
+                        return;
+                }
+
                 var remaining = casters
                     .Where(c => !toRemove.Contains(c.ValidatorAddress ?? ""))
                     .ToList();
@@ -1374,16 +1407,58 @@ namespace ReserveBlockCore.Services
             ConsoleWriterService.OutputValCaster(
                 $"[CasterDiscovery] Caster {departure.DepartingAddress} announced departure. Removing...");
 
-            var nCasterList = casterList
-                .Where(c => c.ValidatorAddress != departure.DepartingAddress)
+            // Wave 3 RECORD-FIRST: in the record era the removal flows through a signed rotation.
+            // The departing node can't drive it (it's shutting down), so the deterministic proposer
+            // is the lexicographically-lowest REMAINING caster; everyone else applies the resulting
+            // AnnounceMembershipRecord (which reconciles the bag). A 60s safety net does the legacy
+            // removal if the rotation never lands (e.g., proposer also died).
+            if (CasterMembershipStore.RecordEraActive)
+            {
+                var departing = departure.DepartingAddress;
+                if (CasterMembershipService.IsSelfDepartureProposer(departing))
+                {
+                    var ok = await CasterMembershipService.ProposeRotationAsync("Departure", departing, null);
+                    if (ok)
+                    {
+                        // Reconcile removed it from the bag; still revoke trust + trigger replacement evaluation.
+                        await OnCasterRemoved(departing).ConfigureAwait(false);
+                        return;
+                    }
+                    CasterLogUtility.Log($"MEMBERSHIP: departure rotation for {departing} failed — falling back to legacy removal.", "MEMBERSHIP");
+                }
+                else
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(60));
+                        var head = CasterMembershipStore.GetCurrent();
+                        var stillInRecord = head?.Casters.Any(c => c.Address == departing) ?? false;
+                        var stillInBag = Globals.BlockCasters.Any(c => c.ValidatorAddress == departing);
+                        if (stillInRecord && stillInBag)
+                        {
+                            CasterLogUtility.Log($"MEMBERSHIP: departure rotation for {departing} never landed after 60s — legacy removal safety net firing.", "MEMBERSHIP");
+                            RemoveDepartedFromBag(departing);
+                            await OnCasterRemoved(departing).ConfigureAwait(false);
+                        }
+                    });
+                    return; // wait for the proposer's announce
+                }
+            }
+
+            RemoveDepartedFromBag(departure.DepartingAddress);
+            await OnCasterRemoved(departure.DepartingAddress).ConfigureAwait(false);
+        }
+
+        private static void RemoveDepartedFromBag(string departingAddress)
+        {
+            var nCasterList = Globals.BlockCasters.ToList()
+                .Where(c => c.ValidatorAddress != departingAddress)
                 .ToList();
             var nBag = new ConcurrentBag<Peers>();
             foreach (var x in nCasterList)
                 nBag.Add(x);
             Globals.BlockCasters = nBag;
             Globals.SyncKnownCastersFromBlockCasters();
-
-            await OnCasterRemoved(departure.DepartingAddress).ConfigureAwait(false);
         }
 
         #region FIX 2 — Validate inbound casters received via gossip/GetBlockcasters
@@ -1919,6 +1994,24 @@ namespace ReserveBlockCore.Services
         /// </summary>
         public static async Task<List<Peers>?> FetchLiveCasterListFromPeersAsync(IEnumerable<string> peerIPs)
         {
+            // Wave 3/6: ALWAYS try signed-record-chain adoption first — query MANY peers (seeds +
+            // known validators, not seeds-only), verify each returned chain independently, adopt
+            // the highest valid seq, push the chain back to stragglers. A single valid response is
+            // cryptographically trustworthy. Trying regardless of local era state is what lets a
+            // fresh/legacy node ARM itself the moment its peers have a genesis record (Wave 6).
+            // Null (no records anywhere) → legacy first-responder list below.
+            var recordPeers = peerIPs
+                .Concat(Globals.ValidatorNodes.Values.Select(n => n.NodeIP))
+                .Concat(SeedNodeService.GetBootstrapSeedPeers().Select(p => p.PeerIP))
+                .Where(ip => !string.IsNullOrEmpty(ip))
+                .Select(ip => ip!.Replace("::ffff:", ""))
+                .Distinct()
+                .Take(10)
+                .ToList();
+            var recordResult = await FetchAndAdoptMembershipAsync(recordPeers);
+            if (recordResult != null)
+                return recordResult;
+
             var ipsToQuery = peerIPs
                 .Where(ip => !string.IsNullOrEmpty(ip))
                 .Select(ip => ip.Replace("::ffff:", ""))
@@ -1970,6 +2063,86 @@ namespace ReserveBlockCore.Services
 
             CasterLogUtility.Log("FetchLiveCasterList: no peers responded — true cold start", "EVICTION-AWARE");
             return null;
+        }
+
+        /// <summary>
+        /// Wave 3: record-era adoption. Pulls membership records after our head from up to 10 peers
+        /// in parallel, verifies each chain locally (TryAppendChain runs full successor validation),
+        /// adopts the highest valid seq, heals stragglers by pushing them the records they miss,
+        /// and returns the adopted committee as a Peers list (null = no record available anywhere).
+        /// </summary>
+        internal static async Task<List<Peers>?> FetchAndAdoptMembershipAsync(List<string> peerIPs)
+        {
+            var localHeadSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
+
+            var responses = new System.Collections.Concurrent.ConcurrentBag<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)>();
+            var tasks = peerIPs.Select(async ip =>
+            {
+                try
+                {
+                    using var client = Globals.HttpClientFactory.CreateClient();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+                    var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetMembershipRecord/{localHeadSeq}";
+                    var resp = await client.GetAsync(url, cts.Token);
+                    if (!resp.IsSuccessStatusCode) return;
+                    var body = await resp.Content.ReadAsStringAsync();
+                    var parsed = Newtonsoft.Json.JsonConvert.DeserializeObject<MembershipRecordResponse>(body);
+                    if (parsed != null)
+                        responses.Add((ip, parsed.HeadSeq, parsed.Records ?? new List<CasterMembershipRecord>()));
+                }
+                catch { /* unreachable */ }
+            });
+            await Task.WhenAll(tasks);
+
+            // Apply the longest chains first — every record is fully validated on append.
+            foreach (var r in responses.OrderByDescending(x => x.HeadSeq))
+            {
+                if (r.Records.Count == 0) continue;
+                var applied = CasterMembershipStore.TryAppendChain(r.Records);
+                if (applied > 0)
+                    CasterLogUtility.Log($"MEMBERSHIP: adopted {applied} record(s) from {r.Ip} (their head {r.HeadSeq}).", "MEMBERSHIP");
+            }
+
+            var head = CasterMembershipStore.GetCurrent();
+            if (head == null)
+                return null;
+
+            // Straggler healing (owner request): push missing records to peers behind our head.
+            foreach (var r in responses.Where(x => x.HeadSeq < head.RecordSeq))
+            {
+                var missing = CasterMembershipStore.GetSince(r.HeadSeq);
+                if (missing.Count == 0) continue;
+                var ip = r.Ip;
+                _ = Task.Run(async () =>
+                {
+                    foreach (var rec in missing.OrderBy(x => x.RecordSeq))
+                    {
+                        try
+                        {
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                            var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/AnnounceMembershipRecord";
+                            using var content = new StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(rec), System.Text.Encoding.UTF8, "application/json");
+                            await client.PostAsync(uri, content, cts.Token);
+                        }
+                        catch { break; }
+                    }
+                    CasterLogUtility.Log($"MEMBERSHIP: pushed {missing.Count} record(s) to straggler {ip} (was at {r.HeadSeq}, head {head.RecordSeq}).", "MEMBERSHIP");
+                });
+            }
+
+            CasterMembershipService.ReconcileBlockCastersToRecord(head);
+
+            return head.Casters.Select(c => new Peers
+            {
+                IsIncoming = false,
+                IsOutgoing = true,
+                PeerIP = c.PeerIP,
+                FailCount = 0,
+                IsValidator = true,
+                ValidatorAddress = c.Address,
+                ValidatorPublicKey = c.PublicKey,
+            }).ToList();
         }
 
         /// <summary>

@@ -362,6 +362,128 @@ namespace ReserveBlockCore.Utilities
         }
 
         /// <summary>
+        /// Wave 5: bounded reorg onto a winning branch chosen by ForkChoiceUtility.
+        /// Shares the SAME single-flight interlock as RecoverAsync — exactly one rollback
+        /// writer can run at any instant. Depth is hard-capped at MAX_REORG_DEPTH; the
+        /// fast-rollback path escalates internally to snapshot restore for non-trivial TX
+        /// content. NEVER triggers a genesis rebuild (owner invariant).
+        /// </summary>
+        public static async Task<bool> ReorgToBranchAsync(long divergenceHeight, string expectedHash, string sourceIP, string caller = "ForkChoice")
+        {
+            var myHeight = Globals.LastBlock.Height;
+            var depth = (int)(myHeight - divergenceHeight + 1);
+            if (depth < 1 || depth > ForkChoiceUtility.MAX_REORG_DEPTH)
+            {
+                LogUtility.Log(
+                    $"[{caller}] REORG-REFUSED: depth {depth} outside bound 1..{ForkChoiceUtility.MAX_REORG_DEPTH} (divergence {divergenceHeight}, tip {myHeight}).",
+                    $"{caller}.Reorg");
+                return false;
+            }
+
+            if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
+            {
+                LogUtility.Log($"[{caller}] REORG: recovery already in progress, skipping.", $"{caller}.Reorg");
+                return false;
+            }
+
+            var success = false;
+            try
+            {
+                LogUtility.Log(
+                    $"[{caller}] REORG: rolling back {depth} block(s) to adopt branch at h={divergenceHeight} (expected {expectedHash[..Math.Min(16, expectedHash.Length)]}…) from {sourceIP}.",
+                    $"{caller}.Reorg");
+                ConsoleWriterService.Output($"[{caller}] REORG: rolling back {depth} block(s), adopting winning branch…");
+
+                var wasResyncing = Globals.IsResyncing;
+                Globals.IsResyncing = true;
+                try
+                {
+                    var rolledBack = await BlockRollbackUtility.RollbackBlocksFast(depth, manageIsResyncing: false);
+                    if (!rolledBack)
+                    {
+                        LogUtility.Log($"[{caller}] REORG: rollback failed (no usable snapshot for non-trivial TXs?) — aborting, chain unchanged.", $"{caller}.Reorg");
+                        _consecutiveRecoveryFailures++;
+                        return false;
+                    }
+
+                    // Fetch + apply the winning block at the divergence height, then catch up.
+                    Globals.IsResyncing = false;
+                    _isInDownloadPhase = true;
+                    try
+                    {
+                        Models.Block? winningBlock = null;
+                        try
+                        {
+                            using var client = Globals.HttpClientFactory.CreateClient();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                            var uri = $"http://{sourceIP}:{Globals.ValAPIPort}/valapi/validator/GetBlock/{divergenceHeight}";
+                            var resp = await client.GetAsync(uri, cts.Token);
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                var body = await resp.Content.ReadAsStringAsync();
+                                if (!string.IsNullOrEmpty(body) && body != "0")
+                                    winningBlock = Newtonsoft.Json.JsonConvert.DeserializeObject<Models.Block>(body);
+                            }
+                        }
+                        catch { }
+
+                        if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
+                        {
+                            await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
+                        }
+
+                        BanService.UnbanAllForForkRecovery();
+                        await Task.Delay(2000);
+                        await BlockDownloadService.GetAllBlocks();
+                    }
+                    finally
+                    {
+                        _isInDownloadPhase = false;
+                        Globals.IsResyncing = true;
+                    }
+
+                    // Post-condition: our hash at the divergence height must now be the expected one.
+                    var adopted = divergenceHeight == Globals.LastBlock.Height
+                        ? Globals.LastBlock.Hash
+                        : Data.BlockchainData.GetBlockByHeight(divergenceHeight)?.Hash;
+                    success = string.Equals(adopted, expectedHash, StringComparison.Ordinal);
+
+                    if (success)
+                    {
+                        _consecutiveRecoveryFailures = 0;
+                        LogUtility.Log($"[{caller}] REORG COMPLETE: h={divergenceHeight} now {expectedHash[..Math.Min(16, expectedHash.Length)]}…, tip={Globals.LastBlock.Height}.", $"{caller}.Reorg");
+                        ConsoleWriterService.Output($"[{caller}] REORG complete — now at height {Globals.LastBlock.Height} on the winning branch.");
+                    }
+                    else
+                    {
+                        // Re-downloaded the losing branch again (minority peers answered first);
+                        // feeds the escalation ladder — the next detection cycle retries.
+                        _consecutiveRecoveryFailures++;
+                        LogUtility.Log(
+                            $"[{caller}] REORG INCOMPLETE: h={divergenceHeight} is {adopted?[..Math.Min(16, adopted?.Length ?? 0)]} not the expected hash. Failures {_consecutiveRecoveryFailures}/{ESCALATION_THRESHOLD}.",
+                            $"{caller}.Reorg");
+                    }
+                }
+                finally
+                {
+                    Globals.IsResyncing = wasResyncing;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[{caller}] REORG: exception — {ex.Message}", $"{caller}.Reorg");
+                _consecutiveRecoveryFailures++;
+            }
+            finally
+            {
+                _isInDownloadPhase = false;
+                Interlocked.Exchange(ref _recoveryInProgress, 0);
+            }
+
+            return success;
+        }
+
+        /// <summary>
         /// Resets all tracking state. Called after a successful block commit
         /// to ensure the stuck counter doesn't carry over from a previous stall.
         /// </summary>

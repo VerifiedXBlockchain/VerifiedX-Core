@@ -14,7 +14,8 @@ namespace ReserveBlockCore.Services
         {
             try
             {
-                if (Globals.IsBootstrapMode || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
+                // Wave 4: publish during bootstrap too — bootstrap blocks now carry seed attestations.
+                if (!ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
                     return;
                 if (!Globals.IsBlockCaster)
                     return;

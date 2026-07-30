@@ -443,7 +443,19 @@ namespace ReserveBlockCore.Controllers
                 // Do not publish attestations from this unauthenticated GET (DoS amplifier). Use authenticated RequestBlock / post-accept paths.
                 return Ok(JsonConvert.SerializeObject(round.Block));
             }
-                
+
+            // Wave 5: also serve COMMITTED blocks, windowed to tip−100 to bound the
+            // unauthenticated serving surface (deep history stays on the bulk GetAllBlocks path).
+            // Enables single-block fetch for fork detection/reorg on all node roles, and makes
+            // the caster hash-sync fetch reliable instead of depending on CasterRoundDict residue.
+            var tip = Globals.LastBlock?.Height ?? -1;
+            if (blockHeight <= tip && blockHeight >= Math.Max(0, tip - 100))
+            {
+                var committed = BlockchainData.GetBlockByHeight(blockHeight);
+                if (committed != null)
+                    return Ok(JsonConvert.SerializeObject(committed));
+            }
+
             return Ok("0");
         }
 
@@ -724,7 +736,9 @@ namespace ReserveBlockCore.Controllers
             {
                 var myHeight = Globals.LastBlock.Height;
                 var ready = Globals.IsBlockCaster && !string.IsNullOrEmpty(Globals.ValidatorAddress);
-                var result = new { Height = myHeight, Ready = ready, Address = Globals.ValidatorAddress ?? "" };
+                // Wave 3: RecordSeq lets round peers detect a stale membership view and trigger catch-up.
+                var recordSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
+                var result = new { Height = myHeight, Ready = ready, Address = Globals.ValidatorAddress ?? "", RecordSeq = recordSeq };
                 return Ok(JsonConvert.SerializeObject(result));
             }
             catch { return BadRequest(); }
@@ -1220,6 +1234,17 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// Wave 5: producer-readiness signal. Casters query this before finalizing a winner —
+        /// a node mid-recovery answers "false" and is skipped instead of wasting a round.
+        /// </summary>
+        [HttpGet]
+        [Route("ProducerReady")]
+        public ActionResult<string> ProducerReadyCheck()
+        {
+            return Ok(Globals.ProducerReady ? "true" : "false");
+        }
+
+        /// <summary>
         /// Phase E: combined status used by the cooperative bootstrap agreement between seeds
         /// (tip + stall candidacy + identity in one call).
         /// </summary>
@@ -1263,6 +1288,72 @@ namespace ReserveBlockCore.Controllers
         }
 
         /// <summary>
+        /// Wave 3: returns the membership record head, or the chain after {sinceSeq} for catch-up.
+        /// Records are hash-chained + majority-signed, so callers verify them independently —
+        /// no trust in this server is required.
+        /// </summary>
+        [HttpGet]
+        [Route("GetMembershipRecord/{sinceSeq?}")]
+        public ActionResult<string> GetMembershipRecord(long? sinceSeq = null)
+        {
+            var head = CasterMembershipStore.GetCurrent();
+            var response = new MembershipRecordResponse { HeadSeq = head?.RecordSeq ?? -1 };
+            if (head != null)
+            {
+                response.Records = sinceSeq.HasValue
+                    ? CasterMembershipStore.GetSince(sinceSeq.Value)
+                    : new List<CasterMembershipRecord> { head };
+            }
+            return Ok(JsonConvert.SerializeObject(response));
+        }
+
+        /// <summary>
+        /// Wave 3: a proposer requests our signature on a candidate rotation record. We sign only
+        /// if it derives correctly from OUR head, we are in the previous set, and we have not
+        /// signed a different record at that seq (equivocation guard).
+        /// </summary>
+        [HttpPost]
+        [Route("SignMembershipRecord")]
+        public ActionResult<string> SignMembershipRecord([FromBody] MembershipSignRequest? request)
+        {
+            if (request?.Candidate == null)
+                return BadRequest();
+            var signature = CasterMembershipService.HandleSignRequest(request);
+            if (signature == null)
+                return Conflict("Refused to sign.");
+            return Ok(JsonConvert.SerializeObject(signature));
+        }
+
+        /// <summary>
+        /// Wave 3: receives a finalized (majority-signed) membership record. Full validation runs
+        /// in TryAppend; on success the live caster pool is reconciled to the record.
+        /// </summary>
+        [HttpPost]
+        [Route("AnnounceMembershipRecord")]
+        public ActionResult<string> AnnounceMembershipRecord([FromBody] CasterMembershipRecord? record)
+        {
+            if (record == null)
+                return BadRequest();
+
+            // Wave 6: a valid seed-signed GENESIS is accepted even when the local store is empty —
+            // this is how adopting the record arms a node's era. TryAppend validates everything.
+            if (!CasterMembershipStore.TryAppend(record, out var reason))
+            {
+                // A stale announce (seq <= head) is normal gossip noise; anything else is logged loudly.
+                var head = CasterMembershipStore.GetCurrent();
+                if (head != null && record.RecordSeq > head.RecordSeq + 1)
+                {
+                    // We're behind by more than one — pull the chain from the sender's own store later.
+                    CasterLogUtility.Log($"MEMBERSHIP: announce seq {record.RecordSeq} ahead of head {head.RecordSeq} — catch-up needed.", "MEMBERSHIP");
+                }
+                return Conflict(reason);
+            }
+
+            CasterMembershipService.ReconcileBlockCastersToRecord(record);
+            return Ok("Appended");
+        }
+
+        /// <summary>
         /// F.2: single-call node health for update orchestration and runbooks.
         /// Green criteria for upgrades: IsChainSynced && StateTreiSynced && !Probation.Active
         /// && ForkStatus == "None" && height within ~1 of peers.
@@ -1286,7 +1377,9 @@ namespace ReserveBlockCore.Controllers
                 BootstrapState = BootstrapCoordinationService.State.ToString(),
                 StateTreiSynced = StateTreiStatusService.IsSynced(),
                 Probation = new { Active = probation.Active, Streak = probation.Streak },
-                ForkStatus = "Unknown", // Phase D (fork detection) populates this
+                MembershipRecordSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1L,
+                ForkStatus = ForkDetectionService.ForkStatusText,
+                ProducerReady = Globals.ProducerReady,
                 PeerCount = Globals.Nodes.Count,
                 ValidatorPeerCount = Globals.ValidatorNodes.Count,
                 CasterCount = Globals.BlockCasters.Count,

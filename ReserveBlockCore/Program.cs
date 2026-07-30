@@ -128,6 +128,9 @@ namespace ReserveBlockCore
             _ = VersionControlService.RunVersionControl();
             // Phase E: cooperative seed bootstrap coordination (no-op on non-seed nodes)
             BootstrapCoordinationService.Start();
+            // Wave 6: cert enforcement + record era are armed automatically by the genesis
+            // membership record — minted by the seeds at the coordinated restart's bootstrap
+            // agreement, adopted by everyone else. No constant, no config (see CasterMembershipStore).
 
             await Task.Delay(800);
 
@@ -1108,22 +1111,13 @@ namespace ReserveBlockCore
                     else
                         P2PClient.UpdateMaxHeight(maxHeight);
 
-                    // FORK-RECOVERY: DISABLED — time-based stuck detection was too aggressive.
-                    // It triggered false-positive rollbacks during normal block production delays,
-                    // causing the missing-block-22802 bug (stale NetworkBlockQueue entries allowed
-                    // orphaned blocks to pass validation after rollback).
-                    //
-                    // Phase 2 will replace this with caster-driven hash-based fork detection:
-                    // Casters detect hash splits, vote on canonical hash (3/5 majority),
-                    // and push corrections to validators via SignalR.
-                    //
-                    // if (!Globals.IsResyncing && !ForkRecoveryUtility.IsRecoveryInProgress)
-                    // {
-                    //     await ForkRecoveryUtility.CheckAndRecoverAsync(
-                    //         Globals.LastBlock.Height,
-                    //         maxHeight,
-                    //         "Program.BlockHeightCheck");
-                    // }
+                    // Wave 5: HASH-BASED fork detection (replaces the disabled time-based loop
+                    // that caused the missing-block-22802 false positives). Compares the hash at
+                    // our COMMITTED tip height against a majority of peers across 2 consecutive
+                    // probes — production delays can never trigger it. Losing branch → bounded
+                    // reorg (≤10) via the shared recovery interlock; deeper → FORK-TOO-DEEP,
+                    // operator playbook. Guards + single-flight live inside CheckAsync.
+                    _ = ForkDetectionService.CheckAsync("Program.BlockHeightCheck");
 
                     var MaxHeight = P2PClient.MaxHeight();
                     foreach (var node in Globals.Nodes.Values)

@@ -646,6 +646,10 @@ namespace ReserveBlockCore.Nodes
                     return;
                 }
 
+                // Wave 4: complete a missing/short certificate from the attestation store + peers
+                // before validation (the verifier still enforces the quorum).
+                await ConsensusCertificateHelper.TryCompleteCertificateAsync(nextBlock);
+
                 var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
                 if (result)
                 {
@@ -783,6 +787,19 @@ namespace ReserveBlockCore.Nodes
             if (string.IsNullOrEmpty(data)) return;
             try
             {
+                // Wave 3: in the record era, corrections must come from a current committee member.
+                var committee = CasterMembershipStore.GetCommitteeForHeight(Globals.LastBlock.Height + 1);
+                if (committee != null)
+                {
+                    var cleanIP = (casterIP ?? "").Replace("::ffff:", "");
+                    var senderAddr = Globals.BlockCasters.FirstOrDefault(x => (x.PeerIP ?? "").Replace("::ffff:", "") == cleanIP)?.ValidatorAddress;
+                    if (string.IsNullOrEmpty(senderAddr) || !committee.Contains(senderAddr))
+                    {
+                        LogUtility.Log($"[ForkCorrection] Rejected correction from {casterIP} — sender not in membership committee.", "ValidatorNode");
+                        return;
+                    }
+                }
+
                 var correction = JsonConvert.DeserializeAnonymousType(data, new { Height = 0L, BlockJson = "" });
                 if (correction != null && correction.Height > 0 && !string.IsNullOrEmpty(correction.BlockJson))
                 {

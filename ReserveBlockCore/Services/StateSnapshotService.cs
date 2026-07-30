@@ -231,7 +231,9 @@ namespace ReserveBlockCore.Services
             try
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var slots = GetSlots();
+                // Wave 5: anchor slots (ids > SlotCount) have their own cadence — the fine
+                // 10-block rotation only cycles slots 1..SlotCount.
+                var slots = GetSlots().Where(x => x.SlotId <= SnapshotManifest.SlotCount).ToList();
 
                 // Prefer rebuilding a broken/stale slot; otherwise roll the oldest forward.
                 var slot = slots.FirstOrDefault(x => !IsUsable(x))
@@ -271,6 +273,73 @@ namespace ReserveBlockCore.Services
                 // Snapshotting must never break block processing. The slot stays Updating and
                 // will be rebuilt via full copy on the next cycle.
                 ErrorLogUtility.LogError($"[Snapshot] Update cycle at height {height} failed: {ex}", "StateSnapshotService.UpdateCycleAsync");
+            }
+            finally
+            {
+                _isSnapshotting = false;
+            }
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Wave 5 deep anchors: refreshes a DEDICATED anchor slot (H-100 / H-1000 cadence) so a
+        /// fork deeper than the rotating slots still restores in minutes. Same crash-safety and
+        /// dirty-state guards as the fine cycle; after the first full copy each refresh is a
+        /// cheap diff (LastModifiedHeight-tracked collections diff across any gap).
+        /// </summary>
+        public static Task UpdateAnchorCycleAsync(long height, string? blockHash, int anchorSlotId)
+        {
+            if (_isSnapshotting) return Task.CompletedTask;
+            if (height < MinSnapshotHeight) return Task.CompletedTask;
+            if (DbContext.DB_Snapshot == null) return Task.CompletedTask;
+            if (Globals.TreisUpdating) return Task.CompletedTask;
+
+            var treiStatus = StateTreiStatusService.GetStatus();
+            if (treiStatus != null && !treiStatus.IsSynced)
+                return Task.CompletedTask;
+
+            _isSnapshotting = true;
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var col = SnapshotManifest.GetManifest();
+                if (col == null) return Task.CompletedTask;
+
+                var slot = col.FindById(anchorSlotId);
+                if (slot == null)
+                {
+                    slot = new SnapshotManifest { SlotId = anchorSlotId, Height = 0, Status = SnapshotSlotStatus.Empty, UpdatedUtc = DateTime.UtcNow };
+                    col.Upsert(slot);
+                }
+
+                var fullCopy = !IsUsable(slot) || slot.Height <= 0;
+                var previousHeight = slot.Height;
+
+                MarkSlot(slot, SnapshotSlotStatus.Updating, previousHeight, slot.BlockHash);
+
+                foreach (var spec in Specs)
+                {
+                    if (fullCopy || !spec.DiffTracked)
+                        FullCopy(spec, slot.SlotId);
+                    else
+                        DiffCopy(spec, slot.SlotId, previousHeight);
+                }
+
+                var anchorHash = blockHash;
+                if (anchorHash == null)
+                {
+                    try { anchorHash = BlockchainData.GetBlockByHeight(height)?.Hash; } catch { }
+                }
+                MarkSlot(slot, SnapshotSlotStatus.Valid, height, anchorHash);
+
+                sw.Stop();
+                LogUtility.Log(
+                    $"[Snapshot] ANCHOR slot {slot.SlotId} {(fullCopy ? "full-copied" : $"rolled forward from {previousHeight}")} to height {height} in {sw.ElapsedMilliseconds} ms.",
+                    "StateSnapshotService");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"[Snapshot] Anchor cycle (slot {anchorSlotId}) at height {height} failed: {ex}", "StateSnapshotService.UpdateAnchorCycleAsync");
             }
             finally
             {

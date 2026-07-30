@@ -46,6 +46,12 @@ namespace ReserveBlockCore.Services
         /// <summary>Addresses of the seeds (incl. self) in the active agreement.</summary>
         public static List<string> AgreedSeedAddresses { get; private set; } = new();
 
+        /// <summary>Wave 6: the tip height the seeds agreed on. Genesis boundary = this + 1.</summary>
+        public static long AgreedHeight { get; private set; } = -1;
+
+        /// <summary>Wave 6: IPs of the other agreeing seeds (for genesis signature collection).</summary>
+        private static List<(string Address, string Ip)> _agreedSeedPeers = new();
+
         public static void Start()
         {
             if (_running) return;
@@ -104,8 +110,8 @@ namespace ReserveBlockCore.Services
                     {
                         ConsoleWriterService.OutputValCaster("[BOOTSTRAP] *** ForceSoloBootstrap=true — ENTERING SOLO BOOTSTRAP. ***");
                         ConsoleWriterService.OutputValCaster("[BOOTSTRAP] *** This bypasses seed agreement and risks a fork if other seeds are alive. ***");
-                        CasterLogUtility.Log("BOOTSTRAP: FORCED SOLO BOOTSTRAP via config override.", "BOOTSTRAP");
-                        EnterAgreed(new List<string> { Globals.ValidatorAddress ?? "" });
+                        CasterLogUtility.Log("BOOTSTRAP: FORCED SOLO BOOTSTRAP via config override. NOTE: a solo seed cannot mint a genesis membership record (needs 2 seed signatures) — the record era stays unarmed.", "BOOTSTRAP");
+                        EnterAgreed(new List<string> { Globals.ValidatorAddress ?? "" }, Globals.LastBlock?.Height ?? -1, new List<(string, string)>());
                         return;
                     }
 
@@ -123,6 +129,12 @@ namespace ReserveBlockCore.Services
                     break;
 
                 case BootstrapState.Agreed:
+                    // Wave 6: the restart event itself arms the record era — while Agreed with an
+                    // empty membership store, keep trying to mint + co-sign the genesis record
+                    // (idempotent: deterministic record, same-hash re-sign allowed).
+                    if (AgreedSeedCount >= 2 && CasterMembershipStore.GetCurrent() == null && AgreedHeight >= 0)
+                        await TryCreateGenesisAsync();
+
                     var tipAge = TimeUtil.GetTime() - (Globals.LastBlock?.Timestamp ?? 0);
                     var tipAdvancing = tipAge < HealthyTipAgeSeconds;
                     _healthyChecks = tipAdvancing ? _healthyChecks + 1 : 0;
@@ -148,10 +160,12 @@ namespace ReserveBlockCore.Services
                 _healthyChecks = 0;
                 AgreedSeedCount = 0;
                 AgreedSeedAddresses = new List<string>();
+                AgreedHeight = -1;
+                _agreedSeedPeers = new List<(string, string)>();
             }
         }
 
-        private static void EnterAgreed(List<string> seedAddresses)
+        private static void EnterAgreed(List<string> seedAddresses, long agreedHeight, List<(string Address, string Ip)> agreedSeedPeers)
         {
             lock (StateLock)
             {
@@ -159,6 +173,82 @@ namespace ReserveBlockCore.Services
                 _healthyChecks = 0;
                 AgreedSeedAddresses = seedAddresses.Where(a => !string.IsNullOrEmpty(a)).Distinct().ToList();
                 AgreedSeedCount = AgreedSeedAddresses.Count;
+                AgreedHeight = agreedHeight;
+                _agreedSeedPeers = agreedSeedPeers;
+            }
+        }
+
+        /// <summary>
+        /// Wave 6: mints the genesis membership record at the agreement boundary
+        /// (EffectiveFromHeight = AgreedHeight + 1). Every agreeing seed constructs the IDENTICAL
+        /// record (deterministic given the agreed height), so signatures from concurrent attempts
+        /// merge and the equivocation guard never trips on honest seeds. Requires
+        /// ≥2 hardcoded-seed signatures — collected via the SignMembershipRecord endpoint.
+        /// Installing the record arms cert enforcement network-wide as it propagates.
+        /// </summary>
+        private static async Task TryCreateGenesisAsync()
+        {
+            try
+            {
+                var account = AccountData.GetLocalValidator();
+                if (account?.GetPrivKey == null || string.IsNullOrEmpty(Globals.ValidatorAddress))
+                    return;
+
+                var genesis = CasterMembershipStore.BuildGenesisRecord(AgreedHeight + 1);
+
+                if (!CasterMembershipStore.TryMarkSigned(0, genesis.RecordHash))
+                {
+                    CasterLogUtility.Log("MEMBERSHIP: refusing genesis — already signed a DIFFERENT record at seq 0.", "MEMBERSHIP");
+                    return;
+                }
+
+                var payload = CasterMembershipStore.CanonicalPayload(genesis);
+                var selfSig = SignatureService.CreateSignature(payload, account.GetPrivKey, account.PublicKey);
+                if (selfSig == "ERROR")
+                    return;
+                genesis.Signatures.Add(new RecordSignature { SignerAddress = Globals.ValidatorAddress, Signature = selfSig });
+
+                var signRequest = JsonConvert.SerializeObject(new MembershipSignRequest { Candidate = genesis, ProposerAddress = Globals.ValidatorAddress });
+                foreach (var seed in _agreedSeedPeers)
+                {
+                    if (genesis.Signatures.Count >= CasterMembershipStore.GenesisMinSeedSignatures) break;
+                    try
+                    {
+                        using var client = Globals.HttpClientFactory.CreateClient();
+                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                        var uri = $"http://{seed.Ip}:{Globals.ValAPIPort}/valapi/validator/SignMembershipRecord";
+                        using var content = new StringContent(signRequest, Encoding.UTF8, "application/json");
+                        var resp = await client.PostAsync(uri, content, cts.Token);
+                        if (!resp.IsSuccessStatusCode) continue;
+                        var body = await resp.Content.ReadAsStringAsync();
+                        var sig = JsonConvert.DeserializeObject<RecordSignature>(body);
+                        if (sig == null || sig.SignerAddress != seed.Address) continue;
+                        if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
+                        if (!genesis.Signatures.Any(s => s.SignerAddress == sig.SignerAddress))
+                            genesis.Signatures.Add(sig);
+                    }
+                    catch { /* seed unreachable — retried next tick */ }
+                }
+
+                if (genesis.Signatures.Count < CasterMembershipStore.GenesisMinSeedSignatures)
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: genesis has {genesis.Signatures.Count}/{CasterMembershipStore.GenesisMinSeedSignatures} seed signatures — retrying next tick.", "MEMBERSHIP");
+                    return;
+                }
+
+                if (CasterMembershipStore.TryAppend(genesis, out var reason))
+                {
+                    ConsoleWriterService.OutputValCaster($"[BOOTSTRAP] GENESIS MEMBERSHIP RECORD installed — record era + certificates active from height {genesis.EffectiveFromHeight}.");
+                    await CasterMembershipService.BroadcastRecordAsync(genesis);
+                }
+                else
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: genesis append failed — {reason}.", "MEMBERSHIP");
+                }
+            }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"MEMBERSHIP: genesis creation error — {ex.Message}", "MEMBERSHIP");
             }
         }
 
@@ -303,7 +393,14 @@ namespace ReserveBlockCore.Services
                 CasterLogUtility.Log(
                     $"BOOTSTRAP-AGREEMENT REACHED: {signers.Count} seeds [{string.Join(",", signers)}] @ h={commonHeight} hash={myHashAtCommon}",
                     "BOOTSTRAP");
-                EnterAgreed(signers.ToList());
+                var agreedPeers = agreeingSeeds.Where(s => signers.Contains(s.Address)).ToList();
+                EnterAgreed(signers.ToList(), commonHeight, agreedPeers);
+
+                // Wave 6: the restart event arms the record era — mint + co-sign the genesis
+                // membership record at the agreed boundary (no manual height, no config).
+                if (CasterMembershipStore.GetCurrent() == null)
+                    await TryCreateGenesisAsync();
+
                 return true;
             }
 

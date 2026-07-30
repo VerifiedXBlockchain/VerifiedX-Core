@@ -391,7 +391,27 @@ namespace ReserveBlockCore.Nodes
         {
             if (block == null)
                 return;
-            await ConsensusCertificateHelper.TryAttachCertificateAsync(block, winnerAddress);
+
+            // Wave 4 HOLD-UNTIL-QUORUM: at enforced heights a sub-quorum block is never broadcast.
+            // The attach polls ~3.75s per attempt; retry twice more (~11s total) while peer
+            // attestations keep arriving via SubmitAttestation pushes. On persistent failure the
+            // round retries — receivers would reject a sub-quorum block anyway.
+            var attached = await ConsensusCertificateHelper.TryAttachCertificateAsync(block, winnerAddress);
+            if (!attached && block.Height >= Globals.CertEnforceHeight)
+            {
+                for (var attempt = 0; attempt < 2 && !attached; attempt++)
+                    attached = await ConsensusCertificateHelper.TryAttachCertificateAsync(block, winnerAddress);
+
+                if (!attached)
+                {
+                    CasterLogUtility.Log(
+                        $"CERT: HOLDING broadcast of block {block.Height} — certificate quorum not reached after retries. Round will retry.",
+                        "CERT");
+                    ConsoleWriterService.OutputValCaster($"[Cert] Block {block.Height} held — no attestation quorum. Round retries.");
+                    return;
+                }
+            }
+
             _ = Broadcast("7", JsonConvert.SerializeObject(block), "");
         }
 
@@ -1382,12 +1402,9 @@ namespace ReserveBlockCore.Nodes
 
                         // FIX 4: Clamp requiredProofs to actual unique caster ADDRESSES (not casterList.Count
                         // which can include phantom entries from replacement logic).
-                        var uniqueCasterAddresses = casterList
-                            .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
-                            .Select(c => c.ValidatorAddress)
-                            .Distinct()
-                            .Count();
-                        var effectiveCasterCount = Math.Max(uniqueCasterAddresses, 1);
+                        // Wave 3: in the record era the committee size governs the quorum instead.
+                        var (_, proofCommitteeCount) = GetQuorumCasters(Height);
+                        var effectiveCasterCount = Math.Max(proofCommitteeCount, 1);
                         var requiredProofs = Math.Max(2, effectiveCasterCount / 2 + 1); // majority quorum
                         CasterLogUtility.Log($"[PHASE] PROOF-EXCHANGE entering at +{roundSw.ElapsedMilliseconds}ms, need {requiredProofs}/{casterList.Count} proofs, have {Globals.CasterProofDict.Count()} (self-injected)", "PHASE");
                         var swProofCollectionTime = Stopwatch.StartNew();
@@ -2854,12 +2871,24 @@ namespace ReserveBlockCore.Nodes
             if (string.IsNullOrEmpty(data)) return;
             try
             {
-                // Only accept corrections from known casters (membership record hardens this later).
+                // Only accept corrections from known casters.
                 var cleanIP = (casterIP ?? "").Replace("::ffff:", "");
-                if (!Globals.BlockCasters.Any(x => (x.PeerIP ?? "").Replace("::ffff:", "") == cleanIP))
+                var senderEntry = Globals.BlockCasters.FirstOrDefault(x => (x.PeerIP ?? "").Replace("::ffff:", "") == cleanIP);
+                if (senderEntry == null)
                 {
                     CasterLogUtility.Log(
                         $"[ForkCorrection] Rejected correction from non-caster IP {cleanIP}.",
+                        "FORK-CORRECTION");
+                    return;
+                }
+
+                // Wave 3: in the record era the sender must also be a member of the current committee.
+                var fcCommittee = CasterMembershipStore.GetCommitteeForHeight(Globals.LastBlock.Height + 1);
+                if (fcCommittee != null &&
+                    (string.IsNullOrEmpty(senderEntry.ValidatorAddress) || !fcCommittee.Contains(senderEntry.ValidatorAddress!)))
+                {
+                    CasterLogUtility.Log(
+                        $"[ForkCorrection] Rejected correction from {cleanIP} — sender not in membership committee.",
                         "FORK-CORRECTION");
                     return;
                 }
@@ -3128,6 +3157,10 @@ namespace ReserveBlockCore.Nodes
                     return;
                 }
 
+                // Wave 4: complete a missing/short certificate from the attestation store + peers
+                // before validation (the verifier still enforces the quorum).
+                await ConsensusCertificateHelper.TryCompleteCertificateAsync(nextBlock);
+
                 var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
                 if (result)
                 {
@@ -3342,6 +3375,24 @@ namespace ReserveBlockCore.Nodes
             }
         }
 
+        /// <summary>
+        /// Wave 3: committee-aware caster view for quorum math. In the record era the membership
+        /// record for the height governs BOTH the quorum size N and whose votes count; the
+        /// BlockCasters bag only supplies connectivity (IPs). Legacy era: bag as-is — behavior
+        /// unchanged until a genesis membership record is installed/adopted (Wave 6 auto-arm).
+        /// </summary>
+        internal static (List<Peers> Casters, int CommitteeCount) GetQuorumCasters(long height)
+        {
+            var bag = Globals.BlockCasters.ToList();
+            var committee = CasterMembershipStore.GetCommitteeForHeight(height);
+            if (committee == null)
+                return (bag, bag.Count);
+            var filtered = bag
+                .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress) && committee.Contains(c.ValidatorAddress!))
+                .ToList();
+            return (filtered, committee.Count);
+        }
+
         private static async Task<bool> WaitForCasterReadiness()
         {
             ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Waiting for peer casters to be ready...");
@@ -3353,14 +3404,14 @@ namespace ReserveBlockCore.Nodes
                 await SyncHeightWithPeersAsync();
 
                 var myHeight = Globals.LastBlock.Height;
-                var casters = Globals.BlockCasters.ToList();
-                if (casters.Count <= 1)
+                var (casters, committeeCount) = GetQuorumCasters(myHeight + 1);
+                if (committeeCount <= 1)
                 {
                     ConsoleWriterService.OutputValCaster("[ReadinessBarrier] Only 1 caster (self); proceeding.");
                     return true;
                 }
 
-                var requiredReady = Math.Max(2, casters.Count / 2 + 1); // supermajority
+                var requiredReady = Math.Max(2, committeeCount / 2 + 1); // supermajority of the committee
                 int readyCount = 1; // count ourselves
                 int matchingHeightCount = 1; // count ourselves
 
@@ -3379,9 +3430,18 @@ namespace ReserveBlockCore.Nodes
                                 var body = await resp.Content.ReadAsStringAsync();
                                 if (!string.IsNullOrEmpty(body) && body != "0")
                                 {
-                                    var peerStatus = JsonConvert.DeserializeAnonymousType(body, new { Height = 0L, Ready = false, Address = "" });
+                                    var peerStatus = JsonConvert.DeserializeAnonymousType(body, new { Height = 0L, Ready = false, Address = "", RecordSeq = -1L });
                                     if (peerStatus != null)
+                                    {
+                                        // Wave 3: a peer with a newer membership record means we're stale — catch up.
+                                        var localSeq = Services.CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
+                                        if (peerStatus.RecordSeq > localSeq && Services.CasterMembershipStore.RecordEraActive)
+                                        {
+                                            var casterIp = caster.PeerIP!.Replace("::ffff:", "");
+                                            _ = Services.CasterDiscoveryService.FetchAndAdoptMembershipAsync(new List<string> { casterIp });
+                                        }
                                         return (ready: peerStatus.Ready, height: peerStatus.Height);
+                                    }
                                 }
                             }
                         }
@@ -3426,11 +3486,12 @@ namespace ReserveBlockCore.Nodes
         /// </summary>
         private static async Task<string?> ReachWinnerAgreementAsync(long height, string myChosenWinner)
         {
-            var casters = Globals.BlockCasters.ToList();
-            if (casters.Count <= 1)
+            // Wave 3: quorum N + eligible voters come from the membership committee when active.
+            var (casters, committeeCount) = GetQuorumCasters(height);
+            if (committeeCount <= 1)
                 return myChosenWinner; // Only one caster, no agreement needed
 
-            var requiredAgreement = Math.Max(2, casters.Count / 2 + 1);
+            var requiredAgreement = Math.Max(2, committeeCount / 2 + 1);
 
             // DETERMINISTIC-CONSENSUS: Check for deadlock safety net
             if (_winnerAgreementFailHeight == height)
@@ -3627,11 +3688,12 @@ namespace ReserveBlockCore.Nodes
             if (myCommitment == null)
                 return null;
 
-            var casters = Globals.BlockCasters.ToList();
-            if (casters.Count <= 1)
+            // Wave 3: quorum N + eligible voters come from the membership committee when active.
+            var (casters, committeeCount) = GetQuorumCasters(height);
+            if (committeeCount <= 1)
                 return myCommitment.ProofAddressesSorted; // single caster — trivially in agreement
 
-            var requiredAgreement = Math.Max(2, casters.Count / 2 + 1);
+            var requiredAgreement = Math.Max(2, committeeCount / 2 + 1);
 
             var commitsForHeight = Globals.CasterProofSetCommitDict
                 .GetOrAdd(height, _ => new ConcurrentDictionary<string, Models.ProofSetCommitment>());
@@ -4167,8 +4229,9 @@ namespace ReserveBlockCore.Nodes
         /// </summary>
         private static async Task<Block?> VerifyBlockHashAgreementAsync(Block block, long height, string terminalWinner)
         {
-            var casters = Globals.BlockCasters.ToList();
-            if (casters.Count <= 1)
+            // Wave 3: quorum N + eligible voters come from the membership committee when active.
+            var (casters, committeeCount) = GetQuorumCasters(height);
+            if (committeeCount <= 1)
             {
                 // Single caster: still publish expected hash before commit so ReceiveConfirmedBlock cannot accept a different next block first.
                 if (block != null && !string.IsNullOrEmpty(block.Hash))
@@ -4179,7 +4242,7 @@ namespace ReserveBlockCore.Nodes
             // New multi-caster attempt for this height — drop any stale pending hash from a prior failed round.
             ClearPendingCasterBlockHash(height);
 
-            var requiredAgreement = Math.Max(2, casters.Count / 2 + 1);
+            var requiredAgreement = Math.Max(2, committeeCount / 2 + 1);
             var myHash = block.Hash;
             int agreementCount = 1; // count ourselves
             string? majorityHash = null;

@@ -37,6 +37,16 @@ namespace ReserveBlockCore.Models
         public const int CurrentSchemaVersion = 1;
         public const int SlotCount = 3;
 
+        /// <summary>Wave 5 deep anchors: dedicated slots refreshed on coarse cadences (~H-100 and
+        /// ~H-1000) so a fork deeper than the rotating slots (~20 blocks) still restores in
+        /// minutes — the hours-long genesis rebuild is never part of fork recovery. Anchor slots
+        /// share the manifest, so restore selection/anchoring/invalidation include them for free;
+        /// only the fine 10-block rotation excludes them.</summary>
+        public const int AnchorSlot100 = 4;
+        public const int AnchorSlot1000 = 5;
+        public const int AnchorCadence100 = 100;
+        public const int AnchorCadence1000 = 1000;
+
         public static LiteDB.ILiteCollection<SnapshotManifest>? GetManifest()
         {
             return DbContext.DB_Snapshot?.GetCollection<SnapshotManifest>(DbContext.RSRV_SNAPSHOT_MANIFEST);

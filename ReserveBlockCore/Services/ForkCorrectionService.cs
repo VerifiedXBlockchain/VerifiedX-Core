@@ -28,6 +28,14 @@ namespace ReserveBlockCore.Services
         {
             try
             {
+                // Wave 5 (interlock unification): exactly one rollback writer at any instant —
+                // never interleave a pushed correction with an active RecoverAsync/ReorgToBranch.
+                if (Utilities.ForkRecoveryUtility.IsRecoveryInProgress)
+                {
+                    LogUtility.Log($"[ForkCorrection] Skipping correction from {casterIP} — recovery/reorg already in progress.", "ForkCorrectionService");
+                    return;
+                }
+
                 if (string.IsNullOrEmpty(blockJson))
                 {
                     LogUtility.Log($"[ForkCorrection] Empty blockJson received from {casterIP}.", "ForkCorrectionService");
@@ -205,12 +213,15 @@ namespace ReserveBlockCore.Services
 
             try
             {
-                // Safety: don't roll back too many blocks from a single correction message
-                if (blocksToRollback > 5)
+                // Safety: don't roll back too many blocks from a single correction message.
+                // Wave 5: raised 5→MAX_REORG_DEPTH (10) — safe now that senders are verified
+                // casters (A1 IP check + Wave 3 committee-membership check at both handlers),
+                // and 10 matches the single reorg bound used everywhere else.
+                if (blocksToRollback > Utilities.ForkChoiceUtility.MAX_REORG_DEPTH)
                 {
                     LogUtility.Log(
                         $"[ForkCorrection] Deep correction requires {blocksToRollback} blocks — too deep. " +
-                        $"Max allowed is 5. Ignoring to prevent potential attack.",
+                        $"Max allowed is {Utilities.ForkChoiceUtility.MAX_REORG_DEPTH}. Ignoring to prevent potential attack.",
                         "ForkCorrectionService");
                     return;
                 }
