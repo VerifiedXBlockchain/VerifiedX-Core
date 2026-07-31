@@ -86,10 +86,10 @@ namespace VerifiedXCore.SmartContractSourceGenerator
 
             // Function: Get IsS3C (S3C — Self-Sovereign Smart Contracts). Emitted as a string
             // so older contracts that lack this function decode to a null Value → IsS3C=false.
-            strTknzV2Bld.AppendLine("function GetIsS3C() : string");
+            strTknzV2Bld.AppendLine("function GetIsStC() : string");
             strTknzV2Bld.AppendLine("{");
-            strTknzV2Bld.AppendLine("   var isS3C = \"" + (tknzV2.IsS3C ? "true" : "false") + "\"");
-            strTknzV2Bld.AppendLine("   return (isS3C)");
+            strTknzV2Bld.AppendLine("   var isStC = \"" + (tknzV2.IsS3C ? "true" : "false") + "\"");
+            strTknzV2Bld.AppendLine("   return (isStC)");
             strTknzV2Bld.AppendLine("}");
 
             // Function: Get Linked Contract UID (companion → S3C back-pointer; empty if none)
