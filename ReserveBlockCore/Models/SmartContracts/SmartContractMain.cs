@@ -643,7 +643,7 @@ namespace ReserveBlockCore.Models.SmartContracts
                                     var v2DkgProofRaw = repl.Run(@"GetDKGProof()").Value != null ? repl.Run(@"GetDKGProof()").Value.ToString() : "";
                                     var v2ImageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
                                     // S3C (§5.4): absent getter → null Value → defaults (IsS3C=false, Linked=null) for pre-S3C contracts
-                                    var v2IsS3C = (repl.Run(@"GetIsS3C()").Value != null ? repl.Run(@"GetIsS3C()").Value.ToString() : "false") == "true";
+                                    var v2IsS3C = (repl.Run(@"GetIsStC()").Value != null ? repl.Run(@"GetIsStC()").Value.ToString() : "false") == "true";
                                     var v2LinkedRaw = repl.Run(@"GetLinkedContractUID()").Value != null ? repl.Run(@"GetLinkedContractUID()").Value.ToString() : "";
                                     string? v2LinkedContractUID = string.IsNullOrEmpty(v2LinkedRaw) ? null : v2LinkedRaw;
 
@@ -829,7 +829,7 @@ namespace ReserveBlockCore.Models.SmartContracts
                                 var v2DkgProofRaw = repl.Run(@"GetDKGProof()").Value != null ? repl.Run(@"GetDKGProof()").Value.ToString() : "";
                                 var v2ImageBase = repl.Run(@"GetImageBase()").Value != null ? repl.Run(@"GetImageBase()").Value.ToString() : "default";
                                 // S3C (§5.4): absent getter → null Value → defaults (IsS3C=false, Linked=null) for pre-S3C contracts
-                                var v2IsS3C = (repl.Run(@"GetIsS3C()").Value != null ? repl.Run(@"GetIsS3C()").Value.ToString() : "false") == "true";
+                                var v2IsS3C = (repl.Run(@"GetIsStC()").Value != null ? repl.Run(@"GetIsStC()").Value.ToString() : "false") == "true";
                                 var v2LinkedRaw = repl.Run(@"GetLinkedContractUID()").Value != null ? repl.Run(@"GetLinkedContractUID()").Value.ToString() : "";
                                 string? v2LinkedContractUID = string.IsNullOrEmpty(v2LinkedRaw) ? null : v2LinkedRaw;
 
