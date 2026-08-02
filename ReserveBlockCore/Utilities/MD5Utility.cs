@@ -5,6 +5,26 @@ namespace ReserveBlockCore.Utilities
 {
     public class MD5Utility
     {
+        /// <summary>
+        /// True when an MD5List refers to media that actually ships with the contract.
+        ///
+        /// Two markers mean "no media": the "NA" sentinel, and the built-in vBTC
+        /// placeholder image. Default-asset vBTC contracts are stamped at mint with
+        /// "defaultvBTC.png::&lt;md5&gt;" (see VBTCController Mint) rather than "NA", and that
+        /// file is generated locally from DefaultVBTCLogo() — it is never uploaded to a
+        /// beacon, so transfers of those contracts must not wait on one.
+        /// </summary>
+        public static bool HasMedia(string? md5List)
+        {
+            if (string.IsNullOrWhiteSpace(md5List) || md5List == "NA")
+                return false;
+
+            // MD5ListCreator joins entries with "<>" as "assetName::checksum".
+            var entries = md5List.Split("<>", StringSplitOptions.RemoveEmptyEntries);
+
+            return entries.Any(x => !x.Trim().StartsWith("defaultvBTC", StringComparison.OrdinalIgnoreCase));
+        }
+
         public static async Task<string> GetMD5FromSmartContract(SmartContractMain sc)
         {
             List<string> assets = new List<string>();

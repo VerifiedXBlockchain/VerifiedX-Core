@@ -332,9 +332,9 @@ namespace ReserveBlockCore.Bitcoin.Services
                 toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
                 var localAddress = AccountData.GetSingleAccount(toAddress);
 
-                // Default-asset contracts store MD5List as "NA" at mint — there is no media
-                // to ship, so the transfer can skip beacons entirely.
-                var hasMedia = !string.IsNullOrWhiteSpace(scState.MD5List) && scState.MD5List != "NA";
+                // Default-asset contracts carry no media to ship (either the "NA" sentinel
+                // or the built-in vBTC placeholder), so the transfer can skip beacons entirely.
+                var hasMedia = MD5Utility.HasMedia(scState.MD5List);
                 if (!hasMedia)
                 {
                     _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, null, "NA", backupURL, false, null, 0, TransactionType.TKNZ_TX));

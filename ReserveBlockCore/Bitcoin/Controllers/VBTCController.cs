@@ -1436,11 +1436,11 @@ namespace ReserveBlockCore.Bitcoin.Controllers
                 // flow mints a token and immediately transfers ownership before any BTC
                 // is deposited. The non-Raw TransferOwnership still has this check.
 
-                // Default-asset contracts store MD5List as "NA" at mint — no media exists,
-                // so force the no-locator sentinel. This keeps the recipient on the
-                // "No Locators in TX" path instead of polling a beacon that never
-                // received a file.
-                if (string.IsNullOrWhiteSpace(scStateTrei.MD5List) || scStateTrei.MD5List == "NA")
+                // Default-asset contracts carry no media (the "NA" sentinel or the built-in
+                // vBTC placeholder), so force the no-locator sentinel. This keeps the
+                // recipient on the "No Locators in TX" path instead of polling a beacon
+                // that never received a file.
+                if (!MD5Utility.HasMedia(scStateTrei.MD5List))
                     locator = "NA";
 
                 // 6. Build TX data payload (same structure as NFT Transfer)
