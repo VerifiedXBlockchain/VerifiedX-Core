@@ -1,5 +1,7 @@
 ﻿using Newtonsoft.Json;
+using ReserveBlockCore.Bitcoin.ElectrumX.Results;
 using ReserveBlockCore.Bitcoin.Models;
+using ReserveBlockCore.Bitcoin.Services;
 using System.Linq;
 
 namespace ReserveBlockCore.Bitcoin.Integrations
@@ -49,75 +51,74 @@ namespace ReserveBlockCore.Bitcoin.Integrations
 
         public static async Task GetAddressUTXO(string address)
         {
-            var baseUri = GetBaseURL();
-            var uri = $"{baseUri}/address/{address}/utxo";
-
             try
             {
-                using (var client = Globals.HttpClientFactory.CreateClient())
+                var utxos = await GetAddressUTXOList(address);
+                if (utxos.Count > 0)
                 {
-                    var httpResponse = await client.GetAsync(uri);
-                    if (httpResponse.IsSuccessStatusCode)
+                    foreach (var item in utxos)
                     {
-                        var responseContent = await httpResponse.Content.ReadAsStringAsync();
-                        if (responseContent != null)
+                        var nUTXO = new BitcoinUTXO
                         {
-                            List<Transaction>? transactions = JsonConvert.DeserializeObject<List<Transaction>>(responseContent);
-                            if (transactions?.Count > 0)
-                            {
-                                var walletUtxoList = BitcoinUTXO.GetUTXOs(address);
-                                if(walletUtxoList != null)
-                                {
-                                    var utxoList = transactions;
-                                    if(utxoList?.Count > 0)
-                                    {
-                                        foreach (var item in utxoList)
-                                        {
-                                            var nUTXO = new BitcoinUTXO { 
-                                                Address = address,
-                                                IsUsed = false,
-                                                TxId = item.txid,
-                                                Value = item.value,
-                                                Vout = item.vout
-                                            };
+                            Address = address,
+                            IsUsed = false,
+                            TxId = item.TxHash,
+                            Value = (long)item.Value,
+                            Vout = (int)item.TxPos
+                        };
 
-                                            BitcoinUTXO.SaveBitcoinUTXO(nUTXO, true);
-                                        }
-                                    }
-                                }
-                                else
-                                {
-                                    if (transactions?.Count > 0)
-                                    {
-                                        foreach (var item in transactions)
-                                        {
-                                            var nUTXO = new BitcoinUTXO
-                                            {
-                                                Address = address,
-                                                IsUsed = false,
-                                                TxId = item.txid,
-                                                Value = item.value,
-                                                Vout = item.vout
-                                            };
-
-                                            BitcoinUTXO.SaveBitcoinUTXO(nUTXO, true);
-                                        }
-                                    }
-                                }
-                                
-                                //TODO:perform audit and update values as needed.
-                                //Remove them from DB saves.
-                                //Push them into memory
-                                //Perform audit after every tx send
-                            }
-                        }
+                        BitcoinUTXO.SaveBitcoinUTXO(nUTXO, true);
                     }
+
+                    //TODO:perform audit and update values as needed.
+                    //Remove them from DB saves.
+                    //Push them into memory
+                    //Perform audit after every tx send
                 }
             }
             catch (Exception ex)
             {
 
             }
+        }
+
+        /// <summary>
+        /// Fetches UTXOs for an address via the mempool.space Esplora API and returns them in the
+        /// ElectrumX result shape consumed by the transaction builder. Does NOT persist to the local
+        /// store — use GetAddressUTXO for that. Returns an empty list on any failure.
+        /// </summary>
+        public static async Task<List<BlockchainScripthashListunspentResult>> GetAddressUTXOList(string address)
+        {
+            var results = new List<BlockchainScripthashListunspentResult>();
+            var baseUri = GetBaseURL();
+            var uri = $"{baseUri}/address/{address}/utxo";
+
+            using (var client = Globals.HttpClientFactory.CreateClient())
+            {
+                var httpResponse = await client.GetAsync(uri);
+                if (httpResponse.IsSuccessStatusCode)
+                {
+                    var responseContent = await httpResponse.Content.ReadAsStringAsync();
+                    if (!string.IsNullOrEmpty(responseContent))
+                    {
+                        List<Transaction>? transactions = JsonConvert.DeserializeObject<List<Transaction>>(responseContent);
+                        if (transactions != null)
+                        {
+                            foreach (var item in transactions)
+                            {
+                                results.Add(BitcoinTransactionService.MapEsploraUtxo(
+                                    item.txid,
+                                    item.vout,
+                                    item.value,
+                                    item.status?.confirmed ?? false,
+                                    item.status?.block_height ?? 0));
+                            }
+                        }
+                    }
+                }
+            }
+
+            return results;
         }
         public class Status
         {

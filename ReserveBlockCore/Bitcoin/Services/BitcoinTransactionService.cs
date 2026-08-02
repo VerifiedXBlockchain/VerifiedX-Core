@@ -2,6 +2,7 @@ using NBitcoin;
 using NBitcoin.Crypto;
 using ReserveBlockCore.Bitcoin.ElectrumX;
 using ReserveBlockCore.Bitcoin.ElectrumX.Results;
+using ReserveBlockCore.Bitcoin.Integrations;
 using ReserveBlockCore.Bitcoin.Models;
 using ReserveBlockCore.Bitcoin.FROST.Models;
 using ReserveBlockCore.Models;
@@ -23,6 +24,11 @@ namespace ReserveBlockCore.Bitcoin.Services
         public static decimal SatoshiMultiplier = 0.00000001M;
 
         /// <summary>
+        /// Maximum number of DISTINCT Electrum servers to query for UTXOs before falling back to Esplora.
+        /// </summary>
+        private const int MaxElectrumServersForUTXOQuery = 3;
+
+        /// <summary>
         /// Gets an available Electrum client
         /// </summary>
         private static Client? GetElectrumClient()
@@ -36,35 +42,165 @@ namespace ReserveBlockCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Fetches UTXOs for a Taproot address via Electrum
+        /// Returns the selectable Electrum servers (FailCount under the threshold) ordered by least-used
+        /// first — same selection rule as GetElectrumClient, but as a full list so callers can fan out
+        /// across DISTINCT servers instead of always hitting the single least-used one.
         /// </summary>
-        public static async Task<List<BlockchainScripthashListunspentResult>> GetTaprootUTXOs(string taprootAddress)
+        private static List<ClientSettings> GetElectrumServerCandidates()
+        {
+            return Globals.ClientSettings?.Where(x => x.FailCount < 10).OrderBy(x => x.Count).ToList()
+                ?? new List<ClientSettings>();
+        }
+
+        /// <summary>
+        /// Maps an Esplora (mempool.space / blockstream.info) UTXO into the ElectrumX result shape the
+        /// transaction builder consumes. The builder re-fetches the raw tx by TxHash to source the
+        /// scriptPubKey, so only TxHash / TxPos / Value are required to build the spending Coin; Height
+        /// is carried for parity with Electrum listunspent (0 == unconfirmed / mempool).
+        /// </summary>
+        public static BlockchainScripthashListunspentResult MapEsploraUtxo(string txid, int vout, long value, bool confirmed, int blockHeight)
+        {
+            return new BlockchainScripthashListunspentResult
+            {
+                TxHash = txid,
+                TxPos = (uint)vout,
+                Value = (ulong)value,
+                Height = confirmed ? blockHeight : 0
+            };
+        }
+
+        /// <summary>
+        /// Decides the authoritative UTXO set after querying Electrum and (when Electrum came back empty)
+        /// Esplora. The rule corroborates an empty Electrum answer before trusting it:
+        /// - Electrum returned UTXOs            -> use them.
+        /// - Electrum empty, Esplora has UTXOs  -> use Esplora AND signal the empty Electrum servers
+        ///                                          should be penalized (they returned empty-while-funded).
+        /// - Both empty                          -> genuinely no UTXOs.
+        /// Pure function (no I/O) so the corroboration logic is unit-testable.
+        /// </summary>
+        public static (List<BlockchainScripthashListunspentResult> Utxos, bool PenalizeEmptyServers) DecideUtxoSource(
+            List<BlockchainScripthashListunspentResult>? electrumUtxos,
+            List<BlockchainScripthashListunspentResult>? esploraUtxos)
+        {
+            if (electrumUtxos != null && electrumUtxos.Any())
+                return (electrumUtxos, false);
+
+            if (esploraUtxos != null && esploraUtxos.Any())
+                return (esploraUtxos, true);
+
+            return (new List<BlockchainScripthashListunspentResult>(), false);
+        }
+
+        /// <summary>
+        /// Cross-checks an address against the Esplora integrations (mempool.space first, then
+        /// blockstream.info) and returns the first non-empty UTXO set. Both honor mainnet/testnet via
+        /// their GetBaseURL(). Returns an empty list if neither reports UTXOs.
+        /// </summary>
+        private static async Task<List<BlockchainScripthashListunspentResult>> GetUTXOsFromEsplora(string address)
         {
             try
             {
-                var client = GetElectrumClient();
-                if (client == null)
-                {
-                    ErrorLogUtility.LogError("No Electrum server available", "BitcoinTransactionService.GetTaprootUTXOs()");
-                    return new List<BlockchainScripthashListunspentResult>();
-                }
-
-                using (client)
-                {
-                    // Use the scripthash for Taproot address
-                    var bitcoinAddress = BitcoinAddress.Create(taprootAddress, Globals.BTCNetwork);
-                    var scriptHash = Client.GetScriptHash(bitcoinAddress);
-                    
-                    var utxos = await client.GetListUnspent(scriptHash);
-                    
-                    return utxos?.ToList() ?? new List<BlockchainScripthashListunspentResult>();
-                }
+                var mempoolUtxos = await MempoolSpace.GetAddressUTXOList(address);
+                if (mempoolUtxos != null && mempoolUtxos.Any())
+                    return mempoolUtxos;
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Error fetching Taproot UTXOs: {ex}", "BitcoinTransactionService.GetTaprootUTXOs()");
+                ErrorLogUtility.LogError($"Esplora (mempool.space) UTXO cross-check failed: {ex.Message}", "BitcoinTransactionService.GetUTXOsFromEsplora()");
+            }
+
+            try
+            {
+                var blockstreamUtxos = await Blockstream.GetAddressUTXOList(address);
+                if (blockstreamUtxos != null && blockstreamUtxos.Any())
+                    return blockstreamUtxos;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Esplora (blockstream.info) UTXO cross-check failed: {ex.Message}", "BitcoinTransactionService.GetUTXOsFromEsplora()");
+            }
+
+            return new List<BlockchainScripthashListunspentResult>();
+        }
+
+        /// <summary>
+        /// Fetches UTXOs for a Taproot address resiliently.
+        ///
+        /// A behind / pruned / rate-limited public Electrum server passes the version handshake but then
+        /// returns an EMPTY listunspent for a funded address. Treating that empty answer as success
+        /// poisoned withdrawals intermittently. This method therefore CORROBORATES an empty Electrum
+        /// result before trusting it:
+        ///   1. Query up to MaxElectrumServersForUTXOQuery DISTINCT Electrum servers; return on first hit.
+        ///   2. If all queried Electrum servers return empty, cross-check via Esplora (mempool.space,
+        ///      then blockstream.info). If Esplora reports UTXOs, use them and bump the FailCount of the
+        ///      Electrum servers that returned empty-while-funded so they rotate out of selection.
+        ///   3. Only conclude "no UTXOs" when both Electrum and Esplora agree the address is empty.
+        /// </summary>
+        public static async Task<List<BlockchainScripthashListunspentResult>> GetTaprootUTXOs(string taprootAddress)
+        {
+            string scriptHash;
+            try
+            {
+                var bitcoinAddress = BitcoinAddress.Create(taprootAddress, Globals.BTCNetwork);
+                scriptHash = Client.GetScriptHash(bitcoinAddress);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Invalid Taproot address '{taprootAddress}': {ex.Message}", "BitcoinTransactionService.GetTaprootUTXOs()");
                 return new List<BlockchainScripthashListunspentResult>();
             }
+
+            var candidates = GetElectrumServerCandidates();
+            if (!candidates.Any())
+                ErrorLogUtility.LogError("No Electrum server available", "BitcoinTransactionService.GetTaprootUTXOs()");
+
+            // Step 1: query distinct Electrum servers, returning on the first non-empty result.
+            var emptyServers = new List<ClientSettings>();
+            int serversTried = 0;
+
+            foreach (var server in candidates)
+            {
+                if (serversTried >= MaxElectrumServersForUTXOQuery)
+                    break;
+                serversTried++;
+                server.Count++;
+
+                try
+                {
+                    using (var client = new Client(server.Host, server.Port, true))
+                    {
+                        var utxos = await client.GetListUnspent(scriptHash);
+                        if (utxos != null && utxos.Any())
+                            return utxos.ToList();
+
+                        // Empty answer — remember this server so we can penalize it if funds turn out to exist.
+                        emptyServers.Add(server);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    server.FailCount++;
+                    ErrorLogUtility.LogError($"Electrum UTXO query failed on {server.Host}:{server.Port}: {ex.Message}", "BitcoinTransactionService.GetTaprootUTXOs()");
+                }
+            }
+
+            // Step 2: every queried Electrum server returned empty — corroborate via Esplora before trusting it.
+            var esploraUtxos = await GetUTXOsFromEsplora(taprootAddress);
+            var decision = DecideUtxoSource(new List<BlockchainScripthashListunspentResult>(), esploraUtxos);
+
+            if (decision.PenalizeEmptyServers)
+            {
+                // Empty-while-funded: these servers are behind/unindexed. Bump FailCount so they rotate out.
+                foreach (var server in emptyServers)
+                    server.FailCount++;
+
+                LogUtility.Log(
+                    $"[UTXO] {emptyServers.Count} Electrum server(s) returned empty for funded address {taprootAddress}; " +
+                    $"corroborated {esploraUtxos.Count} UTXO(s) via Esplora and penalized those servers.",
+                    "BitcoinTransactionService.GetTaprootUTXOs()");
+            }
+
+            return decision.Utxos;
         }
 
         /// <summary>
