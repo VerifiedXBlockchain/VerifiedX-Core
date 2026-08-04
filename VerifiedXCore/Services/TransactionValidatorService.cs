@@ -35,6 +35,10 @@ namespace VerifiedXCore.Services
             if (badNFTTx) 
                 return (true, "");
 
+            if (PrivateTransactionTypes.IsVbtcPrivateTransaction(txRequest.TransactionType)
+                && Globals.LastBlock.Height > Globals.VbtcPrivacyDisableHeight)
+                return (false, "vBTC privacy transactions are temporarily disabled.");
+
             if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
                 return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification);
 

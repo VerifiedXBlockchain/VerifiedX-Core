@@ -12,6 +12,12 @@ namespace VerifiedXCore.Privacy
             || t == TransactionType.VBTC_V2_UNSHIELD
             || t == TransactionType.VBTC_V2_PRIVATE_TRANSFER;
 
+        /// <summary>vBTC-only privacy types (VFX privacy excluded).</summary>
+        public static bool IsVbtcPrivateTransaction(TransactionType t) =>
+            t == TransactionType.VBTC_V2_SHIELD
+            || t == TransactionType.VBTC_V2_UNSHIELD
+            || t == TransactionType.VBTC_V2_PRIVATE_TRANSFER;
+
         /// <summary>T→Z: uses transparent sender nonce and ECDSA; hash includes amount/from/nonce.</summary>
         public static bool IsTransparentShield(TransactionType t) =>
             t == TransactionType.VFX_SHIELD || t == TransactionType.VBTC_V2_SHIELD;

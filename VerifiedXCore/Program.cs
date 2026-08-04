@@ -122,6 +122,7 @@ namespace VerifiedXCore
             Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
             Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
             Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
+            Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 999_999_999_999L /* TODO set testnet disable height */ : 999_999_999_999L /* TODO set mainnet disable height */;
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
