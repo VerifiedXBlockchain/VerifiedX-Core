@@ -950,7 +950,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     CeremonyId = effectiveCeremonyId,
-                    ImageBase = payload.ImageBase,
+                    ImageBase = Globals.VBTCDefaultAssetOnly ? "default" : payload.ImageBase,
                     // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
                     // into the contract so it survives to every node via the state-trei seam.
                     IsS3C = ceremony.IsS3C,
@@ -1016,6 +1016,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 // Mark contract as published in the tokenized bitcoin database
                 await TokenizedBitcoin.SetTokenContractIsPublished(scUID);
+
+                if (Globals.VBTCDefaultAssetOnly)
+                    await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
 
                 // Ceremony results consumed — remove from memory immediately to free space
                 RemoveCeremony(payload.CeremonyId);
@@ -1206,7 +1209,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     DKGProof = dkgProof,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     CeremonyId = effectiveCeremonyId,
-                    ImageBase = payload.ImageBase,
+                    ImageBase = Globals.VBTCDefaultAssetOnly ? "default" : payload.ImageBase,
                     // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
                     // into the contract so it survives to every node via the state-trei seam.
                     IsS3C = ceremony.IsS3C,
@@ -1255,6 +1258,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create or broadcast smart contract transaction" });
                 }
+
+                if (Globals.VBTCDefaultAssetOnly)
+                    await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
 
                 // Ceremony results consumed — remove from memory immediately to free space
                 RemoveCeremony(payload.CeremonyId);
@@ -1386,6 +1392,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// 
         /// Web wallet flow:
         ///   Step 1: GET /txapi/txV1/CreateBeaconUploadRequest/{scUID}/{toAddress}/{signature} → { Locator }
+        ///           (Skippable while Globals.VBTCDefaultAssetOnly is true — pass "NA" as the locator;
+        ///            beacons are stepped over and the TX is emitted with Locators/MD5List = "NA".)
         ///   Step 2: GET /vbtcapi/vbtc/GetVBTCOwnershipTransferData/{scUID}/{toAddress}/{locator} → TX data (this endpoint)
         ///   Step 3: Build raw TX with Type=TKNZ_TX, Amount=0, Data=payload from Step 2
         ///           POST /txapi/txV1/GetRawTxFee → fee
@@ -1445,8 +1453,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         ContractUID = sc.SmartContractUID,
                         ToAddress = toAddress,
                         Data = scStateTrei.ContractData,
-                        Locators = locator,
-                        MD5List = scStateTrei.MD5List
+                        Locators = Globals.VBTCDefaultAssetOnly ? "NA" : locator,
+                        MD5List = Globals.VBTCDefaultAssetOnly ? "NA" : scStateTrei.MD5List
                     }
                 };
 
@@ -2836,7 +2844,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     DKGProof = ceremony.DKGProof!,
                     ProofBlockHeight = Globals.LastBlock.Height,
                     CeremonyId = effectiveCeremonyId,
-                    ImageBase = payload.ImageBase,
+                    ImageBase = Globals.VBTCDefaultAssetOnly ? "default" : payload.ImageBase,
                     // S3C §5.4/§7.1: persist the ceremony's pool choice + optional companion link
                     // into the contract so it survives to every node via the state-trei seam.
                     IsS3C = ceremony.IsS3C,
@@ -3496,15 +3504,25 @@ namespace VerifiedXCore.Bitcoin.Controllers
         {
             try
             {
-                return JsonConvert.SerializeObject(new
+                var defaultImageLocation = NFTAssetFileUtility.GetvBTCDefaultLogoLocation();
+
+                if (System.IO.File.Exists(defaultImageLocation))
                 {
-                    Success = true,
-                    Message = "Default image retrieved",
-                    EncodingFormat = "base64",
-                    ImageExtension = "png",
-                    ImageName = "defaultvBTC_V2.png",
-                    ImageBase = string.Empty // No default image bundled; callers should provide their own
-                });
+                    byte[] imageBytes = System.IO.File.ReadAllBytes(defaultImageLocation);
+                    var imageBase = imageBytes.ToBase64();
+
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "Default image retrieved",
+                        EncodingFormat = "base64",
+                        ImageExtension = "png",
+                        ImageName = "defaultvBTC.png",
+                        ImageBase = imageBase
+                    });
+                }
+
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Could not find file in: {defaultImageLocation}" });
             }
             catch (Exception ex)
             {

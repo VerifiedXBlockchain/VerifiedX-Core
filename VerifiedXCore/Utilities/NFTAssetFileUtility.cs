@@ -102,6 +102,57 @@ namespace VerifiedXCore.Utilities
             }
         }
 
+        /// <summary>
+        /// Copies the built-in defaultvBTC.png into the smart contract's local asset folder
+        /// (DBs/Assets*/{scUID}/) so the token has its image on disk without any beacon download.
+        /// Used while Globals.VBTCDefaultAssetOnly is true.
+        /// </summary>
+        public static async Task<bool> AssociateDefaultVBTCLogo(string scUID)
+        {
+            try
+            {
+                var source = GetvBTCDefaultLogoLocation();
+                if (!File.Exists(source))
+                    await GeneratevBTCDefaultLogo();
+
+                var dest = CreateNFTAssetPath("defaultvBTC.png", scUID);
+                if (!File.Exists(dest))
+                    File.Copy(source, dest);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(ex.ToString(), "NFTAssetFileUtility.AssociateDefaultVBTCLogo()");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Startup sweep for Globals.VBTCDefaultAssetOnly: associates the default logo with every
+        /// vBTC V2 contract already known locally, so pre-existing tokens have their image on disk
+        /// without any beacon download. Idempotent — existing files are skipped.
+        /// </summary>
+        public static async Task AssociateDefaultVBTCLogosForExistingContracts()
+        {
+            try
+            {
+                var contracts = Bitcoin.Models.VBTCContractV2.GetAllContracts();
+                if (contracts == null)
+                    return;
+
+                foreach (var contract in contracts)
+                {
+                    if (!string.IsNullOrWhiteSpace(contract.SmartContractUID))
+                        await AssociateDefaultVBTCLogo(contract.SmartContractUID);
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(ex.ToString(), "NFTAssetFileUtility.AssociateDefaultVBTCLogosForExistingContracts()");
+            }
+        }
+
         public static bool MoveAsset(string fileLocation, string fileName, string scUID)
         {
             var assetLocation = Globals.IsTestNet != true ? "Assets" : "AssetsTestNet";

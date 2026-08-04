@@ -381,6 +381,9 @@ namespace VerifiedXCore
 
             StartupService.StartupDatabase();// initializes databases
 
+            if (Globals.VBTCDefaultAssetOnly)
+                _ = NFTAssetFileUtility.AssociateDefaultVBTCLogosForExistingContracts(); //associates default logo with existing vBTC V2 contracts (no beacons)
+
             // PLONK params: auto-download if not present, then load into native FFI (background — non-blocking)
             _ = Task.Run(async () =>
             {

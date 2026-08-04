@@ -295,6 +295,10 @@ namespace VerifiedXCore
         /// <summary>VBTCb proxy contract on Base (set from config). When set, bridge paths apply.</summary>
         public static string VBTCbContractAddress { get; set; } = string.Empty;
 
+        /// <summary>When true, vBTC V2 tokens use only the built-in default logo; custom images
+        /// and beacon upload/download are stepped over (code retained). Set false to restore.</summary>
+        public static bool VBTCDefaultAssetOnly = true;
+
         /// <summary>Base (Ethereum) chain id: 84532 Sepolia when testnet, 8453 mainnet.</summary>
         public static long BaseEvmChainId => IsTestNet ? 84532L : 8453L;
 

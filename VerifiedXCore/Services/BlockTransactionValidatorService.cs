@@ -268,6 +268,10 @@ namespace VerifiedXCore.Services
 
                                         var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
 
+                                        // vBTC V2 default-asset mode: never queue beacon downloads for these tokens.
+                                        if (Globals.VBTCDefaultAssetOnly && sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                            locators = "NA";
+
                                         if (sc != null)
                                         {
                                             SCLogUtility.Log($"SC Transfer - SC has been generated.", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
@@ -308,6 +312,9 @@ namespace VerifiedXCore.Services
                                                         await TokenizedBitcoin.SaveSmartContract(sc, null, tx.ToAddress);
                                                     }
                                                 }
+                                                // vBTC V2 default-asset mode: never queue beacon downloads for these tokens.
+                                                if (Globals.VBTCDefaultAssetOnly && sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                                    locators = "NA";
                                                 //download files here.
                                                 if (localFromAddress == null)
                                                 {
@@ -321,6 +328,10 @@ namespace VerifiedXCore.Services
                                                 }
                                             }
                                         }
+
+                                        // vBTC V2 default-asset mode: associate the local default logo; no beacon download needed.
+                                        if (Globals.VBTCDefaultAssetOnly && sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                            await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
 
                                     }
                                     break;
@@ -1621,6 +1632,10 @@ namespace VerifiedXCore.Services
 
                                         var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
 
+                                        // vBTC V2 default-asset mode: never queue beacon downloads for these tokens.
+                                        if (Globals.VBTCDefaultAssetOnly && sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                            locators = "NA";
+
                                         if (sc != null)
                                         {
                                             SCLogUtility.Log($"SC Transfer - SC has been generated.", "BlockTransactionValidatorService.ProcessIncomingReserveTransactions()");
@@ -1661,6 +1676,9 @@ namespace VerifiedXCore.Services
                                                         await TokenizedBitcoin.SaveSmartContract(sc, null, tx.ToAddress);
                                                     }
                                                 }
+                                                // vBTC V2 default-asset mode: never queue beacon downloads for these tokens.
+                                                if (Globals.VBTCDefaultAssetOnly && sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                                    locators = "NA";
                                                 //download files here.
                                                 if (localFromAddress == null)
                                                 {
@@ -1674,6 +1692,10 @@ namespace VerifiedXCore.Services
                                                 }
                                             }
                                         }
+
+                                        // vBTC V2 default-asset mode: associate the local default logo; no beacon download needed.
+                                        if (Globals.VBTCDefaultAssetOnly && sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                            await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
 
                                     }
                                     break;

@@ -328,6 +328,16 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Validate balance > 0 (including state trei tokenization TXs)
                 //0 balance check remove for ownership transfers
 
+                if (Globals.VBTCDefaultAssetOnly)
+                {
+                    // Step over beacons: default image only, nothing to upload.
+                    toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
+                    _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, null, "NA", backupURL, false, null, 0, TransactionType.TKNZ_TX));
+                    var response = JsonConvert.SerializeObject(new { Success = true, Message = "vBTC V2 Contract Transfer has been started." });
+                    SCLogUtility.Log($"SC Process Completed in CLI (beacon-free). SCUID: {sc.SmartContractUID}", "VBTCService.TransferOwnership()");
+                    return response;
+                }
+
                 // Check beacons exist
                 if (!Globals.Beacons.Any())
                     return await SCLogUtility.LogAndReturn("Error - You do not have any beacons stored.", "VBTCService.TransferOwnership()", false);
