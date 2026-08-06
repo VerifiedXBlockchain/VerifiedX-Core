@@ -94,6 +94,65 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// per withdrawal to prevent double-spend attacks. Null for non-withdrawal signings (e.g. bridge exits).
         /// </summary>
         public string? WithdrawalRequestHash { get; set; }
+
+        /// <summary>
+        /// Which transaction input this ceremony signs (multi-input withdrawals run one ceremony per
+        /// input). Old coordinators omit this — defaults to 0 (legacy single-input behavior).
+        /// </summary>
+        public int InputIndex { get; set; }
+
+        /// <summary>Total input count of the transaction being signed. 0/absent = legacy (treated as 1).</summary>
+        public int InputCount { get; set; }
+
+        /// <summary>
+        /// Ordered BIP341 sighash per input for the WHOLE transaction. Validators pin this set on the
+        /// first sign/start for a withdrawal; later inputs must match it, so a fake "input k" carrying
+        /// a different transaction's sighash is refused.
+        /// </summary>
+        public List<string>? AllInputSighashes { get; set; }
+
+        /// <summary>
+        /// "txid:vout" of every input the transaction spends. Drives the validator-side per-contract
+        /// conflict rule: while a signed withdrawal tx is outstanding for a contract, a DIFFERENT
+        /// withdrawal's tx must spend at least one of its inputs (so at most one can confirm).
+        /// </summary>
+        public List<string>? TxInputOutpoints { get; set; }
+
+        /// <summary>
+        /// Txid of the unsigned transaction. For Taproot key-path spends the txid does not change
+        /// when the witness is added, so this is also the final broadcast txid — validators use it to
+        /// detect on-chain confirmation and release the contract-level pin.
+        /// </summary>
+        public string? BtcTxId { get; set; }
+    }
+
+    /// <summary>
+    /// Signing Abort Request — coordinator tells validators a ceremony died so they can drop the
+    /// session and (if no share was generated) mark the tracker Failed for a fast retry.
+    /// Authenticated by REPLAYING the session's original start signature over
+    /// "{SessionId}.{LeaderAddress}.{Timestamp}" — works for the web-wallet flow where no fresh
+    /// signature can be minted.
+    /// </summary>
+    public class FrostSigningAbortRequest
+    {
+        public string SessionId { get; set; } = "";
+        public string LeaderAddress { get; set; } = "";
+        /// <summary>The timestamp from the ORIGINAL start message.</summary>
+        public long Timestamp { get; set; }
+        /// <summary>The ORIGINAL start signature (replayed).</summary>
+        public string LeaderSignature { get; set; } = "";
+    }
+
+    /// <summary>
+    /// Per-transaction context threaded from the transaction builder through the signing
+    /// coordinator into each input's sign/start request.
+    /// </summary>
+    public class FrostSigningTxContext
+    {
+        public int InputCount { get; set; }
+        public List<string> AllInputSighashes { get; set; } = new();
+        public List<string> TxInputOutpoints { get; set; } = new();
+        public string BtcTxId { get; set; } = "";
     }
 
     /// <summary>
@@ -173,6 +232,53 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// Only needed for DKG ceremonies.
         /// </summary>
         public long? ShareDistributionTimestamp { get; set; }
+
+        /// <summary>
+        /// Per-input pre-signed start auths for MULTI-INPUT withdrawals. Each transaction input runs
+        /// its own FROST ceremony with its own session id (input 0 = the base SessionId, input k =
+        /// "{base}:i{k}"), and validators verify each start against "{sessionId}.{leader}.{timestamp}"
+        /// — so the web wallet must sign one start message per input at Prepare time. Null/empty for
+        /// single-input withdrawals (fully backward compatible: input 0 uses the top-level fields).
+        /// </summary>
+        public List<PreSignedInputAuth>? InputAuths { get; set; }
+
+        /// <summary>
+        /// Resolves the auth to use for a given input index: input 0 (or anything without a
+        /// per-input entry list) uses the top-level session/signature; higher inputs require a
+        /// matching InputAuths entry and return null when it is missing — callers must treat a null
+        /// as "the prepared auth does not cover this input" and fail with a re-Prepare instruction
+        /// rather than reusing input 0's session (which validators reject as a session collision).
+        /// </summary>
+        public PreSignedLeaderAuth? ForInput(int inputIndex)
+        {
+            if (inputIndex == 0)
+                return this;
+
+            var entry = InputAuths?.FirstOrDefault(a => a.InputIndex == inputIndex);
+            if (entry == null)
+                return null;
+
+            return new PreSignedLeaderAuth
+            {
+                SessionId = entry.SessionId,
+                StartSignature = entry.Signature,
+                StartTimestamp = entry.Timestamp,
+                ShareDistributionSignature = ShareDistributionSignature,
+                ShareDistributionTimestamp = ShareDistributionTimestamp
+            };
+        }
+    }
+
+    /// <summary>
+    /// One input's pre-signed ceremony-start auth (multi-input withdrawals).
+    /// </summary>
+    public class PreSignedInputAuth
+    {
+        public int InputIndex { get; set; }
+        public string SessionId { get; set; } = "";
+        /// <summary>Signature over "{SessionId}.{leaderAddress}.{Timestamp}".</summary>
+        public string Signature { get; set; } = "";
+        public long Timestamp { get; set; }
     }
 
     #endregion

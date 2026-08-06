@@ -689,9 +689,24 @@ namespace VerifiedXCore.Bitcoin.Services
 
                         if (!frostResult.Success)
                         {
-                            FrostContractBlacklist.Blacklist(scUID, $"FROST signing failed: {frostResult.ErrorMessage}");
-                            LogUtility.Log($"[BurnExitConsensus] FROST sign-only failed for contract {scUID}: {frostResult.ErrorMessage}. Auto-blacklisted. Will retry with other contracts.",
-                                "BurnExitConsensusService.ExecuteBtcExit()");
+                            // Only blacklist on DEFINITIVE failures (bad keys, invalid signature, etc.).
+                            // Transient conditions — unreachable validators, ceremony timing, Electrum/UTXO
+                            // lookup failures — clear on their own; blacklisting a contract for one of
+                            // those turned an Electrum blip into a 24h contract lockout.
+                            var isTransient = (frostResult.Ceremony?.IsRetryable ?? false)
+                                || frostResult.ErrorMessage.Contains(BitcoinTransactionService.TransientUtxoErrorMarker);
+
+                            if (isTransient)
+                            {
+                                LogUtility.Log($"[BurnExitConsensus] FROST sign-only failed TRANSIENTLY for contract {scUID}: {frostResult.ErrorMessage}. NOT blacklisting; will retry next pass.",
+                                    "BurnExitConsensusService.ExecuteBtcExit()");
+                            }
+                            else
+                            {
+                                FrostContractBlacklist.Blacklist(scUID, $"FROST signing failed: {frostResult.ErrorMessage}");
+                                LogUtility.Log($"[BurnExitConsensus] FROST sign-only failed for contract {scUID}: {frostResult.ErrorMessage}. Auto-blacklisted. Will retry with other contracts.",
+                                    "BurnExitConsensusService.ExecuteBtcExit()");
+                            }
                             excludedContracts.Add(scUID);
                             needRecompute = true;
                             break;

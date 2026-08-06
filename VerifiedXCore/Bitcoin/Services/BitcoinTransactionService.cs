@@ -2,6 +2,7 @@ using NBitcoin;
 using NBitcoin.Crypto;
 using VerifiedXCore.Bitcoin.ElectrumX;
 using VerifiedXCore.Bitcoin.ElectrumX.Results;
+using VerifiedXCore.Bitcoin.Integrations;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Models;
@@ -23,47 +24,249 @@ namespace VerifiedXCore.Bitcoin.Services
         public static decimal SatoshiMultiplier = 0.00000001M;
 
         /// <summary>
-        /// Gets an available Electrum client
+        /// Maximum number of DISTINCT Electrum servers to query for UTXOs before falling back to Esplora.
         /// </summary>
-        private static Client? GetElectrumClient()
+        private const int MaxElectrumServersForUTXOQuery = 3;
+
+        /// <summary>
+        /// Stable marker embedded in error messages for UTXO lookups that failed because no Bitcoin
+        /// data source could be reached (as opposed to a corroborated-empty address). Callers that
+        /// take punitive action on failure (e.g. contract blacklisting) must skip it when this marker
+        /// is present — the condition is transient and retryable.
+        /// </summary>
+        public const string TransientUtxoErrorMarker = "[TRANSIENT-UTXO]";
+
+        /// <summary>
+        /// Gets an available Electrum client. Delegates to ClientService.GetElectrumClient, which
+        /// handshakes (server version), bumps Count on success and FailCount on failure, and rotates
+        /// through the pool — unlike the old private selector here, which pinned the same server
+        /// forever because it never incremented either counter.
+        /// </summary>
+        private static async Task<Client?> GetElectrumClient()
         {
-            var electrumServer = Globals.ClientSettings?.Where(x => x.FailCount < 10).OrderBy(x => x.Count).FirstOrDefault();
-            if (electrumServer != null)
-            {
-                return new Client(electrumServer.Host, electrumServer.Port, true);
-            }
-            return null;
+            return await ClientService.GetElectrumClient();
         }
 
         /// <summary>
-        /// Fetches UTXOs for a Taproot address via Electrum
+        /// Returns the selectable Electrum servers (FailCount under the threshold) ordered by least-used
+        /// first — same selection rule as GetElectrumClient, but as a full list so callers can fan out
+        /// across DISTINCT servers instead of always hitting the single least-used one.
+        /// If every server has exceeded the FailCount threshold, the pool is reset wholesale
+        /// (mirroring Bitcoin.ElectrumXRun) so a long outage cannot permanently exhaust it.
         /// </summary>
-        public static async Task<List<BlockchainScripthashListunspentResult>> GetTaprootUTXOs(string taprootAddress)
+        private static List<ClientSettings> GetElectrumServerCandidates()
         {
+            var candidates = Globals.ClientSettings?.Where(x => x.FailCount < 10).OrderBy(x => x.Count).ToList()
+                ?? new List<ClientSettings>();
+
+            if (!candidates.Any() && Globals.ClientSettings?.Any() == true)
+            {
+                foreach (var server in Globals.ClientSettings)
+                    server.FailCount = 0;
+
+                candidates = Globals.ClientSettings.Where(x => x.FailCount < 10).OrderBy(x => x.Count).ToList();
+            }
+
+            return candidates;
+        }
+
+        /// <summary>
+        /// Maps an Esplora (mempool.space / blockstream.info) UTXO into the ElectrumX result shape the
+        /// transaction builder consumes. The builder re-fetches the raw tx by TxHash to source the
+        /// scriptPubKey, so only TxHash / TxPos / Value are required to build the spending Coin; Height
+        /// is carried for parity with Electrum listunspent (0 == unconfirmed / mempool).
+        /// </summary>
+        public static BlockchainScripthashListunspentResult MapEsploraUtxo(string txid, int vout, long value, bool confirmed, int blockHeight)
+        {
+            return new BlockchainScripthashListunspentResult
+            {
+                TxHash = txid,
+                TxPos = (uint)vout,
+                Value = (ulong)value,
+                Height = confirmed ? blockHeight : 0
+            };
+        }
+
+        /// <summary>
+        /// Verdict on an "every Electrum server answered empty" outcome.
+        /// </summary>
+        public enum EmptyCorroborationVerdict
+        {
+            /// <summary>The empty answer is trustworthy — the address genuinely has no UTXOs.</summary>
+            ConfirmedEmpty,
+            /// <summary>The empty-answering Electrum servers are behind (a cross-check shows funds) — penalize them and have the caller retry.</summary>
+            PenalizeAndRetry,
+            /// <summary>Not enough agreeing answers to trust "empty" — treat the lookup as failed/transient.</summary>
+            Inconclusive
+        }
+
+        /// <summary>
+        /// Decides whether an all-empty Electrum answer can be trusted. ElectrumX is the system of
+        /// record; the Esplora cross-check is ADVISORY ONLY — it is never a spend source and is never
+        /// required:
+        /// - Esplora answered and shows funds      -> the empty Electrum servers are behind: penalize
+        ///                                            them and retry (rotation picks healthier servers).
+        /// - 2+ Electrum servers agreed empty      -> confirmed empty by Electrum quorum (Esplora
+        ///                                            silence does not block the conclusion).
+        /// - 1 Electrum empty + Esplora agrees     -> confirmed empty.
+        /// - anything less                          -> inconclusive; caller must treat as transient.
+        /// Pure function (no I/O) so the corroboration logic is unit-testable.
+        /// </summary>
+        public static EmptyCorroborationVerdict DecideEmptyVerdict(int electrumEmptyAnswers, bool esploraAnswered, bool esploraHasUtxos)
+        {
+            if (esploraAnswered && esploraHasUtxos)
+                return EmptyCorroborationVerdict.PenalizeAndRetry;
+
+            if (electrumEmptyAnswers >= 2)
+                return EmptyCorroborationVerdict.ConfirmedEmpty;
+
+            if (electrumEmptyAnswers >= 1 && esploraAnswered)
+                return EmptyCorroborationVerdict.ConfirmedEmpty;
+
+            return EmptyCorroborationVerdict.Inconclusive;
+        }
+
+        /// <summary>
+        /// Cross-checks an address against the Esplora integrations (mempool.space first, then
+        /// blockstream.info) and returns the first non-empty UTXO set, plus whether ANY provider
+        /// answered at all (an answered-empty is meaningful; an unreachable provider is not).
+        /// Both honor mainnet/testnet via their GetBaseURL().
+        /// </summary>
+        private static async Task<(List<BlockchainScripthashListunspentResult> Utxos, bool Answered)> GetUTXOsFromEsplora(string address)
+        {
+            bool answered = false;
+
             try
             {
-                var client = GetElectrumClient();
-                if (client == null)
-                {
-                    ErrorLogUtility.LogError("No Electrum server available", "BitcoinTransactionService.GetTaprootUTXOs()");
-                    return new List<BlockchainScripthashListunspentResult>();
-                }
-
-                using (client)
-                {
-                    // Use the scripthash for Taproot address
-                    var bitcoinAddress = BitcoinAddress.Create(taprootAddress, Globals.BTCNetwork);
-                    var scriptHash = Client.GetScriptHash(bitcoinAddress);
-                    
-                    var utxos = await client.GetListUnspent(scriptHash);
-                    
-                    return utxos?.ToList() ?? new List<BlockchainScripthashListunspentResult>();
-                }
+                var mempoolUtxos = await MempoolSpace.GetAddressUTXOList(address);
+                answered = true;
+                if (mempoolUtxos != null && mempoolUtxos.Any())
+                    return (mempoolUtxos, true);
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Error fetching Taproot UTXOs: {ex}", "BitcoinTransactionService.GetTaprootUTXOs()");
-                return new List<BlockchainScripthashListunspentResult>();
+                ErrorLogUtility.LogError($"Esplora (mempool.space) UTXO cross-check failed: {ex.Message}", "BitcoinTransactionService.GetUTXOsFromEsplora()");
+            }
+
+            try
+            {
+                var blockstreamUtxos = await Blockstream.GetAddressUTXOList(address);
+                answered = true;
+                if (blockstreamUtxos != null && blockstreamUtxos.Any())
+                    return (blockstreamUtxos, true);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Esplora (blockstream.info) UTXO cross-check failed: {ex.Message}", "BitcoinTransactionService.GetUTXOsFromEsplora()");
+            }
+
+            return (new List<BlockchainScripthashListunspentResult>(), answered);
+        }
+
+        /// <summary>
+        /// Fetches UTXOs for a Taproot address resiliently, with ElectrumX as the sole system of record.
+        ///
+        /// The old implementation asked ONE Electrum server once, with no health tracking — a server
+        /// that was down, slow, or behind produced an empty answer indistinguishable from an empty
+        /// address ("No UTXOs found" on a funded vault). Now:
+        ///   1. Query up to MaxElectrumServersForUTXOQuery DISTINCT Electrum servers (least-used first,
+        ///      Count/FailCount tracked like every other Electrum consumer); return on the first hit.
+        ///   2. If no server returns UTXOs, decide whether "empty" can be trusted via DecideEmptyVerdict:
+        ///      an Electrum quorum (2+ servers answering empty) confirms it; a single empty answer needs
+        ///      the ADVISORY Esplora cross-check to agree. Esplora is never a spend source and never
+        ///      required — if it is unreachable, an Electrum quorum still decides.
+        ///   3. If the cross-check shows the address IS funded, the empty-answering servers are behind:
+        ///      bump their FailCount so rotation skips them, and return a transient failure so the
+        ///      caller retries against healthier servers.
+        ///   4. Anything inconclusive is Success=false — a transient, retryable state, never "empty".
+        /// </summary>
+        public static async Task<UtxoLookupResult> GetTaprootUTXOs(string taprootAddress)
+        {
+            string scriptHash;
+            try
+            {
+                var bitcoinAddress = BitcoinAddress.Create(taprootAddress, Globals.BTCNetwork);
+                scriptHash = Client.GetScriptHash(bitcoinAddress);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Invalid Taproot address '{taprootAddress}': {ex.Message}", "BitcoinTransactionService.GetTaprootUTXOs()");
+                return UtxoLookupResult.Failed($"Invalid Taproot address: {ex.Message}", 0);
+            }
+
+            var candidates = GetElectrumServerCandidates();
+            if (!candidates.Any())
+                ErrorLogUtility.LogError("No Electrum server available", "BitcoinTransactionService.GetTaprootUTXOs()");
+
+            // Step 1: query distinct Electrum servers, returning on the first non-empty result.
+            var emptyServers = new List<ClientSettings>();
+            int serversTried = 0;
+
+            foreach (var server in candidates)
+            {
+                if (serversTried >= MaxElectrumServersForUTXOQuery)
+                    break;
+                serversTried++;
+                server.Count++;
+
+                try
+                {
+                    using (var client = new Client(server.Host, server.Port, true))
+                    {
+                        var utxos = await client.GetListUnspent(scriptHash);
+                        if (utxos != null && utxos.Any())
+                            return UtxoLookupResult.Found(utxos.ToList(), UtxoSource.Electrum, serversTried);
+
+                        // Empty answer — remember this server so we can penalize it if funds turn out to exist.
+                        emptyServers.Add(server);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    server.FailCount++;
+                    ErrorLogUtility.LogError($"Electrum UTXO query failed on {server.Host}:{server.Port}: {ex.Message}", "BitcoinTransactionService.GetTaprootUTXOs()");
+                }
+            }
+
+            // Step 2: no Electrum server produced UTXOs. If nothing even answered, that is a plain
+            // transient failure — no cross-check needed, just retry later against rotated servers.
+            if (!emptyServers.Any())
+            {
+                var noAnswerDetail = $"no Electrum server answered ({serversTried} tried)";
+                ErrorLogUtility.LogError($"UTXO lookup failed for {taprootAddress}: {noAnswerDetail}", "BitcoinTransactionService.GetTaprootUTXOs()");
+                return UtxoLookupResult.Failed(noAnswerDetail, serversTried);
+            }
+
+            // Step 3: at least one Electrum server answered "empty" — decide whether to trust it.
+            // The Esplora cross-check is advisory only (single lightweight GET, never a spend source);
+            // an Electrum quorum can confirm empty without it.
+            var (esploraUtxos, esploraAnswered) = await GetUTXOsFromEsplora(taprootAddress);
+            var verdict = DecideEmptyVerdict(emptyServers.Count, esploraAnswered, esploraUtxos.Any());
+
+            switch (verdict)
+            {
+                case EmptyCorroborationVerdict.PenalizeAndRetry:
+                    // Empty-while-funded: these servers are behind/unindexed. Bump FailCount so
+                    // rotation skips them, then have the caller retry — the next attempt selects
+                    // healthier Electrum servers. We do NOT spend from Esplora data.
+                    foreach (var server in emptyServers)
+                        server.FailCount++;
+
+                    LogUtility.Log(
+                        $"[UTXO] {emptyServers.Count} Electrum server(s) returned empty for {taprootAddress} but a cross-check shows " +
+                        $"{esploraUtxos.Count} UTXO(s) exist; penalized those servers — retry will rotate to healthier ones.",
+                        "BitcoinTransactionService.GetTaprootUTXOs()");
+
+                    return UtxoLookupResult.Failed(
+                        $"{emptyServers.Count} Electrum server(s) answered empty for a funded address (lagging/unindexed); servers penalized, retry", serversTried);
+
+                case EmptyCorroborationVerdict.ConfirmedEmpty:
+                    return UtxoLookupResult.ConfirmedEmpty(serversTried);
+
+                default:
+                    var detail = $"only {emptyServers.Count} Electrum server(s) answered empty and no second source could corroborate";
+                    ErrorLogUtility.LogError($"UTXO lookup inconclusive for {taprootAddress}: {detail}", "BitcoinTransactionService.GetTaprootUTXOs()");
+                    return UtxoLookupResult.Failed(detail, serversTried);
             }
         }
 
@@ -94,10 +297,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
 
                 // Get UTXOs
-                var utxos = await GetTaprootUTXOs(taprootAddress);
+                var utxoLookup = await GetTaprootUTXOs(taprootAddress);
+                if (!utxoLookup.Success)
+                {
+                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
+                        $"UTXO lookup failed for Taproot address: {utxoLookup.Error}. Bitcoin data sources unreachable — try again. {TransientUtxoErrorMarker}");
+                }
+
+                var utxos = utxoLookup.Utxos;
                 if (!utxos.Any())
                 {
-                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), "No UTXOs found for Taproot address");
+                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), "No UTXOs found for Taproot address (confirmed empty by multiple sources)");
                 }
 
                 ulong amountToSend = Convert.ToUInt64(amountBTC * BTCMultiplier);
@@ -106,6 +316,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 List<Coin> unspentCoins = new List<Coin>();
                 List<BlockchainScripthashListunspentResult> selectedUtxos = new List<BlockchainScripthashListunspentResult>();
                 ulong previousTotalInputAmount = 0;
+
+                // One handshaked client for the whole selection pass — the old code opened a fresh
+                // TCP+TLS connection per UTXO.
+                using var rawTxClient = await GetElectrumClient();
+                if (rawTxClient == null)
+                {
+                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
+                        $"No Electrum server available to fetch raw transactions. {TransientUtxoErrorMarker}");
+                }
 
                 // Select UTXOs to cover the withdrawal amount.
                 // The fee is deducted FROM the withdrawal amount (user receives amount - fee).
@@ -121,27 +340,20 @@ namespace VerifiedXCore.Bitcoin.Services
                     foreach (var utxo in sortedUtxos)
                     {
                         totalInputAmount += utxo.Value;
-                        
-                        // Fetch the raw transaction to get the output
-                        var client = GetElectrumClient();
-                        if (client != null)
-                        {
-                            using (client)
-                            {
-                                var rawTx = await client.GetRawTx(utxo.TxHash);
 
-                                if (rawTx?.RawTx != null)
-                                {
-                                    var tx = NBitcoin.Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
-                                    var output = tx.Outputs[utxo.TxPos];
-                                    
-                                    OutPoint outPoint = new OutPoint(uint256.Parse(utxo.TxHash), utxo.TxPos);
-                                    Coin coin = new Coin(outPoint, output);
-                                    
-                                    unspentCoins.Add(coin);
-                                    selectedUtxos.Add(utxo);
-                                }
-                            }
+                        // Fetch the raw transaction to get the output
+                        var rawTx = await rawTxClient.GetRawTx(utxo.TxHash);
+
+                        if (rawTx?.RawTx != null)
+                        {
+                            var tx = NBitcoin.Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
+                            var output = tx.Outputs[utxo.TxPos];
+
+                            OutPoint outPoint = new OutPoint(uint256.Parse(utxo.TxHash), utxo.TxPos);
+                            Coin coin = new Coin(outPoint, output);
+
+                            unspentCoins.Add(coin);
+                            selectedUtxos.Add(utxo);
                         }
 
                         // Check if we have enough
@@ -210,7 +422,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// a separate FROST signing ceremony for each input, since each input's sighash
         /// commits to the input index and differs per-input.
         /// </summary>
-        public static async Task<(bool Success, string SignedTxHex, string TxHash, string ErrorMessage)> 
+        public static async Task<(bool Success, string SignedTxHex, string TxHash, string ErrorMessage, FrostCeremonyOutcome? Ceremony)>
             SignTransactionWithFROST(
                 NBitcoin.Transaction unsignedTx,
                 List<Coin> spentCoins,
@@ -265,7 +477,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (string.IsNullOrEmpty(frostGroupPublicKey))
                 {
-                    return (false, string.Empty, string.Empty, "FROST group public key not found in contract or State Trei");
+                    return (false, string.Empty, string.Empty, "FROST group public key not found in contract or State Trei", null);
                 }
 
                 // FIND-020 Fix: Build the spent outputs array in input order for BIP341 sighash.
@@ -277,14 +489,35 @@ namespace VerifiedXCore.Bitcoin.Services
                     var matchingCoin = spentCoins.FirstOrDefault(c => c.Outpoint == prevOut);
                     if (matchingCoin == null)
                     {
-                        return (false, string.Empty, string.Empty, 
-                            $"Missing prevout data for input {i} (txid: {prevOut.Hash}, vout: {prevOut.N}). Cannot compute BIP341 sighash.");
+                        return (false, string.Empty, string.Empty,
+                            $"Missing prevout data for input {i} (txid: {prevOut.Hash}, vout: {prevOut.N}). Cannot compute BIP341 sighash.", null);
                     }
                     spentOutputs[i] = matchingCoin.TxOut;
                 }
 
                 // Precompute shared transaction data for BIP341 sighash (prevouts hash, amounts hash, etc.)
                 var precomputedData = unsignedTx.PrecomputeTransactionData(spentOutputs);
+
+                // Precompute the whole transaction's sighash set, input outpoints and txid. The set is
+                // announced to validators on every sign/start so they can pin it (a fake "input k"
+                // carrying another transaction's sighash gets refused), and the outpoints drive the
+                // per-contract conflict rule against parallel double-payout transactions. For Taproot
+                // the unsigned txid equals the broadcast txid (witness data is excluded from the txid).
+                var allSighashes = new List<string>();
+                for (int i = 0; i < unsignedTx.Inputs.Count; i++)
+                {
+                    var preExecData = new TaprootExecutionData(i) { SigHash = TaprootSigHash.Default };
+                    uint256 preSighash = unsignedTx.GetSignatureHashTaproot(precomputedData, preExecData);
+                    allSighashes.Add(Convert.ToHexString(preSighash.ToBytes()).ToLowerInvariant());
+                }
+
+                var txContext = new FrostSigningTxContext
+                {
+                    InputCount = unsignedTx.Inputs.Count,
+                    AllInputSighashes = allSighashes,
+                    TxInputOutpoints = unsignedTx.Inputs.Select(inp => $"{inp.PrevOut.Hash}:{inp.PrevOut.N}".ToLowerInvariant()).ToList(),
+                    BtcTxId = unsignedTx.GetHash().ToString()
+                };
 
                 // FIND-020 Fix: Sign each input individually with its own BIP341 sighash.
                 // Each input has a unique sighash because the input index is part of the BIP341 preimage.
@@ -295,13 +528,26 @@ namespace VerifiedXCore.Bitcoin.Services
                     uint256 sighash = unsignedTx.GetSignatureHashTaproot(precomputedData, execData);
                     // Convert sighash to hex for FROST. ToBytes() returns the raw SHA-256 output bytes
                     // in their natural order (same as Bitcoin Core's internal representation).
-                    string sighashHex = Convert.ToHexString(sighash.ToBytes()).ToLowerInvariant();
+                    string sighashHex = allSighashes[i];
 
-                    LogUtility.Log($"[FROST] Computing BIP341 sighash for input {i}/{unsignedTx.Inputs.Count}: {sighashHex}", 
+                    LogUtility.Log($"[FROST] Computing BIP341 sighash for input {i}/{unsignedTx.Inputs.Count}: {sighashHex}",
                         "BitcoinTransactionService.SignTransactionWithFROST()");
 
+                    // Multi-input withdrawals run one ceremony per input, each with its own session id.
+                    // A pre-signed auth (web wallet flow) must therefore carry one signed start message
+                    // per input — reusing input 0's session for input 1 collides on every validator.
+                    var inputAuth = preSignedAuth?.ForInput(i);
+                    if (preSignedAuth != null && inputAuth == null)
+                    {
+                        var mismatch = FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.InputCountMismatch,
+                            preSignedAuth.SessionId ?? string.Empty,
+                            $"pre-signed auth covers fewer inputs than the transaction has ({unsignedTx.Inputs.Count}); call PrepareCompleteWithdrawalRaw again to sign one start message per input",
+                            inputIndex: i);
+                        return (false, string.Empty, string.Empty, $"FROST signing failed for input {i}: {mismatch.Describe()}", mismatch);
+                    }
+
                     // Coordinate FROST signing ceremony for this input's sighash
-                    var signingResult = await FrostMPCService.CoordinateSigningCeremony(
+                    var ceremonyOutcome = await FrostMPCService.CoordinateSigningCeremony(
                         sighashHex,
                         scUID,
                         validators,
@@ -309,20 +555,27 @@ namespace VerifiedXCore.Bitcoin.Services
                         ceremonyId,
                         coordinatorAddress,
                         withdrawalRequestHash,
-                        preSignedAuth);
+                        inputAuth,
+                        inputIndex: i,
+                        txContext: txContext);
 
-                    if (signingResult == null || !signingResult.SignatureValid)
+                    if (!ceremonyOutcome.Success)
                     {
-                        return (false, string.Empty, string.Empty, $"FROST signing failed for input {i}");
+                        // Keep the exact legacy prefix ("FROST signing failed for input {i}") so
+                        // explorer-side string matching survives; everything after the colon is the
+                        // new diagnostic detail.
+                        return (false, string.Empty, string.Empty, $"FROST signing failed for input {i}: {ceremonyOutcome.Describe()}", ceremonyOutcome);
                     }
+
+                    var signingResult = ceremonyOutcome.Result!;
 
                     // The aggregate signature from FROST is a 64-byte Schnorr signature
                     var aggregateSignatureBytes = Convert.FromHexString(signingResult.SchnorrSignature);
 
                     if (aggregateSignatureBytes.Length != 64)
                     {
-                        return (false, string.Empty, string.Empty, 
-                            $"Invalid Schnorr signature length for input {i}: expected 64 bytes, got {aggregateSignatureBytes.Length}");
+                        return (false, string.Empty, string.Empty,
+                            $"Invalid Schnorr signature length for input {i}: expected 64 bytes, got {aggregateSignatureBytes.Length}", ceremonyOutcome);
                     }
 
                     // Pre-broadcast validation (non-blocking): The FROST native library already
@@ -361,15 +614,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 string signedTxHex = unsignedTx.ToHex();
                 string txHash = unsignedTx.GetHash().ToString();
 
-                LogUtility.Log($"[FROST] All {unsignedTx.Inputs.Count} inputs signed and verified successfully. TxHash: {txHash}", 
+                LogUtility.Log($"[FROST] All {unsignedTx.Inputs.Count} inputs signed and verified successfully. TxHash: {txHash}",
                     "BitcoinTransactionService.SignTransactionWithFROST()");
 
-                return (true, signedTxHex, txHash, string.Empty);
+                return (true, signedTxHex, txHash, string.Empty, null);
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error signing transaction with FROST: {ex}", "BitcoinTransactionService.SignTransactionWithFROST()");
-                return (false, string.Empty, string.Empty, $"Error: {ex.Message}");
+                return (false, string.Empty, string.Empty, $"Error: {ex.Message}", null);
             }
         }
 
@@ -386,7 +639,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS HEX: {txHex}",
                             "BitcoinTransactionService.BroadcastTransaction()");
 
-                var client = GetElectrumClient();
+                var client = await GetElectrumClient();
                 if (client == null)
                 {
                     return (false, string.Empty, "No Electrum server available");
@@ -427,7 +680,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var client = GetElectrumClient();
+                var client = await GetElectrumClient();
                 if (client == null)
                     return 0;
 
@@ -447,7 +700,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// Complete workflow: Build, sign with FROST, and broadcast a Bitcoin withdrawal transaction
         /// </summary>
-        public static async Task<(bool Success, string TxHash, string SignedTxHex, string ErrorMessage)>
+        public static async Task<(bool Success, string TxHash, string SignedTxHex, string ErrorMessage, FrostCeremonyOutcome? Ceremony)>
             ExecuteFROSTWithdrawal(
                 string taprootAddress,
                 string destinationAddress,
@@ -472,7 +725,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (!buildResult.Success || buildResult.UnsignedTx == null)
                 {
-                    return (false, string.Empty, string.Empty, $"Failed to build transaction: {buildResult.ErrorMessage}");
+                    return (false, string.Empty, string.Empty, $"Failed to build transaction: {buildResult.ErrorMessage}", null);
                 }
 
                 // Step 2: Sign with FROST (FIND-020: pass spent coins for BIP341 sighash computation)
@@ -488,7 +741,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (!signingResult.Success)
                 {
-                    return (false, string.Empty, string.Empty, $"Failed to sign transaction: {signingResult.ErrorMessage}");
+                    return (false, string.Empty, string.Empty, $"Failed to sign transaction: {signingResult.ErrorMessage}", signingResult.Ceremony);
                 }
 
                 // Step 3: Optionally broadcast signed transaction to Bitcoin network
@@ -497,7 +750,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     // signOnly mode: return the signed TX hex without broadcasting
                     LogUtility.Log($"[FROST] Sign-only mode: returning signed TX hex without broadcasting. TxHash: {signingResult.TxHash}",
                         "BitcoinTransactionService.ExecuteFROSTWithdrawal()");
-                    return (true, signingResult.TxHash, signingResult.SignedTxHex, string.Empty);
+                    return (true, signingResult.TxHash, signingResult.SignedTxHex, string.Empty, null);
                 }
 
                 // Parse the FROST-signed tx hex back into a Transaction object for broadcast
@@ -508,15 +761,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!broadcastResult.Success)
                 {
                     // Broadcast failed but we have the signed hex — return it so caller can retry
-                    return (false, string.Empty, signingResult.SignedTxHex, $"Failed to broadcast transaction: {broadcastResult.ErrorMessage}");
+                    return (false, string.Empty, signingResult.SignedTxHex, $"Failed to broadcast transaction: {broadcastResult.ErrorMessage}", null);
                 }
 
-                return (true, broadcastResult.TxHash, signingResult.SignedTxHex, string.Empty);
+                return (true, broadcastResult.TxHash, signingResult.SignedTxHex, string.Empty, null);
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error executing FROST withdrawal: {ex}", "BitcoinTransactionService.ExecuteFROSTWithdrawal()");
-                return (false, string.Empty, string.Empty, $"Error: {ex.Message}");
+                return (false, string.Empty, string.Empty, $"Error: {ex.Message}", null);
             }
         }
     }

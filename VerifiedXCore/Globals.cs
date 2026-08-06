@@ -129,6 +129,16 @@ namespace VerifiedXCore
         public static long TXHeightRule3 = 1079488; //around June 13th, 2023 at 19:30 UTC
         public static long TXHeightRule4 = 999999999999; //HAL-067: Nonce validation activation height
         public static long TXHeightRule5 = 5436312; //vBTC Lead signer changes
+        /// <summary>
+        /// vBTC withdrawal-gate consensus fixes activation height. At/after this height:
+        /// (a) legacy mined withdrawal requests with RequestBlockHeight==0 (pre-upgrade rows) stop
+        ///     blocking their contract after a grace window instead of blocking forever;
+        /// (b) the consensus gate ignores local-only rows (TransactionHash==""), which exist on a
+        ///     single API node and were a fork vector;
+        /// (c) a per-requestor repeat-offense cooldown applies after an expired-incomplete request.
+        /// Inert (rule never active) until set. Testnet/mainnet values assigned in Program/WardenService.
+        /// </summary>
+        public static long V2WithdrawalExpiryFixHeight = 999_999_999_999L;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds

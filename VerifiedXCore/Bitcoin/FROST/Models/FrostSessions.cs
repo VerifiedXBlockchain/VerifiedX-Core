@@ -66,6 +66,13 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public List<string> SignerAddresses { get; set; }
         public int RequiredThreshold { get; set; }
         public long StartTimestamp { get; set; }
+
+        /// <summary>Which transaction input this session signs (multi-input withdrawals; 0 = legacy).</summary>
+        public int InputIndex { get; set; }
+        /// <summary>"txid:vout" of every input of the transaction being signed (for the contract-level conflict pin).</summary>
+        public List<string>? TxInputOutpoints { get; set; }
+        /// <summary>Txid of the (unsigned == final, Taproot) transaction being signed.</summary>
+        public string? BtcTxId { get; set; }
         
         // FROST native library state for this validator's participation
         public string? MyKeyPackage { get; set; }              // This validator's key package (loaded from persistent store)

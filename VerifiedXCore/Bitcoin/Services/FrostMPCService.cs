@@ -777,8 +777,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <param name="scUID">Smart contract UID</param>
         /// <param name="validators">List of active validators to participate</param>
         /// <param name="threshold">Required threshold percentage</param>
-        /// <returns>Signing result or null if failed</returns>
-        public static async Task<FrostSigningResult?> CoordinateSigningCeremony(
+        /// <param name="inputIndex">Which transaction input this ceremony signs (multi-input withdrawals run one ceremony per input)</param>
+        /// <returns>A FrostCeremonyOutcome — Result is set on success; on failure FailureCode/Detail/counts identify the exact cause</returns>
+        public static async Task<FrostCeremonyOutcome> CoordinateSigningCeremony(
             string messageHash,
             string scUID,
             List<VBTCValidator> validators,
@@ -786,68 +787,162 @@ namespace VerifiedXCore.Bitcoin.Services
             string? ceremonyId = null,
             string? coordinatorAddress = null,
             string? withdrawalRequestHash = null,
-            PreSignedLeaderAuth? preSignedAuth = null)
+            PreSignedLeaderAuth? preSignedAuth = null,
+            int inputIndex = 0,
+            FrostSigningTxContext? txContext = null)
         {
+            // Reuse the pre-signed session ID if provided (web wallet flow), otherwise generate a new one.
+            // The pre-signed signatures embed this session ID in the message, so it MUST match.
+            var sessionId = !string.IsNullOrEmpty(preSignedAuth?.SessionId) ? preSignedAuth.SessionId : Guid.NewGuid().ToString();
+            long abortTimestamp = 0;
+            string abortSignature = string.Empty;
+            string abortLeader = string.Empty;
+            bool startBroadcast = false;
+
+            // Fire-and-forget abort so validators drop the dead session and start their retry
+            // cooldown instead of leaving state dangling until TTLs expire.
+            void AbortCeremony()
+            {
+                if (startBroadcast && !string.IsNullOrEmpty(abortSignature))
+                    _ = BroadcastSigningAbort(sessionId, abortLeader, abortTimestamp, abortSignature, validators);
+            }
+
             try
             {
-                // Reuse the pre-signed session ID if provided (web wallet flow), otherwise generate a new one.
-                // The pre-signed signatures embed this session ID in the message, so it MUST match.
-                var sessionId = !string.IsNullOrEmpty(preSignedAuth?.SessionId) ? preSignedAuth.SessionId : Guid.NewGuid().ToString();
                 // Use provided coordinator address, fall back to validator address, then first validator
                 // Note: Globals.ValidatorAddress is "" (not null) for non-validators, so ?? won't fall through
                 var leaderAddress = !string.IsNullOrEmpty(coordinatorAddress) ? coordinatorAddress
                     : !string.IsNullOrEmpty(Globals.ValidatorAddress) ? Globals.ValidatorAddress
                     : validators.First().ValidatorAddress;
 
-                LogUtility.Log($"[FROST MPC] Starting signing ceremony. Session: {sessionId}, Validators: {validators.Count}, PreSignedSession: {preSignedAuth?.SessionId != null}", "FrostMPCService.CoordinateSigningCeremony");
+                var requiredCount = GetRequiredValidatorCount(validators.Count, threshold);
+
+                LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=start — starting ceremony. Validators: {validators.Count}, required: {requiredCount}, PreSignedSession: {preSignedAuth?.SessionId != null}", "FrostMPCService.CoordinateSigningCeremony");
 
                 // Phase 1: Broadcast signing start
-                var startSuccess = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId, withdrawalRequestHash, preSignedAuth);
-                if (!startSuccess)
+                var (startCount, startFailures, startTimestamp, startSignature) = await BroadcastSigningStart(sessionId, messageHash, scUID, leaderAddress, validators, threshold, ceremonyId, withdrawalRequestHash, preSignedAuth, inputIndex, txContext);
+                abortTimestamp = startTimestamp;
+                abortSignature = startSignature;
+                abortLeader = leaderAddress;
+                startBroadcast = startCount > 0;
+
+                if (startCount < requiredCount)
                 {
-                    LogUtility.Log($"[FROST MPC] Failed to start signing ceremony", "FrostMPCService.CoordinateSigningCeremony");
-                    return null;
+                    // Distinguish "validators actively rejected us" (409 dedup / 403 bad signature — the
+                    // rejection bodies say why) from "not enough validators reachable".
+                    var code = startFailures.Any(f => f.HttpStatus > 0)
+                        ? FrostCeremonyFailureCode.StartRejectedByValidators
+                        : FrostCeremonyFailureCode.StartInsufficientResponses;
+                    var outcome = FrostCeremonyOutcome.Fail(code, sessionId,
+                        "signing start did not reach threshold", startCount, requiredCount, validators.Count, startFailures, inputIndex);
+                    LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=start ok={startCount}/{requiredCount}/{validators.Count} code={code} — {outcome.Describe()}", "FrostMPCService.CoordinateSigningCeremony");
+                    AbortCeremony();
+                    return outcome;
                 }
 
                 // Phase 2: Signing Round 1 - Nonce commitments
                 var round1Nonces = await CollectSigningRound1Nonces(sessionId, validators);
-                if (round1Nonces == null || round1Nonces.Count < GetRequiredValidatorCount(validators.Count, threshold))
+                if (round1Nonces == null || round1Nonces.Count < requiredCount)
                 {
-                    LogUtility.Log($"[FROST MPC] Signing Round 1 failed - insufficient nonces", "FrostMPCService.CoordinateSigningCeremony");
-                    return null;
+                    var got = round1Nonces?.Count ?? 0;
+                    LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=r1 ok={got}/{requiredCount}/{validators.Count} code={FrostCeremonyFailureCode.Round1InsufficientNonces}", "FrostMPCService.CoordinateSigningCeremony");
+                    AbortCeremony();
+                    return FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.Round1InsufficientNonces, sessionId,
+                        "insufficient nonce commitments", got, requiredCount, validators.Count, null, inputIndex);
                 }
 
                 // Phase 3: Signing Round 2 - Signature shares
                 var round2Shares = await CollectSigningRound2Shares(sessionId, validators, round1Nonces);
-                if (round2Shares == null || round2Shares.Count < GetRequiredValidatorCount(validators.Count, threshold))
+                if (round2Shares == null || round2Shares.Count < requiredCount)
                 {
-                    LogUtility.Log($"[FROST MPC] Signing Round 2 failed - insufficient signature shares", "FrostMPCService.CoordinateSigningCeremony");
-                    return null;
+                    var got = round2Shares?.Count ?? 0;
+                    LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=r2 ok={got}/{requiredCount}/{validators.Count} code={FrostCeremonyFailureCode.Round2InsufficientShares}", "FrostMPCService.CoordinateSigningCeremony");
+                    AbortCeremony();
+                    return FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.Round2InsufficientShares, sessionId,
+                        "insufficient signature shares", got, requiredCount, validators.Count, null, inputIndex);
                 }
 
                 // Phase 4: Aggregate signature
                 // FIND-026 Fix: Pass scUID and ordered signer addresses for correct pubkey package lookup
                 // and FROST Identifier remapping
                 var signerAddresses = validators.Select(v => v.ValidatorAddress).ToList();
-                var signingResult = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, ceremonyId);
+                var (signingResult, aggCode, aggDetail) = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, ceremonyId);
                 if (signingResult != null)
                 {
-                    LogUtility.Log($"[FROST MPC] Signing ceremony completed successfully", "FrostMPCService.CoordinateSigningCeremony");
+                    LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=agg — ceremony completed successfully", "FrostMPCService.CoordinateSigningCeremony");
+                    return FrostCeremonyOutcome.Ok(signingResult, sessionId, inputIndex);
                 }
 
-                return signingResult;
+                // Previously this path returned null with NO log at this level — an aggregation
+                // failure was indistinguishable from every other cause. Note: validators that
+                // generated shares stay Signed after the abort; the idempotent same-sighash rule
+                // makes the retry work regardless.
+                LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=agg code={aggCode} — {aggDetail}", "FrostMPCService.CoordinateSigningCeremony");
+                AbortCeremony();
+                return FrostCeremonyOutcome.Fail(aggCode, sessionId, aggDetail,
+                    round2Shares.Count, requiredCount, validators.Count, null, inputIndex);
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Signing ceremony error: {ex.Message}", "FrostMPCService.CoordinateSigningCeremony");
-                return null;
+                ErrorLogUtility.LogError($"Signing ceremony error. sid={sessionId} input={inputIndex}: {ex}", "FrostMPCService.CoordinateSigningCeremony");
+                AbortCeremony();
+                return FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.CoordinatorException, sessionId, ex.Message, inputIndex: inputIndex);
             }
         }
 
         /// <summary>
-        /// Broadcast signing ceremony start to all validators
+        /// Fire-and-forget: tell all validators to drop a dead signing session. Authenticated by
+        /// replaying the original start signature (see /frost/sign/abort). Failures are ignored —
+        /// validator-side TTLs and staleness rules remain the backstop.
         /// </summary>
-        private static async Task<bool> BroadcastSigningStart(
+        private static async Task BroadcastSigningAbort(string sessionId, string leaderAddress, long timestamp, string leaderSignature, List<VBTCValidator> validators)
+        {
+            try
+            {
+                var abortRequest = new FrostSigningAbortRequest
+                {
+                    SessionId = sessionId,
+                    LeaderAddress = leaderAddress,
+                    Timestamp = timestamp,
+                    LeaderSignature = leaderSignature
+                };
+
+                var tasks = validators.Select(async validator =>
+                {
+                    try
+                    {
+                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/abort";
+                        await _httpClient.PostAsJsonAsync(url, abortRequest);
+                    }
+                    catch { /* best effort */ }
+                });
+
+                await Task.WhenAll(tasks);
+                LogUtility.Log($"[FROST MPC] sid={sessionId} abort broadcast to {validators.Count} validator(s)", "FrostMPCService.BroadcastSigningAbort");
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[FROST MPC] sid={sessionId} abort broadcast error (ignored): {ex.Message}", "FrostMPCService.BroadcastSigningAbort");
+            }
+        }
+
+        /// <summary>
+        /// First 16 chars of a hash for compact log lines.
+        /// </summary>
+        private static string Shorten(string? hash)
+        {
+            if (string.IsNullOrEmpty(hash)) return "-";
+            return hash.Length <= 16 ? hash : hash.Substring(0, 16);
+        }
+
+        /// <summary>
+        /// Broadcast signing ceremony start to all validators.
+        /// Returns the success count plus each rejecting validator's HTTP status and response body —
+        /// the body carries the validator's actual refusal reason (tracker dedup, bad leader
+        /// signature, session collision), which is the single most useful diagnostic in a failed
+        /// ceremony.
+        /// </summary>
+        private static async Task<(int SuccessCount, List<FrostValidatorFailure> Failures, long Timestamp, string LeaderSignature)> BroadcastSigningStart(
             string sessionId,
             string messageHash,
             string scUID,
@@ -856,30 +951,32 @@ namespace VerifiedXCore.Bitcoin.Services
             int threshold,
             string? ceremonyId = null,
             string? withdrawalRequestHash = null,
-            PreSignedLeaderAuth? preSignedAuth = null)
+            PreSignedLeaderAuth? preSignedAuth = null,
+            int inputIndex = 0,
+            FrostSigningTxContext? txContext = null)
         {
+            // Sign with leader's key using deterministic message format
+            // Any VFX wallet owner can be the leader — not just validators
+            // When preSignedAuth is provided (web wallet flow), use the pre-signed signature.
+            long timestamp;
+            string signingLeaderSignature;
+
+            if (preSignedAuth != null && !string.IsNullOrEmpty(preSignedAuth.StartSignature))
+            {
+                timestamp = preSignedAuth.StartTimestamp;
+                signingLeaderSignature = preSignedAuth.StartSignature;
+                LogUtility.Log($"[FROST MPC] Using pre-signed leader auth for signing start (web wallet flow)",
+                    "FrostMPCService.BroadcastSigningStart");
+            }
+            else
+            {
+                timestamp = TimeUtil.GetTime();
+                var signingLeaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
+                signingLeaderSignature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, signingLeaderMessage);
+            }
+
             try
             {
-                // Sign with leader's key using deterministic message format
-                // Any VFX wallet owner can be the leader — not just validators
-                // When preSignedAuth is provided (web wallet flow), use the pre-signed signature.
-                long timestamp;
-                string signingLeaderSignature;
-
-                if (preSignedAuth != null && !string.IsNullOrEmpty(preSignedAuth.StartSignature))
-                {
-                    timestamp = preSignedAuth.StartTimestamp;
-                    signingLeaderSignature = preSignedAuth.StartSignature;
-                    LogUtility.Log($"[FROST MPC] Using pre-signed leader auth for signing start (web wallet flow)", 
-                        "FrostMPCService.BroadcastSigningStart");
-                }
-                else
-                {
-                    timestamp = TimeUtil.GetTime();
-                    var signingLeaderMessage = $"{sessionId}.{leaderAddress}.{timestamp}";
-                    signingLeaderSignature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, signingLeaderMessage);
-                }
-
                 var startRequest = new FrostSigningStartRequest
                 {
                     SessionId = sessionId,
@@ -891,7 +988,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     LeaderSignature = signingLeaderSignature,
                     SignerAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
                     RequiredThreshold = threshold,
-                    WithdrawalRequestHash = withdrawalRequestHash  // FIND-028: For validator-side dedup
+                    WithdrawalRequestHash = withdrawalRequestHash,  // FIND-028: For validator-side dedup
+                    InputIndex = inputIndex,
+                    InputCount = txContext?.InputCount ?? 1,
+                    AllInputSighashes = txContext?.AllInputSighashes,
+                    TxInputOutpoints = txContext?.TxInputOutpoints,
+                    BtcTxId = txContext?.BtcTxId
                 };
 
                 var tasks = validators.Select(async validator =>
@@ -906,28 +1008,40 @@ namespace VerifiedXCore.Bitcoin.Services
                             var errorBody = await response.Content.ReadAsStringAsync();
                             LogUtility.Log($"[FROST MPC] Signing start REJECTED by {validator.ValidatorAddress} ({validator.IPAddress}): HTTP {(int)response.StatusCode} — {errorBody}",
                                 "FrostMPCService.BroadcastSigningStart");
+                            return (Success: false, Failure: new FrostValidatorFailure
+                            {
+                                ValidatorAddress = validator.ValidatorAddress,
+                                HttpStatus = (int)response.StatusCode,
+                                Message = errorBody.Length > 300 ? errorBody.Substring(0, 300) : errorBody
+                            });
                         }
-                        return response.IsSuccessStatusCode;
+                        return (Success: true, Failure: (FrostValidatorFailure?)null);
                     }
                     catch (Exception ex)
                     {
                         LogUtility.Log($"[FROST MPC] Signing start EXCEPTION contacting {validator.ValidatorAddress} ({validator.IPAddress}): {ex.Message}",
                             "FrostMPCService.BroadcastSigningStart");
-                        return false;
+                        return (Success: false, Failure: new FrostValidatorFailure
+                        {
+                            ValidatorAddress = validator.ValidatorAddress,
+                            HttpStatus = 0,
+                            Message = ex.Message
+                        });
                     }
                 });
 
                 var results = await Task.WhenAll(tasks);
-                var successCount = results.Count(r => r);
+                var successCount = results.Count(r => r.Success);
+                var failures = results.Where(r => r.Failure != null).Select(r => r.Failure!).ToList();
                 var requiredCount = GetRequiredValidatorCount(validators.Count, threshold);
 
                 LogUtility.Log($"[FROST MPC] Signing start: {successCount}/{validators.Count} responded (required: {requiredCount})", "FrostMPCService.BroadcastSigningStart");
-                return successCount >= requiredCount;
+                return (successCount, failures, timestamp, signingLeaderSignature);
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Signing start error: {ex.Message}", "FrostMPCService.BroadcastSigningStart");
-                return false;
+                return (0, new List<FrostValidatorFailure> { new FrostValidatorFailure { ValidatorAddress = "coordinator", HttpStatus = 0, Message = ex.Message } }, timestamp, signingLeaderSignature);
             }
         }
 
@@ -1168,7 +1282,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// 2. Remap signature shares and nonce commitments from VFX address keys to FROST Identifier keys
         ///    (64-char hex scalars), matching the format the FROST native library expects.
         /// </summary>
-        private static async Task<FrostSigningResult?> AggregateSignature(
+        private static async Task<(FrostSigningResult? Result, FrostCeremonyFailureCode Code, string Detail)> AggregateSignature(
             string sessionId,
             string messageHash,
             string scUID,
@@ -1353,8 +1467,15 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (string.IsNullOrEmpty(pubkeyPackage))
                 {
-                    ErrorLogUtility.LogError($"FROST Signing: Could not find pubkey package (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID})", "FrostMPCService.AggregateSignature");
-                    return null;
+                    // A non-validator coordinator (e.g. a web-wallet user's node that never ran DKG)
+                    // skips the keystore tiers entirely and depends on the HTTP fetch from validators —
+                    // say so, because that is exactly the owner-vs-non-owner divergence seen in production.
+                    var coordinatorContext = string.IsNullOrEmpty(myAddr)
+                        ? "coordinator is a non-validator (keystore tiers skipped; depended on validator HTTP fetch)"
+                        : "coordinator is a validator (all lookup tiers exhausted)";
+                    var detail = $"pubkey package not found (ceremonyId: {ceremonyId ?? "null"}, scUID: {scUID}); {coordinatorContext}";
+                    ErrorLogUtility.LogError($"FROST Signing: {detail}", "FrostMPCService.AggregateSignature");
+                    return (null, FrostCeremonyFailureCode.PubkeyPackageNotFound, detail);
                 }
 
                 // FIND-026 Fix: Remap signature shares and nonce commitments from VFX address keys
@@ -1435,21 +1556,21 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     ErrorLogUtility.LogError($"FROST signature aggregation failed. Error code: {errorCode}. " +
                         "This is a fail-closed result - no invalid signature will be used.", "FrostMPCService.AggregateSignature");
-                    return null;
+                    return (null, FrostCeremonyFailureCode.NativeAggregationFailed, $"native SignAggregate returned error code {errorCode}");
                 }
 
                 // Validate signature is 64 bytes (128 hex chars) - standard Schnorr signature size
                 if (schnorrSignature.Length != 128)
                 {
-                    ErrorLogUtility.LogError($"FROST: Aggregated signature unexpected length: {schnorrSignature.Length} hex chars (expected 128)", 
+                    ErrorLogUtility.LogError($"FROST: Aggregated signature unexpected length: {schnorrSignature.Length} hex chars (expected 128)",
                         "FrostMPCService.AggregateSignature");
-                    return null;
+                    return (null, FrostCeremonyFailureCode.InvalidSignatureLength, $"aggregated signature was {schnorrSignature.Length} hex chars (expected 128)");
                 }
 
                 LogUtility.Log($"[FROST MPC] Signature aggregation complete. Schnorr sig: {schnorrSignature.Substring(0, 16)}...", 
                     "FrostMPCService.AggregateSignature");
 
-                return new FrostSigningResult
+                return (new FrostSigningResult
                 {
                     SessionId = sessionId,
                     MessageHash = messageHash,
@@ -1458,12 +1579,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     CompletionTimestamp = TimeUtil.GetTime(),
                     SignerAddresses = signerAddresses,
                     Threshold = threshold
-                };
+                }, FrostCeremonyFailureCode.None, string.Empty);
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Signature aggregation error: {ex.Message}", "FrostMPCService.AggregateSignature");
-                return null;
+                ErrorLogUtility.LogError($"Signature aggregation error: {ex}", "FrostMPCService.AggregateSignature");
+                return (null, FrostCeremonyFailureCode.CoordinatorException, $"aggregation exception: {ex.Message}");
             }
         }
 

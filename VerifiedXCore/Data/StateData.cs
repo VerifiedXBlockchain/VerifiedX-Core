@@ -3258,8 +3258,12 @@ namespace VerifiedXCore.Data
                 };
 
                 // Save the withdrawal request to the per-user tracking database
-                // This is consensus-critical and must succeed on ALL nodes
-                var saved = VBTCWithdrawalRequest.Save(withdrawalRequest);
+                // This is consensus-critical and must succeed on ALL nodes.
+                // update: true — on the API node that served RequestWithdrawalRaw, a local
+                // pre-registration row already exists under the same (Requestor, UniqueId, scUID)
+                // composite key; the mined record must UPDATE it (stamping the real TransactionHash
+                // and mined height) rather than fail the insert and leave the row incomplete forever.
+                var saved = VBTCWithdrawalRequest.Save(withdrawalRequest, update: true);
                 if (!saved)
                 {
                     ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal failed: Could not save withdrawal request", "StateData.RequestVBTCV2Withdrawal()");

@@ -147,11 +147,12 @@ namespace VerifiedXCore.Tests
             );
 
             // Assert
-            Assert.NotNull(result);
-            Assert.Equal(messageHash, result.MessageHash);
-            Assert.NotNull(result.SchnorrSignature);
-            Assert.True(result.SignatureValid);
-            Assert.Equal(128, result.SchnorrSignature.Length); // 64 bytes = 128 hex chars
+            Assert.True(result.Success);
+            var signing = result.Result!;
+            Assert.Equal(messageHash, signing.MessageHash);
+            Assert.NotNull(signing.SchnorrSignature);
+            Assert.True(signing.SignatureValid);
+            Assert.Equal(128, signing.SchnorrSignature.Length); // 64 bytes = 128 hex chars
         }
 
         [Fact(Skip = "Integration test — requires live validator HTTP endpoints. Mock validators have no servers, so CoordinateSigningCeremony returns null. Run against a live testnet to verify FROST signing ceremony.")]
@@ -170,8 +171,8 @@ namespace VerifiedXCore.Tests
             );
 
             // Assert
-            Assert.NotNull(result);
-            Assert.Equal(128, result.SchnorrSignature.Length); // Schnorr = 64 bytes
+            Assert.True(result.Success);
+            Assert.Equal(128, result.Result!.SchnorrSignature.Length); // Schnorr = 64 bytes
         }
 
         [Fact(Skip = "Integration test — requires live validator HTTP endpoints. Mock validators have no servers, so CoordinateSigningCeremony returns null. Run against a live testnet to verify FROST signing ceremony.")]
@@ -187,9 +188,9 @@ namespace VerifiedXCore.Tests
             var result2 = await FrostMPCService.CoordinateSigningCeremony(messageHash2, "sc2", validators, 51);
 
             // Assert
-            Assert.NotNull(result1);
-            Assert.NotNull(result2);
-            Assert.NotEqual(result1.SchnorrSignature, result2.SchnorrSignature);
+            Assert.True(result1.Success);
+            Assert.True(result2.Success);
+            Assert.NotEqual(result1.Result!.SchnorrSignature, result2.Result!.SchnorrSignature);
         }
 
         [Fact]
@@ -208,8 +209,9 @@ namespace VerifiedXCore.Tests
             );
 
             // Assert
-            // Should handle gracefully
-            Assert.True(result == null || result.SignerAddresses.Count == 0);
+            // Should handle gracefully: failure outcome with a diagnosable code, never a throw.
+            Assert.False(result.Success);
+            Assert.NotEqual(VerifiedXCore.Bitcoin.FROST.Models.FrostCeremonyFailureCode.None, result.FailureCode);
         }
 
         [Fact(Skip = "Integration test — requires live validator HTTP endpoints. Mock validators have no servers, so CoordinateSigningCeremony returns null. Run against a live testnet to verify FROST signing ceremony.")]
@@ -228,11 +230,12 @@ namespace VerifiedXCore.Tests
             );
 
             // Assert
-            Assert.NotNull(result);
-            Assert.Equal(validators.Count, result.SignerAddresses.Count);
+            Assert.True(result.Success);
+            var signerAddresses = result.Result!.SignerAddresses;
+            Assert.Equal(validators.Count, signerAddresses.Count);
             foreach (var validator in validators)
             {
-                Assert.Contains(validator.ValidatorAddress, result.SignerAddresses);
+                Assert.Contains(validator.ValidatorAddress, signerAddresses);
             }
         }
 
@@ -288,10 +291,10 @@ namespace VerifiedXCore.Tests
             );
 
             // Assert
-            Assert.NotNull(signingResult);
+            Assert.True(signingResult.Success);
             Assert.NotNull(dkgResult.TaprootAddress);
-            Assert.NotNull(signingResult.SchnorrSignature);
-            Assert.True(signingResult.SignatureValid);
+            Assert.NotNull(signingResult.Result!.SchnorrSignature);
+            Assert.True(signingResult.Result!.SignatureValid);
         }
 
         [Fact(Skip = "Integration test — requires live validator HTTP endpoints. Mock validators have no servers, so concurrent ceremonies all return null. Run against a live testnet to verify concurrent DKG ceremonies.")]

@@ -22,6 +22,30 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
 
                     var walletUtxoList = BitcoinUTXO.GetUTXOs(address);
 
+                    // An empty-but-non-null Electrum answer would fall through to the reconcile
+                    // branch below and DELETE every cached UTXO for the address. A single behind or
+                    // pruned server can answer empty for a funded address, so corroborate an
+                    // empty-while-cached answer with a SECOND Electrum server before wiping the cache.
+                    if (transactions.Count == 0 && walletUtxoList.Count() > 0)
+                    {
+                        try
+                        {
+                            using (var secondClient = await GetElectrumClient())
+                            {
+                                if (secondClient == null)
+                                    return; // No second server reachable — do not trust the empty answer.
+
+                                var secondAnswer = await secondClient.GetListUnspent(address, false);
+                                if (secondAnswer == null || secondAnswer.Count > 0)
+                                    return; // Unreachable or disagrees — keep the cache intact.
+                            }
+                        }
+                        catch
+                        {
+                            return;
+                        }
+                    }
+
                     if (walletUtxoList.Count() == 0)
                     {
                         if (transactions?.Count > 0)

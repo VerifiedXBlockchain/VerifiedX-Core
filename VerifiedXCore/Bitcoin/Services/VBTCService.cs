@@ -207,14 +207,23 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (string.IsNullOrEmpty(contract.DepositAddress))
                     return 0M;
 
-                var utxos = await BitcoinTransactionService.GetTaprootUTXOs(contract.DepositAddress);
+                var utxoLookup = await BitcoinTransactionService.GetTaprootUTXOs(contract.DepositAddress);
+                if (!utxoLookup.Success)
+                {
+                    // Inconclusive lookup (data sources unreachable) — never overwrite the cached
+                    // balance with 0 on a failed lookup; keep the last known value.
+                    ErrorLogUtility.LogError($"UTXO lookup inconclusive for {contract.SmartContractUID}; keeping cached balance {contract.Balance}: {utxoLookup.Error}",
+                        "VBTCService.ScanSingleContractBalance()");
+                    return contract.Balance;
+                }
+
                 decimal btcBalance = 0M;
 
-                if (utxos != null && utxos.Any())
+                if (utxoLookup.Utxos.Any())
                 {
                     // Sum all UTXO values (in satoshis) and convert to BTC
                     ulong totalSatoshis = 0;
-                    foreach (var utxo in utxos)
+                    foreach (var utxo in utxoLookup.Utxos)
                     {
                         totalSatoshis += utxo.Value;
                     }
@@ -636,7 +645,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <param name="scUID">Smart contract UID</param>
         /// <param name="withdrawalRequestHash">Hash of withdrawal request transaction</param>
         /// <returns>Completion transaction hash and Bitcoin transaction hash</returns>
-        public static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage)> CompleteWithdrawal(
+        public static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage, FROST.Models.FrostCeremonyOutcome? Ceremony)> CompleteWithdrawal(
             string scUID, string withdrawalRequestHash,
             decimal? delegatedAmount = null, string? delegatedBTCDestination = null, int? delegatedFeeRate = null,
             bool signOnly = false,
@@ -707,14 +716,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     else if (vbtcContract == null)
                     {
                         SCLogUtility.Log($"Smart contract state not found in State Trei and no local contract: {scUID}", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, string.Empty, $"vBTC V2 contract not found in local DB or State Trei: {scUID}");
+                        return (false, string.Empty, string.Empty, $"vBTC V2 contract not found in local DB or State Trei: {scUID}", null);
                     }
                 }
 
                 if (string.IsNullOrEmpty(depositAddress))
                 {
                     SCLogUtility.Log($"Deposit address is empty for contract: {scUID}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"Deposit address not found for contract: {scUID}");
+                    return (false, string.Empty, string.Empty, $"Deposit address not found for contract: {scUID}", null);
                 }
 
                 // FIND-003 FIX: Look up withdrawal request using per-user tracking.
@@ -745,7 +754,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     else
                     {
                         SCLogUtility.Log($"Withdrawal request not found for hash: {withdrawalRequestHash} and no delegated params provided", "VBTCService.CompleteWithdrawal()");
-                        return (false, string.Empty, string.Empty, $"Withdrawal request not found for hash: {withdrawalRequestHash}");
+                        return (false, string.Empty, string.Empty, $"Withdrawal request not found for hash: {withdrawalRequestHash}", null);
                     }
                 }
 
@@ -753,7 +762,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (withdrawalRequest.IsCompleted)
                 {
                     SCLogUtility.Log($"Withdrawal request already completed: {withdrawalRequestHash}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"Withdrawal request already completed: {withdrawalRequestHash}");
+                    return (false, string.Empty, string.Empty, $"Withdrawal request already completed: {withdrawalRequestHash}", null);
                 }
 
                 // ============================================================
@@ -768,7 +777,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (allRegistryValidators == null || !allRegistryValidators.Any())
                 {
                     SCLogUtility.Log($"No active validators in registry for FROST signing", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, "No active validators in registry for FROST signing");
+                    return (false, string.Empty, string.Empty, "No active validators in registry for FROST signing", null);
                 }
 
                 // Filter to only validators from the contract's DKG snapshot (they hold the key shares)
@@ -793,7 +802,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     SCLogUtility.Log($"No snapshot validators found in registry for FROST signing. " +
                         $"Snapshot had {snapshotAddresses?.Count ?? 0} addresses but none matched active registry.", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, "No DKG snapshot validators are currently active in the registry");
+                    return (false, string.Empty, string.Empty, "No DKG snapshot validators are currently active in the registry", null);
                 }
 
                 // Probe reachability — only contact validators that are actually online
@@ -801,7 +810,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!validators.Any())
                 {
                     SCLogUtility.Log($"No reachable validators for FROST signing (0/{snapshotValidators.Count} responded to health check)", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"No reachable validators for FROST signing (0/{snapshotValidators.Count} snapshot validators online)");
+                    return (false, string.Empty, string.Empty, $"No reachable validators for FROST signing (0/{snapshotValidators.Count} snapshot validators online)", null);
                 }
 
                 // Use the snapshot total (not registry total) for threshold calculation
@@ -831,7 +840,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     SCLogUtility.Log($"Insufficient reachable validators. Have: {validators.Count}, Need: {requiredValidators} " +
                         $"(Adjusted threshold: {adjustedThreshold}%, Snapshot: {snapshotTotal})", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"Insufficient reachable validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)");
+                    return (false, string.Empty, string.Empty, $"Insufficient reachable validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)", null);
                 }
 
                 // Get withdrawal details — prefer contract Active* fields (set by StateData when TX is mined),
@@ -857,7 +866,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 else
                 {
                     SCLogUtility.Log($"Invalid withdrawal details in both contract and request record", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, "Invalid withdrawal details — amount/destination not found in contract or request record");
+                    return (false, string.Empty, string.Empty, "Invalid withdrawal details — amount/destination not found in contract or request record", null);
                 }
                 long feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
 
@@ -884,19 +893,29 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!btcResult.Success)
                 {
                     SCLogUtility.Log($"Bitcoin transaction failed: {btcResult.ErrorMessage}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, string.Empty, $"Bitcoin transaction failed: {btcResult.ErrorMessage}");
+
+                    // Local-only observability: record what/when/why the last signing attempt failed
+                    // on the stored request. Never touches IsCompleted/Status=Completed semantics.
+                    RecordSigningFailureOnRequest(withdrawalRequestHash, btcResult.Ceremony);
+
+                    return (false, string.Empty, string.Empty, $"Bitcoin transaction failed: {btcResult.ErrorMessage}", btcResult.Ceremony);
                 }
 
                 string btcTxHash = btcResult.TxHash;
                 string signedTxHex = btcResult.SignedTxHex;
                 SCLogUtility.Log($"FROST signing successful. TxHash: {btcTxHash}, SignedTxHex length: {signedTxHex?.Length ?? 0}", "VBTCService.CompleteWithdrawal()");
 
+                // Persist the signed BTC txid on the stored request (local-only). If the caller dies
+                // between signing and completion, this is the only durable pointer to the outstanding
+                // signed transaction — a future watcher can use it to detect an out-of-band broadcast.
+                PersistSignedBtcTxId(withdrawalRequestHash, btcTxHash);
+
                 // signOnly mode: Return the signed TX hex without broadcasting or creating VFX TX.
                 // The caller (wallet node) will handle broadcast and VFX completion TX.
                 if (signOnly)
                 {
                     SCLogUtility.Log($"signOnly mode: returning signed TX hex to caller. TxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
-                    return (true, string.Empty, signedTxHex, string.Empty);
+                    return (true, string.Empty, signedTxHex, string.Empty, null);
                 }
 
                 // ============================================================
@@ -910,7 +929,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (account == null)
                 {
                     SCLogUtility.Log($"Account not found: {fromAddress}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, btcTxHash, $"Account not found: {fromAddress}");
+                    return (false, string.Empty, btcTxHash, $"Account not found: {fromAddress}", null);
                 }
 
                 // Create transaction data (use resolved withdrawal details, not contract Active* fields which may be null)
@@ -953,14 +972,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (privateKey == null)
                 {
                     SCLogUtility.Log($"Private key was null for account {fromAddress}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, btcTxHash, $"Private key was null for account {fromAddress}");
+                    return (false, string.Empty, btcTxHash, $"Private key was null for account {fromAddress}", null);
                 }
 
                 var signature = VerifiedXCore.Services.SignatureService.CreateSignature(txHash, privateKey, publicKey);
                 if (signature == "ERROR")
                 {
                     SCLogUtility.Log($"TX Signature Failed. SCUID: {scUID}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, btcTxHash, $"TX Signature Failed. SCUID: {scUID}");
+                    return (false, string.Empty, btcTxHash, $"TX Signature Failed. SCUID: {scUID}", null);
                 }
 
                 completionTx.Signature = signature;
@@ -983,18 +1002,66 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                     
                     SCLogUtility.Log($"vBTC V2 Withdrawal Complete TX Success. SCUID: {scUID}, TxHash: {completionTx.Hash}, BTCTxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
-                    return (true, completionTx.Hash, btcTxHash, string.Empty);
+                    return (true, completionTx.Hash, btcTxHash, string.Empty, null);
                 }
                 else
                 {
                     SCLogUtility.Log($"vBTC V2 Withdrawal Complete TX Verify Failed: {scUID}. Result: {result.Item2}", "VBTCService.CompleteWithdrawal()");
-                    return (false, string.Empty, btcTxHash, $"TX Verify Failed: {result.Item2}");
+                    return (false, string.Empty, btcTxHash, $"TX Verify Failed: {result.Item2}", null);
                 }
             }
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Withdrawal Complete Error: {ex.Message}", "VBTCService.CompleteWithdrawal()");
-                return (false, string.Empty, string.Empty, $"Error: {ex.Message}");
+                return (false, string.Empty, string.Empty, $"Error: {ex.Message}", null);
+            }
+        }
+
+        /// <summary>
+        /// Local-only observability write: stamps the stored withdrawal request with the last
+        /// signing failure's code/session/time. Purely informational for UIs and support — never
+        /// touches IsCompleted or completion Status values (those are consensus-adjacent).
+        /// </summary>
+        private static void RecordSigningFailureOnRequest(string withdrawalRequestHash, FROST.Models.FrostCeremonyOutcome? ceremony)
+        {
+            try
+            {
+                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (storedRequest == null)
+                    return;
+
+                storedRequest.LastSigningFailureCode = ceremony?.FailureCode.ToString() ?? "Unknown";
+                storedRequest.LastSigningFailureAt = TimeUtil.GetTime();
+                storedRequest.LastSigningSessionId = ceremony?.SessionId ?? string.Empty;
+                VBTCWithdrawalRequest.Save(storedRequest, true);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Failed to record signing failure on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.RecordSigningFailureOnRequest()");
+            }
+        }
+
+        /// <summary>
+        /// Local-only: persist the signed BTC txid on the stored request so a signed-but-unbroadcast
+        /// transaction remains traceable if the caller (e.g. a web wallet) dies before completing.
+        /// </summary>
+        private static void PersistSignedBtcTxId(string withdrawalRequestHash, string btcTxHash)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(btcTxHash))
+                    return;
+
+                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (storedRequest == null)
+                    return;
+
+                storedRequest.LastSignedBtcTxId = btcTxHash;
+                VBTCWithdrawalRequest.Save(storedRequest, true);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Failed to persist signed BTC txid on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.PersistSignedBtcTxId()");
             }
         }
 

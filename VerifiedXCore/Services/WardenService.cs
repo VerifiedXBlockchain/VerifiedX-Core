@@ -36,6 +36,7 @@ namespace VerifiedXCore.Services
                 Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
                 Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
                 Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 999_999_999_999L /* TODO set testnet disable height */ : 999_999_999_999L /* TODO set mainnet disable height */;
+                Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinate with caster-upgrade fork deploy) */;
             }
             else
             {
@@ -45,6 +46,7 @@ namespace VerifiedXCore.Services
                 Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
                 Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
                 Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 999_999_999_999L /* TODO set testnet disable height */ : 999_999_999_999L /* TODO set mainnet disable height */;
+                Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinate with caster-upgrade fork deploy) */;
             }
 
             Config.Config.EstablishConfigFile();

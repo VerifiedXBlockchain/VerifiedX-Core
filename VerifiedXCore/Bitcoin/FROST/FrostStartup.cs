@@ -1376,17 +1376,35 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-028: Validator-side withdrawal dedup check.
+                            // FIND-028: Validator-side withdrawal dedup check (per input, sighash-aware).
                             // If this signing request carries a WithdrawalRequestHash, verify that
-                            // we haven't already signed for this withdrawal. This is the network-level
+                            // we haven't already signed a DIFFERENT transaction for this withdrawal
+                            // input, and that no other withdrawal's signed tx is outstanding for the
+                            // contract unless this tx conflicts with it. This is the network-level
                             // defense against double-spend — even if the coordinator's code is modified.
                             if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                             {
                                 var (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                    .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash);
+                                    .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
+                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints);
+
+                                // If blocked by the contract-level outpoint pin, check on-chain whether
+                                // the pinned tx has since confirmed (or been conflicted away) — if so
+                                // the pin is released and the check re-run. Pins have no time expiry;
+                                // observed on-chain spend is the ONLY release.
+                                if (blocked && reason.Contains("PIN:"))
+                                {
+                                    if (await TryReleaseContractPinIfObservedOnChain(request.SmartContractUID))
+                                    {
+                                        (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                            .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
+                                                request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints);
+                                    }
+                                }
+
                                 if (blocked)
                                 {
-                                    LogUtility.Log($"[FROST Dedup] BLOCKED signing start for withdrawal {request.WithdrawalRequestHash}: {reason}",
+                                    LogUtility.Log($"[FROST Dedup] BLOCKED signing start for withdrawal {request.WithdrawalRequestHash} input {request.InputIndex}: {reason}",
                                         "FrostStartup.SignStart");
                                     context.Response.StatusCode = StatusCodes.Status409Conflict;
                                     await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1544,7 +1562,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 StartTimestamp = TimeUtil.GetTime(),
                                 MyKeyPackage = keyStore.KeyPackage,
                                 NonceSecret = nonceSecret,
-                                StoredParticipantOrder = storedOrder
+                                StoredParticipantOrder = storedOrder,
+                                InputIndex = request.InputIndex,
+                                TxInputOutpoints = request.TxInputOutpoints,
+                                BtcTxId = request.BtcTxId
                             };
 
                             // Auto-store this validator's nonce commitment
@@ -1556,7 +1577,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                                 {
                                     VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                        .RecordSigningFailed(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId);
+                                        .RecordSigningFailed(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId, request.InputIndex);
                                 }
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1571,7 +1592,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                             {
                                 VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                    .RecordSigningStarted(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId);
+                                    .RecordSigningStarted(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId,
+                                        request.InputIndex, request.MessageHash, request.AllInputSighashes);
                             }
 
                             LogUtility.Log($"[FROST] Signing ceremony started with real nonce generation. Session: {request.SessionId}", "FrostStartup.SignStart");
@@ -1892,12 +1914,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                             session.Round2Shares.TryAdd(myAddr, signatureShare);
 
                             // FIND-028: Record signing completed for withdrawal dedup tracking.
-                            // After generating a signature share, this validator has committed its key share
-                            // to this withdrawal. It MUST NOT sign for the same withdrawal again.
+                            // After generating a signature share, this validator has committed its key
+                            // share to THIS transaction for this withdrawal input. Re-signing the same
+                            // sighash stays allowed (idempotent); a different transaction is refused,
+                            // and the tx's input outpoints are pinned contract-wide so a different
+                            // withdrawal can only sign a CONFLICTING tx until this one is observed
+                            // on-chain.
                             if (!string.IsNullOrEmpty(session.WithdrawalRequestHash))
                             {
                                 VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                    .RecordSigningCompleted(session.SmartContractUID, session.WithdrawalRequestHash, sessionId);
+                                    .RecordSigningCompleted(session.SmartContractUID, session.WithdrawalRequestHash, sessionId,
+                                        session.InputIndex, session.MessageHash, session.TxInputOutpoints, session.BtcTxId);
                             }
 
                             LogUtility.Log($"[FROST] Signing Round 2 signature share generated via native library for session {sessionId}", "FrostStartup.SignRound2");
@@ -2038,6 +2065,93 @@ namespace VerifiedXCore.Bitcoin.FROST
                             Success = false,
                             Message = $"Error: {ex.Message}"
                         }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/sign/abort — coordinator notifies validators that a signing ceremony
+                /// died (insufficient nonces/shares, aggregation failure, exception). Before this
+                /// endpoint existed, a failed ceremony left validator-side sessions and tracker state
+                /// dangling until TTLs expired, which is what made failures unretryable in practice.
+                ///
+                /// Auth: a REPLAY of the session's original start signature — the leader signs
+                /// "{sessionId}.{leaderAddress}.{timestamp}" at start time, and the web-wallet flow
+                /// cannot mint fresh signatures, so replaying the start auth is the only universally
+                /// available proof. Session ids are single-use GUIDs, so a replayed abort can only
+                /// target the session it started.
+                ///
+                /// Effect: the session is dropped. If this validator has NOT generated its Round 2
+                /// share, the tracker input is marked Failed (60s cooldown, then retryable). If a
+                /// share WAS generated, the tracker stays Signed — the idempotent same-sighash rule
+                /// still allows the retry.
+                /// </summary>
+                endpoints.MapPost("/frost/sign/abort", async context =>
+                {
+                    try
+                    {
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var body = await reader.ReadToEndAsync();
+                            var request = JsonConvert.DeserializeObject<FrostSigningAbortRequest>(body);
+
+                            if (request == null || string.IsNullOrEmpty(request.SessionId) ||
+                                string.IsNullOrEmpty(request.LeaderAddress) || string.IsNullOrEmpty(request.LeaderSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "SessionId, LeaderAddress and LeaderSignature required" }));
+                                return;
+                            }
+
+                            if (!FrostSessionStorage.SigningSessions.TryGetValue(request.SessionId, out var session))
+                            {
+                                // Nothing to abort — treat as success so the coordinator's fire-and-forget stays simple.
+                                context.Response.StatusCode = StatusCodes.Status200OK;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Message = "No such session" }));
+                                return;
+                            }
+
+                            if (!string.Equals(session.LeaderAddress, request.LeaderAddress, StringComparison.OrdinalIgnoreCase))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Abort must come from the session leader" }));
+                                return;
+                            }
+
+                            var abortMessage = $"{request.SessionId}.{request.LeaderAddress}.{request.Timestamp}";
+                            if (!SignatureService.VerifySignature(request.LeaderAddress, abortMessage, request.LeaderSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid abort signature" }));
+                                return;
+                            }
+
+                            var myAddr = Globals.ValidatorAddress ?? "";
+                            var shareGenerated = session.Round2Shares.ContainsKey(myAddr);
+
+                            FrostSessionStorage.SigningSessions.TryRemove(request.SessionId, out _);
+
+                            if (!shareGenerated && !string.IsNullOrEmpty(session.WithdrawalRequestHash))
+                            {
+                                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .RecordSigningFailed(session.SmartContractUID, session.WithdrawalRequestHash, request.SessionId, session.InputIndex);
+                            }
+
+                            LogUtility.Log($"[FROST] Signing session {request.SessionId} aborted by leader {request.LeaderAddress}. ShareGenerated: {shareGenerated}",
+                                "FrostStartup.SignAbort");
+
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                Message = "Session aborted",
+                                ShareGenerated = shareGenerated
+                            }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
                     }
                 });
 
@@ -2316,6 +2430,66 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>
         /// FIND-024 Fix: Shared helper to finalize DKG when all required shares have been received.
         /// Calls FrostNative.DKGRound3Finalize, derives the Taproot address via NBitcoin,
+        /// <summary>
+        /// Checks on-chain whether a contract's pinned (signed-but-outstanding) withdrawal tx has
+        /// been resolved, and releases the pin if so. Resolution means either:
+        ///  - the pinned txid itself confirmed (its withdrawal should then complete normally), or
+        ///  - every pinned input outpoint is gone from the deposit address's unspent set (a
+        ///    conflicting tx confirmed, so the pinned tx can never confirm).
+        /// Uses the resilient Electrum lookup; on any inconclusive answer the pin is KEPT —
+        /// releasing it early would reopen the double-payout window this pin exists to close.
+        /// Returns true if the pin was released.
+        /// </summary>
+        private static async Task<bool> TryReleaseContractPinIfObservedOnChain(string scUID)
+        {
+            try
+            {
+                var pin = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetContractPin(scUID);
+                if (pin == null)
+                    return true; // Nothing pinned (already released)
+
+                // 1) Pinned tx confirmed?
+                if (!string.IsNullOrEmpty(pin.Value.BtcTxId))
+                {
+                    var confirmations = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
+                        .GetTransactionConfirmations(pin.Value.BtcTxId);
+                    if (confirmations > 0)
+                    {
+                        VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                            .ClearContractPin(scUID, $"pinned tx confirmed with {confirmations} confirmation(s)");
+                        return true;
+                    }
+                }
+
+                // 2) All pinned outpoints spent (conflicting tx confirmed)?
+                var depositAddress = VerifiedXCore.Bitcoin.Models.VBTCContractV2.GetContract(scUID)?.DepositAddress;
+                if (!string.IsNullOrEmpty(depositAddress))
+                {
+                    var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTaprootUTXOs(depositAddress);
+                    if (lookup.Success)
+                    {
+                        var unspent = lookup.Utxos
+                            .Select(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant())
+                            .ToHashSet();
+                        var anyStillUnspent = pin.Value.Outpoints.Any(op => unspent.Contains(op.ToLowerInvariant()));
+                        if (!anyStillUnspent)
+                        {
+                            VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                .ClearContractPin(scUID, "all pinned outpoints spent on-chain (pinned tx confirmed or conflicted away)");
+                            return true;
+                        }
+                    }
+                }
+
+                return false; // Inconclusive or still outstanding — keep the pin.
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[FROST Dedup] Pin release check failed for {scUID} (keeping pin): {ex.Message}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
+                return false;
+            }
+        }
+
         /// persists the key package, and marks the session as completed.
         /// Returns true if finalization succeeded.
         /// </summary>

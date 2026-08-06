@@ -2678,8 +2678,17 @@ namespace VerifiedXCore.Services
 
                         // S3C §0: per-CONTRACT active-withdrawal gate (was per-user) — rejects if
                         // the contract already has a mined active request (anti-grief expiry inside).
-                        if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, Globals.LastBlock?.Height ?? 0))
+                        // includeLocalOnlyRows: false — consensus must not read rows that exist on
+                        // this node only (fork vector; activates at V2WithdrawalExpiryFixHeight).
+                        if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, Globals.LastBlock?.Height ?? 0, includeLocalOnlyRows: false))
                             return (txResult, $"A withdrawal is already in progress for contract {scUID}; try again once it completes.");
+
+                        // Anti-griefing (V2WithdrawalExpiryFixHeight): a requestor whose previous
+                        // request on this contract expired incomplete sits out a cooldown before
+                        // requesting again — otherwise one address can relock a shared contract
+                        // every 360 blocks indefinitely.
+                        if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, Globals.LastBlock?.Height ?? 0))
+                            return (txResult, $"Requestor {requesterAddress} has a recently expired incomplete withdrawal on contract {scUID} and is in the repeat-request cooldown ({VBTCWithdrawalRequest.REPEAT_REQUEST_COOLDOWN_BLOCKS} blocks).");
 
                         // S3C §0: per-CONTRACT mempool guard (same-block defense) — reject if ANY
                         // withdrawal request for this contract, from any requester, is already pending.

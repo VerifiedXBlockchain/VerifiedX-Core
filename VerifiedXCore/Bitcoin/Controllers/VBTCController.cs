@@ -1716,6 +1716,15 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// <summary>
         /// Request withdrawal with pre-signed external request (Raw format)
         /// SECURITY: Includes signature verification, timestamp validation, and replay attack prevention
+        ///
+        /// PRE-REGISTRATION ONLY: this endpoint saves a local DB record and creates NO blockchain
+        /// transaction. The returned RequestHash is a synthetic local identifier — it is NOT a
+        /// withdrawal handle and cannot be completed or cancelled on-chain. Web wallets must follow
+        /// with GetRawRequestWithdrawalTxData → SendRawRequestWithdrawalTx (passing the SAME UniqueId)
+        /// to create the real VBTC_V2_WITHDRAWAL_REQUEST; its tx hash is the canonical
+        /// WithdrawalRequestHash for Prepare/ExecuteCompleteWithdrawalRaw. The mined record then
+        /// UPDATES this pre-registration row (matched by UniqueId); an orphaned pre-registration row
+        /// simply expires after the anti-grief window.
         /// </summary>
         /// <param name="payload">Raw withdrawal request with signature and unique ID</param>
         /// <returns>Withdrawal request confirmation</returns>
@@ -1764,7 +1773,25 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var hasActive = VBTCWithdrawalRequest.HasActiveContractRequest(payload.SmartContractUID, Globals.LastBlock?.Height ?? 0);
                 if (hasActive)
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "A withdrawal is already in progress for this contract; try again once it completes." });
+                    // Local gate — free to be helpful: name the blocking request and when it releases.
+                    var blocking = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query()
+                        .Where(x => x.SmartContractUID == payload.SmartContractUID && !x.IsCompleted)
+                        .ToList()
+                        .OrderByDescending(x => x.RequestBlockHeight)
+                        .FirstOrDefault();
+                    var releaseHeight = blocking != null && blocking.RequestBlockHeight > 0
+                        ? blocking.RequestBlockHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS
+                        : (long?)null;
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "A withdrawal is already in progress for this contract; try again once it completes." +
+                            (blocking != null ? $" Blocking requestor: {blocking.RequestorAddress}." : "") +
+                            (releaseHeight != null ? $" Gate releases at block {releaseHeight} (current: {Globals.LastBlock?.Height ?? 0})." : ""),
+                        BlockingRequestor = blocking?.RequestorAddress,
+                        BlockingRequestHash = blocking?.TransactionHash,
+                        GateReleaseHeight = releaseHeight
+                    });
                 }
 
                 // 5. Verify VFX signature
@@ -1889,10 +1916,56 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var startMessage = $"{sessionId}.{payload.OwnerAddress}.{startTimestamp}";
                 var shareDistMessage = $"{sessionId}.{payload.OwnerAddress}.{shareDistTimestamp}";
 
+                // Multi-input support: each transaction input runs its own FROST ceremony with its
+                // own session id (input 0 = base sessionId — byte-identical to the legacy single-input
+                // flow — input k = "{base}:i{k}"), and validators verify each start independently, so
+                // the wallet must sign ONE start message per input. Build the unsigned tx now (same
+                // deterministic largest-first selection Execute will use) to learn the input count.
+                var startMessages = new List<object>
+                {
+                    new { InputIndex = 0, SessionId = sessionId, Message = startMessage, Timestamp = startTimestamp }
+                };
+                var selectedOutpoints = new List<object>();
+                int inputCount = 1;
+
+                if (amount > 0 && !string.IsNullOrEmpty(btcDestination))
+                {
+                    var depositAddress = VBTCContractV2.GetContract(payload.SmartContractUID)?.DepositAddress;
+                    if (!string.IsNullOrEmpty(depositAddress))
+                    {
+                        var buildProbe = await Services.BitcoinTransactionService.BuildUnsignedTaprootTransaction(
+                            depositAddress, btcDestination, amount, feeRate);
+
+                        if (buildProbe.Success && buildProbe.UnsignedTx != null)
+                        {
+                            inputCount = buildProbe.UnsignedTx.Inputs.Count;
+                            foreach (var coin in buildProbe.SpentCoins)
+                                selectedOutpoints.Add(new { TxId = coin.Outpoint.Hash.ToString(), Vout = coin.Outpoint.N });
+
+                            for (int k = 1; k < inputCount; k++)
+                            {
+                                var inputSessionId = $"{sessionId}:i{k}";
+                                startMessages.Add(new
+                                {
+                                    InputIndex = k,
+                                    SessionId = inputSessionId,
+                                    Message = $"{inputSessionId}.{payload.OwnerAddress}.{startTimestamp}",
+                                    Timestamp = startTimestamp
+                                });
+                            }
+                        }
+                        // If the probe build fails (e.g. transient UTXO lookup) fall back to the
+                        // single-input legacy response; Execute rebuilds and will surface a precise
+                        // error (including InputCountMismatch) if the real tx needs more inputs.
+                    }
+                }
+
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Sign both LeaderAuthMessages with your private key (ECDSA secp256k1) and submit via ExecuteCompleteWithdrawalRaw.",
+                    Message = inputCount > 1
+                        ? $"This withdrawal spans {inputCount} inputs. Sign EVERY message in StartMessages (plus ShareDistributionMessage) and submit all signatures via ExecuteCompleteWithdrawalRaw.StartSignatures."
+                        : "Sign both LeaderAuthMessages with your private key (ECDSA secp256k1) and submit via ExecuteCompleteWithdrawalRaw.",
                     SessionId = sessionId,
                     OwnerAddress = payload.OwnerAddress,
                     SmartContractUID = payload.SmartContractUID,
@@ -1901,11 +1974,14 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Amount = amount,
                     BTCDestination = btcDestination,
                     FeeRate = feeRate,
-                    // Messages to sign
+                    // Messages to sign (legacy single-input fields preserved; StartMessages covers all inputs)
                     StartMessage = startMessage,
                     StartTimestamp = startTimestamp,
                     ShareDistributionMessage = shareDistMessage,
-                    ShareDistributionTimestamp = shareDistTimestamp
+                    ShareDistributionTimestamp = shareDistTimestamp,
+                    InputCount = inputCount,
+                    StartMessages = startMessages,
+                    SelectedOutpoints = selectedOutpoints
                 });
             }
             catch (Exception ex)
@@ -1960,6 +2036,28 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     ShareDistributionTimestamp = payload.ShareDistributionTimestamp
                 };
 
+                // Multi-input: verify and attach one pre-signed start per additional input. Session ids
+                // are derived deterministically ("{base}:i{k}"), timestamps match the base start message.
+                if (payload.StartSignatures != null && payload.StartSignatures.Any())
+                {
+                    preSignedAuth.InputAuths = new List<VerifiedXCore.Bitcoin.FROST.Models.PreSignedInputAuth>();
+                    foreach (var entry in payload.StartSignatures.Where(e => e.InputIndex > 0))
+                    {
+                        var inputSessionId = $"{payload.SessionId}:i{entry.InputIndex}";
+                        var inputStartMessage = $"{inputSessionId}.{payload.OwnerAddress}.{payload.StartTimestamp}";
+                        if (!SignatureService.VerifySignature(payload.OwnerAddress, inputStartMessage, entry.Signature))
+                            return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid start signature for input {entry.InputIndex}" });
+
+                        preSignedAuth.InputAuths.Add(new VerifiedXCore.Bitcoin.FROST.Models.PreSignedInputAuth
+                        {
+                            InputIndex = entry.InputIndex,
+                            SessionId = inputSessionId,
+                            Signature = entry.Signature,
+                            Timestamp = payload.StartTimestamp
+                        });
+                    }
+                }
+
                 // Call CompleteWithdrawal with signOnly=true + preSignedAuth + delegated params
                 var withdrawalResult = await Services.VBTCService.CompleteWithdrawal(
                     payload.SmartContractUID,
@@ -1973,10 +2071,23 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 if (!withdrawalResult.Success)
                 {
+                    // Legacy fields unchanged; the ceremony diagnostics are additive so the web
+                    // wallet/explorer can show WHY the ceremony failed and whether a retry will help.
+                    var ceremony = withdrawalResult.Ceremony;
                     return JsonConvert.SerializeObject(new
                     {
                         Success = false,
-                        Message = withdrawalResult.ErrorMessage ?? "FROST signing ceremony failed"
+                        Message = withdrawalResult.ErrorMessage ?? "FROST signing ceremony failed",
+                        FailureCode = ceremony?.FailureCode.ToString(),
+                        SessionId = ceremony?.SessionId,
+                        InputIndex = ceremony?.InputIndex,
+                        Retryable = ceremony?.IsRetryable,
+                        ValidatorFailures = ceremony?.ValidatorFailures?.Select(f => new
+                        {
+                            f.ValidatorAddress,
+                            f.HttpStatus,
+                            f.Message
+                        })
                     });
                 }
 
@@ -2255,7 +2366,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
 
-                // Build unsigned transaction
+                // Build unsigned transaction. UniqueId is carried in tx.Data so the mined record's
+                // OriginalUniqueId matches any RequestWithdrawalRaw pre-registration row and the
+                // Save dedup updates that row instead of duplicating it. Consensus-safe: tx.Data is
+                // free-form signed content and validators parse only the fields they know — old
+                // nodes ignore the extra field.
                 var txData = JsonConvert.SerializeObject(new
                 {
                     Function = "VBTCWithdrawalRequest()",
@@ -2263,7 +2378,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     RequestorAddress = payload.RequestorAddress,
                     BTCAddress = btcAddress,
                     Amount = payload.Amount,
-                    FeeRate = payload.FeeRate
+                    FeeRate = payload.FeeRate,
+                    UniqueId = !string.IsNullOrEmpty(payload.UniqueId) ? payload.UniqueId : null
                 });
 
                 var tx = new Transaction
@@ -4295,6 +4411,14 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public string BTCAddress { get; set; }
         public decimal Amount { get; set; }
         public int FeeRate { get; set; }
+        /// <summary>
+        /// Optional client-generated unique id. Web wallets that pre-registered via
+        /// RequestWithdrawalRaw MUST pass the same UniqueId here — StateData stores it as the mined
+        /// record's OriginalUniqueId, which lets the Save dedup UPDATE the local pre-registration
+        /// row (stamping the real TransactionHash and mined height) instead of inserting a second,
+        /// forever-incomplete row.
+        /// </summary>
+        public string? UniqueId { get; set; }
     }
 
     public class VBTCWithdrawalCompletePayload
@@ -4427,6 +4551,20 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public string BTCDestination { get; set; } = "";
         /// <summary>Delegated fee rate (sats/vB).</summary>
         public int FeeRate { get; set; }
+        /// <summary>
+        /// Per-input start signatures for MULTI-INPUT withdrawals. PrepareCompleteWithdrawalRaw
+        /// returns one StartMessage per transaction input (each with its own derived session id);
+        /// sign each and return them here. Input 0's signature may be supplied either here or via
+        /// the legacy top-level StartSignature. Omit entirely for single-input withdrawals.
+        /// </summary>
+        public List<StartSignatureEntry>? StartSignatures { get; set; }
+    }
+
+    /// <summary>One signed ceremony-start message for a specific transaction input.</summary>
+    public class StartSignatureEntry
+    {
+        public int InputIndex { get; set; }
+        public string Signature { get; set; } = "";
     }
 
     public class PrepareMPCCeremonyRawPayload

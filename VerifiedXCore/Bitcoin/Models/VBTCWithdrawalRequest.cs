@@ -26,8 +26,44 @@ namespace VerifiedXCore.Bitcoin.Models
         // Drives the per-contract anti-grief expiry in HasActiveContractRequest.
         public long RequestBlockHeight { get; set; }
 
+        // Local-only observability (never consensus-read): what/when/why the last FROST signing
+        // attempt for this request failed, and the txid of the last successfully signed BTC tx
+        // (traceable even if the caller died before broadcasting/completing).
+        public string? LastSigningFailureCode { get; set; }
+        public long? LastSigningFailureAt { get; set; }
+        public string? LastSigningSessionId { get; set; }
+        public string? LastSignedBtcTxId { get; set; }
+
         // S3C §0: ~1 hour at ~10s/block; matches the existing 1-hour FROST ceremony TTL.
         public const long EXPIRY_BLOCKS = 360;
+
+        // Wall-clock equivalent of EXPIRY_BLOCKS (~1 hour), used only by the LOCAL per-user gates
+        // as a fallback for rows that never got a mined height (RequestBlockHeight == 0) — e.g.
+        // rows written by RequestWithdrawalRaw before heights were stamped, or legacy pre-upgrade
+        // rows. Wall clock is acceptable here because these gates are local-only, never consensus.
+        public const long EXPIRY_SECONDS = 3600;
+
+        /// <summary>
+        /// Shared read-time expiry predicate for the LOCAL per-user gates (GetActiveRequest,
+        /// GetIncompleteWithdrawalAmount, HasIncompleteRequest). A request stops blocking its
+        /// requester once it completes OR ages out of the anti-grief window — the same window after
+        /// which the per-contract consensus gate (HasActiveContractRequest) frees the contract for
+        /// everyone. Without this, a stalled request (failed FROST ceremony, dead web-wallet
+        /// session, node restart) locked its requester out of the contract permanently.
+        /// NOT used by consensus paths — HasActiveContractRequest has its own height-only rule.
+        /// </summary>
+        public static bool IsStillBlocking(VBTCWithdrawalRequest request, long currentHeight, long currentTime)
+        {
+            if (request.IsCompleted)
+                return false;
+
+            if (request.RequestBlockHeight > 0)
+                return currentHeight - request.RequestBlockHeight <= EXPIRY_BLOCKS;
+
+            // No mined height recorded — fall back to the request's own timestamp so legacy and
+            // local-only rows self-heal instead of blocking forever.
+            return currentTime - request.Timestamp <= EXPIRY_SECONDS;
+        }
 
         #region Get DB
         public static LiteDB.ILiteCollection<VBTCWithdrawalRequest>? GetVBTCWithdrawalRequestDb()
@@ -76,6 +112,11 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         public static bool HasIncompleteRequest(string address, string scUID)
         {
+            return HasIncompleteRequest(address, scUID, Globals.LastBlock?.Height ?? 0, TimeUtil.GetTime());
+        }
+
+        public static bool HasIncompleteRequest(string address, string scUID, long currentHeight, long currentTime)
+        {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
             {
@@ -84,12 +125,12 @@ namespace VerifiedXCore.Bitcoin.Models
             }
 
             var incompleteRequests = vwrDb.Query()
-                .Where(x => x.RequestorAddress == address && 
-                            x.SmartContractUID == scUID && 
+                .Where(x => x.RequestorAddress == address &&
+                            x.SmartContractUID == scUID &&
                             !x.IsCompleted)
                 .ToList();
 
-            return incompleteRequests.Any();
+            return incompleteRequests.Any(x => IsStillBlocking(x, currentHeight, currentTime));
         }
         #endregion
 
@@ -106,7 +147,12 @@ namespace VerifiedXCore.Bitcoin.Models
         /// <param name="currentHeight">Height to measure expiry against — Globals.LastBlock.Height
         /// at mempool/API time, the block-being-validated's height during block validation
         /// (must be the block height, not the chain tip, so replay stays deterministic).</param>
-        public static bool HasActiveContractRequest(string scUID, long currentHeight)
+        /// <param name="includeLocalOnlyRows">True (default) for LOCAL gates (API/bridge). CONSENSUS
+        /// callers (mempool/block validation) must pass false: local-only rows (TransactionHash=="",
+        /// created by RequestWithdrawalRaw) exist only on the API node that served the call, so a
+        /// consensus rule reading them is a fork vector. The exclusion activates at
+        /// Globals.V2WithdrawalExpiryFixHeight so historical replay stays byte-identical.</param>
+        public static bool HasActiveContractRequest(string scUID, long currentHeight, bool includeLocalOnlyRows = true)
         {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
@@ -119,9 +165,83 @@ namespace VerifiedXCore.Bitcoin.Models
                 .Where(x => x.SmartContractUID == scUID && !x.IsCompleted)
                 .ToList();
 
+            var fixActive = currentHeight >= Globals.V2WithdrawalExpiryFixHeight;
+
             foreach (var r in incompleteRequests)
             {
-                if (r.RequestBlockHeight == 0 || currentHeight - r.RequestBlockHeight <= EXPIRY_BLOCKS)
+                var isLocalOnlyRow = string.IsNullOrEmpty(r.TransactionHash);
+
+                // Consensus callers ignore rows that exist on this node only (fork vector).
+                if (fixActive && !includeLocalOnlyRows && isLocalOnlyRow)
+                    continue;
+
+                if (r.RequestBlockHeight == 0)
+                {
+                    // Legacy MINED rows (created before RequestBlockHeight existed) deserialize with
+                    // height 0 and would block their contract forever. At/after activation they get a
+                    // fixed grace window measured from the activation constant — identical on every
+                    // node, no wall clock — then stop blocking permanently. (New mined rows always
+                    // stamp a real height via StateData, so they can never be 0.)
+                    if (fixActive && !isLocalOnlyRow)
+                    {
+                        if (currentHeight <= Globals.V2WithdrawalExpiryFixHeight + EXPIRY_BLOCKS)
+                            return true;
+                        continue;
+                    }
+
+                    // Pre-activation (and local-only rows on local gates): fail toward locked so an
+                    // unmined request cannot slip the mempool race — byte-identical legacy behavior.
+                    return true;
+                }
+
+                if (currentHeight - r.RequestBlockHeight <= EXPIRY_BLOCKS)
+                    return true;
+            }
+
+            return false;
+        }
+        #endregion
+
+        #region Per-Requestor Repeat-Offense Cooldown
+        /// <summary>
+        /// Anti-griefing: blocks after an expired-incomplete request during which the SAME requestor
+        /// may not open another request on the same contract. Without this, any vBTC holder on a
+        /// shared contract could lock all withdrawals indefinitely by requesting, letting the
+        /// ceremony fail, and re-requesting the moment the 360-block window expires (~1h lock per
+        /// tx fee, repeatable forever). 1080 blocks ≈ 3 windows.
+        /// </summary>
+        public const long REPEAT_REQUEST_COOLDOWN_BLOCKS = 1080;
+
+        /// <summary>
+        /// CONSENSUS RULE (active at/after Globals.V2WithdrawalExpiryFixHeight): true when the
+        /// requestor has a prior MINED incomplete request on this contract whose anti-grief window
+        /// expired within the last REPEAT_REQUEST_COOLDOWN_BLOCKS. Deterministic — derived solely
+        /// from mined data (RequestBlockHeight stamped by StateData on every node) and the supplied
+        /// height (block height during block validation, never the chain tip).
+        /// </summary>
+        public static bool IsRequestorInRepeatCooldown(string requestorAddress, string scUID, long currentHeight)
+        {
+            if (currentHeight < Globals.V2WithdrawalExpiryFixHeight)
+                return false;
+
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+            {
+                ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.IsRequestorInRepeatCooldown()");
+                return false;
+            }
+
+            var expiredIncomplete = vwrDb.Query()
+                .Where(x => x.RequestorAddress == requestorAddress &&
+                            x.SmartContractUID == scUID &&
+                            !x.IsCompleted)
+                .ToList()
+                .Where(x => x.RequestBlockHeight > 0 && !string.IsNullOrEmpty(x.TransactionHash));
+
+            foreach (var r in expiredIncomplete)
+            {
+                var expiredAtHeight = r.RequestBlockHeight + EXPIRY_BLOCKS;
+                if (currentHeight > expiredAtHeight && currentHeight - expiredAtHeight <= REPEAT_REQUEST_COOLDOWN_BLOCKS)
                     return true;
             }
 
@@ -137,6 +257,11 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         public static decimal GetIncompleteWithdrawalAmount(string address, string scUID)
         {
+            return GetIncompleteWithdrawalAmount(address, scUID, Globals.LastBlock?.Height ?? 0, TimeUtil.GetTime());
+        }
+
+        public static decimal GetIncompleteWithdrawalAmount(string address, string scUID, long currentHeight, long currentTime)
+        {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
             {
@@ -145,9 +270,11 @@ namespace VerifiedXCore.Bitcoin.Models
             }
 
             var incompleteWithdrawals = vwrDb.Query()
-                .Where(x => x.RequestorAddress == address && 
-                            x.SmartContractUID == scUID && 
+                .Where(x => x.RequestorAddress == address &&
+                            x.SmartContractUID == scUID &&
                             !x.IsCompleted)
+                .ToList()
+                .Where(x => IsStillBlocking(x, currentHeight, currentTime))
                 .ToList();
 
             if (incompleteWithdrawals.Any())
@@ -204,6 +331,16 @@ namespace VerifiedXCore.Bitcoin.Models
                 // mine time; never zero it back out on later completion/cancellation saves.
                 if (request.RequestBlockHeight > 0)
                     existingRequest.RequestBlockHeight = request.RequestBlockHeight;
+
+                // Local-only observability fields — carry forward when set, never blank out.
+                if (!string.IsNullOrEmpty(request.LastSigningFailureCode))
+                    existingRequest.LastSigningFailureCode = request.LastSigningFailureCode;
+                if (request.LastSigningFailureAt.HasValue)
+                    existingRequest.LastSigningFailureAt = request.LastSigningFailureAt;
+                if (!string.IsNullOrEmpty(request.LastSigningSessionId))
+                    existingRequest.LastSigningSessionId = request.LastSigningSessionId;
+                if (!string.IsNullOrEmpty(request.LastSignedBtcTxId))
+                    existingRequest.LastSignedBtcTxId = request.LastSignedBtcTxId;
 
                 vwrDb.UpdateSafe(existingRequest);
                 return true;
@@ -285,6 +422,11 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         public static VBTCWithdrawalRequest? GetActiveRequest(string address, string scUID)
         {
+            return GetActiveRequest(address, scUID, Globals.LastBlock?.Height ?? 0, TimeUtil.GetTime());
+        }
+
+        public static VBTCWithdrawalRequest? GetActiveRequest(string address, string scUID, long currentHeight, long currentTime)
+        {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
             {
@@ -292,11 +434,14 @@ namespace VerifiedXCore.Bitcoin.Models
                 return null;
             }
 
+            // Read-time expiry: a stalled request stops blocking its requester after the same
+            // anti-grief window the per-contract gate uses, instead of blocking forever.
             var request = vwrDb.Query()
-                .Where(x => x.RequestorAddress == address && 
-                            x.SmartContractUID == scUID && 
+                .Where(x => x.RequestorAddress == address &&
+                            x.SmartContractUID == scUID &&
                             !x.IsCompleted)
-                .FirstOrDefault();
+                .ToList()
+                .FirstOrDefault(x => IsStillBlocking(x, currentHeight, currentTime));
 
             return request;
         }
