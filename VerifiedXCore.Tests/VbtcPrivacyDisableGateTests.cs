@@ -6,8 +6,10 @@ using VerifiedXCore.Services;
 namespace VerifiedXCore.Tests
 {
     /// <summary>
-    /// Consensus gate that temporarily disables vBTC privacy TXs once
-    /// <see cref="Globals.LastBlock"/>.Height exceeds <see cref="Globals.VbtcPrivacyDisableHeight"/>.
+    /// Consensus gate that temporarily disables vBTC privacy TXs from
+    /// <see cref="Globals.VbtcPrivacyDisableHeight"/> onward. Deterministic under replay:
+    /// block validation gates on the block's own height (blockHeight param); mempool
+    /// admission gates on the height the tx would mine into (tip + 1).
     /// Mutates Globals.LastBlock, so serialized via the GlobalCasterState collection.
     /// </summary>
     [Collection("GlobalCasterState")]
@@ -60,16 +62,64 @@ namespace VerifiedXCore.Tests
         [InlineData(TransactionType.VBTC_V2_SHIELD)]
         [InlineData(TransactionType.VBTC_V2_UNSHIELD)]
         [InlineData(TransactionType.VBTC_V2_PRIVATE_TRANSFER)]
-        public async Task VerifyTX_AllowsVbtcPrivacyTypes_BelowOrAtGateHeight(TransactionType type)
+        public async Task VerifyTX_AllowsVbtcPrivacyTypes_BelowGateBoundary(TransactionType type)
         {
             Globals.VbtcPrivacyDisableHeight = 1000;
-            Globals.LastBlock = new Block { Height = 1000 };
+            Globals.LastBlock = new Block { Height = 998 }; // next block = 999 < gate
 
             var (ok, message) = await TransactionValidatorService.VerifyTX(MakeTx(type));
 
             Assert.False(ok);
             Assert.NotEqual(DisabledMessage, message);
             Assert.Contains("MaxPrivateTxDataSize", message);
+        }
+
+        [Theory]
+        [InlineData(TransactionType.VBTC_V2_SHIELD)]
+        [InlineData(TransactionType.VBTC_V2_UNSHIELD)]
+        [InlineData(TransactionType.VBTC_V2_PRIVATE_TRANSFER)]
+        public async Task VerifyTX_MempoolRejects_WhenNextBlockWouldCrossGate(TransactionType type)
+        {
+            Globals.VbtcPrivacyDisableHeight = 1000;
+            Globals.LastBlock = new Block { Height = 999 }; // next block = 1000 >= gate
+
+            var (ok, message) = await TransactionValidatorService.VerifyTX(MakeTx(type));
+
+            Assert.False(ok);
+            Assert.Equal(DisabledMessage, message);
+        }
+
+        /// <summary>Replay determinism: a historical block below the gate must revalidate the
+        /// same way regardless of the live chain tip.</summary>
+        [Theory]
+        [InlineData(TransactionType.VBTC_V2_SHIELD)]
+        [InlineData(TransactionType.VBTC_V2_UNSHIELD)]
+        [InlineData(TransactionType.VBTC_V2_PRIVATE_TRANSFER)]
+        public async Task VerifyTX_BlockPath_UsesBlockHeightNotTip_AllowsHistorical(TransactionType type)
+        {
+            Globals.VbtcPrivacyDisableHeight = 1000;
+            Globals.LastBlock = new Block { Height = 5000 }; // tip far past the gate
+
+            var (ok, message) = await TransactionValidatorService.VerifyTX(MakeTx(type), blockHeight: 500);
+
+            Assert.False(ok);
+            Assert.NotEqual(DisabledMessage, message);
+            Assert.Contains("MaxPrivateTxDataSize", message);
+        }
+
+        [Theory]
+        [InlineData(TransactionType.VBTC_V2_SHIELD)]
+        [InlineData(TransactionType.VBTC_V2_UNSHIELD)]
+        [InlineData(TransactionType.VBTC_V2_PRIVATE_TRANSFER)]
+        public async Task VerifyTX_BlockPath_RejectsAtOrAboveGate_EvenWhenTipBelow(TransactionType type)
+        {
+            Globals.VbtcPrivacyDisableHeight = 1000;
+            Globals.LastBlock = new Block { Height = 10 }; // tip below the gate
+
+            var (ok, message) = await TransactionValidatorService.VerifyTX(MakeTx(type), blockHeight: 1000);
+
+            Assert.False(ok);
+            Assert.Equal(DisabledMessage, message);
         }
 
         [Theory]

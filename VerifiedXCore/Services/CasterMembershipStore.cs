@@ -35,6 +35,17 @@ namespace VerifiedXCore.Services
         /// <summary>Wave 6: minimum hardcoded-seed signatures a genesis record must carry.</summary>
         public const int GenesisMinSeedSignatures = 2;
 
+        /// <summary>
+        /// Wave 6: forward margin (in blocks) between the bootstrap AgreedHeight and the genesis
+        /// EffectiveFromHeight. Genesis minting is a retry loop that runs while block production
+        /// has already resumed; a boundary of AgreedHeight+1 would arm cert enforcement
+        /// RETROACTIVELY over cert-less blocks committed during minting, which any node adopting
+        /// the record later can never validate (attestations are in-memory only). The margin
+        /// keeps the boundary ahead of production for the whole minting window (~45s at ~12s
+        /// blocks) so enforcement only ever begins on blocks produced under the installed record.
+        /// </summary>
+        public const int GenesisBoundaryMargin = 32;
+
         private static bool _armed = false;
 
         /// <summary>

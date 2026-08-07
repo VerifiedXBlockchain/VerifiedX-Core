@@ -272,7 +272,7 @@ namespace VerifiedXCore.Services
                 return null;
             if (BootstrapCoordinationService.State != BootstrapCoordinationService.BootstrapState.Agreed)
                 return null;
-            if (candidate.EffectiveFromHeight != BootstrapCoordinationService.AgreedHeight + 1)
+            if (candidate.EffectiveFromHeight != BootstrapCoordinationService.AgreedHeight + CasterMembershipStore.GenesisBoundaryMargin)
                 return null; // must match OUR agreement's boundary exactly
 
             // Structural checks: must be the deterministic genesis for this network + boundary.

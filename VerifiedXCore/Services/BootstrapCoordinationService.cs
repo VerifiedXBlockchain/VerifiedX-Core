@@ -179,10 +179,12 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Wave 6: mints the genesis membership record at the agreement boundary
-        /// (EffectiveFromHeight = AgreedHeight + 1). Every agreeing seed constructs the IDENTICAL
-        /// record (deterministic given the agreed height), so signatures from concurrent attempts
-        /// merge and the equivocation guard never trips on honest seeds. Requires
+        /// Wave 6: mints the genesis membership record ahead of the agreement boundary
+        /// (EffectiveFromHeight = AgreedHeight + GenesisBoundaryMargin — production resumes during
+        /// the minting retry loop, so the boundary must stay in front of it; see
+        /// CasterMembershipStore.GenesisBoundaryMargin). Every agreeing seed constructs the
+        /// IDENTICAL record (deterministic given the agreed height), so signatures from concurrent
+        /// attempts merge and the equivocation guard never trips on honest seeds. Requires
         /// ≥2 hardcoded-seed signatures — collected via the SignMembershipRecord endpoint.
         /// Installing the record arms cert enforcement network-wide as it propagates.
         /// </summary>
@@ -194,7 +196,7 @@ namespace VerifiedXCore.Services
                 if (account?.GetPrivKey == null || string.IsNullOrEmpty(Globals.ValidatorAddress))
                     return;
 
-                var genesis = CasterMembershipStore.BuildGenesisRecord(AgreedHeight + 1);
+                var genesis = CasterMembershipStore.BuildGenesisRecord(AgreedHeight + CasterMembershipStore.GenesisBoundaryMargin);
 
                 if (!CasterMembershipStore.TryMarkSigned(0, genesis.RecordHash))
                 {

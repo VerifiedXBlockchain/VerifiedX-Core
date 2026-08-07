@@ -22,7 +22,7 @@ namespace VerifiedXCore.Services
 {
     public class TransactionValidatorService
     {
-        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false)
+        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null)
         {
             bool txResult = false;
             bool runReserveCheck = true;
@@ -35,8 +35,12 @@ namespace VerifiedXCore.Services
             if (badNFTTx) 
                 return (true, "");
 
+            // Height-gated vBTC privacy disable (inert until VbtcPrivacyDisableHeight is set).
+            // Deterministic under replay/sync: block validation passes the block's own height;
+            // mempool admission gates on the height the tx would mine into (tip + 1).
+            var vbtcPrivacyGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
             if (PrivateTransactionTypes.IsVbtcPrivateTransaction(txRequest.TransactionType)
-                && Globals.LastBlock.Height > Globals.VbtcPrivacyDisableHeight)
+                && vbtcPrivacyGateHeight >= Globals.VbtcPrivacyDisableHeight)
                 return (false, "vBTC privacy transactions are temporarily disabled.");
 
             if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))

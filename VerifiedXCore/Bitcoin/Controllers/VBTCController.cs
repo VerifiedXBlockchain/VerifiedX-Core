@@ -1717,14 +1717,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// Request withdrawal with pre-signed external request (Raw format)
         /// SECURITY: Includes signature verification, timestamp validation, and replay attack prevention
         ///
+        /// DEPRECATED FOR WALLET WITHDRAWAL FLOWS — wallets should skip this endpoint entirely and
+        /// use GetRawRequestWithdrawalTxData → SendRawRequestWithdrawalTx directly; that flow does
+        /// its own balance/gate/replay checks and its tx hash is the canonical WithdrawalRequestHash.
+        ///
         /// PRE-REGISTRATION ONLY: this endpoint saves a local DB record and creates NO blockchain
         /// transaction. The returned RequestHash is a synthetic local identifier — it is NOT a
-        /// withdrawal handle and cannot be completed or cancelled on-chain. Web wallets must follow
-        /// with GetRawRequestWithdrawalTxData → SendRawRequestWithdrawalTx (passing the SAME UniqueId)
-        /// to create the real VBTC_V2_WITHDRAWAL_REQUEST; its tx hash is the canonical
-        /// WithdrawalRequestHash for Prepare/ExecuteCompleteWithdrawalRaw. The mined record then
-        /// UPDATES this pre-registration row (matched by UniqueId); an orphaned pre-registration row
-        /// simply expires after the anti-grief window.
+        /// withdrawal handle and cannot be completed or cancelled on-chain. Kept for external API
+        /// consumers; a client that does pre-register should pass the SAME UniqueId to
+        /// GetRawRequestWithdrawalTxData so the mined record UPDATES this row (matched by UniqueId).
+        /// An orphaned pre-registration row simply expires after the anti-grief window.
         /// </summary>
         /// <param name="payload">Raw withdrawal request with signature and unique ID</param>
         /// <returns>Withdrawal request confirmation</returns>
@@ -2351,8 +2353,17 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (payload.FeeRate <= 0)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
 
-                // Check for existing active withdrawal
-                var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(payload.RequestorAddress, payload.SmartContractUID);
+                // Check for existing active withdrawal — but ignore the caller's own LOCAL-ONLY
+                // pre-registration rows (TransactionHash == "", created by RequestWithdrawalRaw).
+                // Such a row represents THIS withdrawal being built, not a competing one; counting
+                // it here made the pre-register → build-TX sequence self-blocking for ~360 blocks.
+                var existingRequest = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query()
+                    .Where(x => x.RequestorAddress == payload.RequestorAddress &&
+                                x.SmartContractUID == payload.SmartContractUID &&
+                                !x.IsCompleted)
+                    .ToList()
+                    .Where(x => !string.IsNullOrEmpty(x.TransactionHash))
+                    .FirstOrDefault(x => VBTCWithdrawalRequest.IsStillBlocking(x, Globals.LastBlock?.Height ?? 0, TimeUtil.GetTime()));
                 if (existingRequest != null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Active withdrawal already exists. Request Hash: {existingRequest.TransactionHash}" });
 

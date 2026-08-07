@@ -1355,6 +1355,8 @@ namespace VerifiedXCore.Services
             }
 
             var download = true;
+            var noPeerIterations = 0;
+            const int noPeerExitIterations = 12; // ~60s at 5s per iteration
             try
             {
                 while (download) //this will loop forever till download happens
@@ -1376,6 +1378,27 @@ namespace VerifiedXCore.Services
                     }
 
                     var highestReportedBlock = Globals.Nodes.Values.OrderByDescending(x => x.NodeHeight).FirstOrDefault();
+
+                    if (highestReportedBlock == null)
+                    {
+                        // No connected peer is reporting a height. On a coordinated cold start
+                        // (whole network down, seed casters restarting together) there may be
+                        // nobody to sync from — a node alone at its own tip IS synced with its
+                        // chain, and holding IsChainSynced false here deadlocks the bootstrap
+                        // path (stall detection requires IsChainSynced). Exit after a bounded
+                        // wait; if peers appear later, normal download/broadcast catch-up runs.
+                        noPeerIterations++;
+                        if (noPeerIterations >= noPeerExitIterations)
+                        {
+                            ConsoleWriterService.Output("No peers reporting a height after bounded wait — treating local tip as synced (cold start).");
+                            LogUtility.Log($"DownloadBlocksOnStart: no peers after {noPeerIterations} checks — exiting sync loop at local height {Globals.LastBlock.Height}.", "DownloadBlocksOnStart()-noPeers");
+                            download = false;
+                            continue;
+                        }
+                        await Task.Delay(5000);
+                        continue;
+                    }
+                    noPeerIterations = 0;
 
                     var lastBlock = Globals.LastBlock;
                     var currentTimestamp = TimeUtil.GetTime(-90);

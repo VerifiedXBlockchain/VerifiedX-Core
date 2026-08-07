@@ -478,7 +478,10 @@ namespace VerifiedXCore.Services
 
                 // Certificates are attached after local craft (TryAttachCertificateAsync) and before broadcast.
                 // validateOnly preflight must not require a cert yet; full acceptance paths use validateOnly=false.
-                if (!validateOnly && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                // blockDownloads is exempt: certs are not part of the block hash and attestations are
+                // in-memory with a short retention window, so historical blocks fetched during sync can
+                // never have their certs re-verified (or repaired) — enforcement is live-broadcast only.
+                if (!validateOnly && !blockDownloads && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
                     return result;
@@ -806,7 +809,7 @@ namespace VerifiedXCore.Services
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
                             {
-                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces, skipPrivatePlonkProofVerification: !blockDownloads);
+                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height);
 
                                 var effectiveTxResult = txResult;
                                 if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(blkTransaction.TransactionType))
@@ -1734,7 +1737,7 @@ namespace VerifiedXCore.Services
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                     {
-                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, false, false, null, skipPrivatePlonkProofVerification: !blockDownloads);
+                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, false, false, null, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height);
                         var effectiveTxResult = txResult;
                         if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(transaction.TransactionType))
                         {

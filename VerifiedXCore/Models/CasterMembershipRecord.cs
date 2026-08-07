@@ -6,7 +6,8 @@ namespace VerifiedXCore.Models
     /// and carries signatures from a majority of record N-1's caster set — so any single valid
     /// response is cryptographically trustworthy and disjoint local quorums cannot form.
     /// Record 0 (genesis) is minted by the seeds at the coordinated restart's bootstrap
-    /// agreement (EffectiveFromHeight = agreed height + 1) and must carry ≥2 signatures from
+    /// agreement (EffectiveFromHeight = agreed height + GenesisBoundaryMargin, kept ahead of the
+    /// production that resumes during minting) and must carry ≥2 signatures from
     /// the hardcoded seed allowlist — the same trust root as the bootstrap agreement itself.
     /// </summary>
     public class CasterMembershipRecord

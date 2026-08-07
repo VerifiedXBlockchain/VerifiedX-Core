@@ -70,6 +70,23 @@ namespace VerifiedXCore.Tests
             Assert.Equal(sorted, g1.Casters.Select(c => c.Address).ToList());
         }
 
+        /// <summary>
+        /// Regression guard: the genesis boundary must sit a healthy margin AHEAD of the
+        /// bootstrap AgreedHeight. Genesis minting is a retry loop running while block
+        /// production has already resumed — a margin of 1 (the original design) armed cert
+        /// enforcement retroactively over cert-less committed blocks, permanently bricking
+        /// any node that adopted the record later (attestations are in-memory only).
+        /// The minting window is ~45s at ~12s blocks (~4 blocks); require comfortable headroom.
+        /// </summary>
+        [Fact]
+        public void GenesisBoundaryMargin_StaysAheadOfMintingWindow()
+        {
+            Assert.True(CasterMembershipStore.GenesisBoundaryMargin >= 8,
+                $"GenesisBoundaryMargin={CasterMembershipStore.GenesisBoundaryMargin} is too small — " +
+                "blocks produced during the genesis minting retry loop would fall above the cert " +
+                "enforcement boundary without certificates.");
+        }
+
         [Fact]
         public void Genesis_RequiresSeedSignatures()
         {
