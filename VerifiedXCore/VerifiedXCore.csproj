@@ -72,6 +72,20 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- plonk_ffi native libraries: flattened into the output root because the .NET
+         native loader probes the app directory by per-OS filename (no RID layout). -->
+    <None Include="Plonk\win\plonk_ffi.dll" Link="plonk_ffi.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Plonk\linux\libplonk_ffi.so" Link="libplonk_ffi.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Plonk\mac\libplonk_ffi.dylib" Link="libplonk_ffi.dylib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="Assets\Images\rbx.ico">
       <Pack>True</Pack>
       <PackagePath>\</PackagePath>
