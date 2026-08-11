@@ -72,8 +72,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- plonk_ffi native libraries: flattened into the output root because the .NET
-         native loader probes the app directory by per-OS filename (no RID layout). -->
+    <!-- plonk_ffi / frost_ffi native libraries: flattened into the output root because the
+         .NET native loader probes the app directory by per-OS filename (no RID layout). -->
     <None Include="Plonk\win\plonk_ffi.dll" Link="plonk_ffi.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
@@ -82,6 +82,20 @@
     </None>
     <None Include="Plonk\mac\libplonk_ffi.dylib" Link="libplonk_ffi.dylib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Frost\win\frost_ffi.dll" Link="frost_ffi.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <!-- x64 .so excluded on linux-arm64 publishes: the arm rule below links the SAME
+         output filename (libfrost_ffi.so) and the two must not collide. -->
+    <None Include="Frost\linux\libfrost_ffi.so" Link="libfrost_ffi.so" Condition="'$(RuntimeIdentifier)' != 'linux-arm64'">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Include="Frost\mac\libfrost_ffi.dylib" Link="libfrost_ffi.dylib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
   </ItemGroup>
 
