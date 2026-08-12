@@ -3251,8 +3251,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // balance-holders see contracts they received value on; the loop below already
                 // filters to contracts where the address is owner or has a ledger balance.
                 var contracts = VBTCContractV2.GetAllContracts();
-                SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: GetAllVBTCBalances({address}) — local VBTCContractV2 records: {contracts?.Count ?? 0}",
-                    "VBTCController.GetAllVBTCBalances()");
+                //SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: GetAllVBTCBalances({address}) — local VBTCContractV2 records: {contracts?.Count ?? 0}",
+                //    "VBTCController.GetAllVBTCBalances()");
                 if (contracts != null && contracts.Any())
                 {
                     foreach (var contract in contracts)
@@ -3315,8 +3315,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                         decimal contractBalance = isOwner ? depositBalance + ledgerBalance : ledgerBalance;
 
-                        SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: SCUID: {contract.SmartContractUID} — StateTreiFound: {scState != null}, LedgerBalance: {ledgerBalance}, TxCount: {txCount}, IsOwner: {isOwner}, Included: {contractBalance > 0 || isOwner}",
-                            "VBTCController.GetAllVBTCBalances()");
+                        //SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: SCUID: {contract.SmartContractUID} — StateTreiFound: {scState != null}, LedgerBalance: {ledgerBalance}, TxCount: {txCount}, IsOwner: {isOwner}, Included: {contractBalance > 0 || isOwner}",
+                        //    "VBTCController.GetAllVBTCBalances()");
 
                         if (contractBalance > 0 || isOwner)
                         {
@@ -3341,8 +3341,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     }
                 }
 
-                SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: GetAllVBTCBalances({address}) — returning {contractBalances.Count} contracts, TotalBalance: {totalBalance}",
-                    "VBTCController.GetAllVBTCBalances()");
+                //SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: GetAllVBTCBalances({address}) — returning {contractBalances.Count} contracts, TotalBalance: {totalBalance}",
+                //    "VBTCController.GetAllVBTCBalances()");
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -3375,8 +3375,44 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var contract = VBTCContractV2.GetContract(scUID);
                 if (contract == null)
                 {
-                    SCLogUtility.Log($"VBTC-TRACE [7-Details]: GetContractDetails({scUID}) — no local VBTCContractV2 record on this node.",
-                        "VBTCController.GetContractDetails()");
+                    //SCLogUtility.Log($"VBTC-TRACE [7-Details]: GetContractDetails({scUID}) — no local VBTCContractV2 record on this node.",
+                    //    "VBTCController.GetContractDetails()");
+
+                    // Fallback: build read-only details from the state trei (available on ALL nodes),
+                    // so any node can answer for any on-chain contract without a local record.
+                    var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                    if (scStateTrei != null && !string.IsNullOrWhiteSpace(scStateTrei.ContractData))
+                    {
+                        var scMainFallback = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
+                        var tknzFallback = scMainFallback?.Features?
+                            .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                            .Select(x => x.FeatureFeatures)
+                            .FirstOrDefault() as TokenizationV2Feature;
+
+                        if (tknzFallback != null)
+                        {
+                            return JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                Message = "Contract details retrieved (state trei — no local record)",
+                                Source = "state-trei",
+                                SmartContractUID = scUID,
+                                Contract = new
+                                {
+                                    SmartContractUID = scUID,
+                                    OwnerAddress = scStateTrei.OwnerAddress,
+                                    DepositAddress = tknzFallback.DepositAddress,
+                                    FrostGroupPublicKey = tknzFallback.FrostGroupPublicKey,
+                                    RequiredThreshold = tknzFallback.RequiredThreshold,
+                                    DKGProof = tknzFallback.DKGProof,
+                                    ProofBlockHeight = tknzFallback.ProofBlockHeight,
+                                    IsS3C = tknzFallback.IsS3C,
+                                    LinkedContractUID = tknzFallback.LinkedContractUID
+                                }
+                            });
+                        }
+                    }
+
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
                 }
 
@@ -3386,6 +3422,35 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Message = "Contract details retrieved",
                     SmartContractUID = scUID,
                     Contract = contract
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Re-runs the local vBTC V2 record backfill on demand (same routine that runs at startup).
+        /// Creates any missing local VBTCContractV2/SmartContract records for contracts that local
+        /// accounts own or hold ledger balances on. Idempotent. Skip reasons are logged to SCLog
+        /// under "VBTC-TRACE [6-Backfill]".
+        /// </summary>
+        [HttpGet("ResyncVBTCContracts")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ResyncVBTCContracts()
+        {
+            try
+            {
+                var result = await Services.VBTCService.BackfillLocalVBTCContracts();
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Backfill complete. Skip reasons logged under VBTC-TRACE [6-Backfill].",
+                    StateRecordsScanned = result.Scanned,
+                    WithLocalInvolvement = result.LocalInvolvement,
+                    RecordsCreated = result.Created,
+                    SkippedAlreadyExisting = result.SkippedExisting
                 });
             }
             catch (Exception ex)

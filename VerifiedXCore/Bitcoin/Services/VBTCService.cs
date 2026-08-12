@@ -1765,35 +1765,35 @@ namespace VerifiedXCore.Bitcoin.Services
         #region Backfill Local V2 Contract Records
 
         /// <summary>
-        /// Startup backfill: ensures local SmartContract + VBTCContractV2 records exist for every
-        /// vBTC V2 contract in the state trei that a local account owns or holds a ledger balance on.
-        /// Covers transfers received before receive-time record creation existed. Idempotent
-        /// (all saves are insert-only), so it is safe to run every boot.
+        /// Startup/on-demand backfill: ensures local SmartContract + VBTCContractV2 records exist for
+        /// every vBTC V2 contract in the state trei that a local account owns or holds a ledger balance
+        /// on. Covers transfers received before receive-time record creation existed. Idempotent
+        /// (all saves are insert-only), so it is safe to run every boot or via ResyncVBTCContracts.
         /// </summary>
-        public static async Task BackfillLocalVBTCContracts()
+        public static async Task<(int Scanned, int LocalInvolvement, int Created, int SkippedExisting)> BackfillLocalVBTCContracts()
         {
+            int scanned = 0, localInvolvement = 0, created = 0, skippedExisting = 0;
             try
             {
                 var accountDb = AccountData.GetAccounts();
                 if (accountDb == null)
-                    return;
+                    return (scanned, localInvolvement, created, skippedExisting);
 
                 var localAddresses = accountDb.FindAll().Select(x => x.Address).ToHashSet();
                 if (!localAddresses.Any())
                 {
                     SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: skipped — no local accounts.", "VBTCService.BackfillLocalVBTCContracts()");
-                    return;
+                    return (scanned, localInvolvement, created, skippedExisting);
                 }
 
                 var scStateTrei = SmartContractStateTrei.GetSCST();
                 if (scStateTrei == null)
                 {
                     SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: skipped — state trei DB was null.", "VBTCService.BackfillLocalVBTCContracts()");
-                    return;
+                    return (scanned, localInvolvement, created, skippedExisting);
                 }
 
                 SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: starting — local accounts: {localAddresses.Count}", "VBTCService.BackfillLocalVBTCContracts()");
-                int scanned = 0, localInvolvement = 0, created = 0;
 
                 foreach (var scState in scStateTrei.Query().ToEnumerable())
                 {
@@ -1801,7 +1801,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     {
                         scanned++;
                         if (string.IsNullOrWhiteSpace(scState.SmartContractUID) || string.IsNullOrWhiteSpace(scState.ContractData))
+                        {
+                            SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: SKIP (empty-contract-data) — SCUID: '{scState.SmartContractUID}'", "VBTCService.BackfillLocalVBTCContracts()");
                             continue;
+                        }
 
                         var isLocalOwner = localAddresses.Contains(scState.OwnerAddress);
                         var hasLocalLedger = scState.SCStateTreiTokenizationTXes != null &&
@@ -1813,14 +1816,29 @@ namespace VerifiedXCore.Bitcoin.Services
                         localInvolvement++;
 
                         if (VBTCContractV2.GetContract(scState.SmartContractUID) != null)
+                        {
+                            skippedExisting++;
+                            SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: SKIP (already-exists) — SCUID: {scState.SmartContractUID}", "VBTCService.BackfillLocalVBTCContracts()");
                             continue; // record already present; logo handled by the startup logo sweep
+                        }
 
-                        // Prefer the locally-saved SC record; fall back to decompiling state-trei data.
-                        var scMain = SmartContractMain.SmartContractData.GetSmartContract(scState.SmartContractUID)
-                            ?? SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
-
+                        // Prefer the locally-saved SC record; if it is missing OR lacks the V2 feature
+                        // (stale/partial save), decompile the authoritative state-trei contract data.
+                        var scMain = SmartContractMain.SmartContractData.GetSmartContract(scState.SmartContractUID);
                         if (scMain?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) != true)
+                            scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+
+                        if (scMain == null)
+                        {
+                            SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: SKIP (decompile-failed) — SCUID: {scState.SmartContractUID}", "VBTCService.BackfillLocalVBTCContracts()");
                             continue;
+                        }
+
+                        if (scMain.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) != true)
+                        {
+                            SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: SKIP (no-V2-feature) — SCUID: {scState.SmartContractUID}", "VBTCService.BackfillLocalVBTCContracts()");
+                            continue;
+                        }
 
                         SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
 
@@ -1841,12 +1859,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                 }
 
-                SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: complete — state records scanned: {scanned}, with local involvement: {localInvolvement}, records created: {created}", "VBTCService.BackfillLocalVBTCContracts()");
+                SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: complete — state records scanned: {scanned}, with local involvement: {localInvolvement}, records created: {created}, skipped existing: {skippedExisting}", "VBTCService.BackfillLocalVBTCContracts()");
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCService.BackfillLocalVBTCContracts()");
             }
+
+            return (scanned, localInvolvement, created, skippedExisting);
         }
 
         #endregion
