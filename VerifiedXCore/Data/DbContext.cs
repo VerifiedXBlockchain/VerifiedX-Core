@@ -18,6 +18,29 @@ namespace VerifiedXCore.Data
 {
     internal static class DbContext
     {
+        static DbContext()
+        {
+            // Databases opened WITHOUT an explicit mapper (e.g. DB_Assets) use BsonMapper.Global.
+            // Install the legacy type-name binder there so records written by pre-rename
+            // (ReserveBlockCore) builds still deserialize. Deliberately NOT adding the
+            // DateTime/DateTimeOffset RegisterType handlers to Global — most databases rely on
+            // LiteDB's default DateTime handling and changing it would alter their on-disk format.
+            BsonMapper.Global = new BsonMapper(null, LegacyTypeNameBinder.Instance);
+        }
+
+        /// <summary>Mapper for the DBs that need ISO-8601 DateTime round-tripping; includes the legacy type-name binder.</summary>
+        private static BsonMapper CreateDbMapper()
+        {
+            var mapper = new BsonMapper(null, LegacyTypeNameBinder.Instance);
+            mapper.RegisterType<DateTime>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTime.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            mapper.RegisterType<DateTimeOffset>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTimeOffset.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            return mapper;
+        }
+
         public static LiteDatabase DB { set; get; }// stores blocks
         public static LiteDatabase DB_Blockchain { set; get; }// stores block size and current chain length
         public static LiteDatabase DB_Mempool { set; get; }// stores blocks
@@ -146,13 +169,7 @@ namespace VerifiedXCore.Data
         {
             string path = GetPathUtility.GetDatabasePath();
 
-            var mapper = new BsonMapper();
-            mapper.RegisterType<DateTime>(
-                value => value.ToString("o", CultureInfo.InvariantCulture),
-                bson => DateTime.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
-            mapper.RegisterType<DateTimeOffset>(
-                value => value.ToString("o", CultureInfo.InvariantCulture),
-                bson => DateTimeOffset.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            var mapper = CreateDbMapper();
 
             DB = new LiteDatabase(new ConnectionString{Filename = path + RSRV_DB_NAME,Connection = ConnectionType.Direct,ReadOnly = false}, mapper);
             DB_Mempool = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_MEMPOOL, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
@@ -218,7 +235,56 @@ namespace VerifiedXCore.Data
             DB_TopicTrei.Pragma("UTC_DATE", true);
             DB_Vote.Pragma("UTC_DATE", true);
             DB_DST.Pragma("UTC_DATE", true);
-        }        
+
+            MigrateLegacyAssetTypeNames();
+        }
+
+        /// <summary>
+        /// One-time cleanup: rewrites smart contract records whose embedded "_type" metadata still
+        /// carries pre-rename "ReserveBlockCore" type names (readable only via LegacyTypeNameBinder)
+        /// so they are re-persisted with current VerifiedXCore type names. Only touches records that
+        /// actually contain legacy names, so subsequent boots migrate nothing. Per-record fault
+        /// tolerant — a bad record logs and is skipped, never blocking startup.
+        /// </summary>
+        private static void MigrateLegacyAssetTypeNames()
+        {
+            try
+            {
+                var raw = DB_Assets.GetCollection(RSRV_ASSETS);
+                var legacyIds = new List<BsonValue>();
+                foreach (var doc in raw.FindAll())
+                {
+                    if (doc.ToString().Contains("ReserveBlockCore"))
+                        legacyIds.Add(doc["_id"]);
+                }
+
+                if (!legacyIds.Any())
+                    return;
+
+                var scs = DB_Assets.GetCollection<Models.SmartContracts.SmartContractMain>(RSRV_ASSETS);
+                int migrated = 0;
+                foreach (var id in legacyIds)
+                {
+                    try
+                    {
+                        var sc = scs.FindById(id);  // deserializes via LegacyTypeNameBinder
+                        if (sc != null && scs.Update(sc))  // re-persists with current type names
+                            migrated++;
+                    }
+                    catch (Exception recEx)
+                    {
+                        ErrorLogUtility.LogError($"VBTC-TRACE [8-TypeMigrate]: failed to migrate record {id}: {recEx.Message}", "DbContext.MigrateLegacyAssetTypeNames()");
+                    }
+                }
+
+                SCLogUtility.Log($"VBTC-TRACE [8-TypeMigrate]: rewrote {migrated}/{legacyIds.Count} smart contract records from legacy ReserveBlockCore type names.", "DbContext.MigrateLegacyAssetTypeNames()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"VBTC-TRACE [8-TypeMigrate]: migration pass failed: {ex.Message}", "DbContext.MigrateLegacyAssetTypeNames()");
+            }
+        }
+
         public static void BeginTrans()
         {                    
             DB.BeginTrans();
@@ -425,13 +491,7 @@ namespace VerifiedXCore.Data
             TryBackupSecretDbFile(path, RSRV_DB_SHARES);
             TryBackupSecretDbFile(path, RSRV_DB_PRIVACY);
 
-            var mapper = new BsonMapper();
-            mapper.RegisterType<DateTime>(
-                value => value.ToString("o", CultureInfo.InvariantCulture),
-                bson => DateTime.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
-            mapper.RegisterType<DateTimeOffset>(
-                value => value.ToString("o", CultureInfo.InvariantCulture),
-                bson => DateTimeOffset.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            var mapper = CreateDbMapper();
 
             //recreate DBs
             DB = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_NAME, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
