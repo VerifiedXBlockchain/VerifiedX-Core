@@ -434,6 +434,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// This runs asynchronously in the background - use GetCeremonyStatus to check progress
         /// </summary>
         /// <param name="ownerAddress">Address requesting the ceremony</param>
+        /// <param name="forcePublic"></param>
         /// <returns>Ceremony ID for tracking progress</returns>
         [HttpPost("InitiateMPCCeremony/{ownerAddress}")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
@@ -3246,8 +3247,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var contractBalances = new List<object>();
                 decimal totalBalance = 0.0M;
 
-                // Get all vBTC V2 contracts for this address from database
-                var contracts = VBTCContractV2.GetContractsByOwner(address);
+                // Get all locally-known vBTC V2 contracts. Enumerating all (not just owned) lets
+                // balance-holders see contracts they received value on; the loop below already
+                // filters to contracts where the address is owner or has a ledger balance.
+                var contracts = VBTCContractV2.GetAllContracts();
                 if (contracts != null && contracts.Any())
                 {
                     foreach (var contract in contracts)

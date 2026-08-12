@@ -1755,5 +1755,79 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         #endregion
+
+        #region Backfill Local V2 Contract Records
+
+        /// <summary>
+        /// Startup backfill: ensures local SmartContract + VBTCContractV2 records exist for every
+        /// vBTC V2 contract in the state trei that a local account owns or holds a ledger balance on.
+        /// Covers transfers received before receive-time record creation existed. Idempotent
+        /// (all saves are insert-only), so it is safe to run every boot.
+        /// </summary>
+        public static async Task BackfillLocalVBTCContracts()
+        {
+            try
+            {
+                var accountDb = AccountData.GetAccounts();
+                if (accountDb == null)
+                    return;
+
+                var localAddresses = accountDb.FindAll().Select(x => x.Address).ToHashSet();
+                if (!localAddresses.Any())
+                    return;
+
+                var scStateTrei = SmartContractStateTrei.GetSCST();
+                if (scStateTrei == null)
+                    return;
+
+                foreach (var scState in scStateTrei.Query().ToEnumerable())
+                {
+                    try
+                    {
+                        if (string.IsNullOrWhiteSpace(scState.SmartContractUID) || string.IsNullOrWhiteSpace(scState.ContractData))
+                            continue;
+
+                        var isLocalOwner = localAddresses.Contains(scState.OwnerAddress);
+                        var hasLocalLedger = scState.SCStateTreiTokenizationTXes != null &&
+                            scState.SCStateTreiTokenizationTXes.Any(t => localAddresses.Contains(t.ToAddress) || localAddresses.Contains(t.FromAddress));
+
+                        if (!isLocalOwner && !hasLocalLedger)
+                            continue;
+
+                        if (VBTCContractV2.GetContract(scState.SmartContractUID) != null)
+                            continue; // record already present; logo handled by the startup logo sweep
+
+                        // Prefer the locally-saved SC record; fall back to decompiling state-trei data.
+                        var scMain = SmartContractMain.SmartContractData.GetSmartContract(scState.SmartContractUID)
+                            ?? SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+
+                        if (scMain?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) != true)
+                            continue;
+
+                        SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
+
+                        if (isLocalOwner)
+                            await VBTCContractV2.SaveSmartContract(scMain, null, scState.OwnerAddress);
+                        else
+                            await VBTCContractV2.SaveSmartContractTransfer(scMain, localAddresses.First());
+
+                        if (Globals.VBTCDefaultAssetOnly)
+                            await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scState.SmartContractUID);
+
+                        SCLogUtility.Log($"Backfilled local vBTC V2 contract record: {scState.SmartContractUID}", "VBTCService.BackfillLocalVBTCContracts()");
+                    }
+                    catch (Exception scEx)
+                    {
+                        ErrorLogUtility.LogError($"Backfill failed for SCUID: {scState.SmartContractUID}. Error: {scEx.Message}", "VBTCService.BackfillLocalVBTCContracts()");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(ex.ToString(), "VBTCService.BackfillLocalVBTCContracts()");
+            }
+        }
+
+        #endregion
     }
 }

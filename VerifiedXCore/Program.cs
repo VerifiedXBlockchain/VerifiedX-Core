@@ -385,6 +385,8 @@ namespace VerifiedXCore
             if (Globals.VBTCDefaultAssetOnly)
                 _ = NFTAssetFileUtility.AssociateDefaultVBTCLogosForExistingContracts(); //associates default logo with existing vBTC V2 contracts (no beacons)
 
+            _ = Bitcoin.Services.VBTCService.BackfillLocalVBTCContracts(); //creates missing local vBTC V2 records for contracts local accounts own or hold balances on
+
             // PLONK params: auto-download if not present, then load into native FFI (background — non-blocking)
             _ = Task.Run(async () =>
             {

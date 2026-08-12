@@ -329,9 +329,15 @@ namespace VerifiedXCore.Services
                                             }
                                         }
 
-                                        // vBTC V2 default-asset mode: associate the local default logo; no beacon download needed.
-                                        if (Globals.VBTCDefaultAssetOnly && sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
-                                            await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
+                                        if (sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                        {
+                                            // Ensure the local vBTC V2 record exists for the recipient (insert-only;
+                                            // existing rows get owner-synced by StateData.TransferSmartContract).
+                                            await VBTCContractV2.SaveSmartContract(sc, null, tx.ToAddress);
+                                            // vBTC V2 default-asset mode: associate the local default logo; no beacon download needed.
+                                            if (Globals.VBTCDefaultAssetOnly)
+                                                await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
+                                        }
 
                                     }
                                     break;
@@ -634,7 +640,27 @@ namespace VerifiedXCore.Services
                         tx.TransactionStatus = TransactionStatus.Success;
                         txdataSuccess.InsertSafe(tx);
 
-                        SCLogUtility.Log($"VBTC_V2_TRANSFER validated successfully. From: {fromAddress}, To: {toAddress}, Amount: {amount.Value}, SCUID: {scUID}", 
+                        // Ensure local contract records exist so the recipient's wallet can see this
+                        // contract (balances live in state trei, but the wallet endpoints enumerate
+                        // the local VBTCContractV2 table). Mirrors AccountData.RestoreAccount.
+                        try
+                        {
+                            var scMainRec = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
+                            if (scMainRec?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                            {
+                                SmartContractMain.SmartContractData.SaveSmartContract(scMainRec, null);
+                                await VBTCContractV2.SaveSmartContractTransfer(scMainRec, tx.ToAddress);
+                                if (Globals.VBTCDefaultAssetOnly)
+                                    await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
+                            }
+                        }
+                        catch (Exception recEx)
+                        {
+                            ErrorLogUtility.LogError($"Failed to save local vBTC V2 contract records on receive. SCUID: {scUID}. Error: {recEx.Message}",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        }
+
+                        SCLogUtility.Log($"VBTC_V2_TRANSFER validated successfully. From: {fromAddress}, To: {toAddress}, Amount: {amount.Value}, SCUID: {scUID}",
                             "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                     }
                     catch (Exception ex)
@@ -1708,9 +1734,15 @@ namespace VerifiedXCore.Services
                                             }
                                         }
 
-                                        // vBTC V2 default-asset mode: associate the local default logo; no beacon download needed.
-                                        if (Globals.VBTCDefaultAssetOnly && sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
-                                            await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
+                                        if (sc?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                        {
+                                            // Ensure the local vBTC V2 record exists for the recipient (insert-only;
+                                            // existing rows get owner-synced by StateData.TransferSmartContract).
+                                            await VBTCContractV2.SaveSmartContract(sc, null, tx.ToAddress);
+                                            // vBTC V2 default-asset mode: associate the local default logo; no beacon download needed.
+                                            if (Globals.VBTCDefaultAssetOnly)
+                                                await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
+                                        }
 
                                     }
                                     break;
