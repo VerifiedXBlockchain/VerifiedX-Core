@@ -585,7 +585,10 @@ namespace VerifiedXCore.Services
                         var toAddress = jobj["ToAddress"]?.ToObject<string?>();
                         var amount = jobj["Amount"]?.ToObject<decimal?>();
 
-                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(fromAddress) || 
+                        SCLogUtility.Log($"VBTC-TRACE [2-Handler]: processing TX {tx.Hash}. SCUID: {scUID}, {fromAddress} -> {toAddress}, Amount: {amount}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(fromAddress) ||
                             string.IsNullOrEmpty(toAddress) || !amount.HasValue)
                         {
                             SCLogUtility.Log($"VBTC_V2_TRANSFER validation failed: Missing required fields", 
@@ -608,31 +611,20 @@ namespace VerifiedXCore.Services
                             return;
                         }
 
-                        // Validate balance in state trei
+                        // NOTE: No sender-balance re-validation here. This TX is in a COMMITTED block —
+                        // consensus (TransactionValidatorService.VerifyTX) already validated it, and by the
+                        // time this wallet-side processor runs, StateData.TransferVBTCV2 has ALREADY applied
+                        // the debit to the ledger, so any re-check double-counts the in-flight amount and
+                        // ignores the owner's deposit balance (this previously produced false "Insufficient
+                        // balance" rejections that blocked the recipient's wallet records). Informational only:
                         var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                         if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                         {
-                            var transactions = scState.SCStateTreiTokenizationTXes
+                            var senderLedger = scState.SCStateTreiTokenizationTXes
                                 .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                                .ToList();
-
-                            decimal balance = 0M;
-                            if (transactions.Any())
-                            {
-                                var received = transactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
-                                var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                                balance = received + sent;
-                            }
-
-                            if (balance < amount.Value)
-                            {
-                                SCLogUtility.Log($"VBTC_V2_TRANSFER validation failed: Insufficient balance. Available: {balance}, Requested: {amount.Value}", 
-                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                                var txdata = TransactionData.GetAll();
-                                tx.TransactionStatus = TransactionStatus.Invalid;
-                                txdata.InsertSafe(tx);
-                                return;
-                            }
+                                .Sum(x => x.Amount);
+                            SCLogUtility.Log($"VBTC-TRACE [2-Handler]: sender post-transfer ledger sum: {senderLedger} (informational — TX already committed)",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         }
 
                         // Mark as success and insert
@@ -645,18 +637,24 @@ namespace VerifiedXCore.Services
                         // the local VBTCContractV2 table). Mirrors AccountData.RestoreAccount.
                         try
                         {
+                            var recordExistedBefore = VBTCContractV2.GetContract(scUID) != null;
                             var scMainRec = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
-                            if (scMainRec?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                            var hasV2Feature = scMainRec?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true;
+                            var logoAssociated = false;
+                            if (hasV2Feature)
                             {
                                 SmartContractMain.SmartContractData.SaveSmartContract(scMainRec, null);
                                 await VBTCContractV2.SaveSmartContractTransfer(scMainRec, tx.ToAddress);
                                 if (Globals.VBTCDefaultAssetOnly)
-                                    await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
+                                    logoAssociated = await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
                             }
+                            var recordExistsAfter = VBTCContractV2.GetContract(scUID) != null;
+                            SCLogUtility.Log($"VBTC-TRACE [3-LocalRecord]: SCUID: {scUID}. Decompiled: {scMainRec != null}, HasV2Feature: {hasV2Feature}, RecordExistedBefore: {recordExistedBefore}, RecordExistsAfter: {recordExistsAfter}, LogoAssociated: {logoAssociated}",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         }
                         catch (Exception recEx)
                         {
-                            ErrorLogUtility.LogError($"Failed to save local vBTC V2 contract records on receive. SCUID: {scUID}. Error: {recEx.Message}",
+                            ErrorLogUtility.LogError($"VBTC-TRACE [3-LocalRecord]: FAILED to save local vBTC V2 contract records on receive. SCUID: {scUID}. Error: {recEx.Message}",
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         }
 

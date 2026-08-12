@@ -25,6 +25,32 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Spendable transparent vBTC for <paramref name="fromAddress"/> on contract <paramref name="scUid"/>:
         /// owner = BTC deposit balance + tokenization ledger; non-owner = ledger only (matches <see cref="TransferVBTC"/>).
         /// </summary>
+        /// <summary>
+        /// Owner ledger component for transparent vBTC balance math:
+        /// SUM of ALL tokenization ledger rows involving the owner (so transfer debits and bridge
+        /// locks stay debited — the BTC never left the deposit address for those), PLUS an add-back
+        /// of completed withdrawal amounts, whose burn rows are already reflected in the ElectrumX
+        /// deposit balance and would otherwise be double-counted.
+        /// Owner available = ElectrumX deposit balance + this value.
+        /// </summary>
+        public static decimal GetOwnerLedgerBalance(SmartContractStateTrei scState, string ownerAddress)
+        {
+            decimal ledgerBalance = 0M;
+            if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+            {
+                var ownerRows = scState.SCStateTreiTokenizationTXes
+                    .Where(x => x.FromAddress == ownerAddress || x.ToAddress == ownerAddress)
+                    .ToList();
+
+                if (ownerRows.Any())
+                    ledgerBalance = ownerRows.Sum(x => x.Amount);
+            }
+
+            ledgerBalance += VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(ownerAddress, scState.SmartContractUID);
+
+            return ledgerBalance;
+        }
+
         public static async Task<(bool success, decimal availableBalance, string? error)> TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress)
         {
             try
@@ -104,29 +130,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
 
                 // Owner: must verify actual BTC deposit balance to prevent inflation.
-                // Recalculate owner's ledger balance excluding burn entries (ToAddress == "-")
-                // to avoid double-counting with ElectrumX balance that already reflects withdrawals.
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                {
-                    var ownerTransactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => (x.FromAddress == fromAddress || x.ToAddress == fromAddress) && x.ToAddress != "-")
-                        .ToList();
-
-                    if (ownerTransactions.Any())
-                    {
-                        var received = ownerTransactions.Where(x => x.ToAddress == fromAddress).Sum(x => x.Amount);
-                        var sent = ownerTransactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
-                        ledgerBalance = received + sent;
-                    }
-                    else
-                    {
-                        ledgerBalance = 0M;
-                    }
-                }
-                else
-                {
-                    ledgerBalance = 0M;
-                }
+                // Full ledger sum (transfer debits and bridge locks stay debited) plus an add-back
+                // of completed withdrawals whose burn rows the ElectrumX balance already reflects.
+                ledgerBalance = GetOwnerLedgerBalance(scState, fromAddress);
 
                 // Query Electrum for real-time balance of the deposit address.
                 decimal btcDepositBalance = 0M;
@@ -1774,16 +1780,26 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 var localAddresses = accountDb.FindAll().Select(x => x.Address).ToHashSet();
                 if (!localAddresses.Any())
+                {
+                    SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: skipped — no local accounts.", "VBTCService.BackfillLocalVBTCContracts()");
                     return;
+                }
 
                 var scStateTrei = SmartContractStateTrei.GetSCST();
                 if (scStateTrei == null)
+                {
+                    SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: skipped — state trei DB was null.", "VBTCService.BackfillLocalVBTCContracts()");
                     return;
+                }
+
+                SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: starting — local accounts: {localAddresses.Count}", "VBTCService.BackfillLocalVBTCContracts()");
+                int scanned = 0, localInvolvement = 0, created = 0;
 
                 foreach (var scState in scStateTrei.Query().ToEnumerable())
                 {
                     try
                     {
+                        scanned++;
                         if (string.IsNullOrWhiteSpace(scState.SmartContractUID) || string.IsNullOrWhiteSpace(scState.ContractData))
                             continue;
 
@@ -1793,6 +1809,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
                         if (!isLocalOwner && !hasLocalLedger)
                             continue;
+
+                        localInvolvement++;
 
                         if (VBTCContractV2.GetContract(scState.SmartContractUID) != null)
                             continue; // record already present; logo handled by the startup logo sweep
@@ -1814,13 +1832,16 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (Globals.VBTCDefaultAssetOnly)
                             await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scState.SmartContractUID);
 
-                        SCLogUtility.Log($"Backfilled local vBTC V2 contract record: {scState.SmartContractUID}", "VBTCService.BackfillLocalVBTCContracts()");
+                        created++;
+                        SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: backfilled local vBTC V2 contract record: {scState.SmartContractUID}", "VBTCService.BackfillLocalVBTCContracts()");
                     }
                     catch (Exception scEx)
                     {
-                        ErrorLogUtility.LogError($"Backfill failed for SCUID: {scState.SmartContractUID}. Error: {scEx.Message}", "VBTCService.BackfillLocalVBTCContracts()");
+                        ErrorLogUtility.LogError($"VBTC-TRACE [6-Backfill]: backfill failed for SCUID: {scState.SmartContractUID}. Error: {scEx.Message}", "VBTCService.BackfillLocalVBTCContracts()");
                     }
                 }
+
+                SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: complete — state records scanned: {scanned}, with local involvement: {localInvolvement}, records created: {created}", "VBTCService.BackfillLocalVBTCContracts()");
             }
             catch (Exception ex)
             {

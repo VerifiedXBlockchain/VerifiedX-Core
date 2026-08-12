@@ -286,6 +286,39 @@ namespace VerifiedXCore.Bitcoin.Models
         }
         #endregion
 
+        #region Get Completed Withdrawal Amount
+        /// <summary>
+        /// Gets the total amount of COMPLETED withdrawals for an address and smart contract.
+        /// Completed withdrawals already reduced the BTC deposit address balance (ElectrumX reflects
+        /// them) AND wrote a burn row (ToAddress "-") to the tokenization ledger. Owner balance math
+        /// adds this amount back so the burn rows aren't double-counted against the deposit balance,
+        /// while transfer debits and bridge locks (same "-" row shape, but BTC never left the deposit)
+        /// correctly remain debited. Withdrawal records are consensus-critical and exist on ALL nodes.
+        /// </summary>
+        public static decimal GetCompletedWithdrawalAmount(string address, string scUID)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+            {
+                ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.GetCompletedWithdrawalAmount()");
+                return 0M;
+            }
+
+            var completedWithdrawals = vwrDb.Query()
+                .Where(x => x.RequestorAddress == address &&
+                            x.SmartContractUID == scUID &&
+                            x.IsCompleted)
+                .ToList();
+
+            if (completedWithdrawals.Any())
+            {
+                return completedWithdrawals.Sum(x => x.Amount);
+            }
+
+            return 0M;
+        }
+        #endregion
+
         #region Save Withdrawal Request
         /// <summary>
         /// Save or update a withdrawal request

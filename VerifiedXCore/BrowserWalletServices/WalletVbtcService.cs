@@ -36,17 +36,18 @@ namespace VerifiedXCore.BrowserWalletServices
                 bool isOwner = scState.OwnerAddress == address;
 
                 decimal ledgerBalance = 0M;
-                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                if (isOwner)
                 {
-                    var transactions = scState.SCStateTreiTokenizationTXes
-                        .Where(x => x.FromAddress == address || x.ToAddress == address);
-
-                    // For owners, exclude burn entries (ToAddress == "-") to avoid double-counting
-                    // with the deposit address balance that already reflects withdrawals
-                    if (isOwner)
-                        transactions = transactions.Where(x => x.ToAddress != "-");
-
-                    var txList = transactions.ToList();
+                    // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
+                    // bridge locks stay debited; only withdrawal burns (already reflected in the
+                    // deposit address balance) are cancelled out.
+                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, address);
+                }
+                else if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var txList = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == address || x.ToAddress == address)
+                        .ToList();
                     if (txList.Any())
                         ledgerBalance = txList.Sum(x => x.Amount);
                 }

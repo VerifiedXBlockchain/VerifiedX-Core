@@ -3251,6 +3251,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // balance-holders see contracts they received value on; the loop below already
                 // filters to contracts where the address is owner or has a ledger balance.
                 var contracts = VBTCContractV2.GetAllContracts();
+                SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: GetAllVBTCBalances({address}) — local VBTCContractV2 records: {contracts?.Count ?? 0}",
+                    "VBTCController.GetAllVBTCBalances()");
                 if (contracts != null && contracts.Any())
                 {
                     foreach (var contract in contracts)
@@ -3277,6 +3279,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         // Check if this address is the owner (check both local DB and state trei)
                         bool isOwner = contract.OwnerAddress == address || scState?.OwnerAddress == address;
                         decimal depositBalance = 0.0M;
+
+                        // Owner ledger: full sum + completed-withdrawal add-back so withdrawal burn
+                        // rows aren't double-counted against the deposit balance (which already
+                        // reflects them), while transfer debits and bridge locks stay debited.
+                        if (isOwner && scState != null)
+                            ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address);
 
                         if (isOwner && !string.IsNullOrEmpty(contract.DepositAddress))
                         {
@@ -3307,6 +3315,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                         decimal contractBalance = isOwner ? depositBalance + ledgerBalance : ledgerBalance;
 
+                        SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: SCUID: {contract.SmartContractUID} — StateTreiFound: {scState != null}, LedgerBalance: {ledgerBalance}, TxCount: {txCount}, IsOwner: {isOwner}, Included: {contractBalance > 0 || isOwner}",
+                            "VBTCController.GetAllVBTCBalances()");
+
                         if (contractBalance > 0 || isOwner)
                         {
                             var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, contract.SmartContractUID);
@@ -3329,6 +3340,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         }
                     }
                 }
+
+                SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: GetAllVBTCBalances({address}) — returning {contractBalances.Count} contracts, TotalBalance: {totalBalance}",
+                    "VBTCController.GetAllVBTCBalances()");
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -3361,6 +3375,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var contract = VBTCContractV2.GetContract(scUID);
                 if (contract == null)
                 {
+                    SCLogUtility.Log($"VBTC-TRACE [7-Details]: GetContractDetails({scUID}) — no local VBTCContractV2 record on this node.",
+                        "VBTCController.GetContractDetails()");
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
                 }
 

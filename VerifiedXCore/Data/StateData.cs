@@ -2695,7 +2695,7 @@ namespace VerifiedXCore.Data
 
                 if (string.IsNullOrEmpty(scUID) || !amount.HasValue || amount.Value <= 0)
                 {
-                    ErrorLogUtility.LogError($"TransferVBTCV2 failed: Missing required fields or invalid amount", "StateData.TransferVBTCV2()");
+                    ErrorLogUtility.LogError($"VBTC-TRACE [4-StateLedger]: TransferVBTCV2 failed: Missing required fields or invalid amount. TX: {tx.Hash}", "StateData.TransferVBTCV2()");
                     return;
                 }
 
@@ -2733,12 +2733,12 @@ namespace VerifiedXCore.Data
 
                     SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
 
-                    SCLogUtility.Log($"TransferVBTCV2 completed: {amount.Value} vBTC from {fromAddress} to {toAddress} in contract {scUID}", 
+                    SCLogUtility.Log($"VBTC-TRACE [4-StateLedger]: TransferVBTCV2 completed: {amount.Value} vBTC from {fromAddress} to {toAddress} in contract {scUID}. TX: {tx.Hash}",
                         "StateData.TransferVBTCV2()");
                 }
                 else
                 {
-                    ErrorLogUtility.LogError($"TransferVBTCV2 failed: Contract not found - {scUID}", "StateData.TransferVBTCV2()");
+                    ErrorLogUtility.LogError($"VBTC-TRACE [4-StateLedger]: TransferVBTCV2 failed: Contract not found - {scUID}. TX: {tx.Hash}", "StateData.TransferVBTCV2()");
                 }
             }
             catch (Exception ex)

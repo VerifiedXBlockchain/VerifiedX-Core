@@ -1540,6 +1540,10 @@ namespace VerifiedXCore.Services
                                 {
                                     //Process transactions sent ->To<- wallet
                                     var account = AccountData.GetAccounts().FindOne(x => x.Address == localToTransaction.ToAddress);
+
+                                    if (localToTransaction.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+                                        SCLogUtility.Log($"VBTC-TRACE [1-BlockSeen]: TX {localToTransaction.Hash} in block {block.Height}. From: {localToTransaction.FromAddress} To: {localToTransaction.ToAddress}. Local account match: {account != null}", "BlockValidatorService");
+
                                     if (account != null)
                                     {
                                         await BlockTransactionValidatorService.ProcessIncomingTransactions(localToTransaction, account, block.Height);

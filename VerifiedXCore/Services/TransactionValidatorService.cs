@@ -1151,16 +1151,10 @@ namespace VerifiedXCore.Services
 
                                                 if (isOwner)
                                                 {
-                                                    // Recalculate owner's ledger excluding burn entries (ToAddress == "-")
-                                                    // to avoid double-counting with ElectrumX deposit balance
-                                                    if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
-                                                    {
-                                                        var ownerTxs = scStateTreiRec.SCStateTreiTokenizationTXes
-                                                            .Where(x => (x.FromAddress == fromAddress || x.ToAddress == fromAddress) && x.ToAddress != "-")
-                                                            .ToList();
-                                                        ledgerBalance = ownerTxs.Any() ? ownerTxs.Sum(x => x.Amount) : 0M;
-                                                    }
-                                                    else { ledgerBalance = 0M; }
+                                                    // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
+                                                    // bridge locks stay debited; only withdrawal burns (already reflected in the
+                                                    // ElectrumX deposit balance) are cancelled out.
+                                                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress);
 
                                                     // Owner: query ElectrumX for deposit address balance and add ledger balance
                                                     decimal depositBalance = 0M;
@@ -2412,16 +2406,10 @@ namespace VerifiedXCore.Services
 
                             if (isOwner)
                             {
-                                // Recalculate owner's ledger excluding burn entries (ToAddress == "-")
-                                // to avoid double-counting with ElectrumX deposit balance
-                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
-                                {
-                                    var ownerTxs = scStateTreiRec.SCStateTreiTokenizationTXes
-                                        .Where(x => (x.FromAddress == fromAddress || x.ToAddress == fromAddress) && x.ToAddress != "-")
-                                        .ToList();
-                                    ledgerBalance = ownerTxs.Any() ? ownerTxs.Sum(x => x.Amount) : 0M;
-                                }
-                                else { ledgerBalance = 0M; }
+                                // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
+                                // bridge locks stay debited; only withdrawal burns (already reflected in the
+                                // ElectrumX deposit balance) are cancelled out.
+                                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress);
 
                                 // Owner: get deposit address from state trei contract data (available on ALL nodes)
                                 decimal depositBalance = 0M;
@@ -2737,16 +2725,10 @@ namespace VerifiedXCore.Services
                             decimal totalBalance = ledgerBalance;
                             if (isRequesterOwner)
                             {
-                                // Recalculate owner's ledger excluding burn entries (ToAddress == "-")
-                                // to avoid double-counting with ElectrumX deposit balance
-                                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                                {
-                                    var ownerTxs = scState.SCStateTreiTokenizationTXes
-                                        .Where(x => (x.FromAddress == requesterAddress || x.ToAddress == requesterAddress) && x.ToAddress != "-")
-                                        .ToList();
-                                    ledgerBalance = ownerTxs.Any() ? ownerTxs.Sum(x => x.Amount) : 0M;
-                                }
-                                else { ledgerBalance = 0M; }
+                                // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
+                                // bridge locks stay debited; only withdrawal burns (already reflected in the
+                                // ElectrumX deposit balance) are cancelled out.
+                                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress);
 
                                 // Get deposit address from state trei contract data (available on ALL nodes)
                                 decimal depositBalance = 0M;
@@ -3386,16 +3368,10 @@ namespace VerifiedXCore.Services
 
             if (isOwner)
             {
-                // Recalculate owner's ledger excluding burn entries (ToAddress == "-")
-                // to avoid double-counting with ElectrumX deposit balance
-                if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
-                {
-                    var ownerTxs = scStateTreiRec.SCStateTreiTokenizationTXes
-                        .Where(x => (x.FromAddress == fromAddress || x.ToAddress == fromAddress) && x.ToAddress != "-")
-                        .ToList();
-                    ledgerBalance = ownerTxs.Any() ? ownerTxs.Sum(x => x.Amount) : 0M;
-                }
-                else { ledgerBalance = 0M; }
+                // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
+                // bridge locks stay debited; only withdrawal burns (already reflected in the
+                // ElectrumX deposit balance) are cancelled out.
+                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress);
 
                 decimal depositBalance = 0M;
                 string? depositAddr2 = null;
