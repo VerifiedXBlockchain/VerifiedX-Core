@@ -71,6 +71,26 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Coordinated-shutdown guard (Aug 2026 testnet incident): a departure cascade during a
+        /// full caster shutdown wrote a committee-of-ONE to disk, which can never legally rotate
+        /// again (rotations need a majority of the previous set) and deadlocked the restart.
+        /// Any non-genesis record below MinCommitteeSize must be structurally invalid.
+        /// </summary>
+        [Fact]
+        public void ValidateSuccessor_RejectsCommitteeBelowMinimum()
+        {
+            Assert.True(CasterMembershipStore.MinCommitteeSize >= 2);
+
+            var prev = MakeRecord(1, 100, "abc", "Promotion", "xB",
+                ("xA", "1.1.1.1", "PKA"), ("xB", "2.2.2.2", "PKB"));
+            var candidate = MakeRecord(2, 200, prev.RecordHash, "Departure", "xB",
+                ("xA", "1.1.1.1", "PKA")); // would shrink 2 -> 1
+
+            Assert.False(CasterMembershipStore.ValidateSuccessor(prev, candidate, out var reason));
+            Assert.Contains("below minimum", reason);
+        }
+
+        /// <summary>
         /// Regression guard: the genesis boundary must sit a healthy margin AHEAD of the
         /// bootstrap AgreedHeight. Genesis minting is a retry loop running while block
         /// production has already resumed — a margin of 1 (the original design) armed cert
@@ -177,7 +197,7 @@ namespace VerifiedXCore.Tests
             var prev = Prev();
             var cand = MakeRecord(6, 1100, prev.RecordHash, "Demotion", "xC");
             Assert.False(CasterMembershipStore.ValidateSuccessor(prev, cand, out var reason));
-            Assert.Contains("empty", reason, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("below minimum", reason); // empty set is below MinCommitteeSize
         }
 
         [Fact]

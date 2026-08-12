@@ -46,6 +46,14 @@ namespace VerifiedXCore.Services
         /// </summary>
         public const int GenesisBoundaryMargin = 32;
 
+        /// <summary>
+        /// Minimum caster-set size any non-genesis record may carry. A committee below 2 can
+        /// never legally rotate again (rotations need a majority of the previous set) and
+        /// deadlocks the network on restart — a coordinated shutdown's departure cascade must
+        /// bottom out here, never at a committee-of-one. Matches GenesisMinSeedSignatures.
+        /// </summary>
+        public const int MinCommitteeSize = 2;
+
         private static bool _armed = false;
 
         /// <summary>
@@ -243,8 +251,8 @@ namespace VerifiedXCore.Services
             { reason = "prevRecordHash mismatch"; return false; }
             if (candidate.EffectiveFromHeight <= prev.EffectiveFromHeight)
             { reason = "effective height not advancing"; return false; }
-            if (candidate.Casters == null || candidate.Casters.Count == 0)
-            { reason = "empty caster set"; return false; }
+            if (candidate.Casters == null || candidate.Casters.Count < MinCommitteeSize)
+            { reason = $"caster set below minimum {MinCommitteeSize}"; return false; }
             if (ComputeRecordHash(candidate) != candidate.RecordHash)
             { reason = "recordHash mismatch"; return false; }
 

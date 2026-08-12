@@ -162,6 +162,12 @@ namespace VerifiedXCore.Services
                     {
                         if (!Globals.IsBlockCaster)
                             return;
+                        // Bootstrap seeds never auto-depart: a process exit is not a resignation.
+                        // A coordinated seed shutdown must leave the persisted committee intact so
+                        // the next restart resumes under the existing record — only an explicit
+                        // /depart removes a seed from the committee.
+                        if (Globals.IsLocalBootstrapCaster)
+                            return;
                         try
                         {
                             CasterDiscoveryService.BroadcastDeparture().GetAwaiter().GetResult();

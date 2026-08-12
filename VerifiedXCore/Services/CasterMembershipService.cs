@@ -51,9 +51,9 @@ namespace VerifiedXCore.Services
                 else // Demotion | Departure
                 {
                     newSet.RemoveAll(c => c.Address == changedAddress);
-                    if (newSet.Count == 0)
+                    if (newSet.Count < CasterMembershipStore.MinCommitteeSize)
                     {
-                        CasterLogUtility.Log("MEMBERSHIP: rotation aborted — change would empty the caster set.", "MEMBERSHIP");
+                        CasterLogUtility.Log($"MEMBERSHIP: rotation REFUSED — removing {changedAddress} would shrink the committee below {CasterMembershipStore.MinCommitteeSize} (coordinated-shutdown guard; live set keeps the member).", "MEMBERSHIP");
                         return false;
                     }
                 }
@@ -226,7 +226,7 @@ namespace VerifiedXCore.Services
             if (candidate.RecordSeq != head.RecordSeq + 1) return null;
             if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
             if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
-            if (candidate.Casters == null || candidate.Casters.Count == 0) return null;
+            if (candidate.Casters == null || candidate.Casters.Count < CasterMembershipStore.MinCommitteeSize) return null;
             if (CasterMembershipStore.ComputeRecordHash(candidate) != candidate.RecordHash) return null;
 
             // The change must be a single add/remove consistent with ChangeType/ChangedAddress.
