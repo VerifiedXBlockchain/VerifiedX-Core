@@ -6,6 +6,12 @@
     <Nullable>enable</Nullable>
 
     <IsPackable>false</IsPackable>
+    <!-- Never include this project in publish output. A solution-level
+         'dotnet publish' otherwise publishes the Tests project into the same
+         output directory as the app, and its copy pass re-resolves the app's
+         RID-conditioned native-lib rules without the RID, shipping the
+         x86-64 libfrost_ffi.so onto arm64 nodes (dead FROST signing). -->
+    <IsPublishable>false</IsPublishable>
   </PropertyGroup>
 
   <ItemGroup>
