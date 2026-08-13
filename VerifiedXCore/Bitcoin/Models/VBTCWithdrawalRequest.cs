@@ -34,6 +34,15 @@ namespace VerifiedXCore.Bitcoin.Models
         public string? LastSigningSessionId { get; set; }
         public string? LastSignedBtcTxId { get; set; }
 
+        // FIND-028 retry determinism (local-only, never consensus-read): the exact unsigned BTC tx
+        // (and the coins it spends) first announced to the validators for this withdrawal. Retries
+        // MUST reuse this verbatim — a rebuilt tx that selects a different equal-value UTXO or a
+        // different input order changes the sighashes, and the validators' per-withdrawal sighash
+        // pin correctly refuses it as a second transaction. Set just before the first FROST
+        // announce; cleared only when the pinned tx is provably resolved on-chain.
+        public string? PinnedUnsignedTxHex { get; set; }
+        public string? PinnedCoinsJson { get; set; }
+
         // S3C §0: ~1 hour at ~10s/block; matches the existing 1-hour FROST ceremony TTL.
         public const long EXPIRY_BLOCKS = 360;
 
@@ -478,6 +487,59 @@ namespace VerifiedXCore.Bitcoin.Models
 
             return request;
         }
+
+        /// <summary>
+        /// FIND-028 / contract-pin conflict rule: the most recent request for this contract that
+        /// still carries a pinned build (a signed-but-unresolved tx may exist for its outpoints).
+        /// New builds for the same contract should prefer those outpoints so the new tx CONFLICTS
+        /// with any outstanding validator pin instead of being refused (or double-payable).
+        /// </summary>
+        public static VBTCWithdrawalRequest? GetLatestPinnedForContract(string scUID)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+                return null;
+
+            return vwrDb.Query()
+                .Where(x => x.SmartContractUID == scUID)
+                .ToList()
+                .Where(x => !string.IsNullOrEmpty(x.PinnedCoinsJson))
+                .OrderByDescending(x => x.Timestamp)
+                .FirstOrDefault();
+        }
         #endregion
+    }
+
+    /// <summary>
+    /// FIND-028: JSON-serializable snapshot of one input of a pinned withdrawal tx — everything
+    /// needed to reconstruct the NBitcoin Coin (and thus the exact BIP341 sighashes) offline,
+    /// without refetching raw transactions from Electrum.
+    /// </summary>
+    public class PinnedWithdrawalCoin
+    {
+        public string TxId { get; set; } = "";
+        public uint Vout { get; set; }
+        public ulong ValueSats { get; set; }
+        public string ScriptPubKeyHex { get; set; } = "";
+
+        public NBitcoin.Coin ToCoin()
+        {
+            var outpoint = new NBitcoin.OutPoint(NBitcoin.uint256.Parse(TxId), Vout);
+            var txOut = new NBitcoin.TxOut(
+                NBitcoin.Money.Satoshis(ValueSats),
+                NBitcoin.Script.FromHex(ScriptPubKeyHex));
+            return new NBitcoin.Coin(outpoint, txOut);
+        }
+
+        public static PinnedWithdrawalCoin FromCoin(NBitcoin.Coin coin) => new PinnedWithdrawalCoin
+        {
+            TxId = coin.Outpoint.Hash.ToString(),
+            Vout = coin.Outpoint.N,
+            ValueSats = (ulong)coin.TxOut.Value.Satoshi,
+            ScriptPubKeyHex = coin.TxOut.ScriptPubKey.ToHex()
+        };
+
+        /// <summary>Lowercase "txid:vout" — the format the signing tracker pins.</summary>
+        public string ToOutpointKey() => $"{TxId}:{Vout}".ToLowerInvariant();
     }
 }

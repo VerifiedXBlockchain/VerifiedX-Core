@@ -1931,7 +1931,32 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var selectedOutpoints = new List<object>();
                 int inputCount = 1;
 
-                if (amount > 0 && !string.IsNullOrEmpty(btcDestination))
+                // FIND-028: if a previous attempt already pinned this withdrawal's tx, derive the
+                // input count/outpoints from the pinned coins — Execute will reuse that exact tx,
+                // so a fresh probe build here could disagree with it (independent Electrum query).
+                List<PinnedWithdrawalCoin>? prepPinnedCoins = null;
+                if (!string.IsNullOrEmpty(withdrawalRequest?.PinnedCoinsJson))
+                    prepPinnedCoins = JsonConvert.DeserializeObject<List<PinnedWithdrawalCoin>>(withdrawalRequest.PinnedCoinsJson);
+
+                if (prepPinnedCoins is { Count: > 0 })
+                {
+                    inputCount = prepPinnedCoins.Count;
+                    foreach (var coin in prepPinnedCoins)
+                        selectedOutpoints.Add(new { coin.TxId, coin.Vout });
+
+                    for (int k = 1; k < inputCount; k++)
+                    {
+                        var inputSessionId = $"{sessionId}:i{k}";
+                        startMessages.Add(new
+                        {
+                            InputIndex = k,
+                            SessionId = inputSessionId,
+                            Message = $"{inputSessionId}.{payload.OwnerAddress}.{startTimestamp}",
+                            Timestamp = startTimestamp
+                        });
+                    }
+                }
+                else if (amount > 0 && !string.IsNullOrEmpty(btcDestination))
                 {
                     var depositAddress = VBTCContractV2.GetContract(payload.SmartContractUID)?.DepositAddress;
                     if (!string.IsNullOrEmpty(depositAddress))

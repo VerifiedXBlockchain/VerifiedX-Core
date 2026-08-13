@@ -737,6 +737,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // StateData hasn't saved it yet or if the TX was processed differently on that node.
                 // When the local lookup fails, fall back to delegated params passed from the requesting node.
                 var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                var isTransientRequest = withdrawalRequest == null; // synthesized rows have no DB home for pinned-build persistence
                 if (withdrawalRequest == null)
                 {
                     // Check if we have delegated withdrawal details from the requesting node
@@ -876,12 +877,78 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
                 long feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10; // Default fee rate (sats/vB) - TODO: Get from withdrawal request
 
+                // ── FIND-028 retry determinism ─────────────────────────────────────────────
+                // If a previous attempt already announced a tx for this withdrawal, reuse it
+                // verbatim (validators allow idempotent same-sighash re-signs). A rebuild that
+                // selects a different equal-value UTXO — or a different input order — changes
+                // the sighashes and is correctly refused by the validators' sighash pin.
+                string? pinnedUnsignedTxHex = null;
+                List<PinnedWithdrawalCoin>? pinnedCoins = null;
+                HashSet<string>? preferredOutpoints = null;
+
+                if (!string.IsNullOrEmpty(withdrawalRequest.PinnedUnsignedTxHex) && !string.IsNullOrEmpty(withdrawalRequest.PinnedCoinsJson))
+                {
+                    var parsedPinnedCoins = JsonConvert.DeserializeObject<List<PinnedWithdrawalCoin>>(withdrawalRequest.PinnedCoinsJson);
+                    if (parsedPinnedCoins is { Count: > 0 })
+                    {
+                        // Stale-pin escape: reuse only while ≥1 pinned outpoint is still unspent.
+                        // If ALL are gone, the pinned tx either CONFIRMED (this withdrawal is
+                        // already paid — never sign another tx for it) or was conflicted away
+                        // (safe to rebuild fresh). Inconclusive lookup → reuse (always safe).
+                        var pinLookup = await BitcoinTransactionService.GetTaprootUTXOs(depositAddress);
+                        if (!pinLookup.Success || parsedPinnedCoins.Any(c =>
+                                pinLookup.Utxos.Any(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant() == c.ToOutpointKey())))
+                        {
+                            pinnedUnsignedTxHex = withdrawalRequest.PinnedUnsignedTxHex;
+                            pinnedCoins = parsedPinnedCoins;
+                            SCLogUtility.Log($"Reusing pinned unsigned tx for withdrawal {withdrawalRequestHash} ({parsedPinnedCoins.Count} input(s)).", "VBTCService.CompleteWithdrawal()");
+                        }
+                        else
+                        {
+                            var pinnedTxId = withdrawalRequest.LastSignedBtcTxId;
+                            var confirmations = !string.IsNullOrEmpty(pinnedTxId)
+                                ? await BitcoinTransactionService.GetTransactionConfirmations(pinnedTxId)
+                                : 0;
+                            if (confirmations > 0)
+                            {
+                                SCLogUtility.Log($"Withdrawal {withdrawalRequestHash} already paid on-chain as {pinnedTxId} ({confirmations} conf) — refusing to sign a second tx.", "VBTCService.CompleteWithdrawal()");
+                                return (false, string.Empty, string.Empty,
+                                    $"The previously signed Bitcoin tx {pinnedTxId} for this withdrawal is already confirmed on-chain — this withdrawal is paid. Complete/reconcile it instead of re-signing.", null);
+                            }
+
+                            SCLogUtility.Log($"Pinned tx for withdrawal {withdrawalRequestHash} was conflicted away on-chain (all pinned outpoints spent, no confirmation of {pinnedTxId ?? "n/a"}) — clearing pin and rebuilding.", "VBTCService.CompleteWithdrawal()");
+                            withdrawalRequest.PinnedUnsignedTxHex = null;
+                            withdrawalRequest.PinnedCoinsJson = null;
+                            if (!isTransientRequest)
+                                VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+                        }
+                    }
+                }
+
+                if (pinnedUnsignedTxHex == null)
+                {
+                    // Conflict-preference: if an EARLIER request for this contract left a pinned,
+                    // unresolved tx behind, prefer its outpoints so our new tx conflicts with any
+                    // outstanding validator pin (the condition under which a different withdrawal
+                    // is allowed to sign — and the guarantee that at most one tx ever confirms).
+                    var priorPinned = VBTCWithdrawalRequest.GetLatestPinnedForContract(scUID);
+                    if (priorPinned != null && priorPinned.TransactionHash != withdrawalRequestHash && !string.IsNullOrEmpty(priorPinned.PinnedCoinsJson))
+                    {
+                        var priorCoins = JsonConvert.DeserializeObject<List<PinnedWithdrawalCoin>>(priorPinned.PinnedCoinsJson);
+                        if (priorCoins is { Count: > 0 })
+                        {
+                            preferredOutpoints = priorCoins.Select(c => c.ToOutpointKey()).ToHashSet();
+                            SCLogUtility.Log($"Preferring {preferredOutpoints.Count} outpoint(s) pinned by prior request {priorPinned.TransactionHash} for contract {scUID}.", "VBTCService.CompleteWithdrawal()");
+                        }
+                    }
+                }
+
                 // Execute FROST withdrawal (build + sign; broadcast only if not signOnly)
                 // Use the withdrawal requestor's address as the FROST coordinator/leader —
                 // they already proved token ownership during the withdrawal request step.
                 var coordinatorAddress = withdrawalRequest.RequestorAddress;
                 SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination} (signOnly={signOnly}, coordinator={coordinatorAddress})", "VBTCService.CompleteWithdrawal()");
-                
+
                 var btcResult = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
                     depositAddress,
                     btcDestination,
@@ -893,7 +960,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     broadcast: !signOnly,
                     coordinatorAddress: coordinatorAddress,
                     withdrawalRequestHash: withdrawalRequestHash,  // FIND-028: Validator-side dedup
-                    preSignedAuth: preSignedAuth
+                    preSignedAuth: preSignedAuth,
+                    pinnedUnsignedTxHex: pinnedUnsignedTxHex,
+                    pinnedCoins: pinnedCoins,
+                    persistPinnedBuild: isTransientRequest ? null : (hex, coins) => PersistPinnedBuild(withdrawalRequestHash, hex, coins),
+                    preferredOutpoints: preferredOutpoints
                 );
 
                 if (!btcResult.Success)
@@ -1044,6 +1115,29 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"Failed to record signing failure on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.RecordSigningFailureOnRequest()");
+            }
+        }
+
+        /// <summary>
+        /// FIND-028: persist the exact unsigned tx (and its coins) about to be announced to the
+        /// validators, so any retry re-signs the identical sighashes instead of rebuilding.
+        /// Written BEFORE the first announce; local-only, never consensus-read.
+        /// </summary>
+        private static void PersistPinnedBuild(string withdrawalRequestHash, string unsignedTxHex, List<PinnedWithdrawalCoin> coins)
+        {
+            try
+            {
+                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                if (storedRequest == null)
+                    return;
+
+                storedRequest.PinnedUnsignedTxHex = unsignedTxHex;
+                storedRequest.PinnedCoinsJson = JsonConvert.SerializeObject(coins);
+                VBTCWithdrawalRequest.Save(storedRequest, true);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Failed to persist pinned build on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.PersistPinnedBuild()");
             }
         }
 

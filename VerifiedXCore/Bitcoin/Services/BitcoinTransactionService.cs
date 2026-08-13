@@ -271,14 +271,36 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Builds an unsigned Taproot transaction
+        /// FIND-028 determinism: full ordering for coin selection — value DESC, then txid, then vout.
+        /// Electrum servers return listunspent in server-specific order (and the server rotates per
+        /// call), so without a complete tiebreaker equal-value UTXOs make the selection — and thus
+        /// every input sighash — non-reproducible across retries, tripping the validators'
+        /// per-withdrawal sighash pin.
         /// </summary>
-        public static async Task<(bool Success, NBitcoin.Transaction? UnsignedTx, ulong Fee, List<Coin> SpentCoins, List<BlockchainScripthashListunspentResult> UsedUtxos, string ErrorMessage)> 
+        public static List<BlockchainScripthashListunspentResult> SortUtxosDeterministic(IEnumerable<BlockchainScripthashListunspentResult> utxos)
+        {
+            return utxos
+                .OrderByDescending(u => u.Value)
+                .ThenBy(u => u.TxHash, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(u => u.TxPos)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Builds an unsigned Taproot transaction.
+        /// <paramref name="preferredOutpoints"/> (lowercase "txid:vout"): outpoints to select FIRST,
+        /// used when a previously signed-but-unresolved tx may exist for the contract — spending at
+        /// least one of its outpoints makes the new tx CONFLICT with it, which is what the
+        /// validators' contract pin requires to sign a different withdrawal (and what guarantees at
+        /// most one of the two ever confirms).
+        /// </summary>
+        public static async Task<(bool Success, NBitcoin.Transaction? UnsignedTx, ulong Fee, List<Coin> SpentCoins, List<BlockchainScripthashListunspentResult> UsedUtxos, string ErrorMessage)>
             BuildUnsignedTaprootTransaction(
-                string taprootAddress, 
-                string destinationAddress, 
+                string taprootAddress,
+                string destinationAddress,
                 decimal amountBTC,
-                long feeRateSatsPerVByte)
+                long feeRateSatsPerVByte,
+                HashSet<string>? preferredOutpoints = null)
         {
             try
             {
@@ -334,8 +356,15 @@ namespace VerifiedXCore.Bitcoin.Services
                     selectedUtxos.Clear();
                     ulong totalInputAmount = 0;
 
-                    // Sort UTXOs by value (largest first) for efficient selection
-                    var sortedUtxos = utxos.OrderByDescending(u => u.Value).ToList();
+                    // Deterministic order (FIND-028) — largest first for efficient selection, full
+                    // tiebreaker so retries reproduce the same selection. Preferred outpoints (a
+                    // prior unresolved signed tx's inputs) float to the front; OrderByDescending is
+                    // stable, so the deterministic order is preserved within each group.
+                    var sortedUtxos = SortUtxosDeterministic(utxos);
+                    if (preferredOutpoints is { Count: > 0 })
+                        sortedUtxos = sortedUtxos
+                            .OrderByDescending(u => preferredOutpoints.Contains($"{u.TxHash}:{u.TxPos}".ToLowerInvariant()))
+                            .ToList();
 
                     foreach (var utxo in sortedUtxos)
                     {
@@ -698,7 +727,13 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Complete workflow: Build, sign with FROST, and broadcast a Bitcoin withdrawal transaction
+        /// Complete workflow: Build, sign with FROST, and broadcast a Bitcoin withdrawal transaction.
+        /// FIND-028 retry determinism: when <paramref name="pinnedUnsignedTxHex"/>/<paramref name="pinnedCoins"/>
+        /// are supplied (a previous attempt already announced a tx to the validators), that exact tx
+        /// is re-signed instead of rebuilding — validators allow idempotent same-sighash re-signs, so
+        /// retries always succeed where a rebuild is a coin flip. On a fresh build,
+        /// <paramref name="persistPinnedBuild"/> is invoked BEFORE the first announce so the pin
+        /// exists durably before any validator sees the tx.
         /// </summary>
         public static async Task<(bool Success, string TxHash, string SignedTxHex, string ErrorMessage, FrostCeremonyOutcome? Ceremony)>
             ExecuteFROSTWithdrawal(
@@ -712,27 +747,64 @@ namespace VerifiedXCore.Bitcoin.Services
                 bool broadcast = true,
                 string? coordinatorAddress = null,
                 string? withdrawalRequestHash = null,
-                PreSignedLeaderAuth? preSignedAuth = null)
+                PreSignedLeaderAuth? preSignedAuth = null,
+                string? pinnedUnsignedTxHex = null,
+                List<PinnedWithdrawalCoin>? pinnedCoins = null,
+                Action<string, List<PinnedWithdrawalCoin>>? persistPinnedBuild = null,
+                HashSet<string>? preferredOutpoints = null)
         {
             try
             {
-                // Step 1: Build unsigned transaction
-                var buildResult = await BuildUnsignedTaprootTransaction(
-                    taprootAddress, 
-                    destinationAddress, 
-                    amountBTC, 
-                    feeRateSatsPerVByte);
+                NBitcoin.Transaction unsignedTx;
+                List<Coin> spentCoins;
 
-                if (!buildResult.Success || buildResult.UnsignedTx == null)
+                if (!string.IsNullOrEmpty(pinnedUnsignedTxHex) && pinnedCoins is { Count: > 0 })
                 {
-                    return (false, string.Empty, string.Empty, $"Failed to build transaction: {buildResult.ErrorMessage}", null);
+                    // Step 1 (retry): reuse the exact tx first announced for this withdrawal.
+                    unsignedTx = NBitcoin.Transaction.Parse(pinnedUnsignedTxHex, Globals.BTCNetwork);
+                    spentCoins = pinnedCoins.Select(c => c.ToCoin()).ToList();
+                    LogUtility.Log($"[FROST] Reusing pinned unsigned tx for withdrawal {withdrawalRequestHash} ({spentCoins.Count} input(s)) — FIND-028 retry determinism.",
+                        "BitcoinTransactionService.ExecuteFROSTWithdrawal()");
+                }
+                else
+                {
+                    // Step 1: Build unsigned transaction
+                    var buildResult = await BuildUnsignedTaprootTransaction(
+                        taprootAddress,
+                        destinationAddress,
+                        amountBTC,
+                        feeRateSatsPerVByte,
+                        preferredOutpoints);
+
+                    if (!buildResult.Success || buildResult.UnsignedTx == null)
+                    {
+                        return (false, string.Empty, string.Empty, $"Failed to build transaction: {buildResult.ErrorMessage}", null);
+                    }
+
+                    unsignedTx = buildResult.UnsignedTx;
+                    spentCoins = buildResult.SpentCoins;
+
+                    // Pin the build BEFORE the first announce — once validators pin the sighash set,
+                    // only this exact tx can ever complete this withdrawal.
+                    if (persistPinnedBuild != null)
+                    {
+                        try
+                        {
+                            persistPinnedBuild(unsignedTx.ToHex(), spentCoins.Select(PinnedWithdrawalCoin.FromCoin).ToList());
+                        }
+                        catch (Exception pex)
+                        {
+                            ErrorLogUtility.LogError($"Failed to persist pinned build for withdrawal {withdrawalRequestHash}: {pex.Message}",
+                                "BitcoinTransactionService.ExecuteFROSTWithdrawal()");
+                        }
+                    }
                 }
 
                 // Step 2: Sign with FROST (FIND-020: pass spent coins for BIP341 sighash computation)
                 var signingResult = await SignTransactionWithFROST(
-                    buildResult.UnsignedTx,
-                    buildResult.SpentCoins,
-                    scUID, 
+                    unsignedTx,
+                    spentCoins,
+                    scUID,
                     validators,
                     threshold,
                     coordinatorAddress,

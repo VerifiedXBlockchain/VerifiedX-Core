@@ -30,6 +30,9 @@
     <Reference Include="LiteDB">
       <HintPath>..\Assemblies\LiteDB.dll</HintPath>
     </Reference>
+    <Reference Include="NBitcoin">
+      <HintPath>..\Assemblies\NBitcoin.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
 </Project>
