@@ -894,33 +894,42 @@ namespace VerifiedXCore.Bitcoin.Services
                         // Stale-pin escape: reuse only while ≥1 pinned outpoint is still unspent.
                         // If ALL are gone, the pinned tx either CONFIRMED (this withdrawal is
                         // already paid — never sign another tx for it) or was conflicted away
-                        // (safe to rebuild fresh). Inconclusive lookup → reuse (always safe).
+                        // (safe to rebuild fresh). Inconclusive lookups → reuse (always safe) —
+                        // including an UNKNOWN confirmation answer: rebuilding on "Electrum couldn't
+                        // tell" produced a non-conflicting tx that pin-holding validators 409'd.
                         var pinLookup = await BitcoinTransactionService.GetTaprootUTXOs(depositAddress);
-                        if (!pinLookup.Success || parsedPinnedCoins.Any(c =>
-                                pinLookup.Utxos.Any(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant() == c.ToOutpointKey())))
+                        var anyPinnedUnspent = pinLookup.Success && parsedPinnedCoins.Any(c =>
+                            pinLookup.Utxos.Any(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant() == c.ToOutpointKey()));
+
+                        var pinnedTxId = withdrawalRequest.LastSignedBtcTxId;
+                        int? pinnedTxConfirmations = 0;
+                        if (pinLookup.Success && !anyPinnedUnspent && !string.IsNullOrEmpty(pinnedTxId))
                         {
-                            pinnedUnsignedTxHex = withdrawalRequest.PinnedUnsignedTxHex;
-                            pinnedCoins = parsedPinnedCoins;
-                            SCLogUtility.Log($"Reusing pinned unsigned tx for withdrawal {withdrawalRequestHash} ({parsedPinnedCoins.Count} input(s)).", "VBTCService.CompleteWithdrawal()");
+                            var confLookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(pinnedTxId);
+                            pinnedTxConfirmations = confLookup.Confirmations;
                         }
-                        else
+
+                        var disposition = DecidePinnedTxDisposition(pinLookup.Success, anyPinnedUnspent, pinnedTxConfirmations);
+                        switch (disposition)
                         {
-                            var pinnedTxId = withdrawalRequest.LastSignedBtcTxId;
-                            var confirmations = !string.IsNullOrEmpty(pinnedTxId)
-                                ? await BitcoinTransactionService.GetTransactionConfirmations(pinnedTxId)
-                                : 0;
-                            if (confirmations > 0)
-                            {
-                                SCLogUtility.Log($"Withdrawal {withdrawalRequestHash} already paid on-chain as {pinnedTxId} ({confirmations} conf) — refusing to sign a second tx.", "VBTCService.CompleteWithdrawal()");
+                            case PinnedReuseDecision.ReusePinned:
+                                pinnedUnsignedTxHex = withdrawalRequest.PinnedUnsignedTxHex;
+                                pinnedCoins = parsedPinnedCoins;
+                                SCLogUtility.Log($"Reusing pinned unsigned tx for withdrawal {withdrawalRequestHash} ({parsedPinnedCoins.Count} input(s)).", "VBTCService.CompleteWithdrawal()");
+                                break;
+
+                            case PinnedReuseDecision.AlreadyPaid:
+                                SCLogUtility.Log($"Withdrawal {withdrawalRequestHash} already paid on-chain as {pinnedTxId} ({pinnedTxConfirmations} conf) — refusing to sign a second tx.", "VBTCService.CompleteWithdrawal()");
                                 return (false, string.Empty, string.Empty,
                                     $"The previously signed Bitcoin tx {pinnedTxId} for this withdrawal is already confirmed on-chain — this withdrawal is paid. Complete/reconcile it instead of re-signing.", null);
-                            }
 
-                            SCLogUtility.Log($"Pinned tx for withdrawal {withdrawalRequestHash} was conflicted away on-chain (all pinned outpoints spent, no confirmation of {pinnedTxId ?? "n/a"}) — clearing pin and rebuilding.", "VBTCService.CompleteWithdrawal()");
-                            withdrawalRequest.PinnedUnsignedTxHex = null;
-                            withdrawalRequest.PinnedCoinsJson = null;
-                            if (!isTransientRequest)
-                                VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+                            case PinnedReuseDecision.RebuildFresh:
+                                SCLogUtility.Log($"Pinned tx for withdrawal {withdrawalRequestHash} was conflicted away on-chain (all pinned outpoints spent, {pinnedTxId ?? "n/a"} known-unconfirmed) — clearing pin and rebuilding.", "VBTCService.CompleteWithdrawal()");
+                                withdrawalRequest.PinnedUnsignedTxHex = null;
+                                withdrawalRequest.PinnedCoinsJson = null;
+                                if (!isTransientRequest)
+                                    VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+                                break;
                         }
                     }
                 }
@@ -1116,6 +1125,45 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 SCLogUtility.Log($"Failed to record signing failure on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.RecordSigningFailureOnRequest()");
             }
+        }
+
+        /// <summary>
+        /// What to do with a withdrawal's previously-pinned (announced) unsigned tx.
+        /// </summary>
+        public enum PinnedReuseDecision
+        {
+            /// <summary>Re-sign the identical pinned tx (idempotent under the validators' sighash pin).</summary>
+            ReusePinned,
+            /// <summary>The pinned tx confirmed — this withdrawal is already paid; never sign another tx for it.</summary>
+            AlreadyPaid,
+            /// <summary>The pinned tx was definitively conflicted away — safe to clear the pin and build fresh.</summary>
+            RebuildFresh
+        }
+
+        /// <summary>
+        /// FIND-028 stale-pin escape, as a pure function (no I/O) so the rule is unit-testable.
+        /// The critical case: pinned outpoints all gone + confirmation lookup UNKNOWN (null) must
+        /// REUSE, not rebuild. The old code collapsed "Electrum couldn't answer" into confs==0 and
+        /// rebuilt a fresh NON-conflicting tx — which validators holding the pin correctly 409
+        /// (FIND-028), deadlocking the withdrawal until their pin cleared. Reuse is always safe:
+        /// re-signing the identical tx is idempotent under the validators' sighash rules.
+        /// </summary>
+        public static PinnedReuseDecision DecidePinnedTxDisposition(bool utxoLookupSucceeded, bool anyPinnedOutpointUnspent, int? pinnedTxConfirmations)
+        {
+            // Inconclusive UTXO view, or the pinned tx can still confirm as-is → reuse it verbatim.
+            if (!utxoLookupSucceeded || anyPinnedOutpointUnspent)
+                return PinnedReuseDecision.ReusePinned;
+
+            if (pinnedTxConfirmations >= 1)
+                return PinnedReuseDecision.AlreadyPaid;
+
+            // All pinned outpoints spent, and no server could say whether OUR tx is what spent them
+            // → unknown; keep reusing until a definitive answer arrives.
+            if (pinnedTxConfirmations == null)
+                return PinnedReuseDecision.ReusePinned;
+
+            // Definitive: outpoints gone AND the pinned tx is known-unconfirmed → conflicted away.
+            return PinnedReuseDecision.RebuildFresh;
         }
 
         /// <summary>

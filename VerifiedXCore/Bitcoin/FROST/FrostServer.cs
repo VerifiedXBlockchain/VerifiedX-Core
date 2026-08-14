@@ -108,7 +108,11 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         /// <summary>
         /// FIND-0013 Fix: Background cleanup loop that periodically removes expired sessions
-        /// Runs every 5 minutes to prevent unbounded in-memory session growth
+        /// Runs every 5 minutes to prevent unbounded in-memory session growth.
+        /// Also reconciles FIND-028 contract pins against the Bitcoin chain: without this, a pin
+        /// was only ever re-checked when a NEW withdrawal got blocked on it, so a validator whose
+        /// Electrum lookups failed at that one moment held the pin indefinitely — even after the
+        /// pinned tx had confirmed on-chain.
         /// </summary>
         private static async Task SessionCleanupLoop()
         {
@@ -118,6 +122,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     await Task.Delay(TimeSpan.FromMinutes(5));
                     FrostSessionStorage.CleanupOldSessions();
+                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.CleanupExpiredRecords();
+
+                    // Pin reconciler: zero Electrum load when no pins are outstanding (the common case).
+                    foreach (var pin in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetAllContractPins())
+                    {
+                        try
+                        {
+                            await FrostStartup.TryReleaseContractPinIfObservedOnChain(pin.ScUID);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[FROST] Pin reconcile error for {pin.ScUID}: {ex.Message}");
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {

@@ -56,18 +56,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         private static List<ClientSettings> GetElectrumServerCandidates()
         {
-            var candidates = Globals.ClientSettings?.Where(x => x.FailCount < 10).OrderBy(x => x.Count).ToList()
-                ?? new List<ClientSettings>();
-
-            if (!candidates.Any() && Globals.ClientSettings?.Any() == true)
-            {
-                foreach (var server in Globals.ClientSettings)
-                    server.FailCount = 0;
-
-                candidates = Globals.ClientSettings.Where(x => x.FailCount < 10).OrderBy(x => x.Count).ToList();
-            }
-
-            return candidates;
+            return ClientService.GetServerCandidates();
         }
 
         /// <summary>
@@ -132,9 +121,27 @@ namespace VerifiedXCore.Bitcoin.Services
         /// answered at all (an answered-empty is meaningful; an unreachable provider is not).
         /// Both honor mainnet/testnet via their GetBaseURL().
         /// </summary>
+        /// <summary>
+        /// Whether the Esplora cross-check has a usable provider for the given network.
+        /// TestNet4 has none: MempoolSpace/Blockstream route all non-mainnet requests to
+        /// TESTNET3 URLs (blockstream.info has no testnet4 Esplora at all), so their answers
+        /// are wrong-chain poison for DecideEmptyVerdict — an answered-empty from the wrong
+        /// chain can upgrade a single lagging Electrum "empty" into ConfirmedEmpty on a funded
+        /// vault. Skipping keeps the check Electrum-quorum-only there (2+ servers must agree),
+        /// and per project policy we minimize third-party reliance rather than extend it.
+        /// Pure function so the routing rule is unit-testable.
+        /// </summary>
+        public static bool IsEsploraCrossCheckSupported(Network network)
+        {
+            return network != Network.TestNet4;
+        }
+
         private static async Task<(List<BlockchainScripthashListunspentResult> Utxos, bool Answered)> GetUTXOsFromEsplora(string address)
         {
             bool answered = false;
+
+            if (!IsEsploraCrossCheckSupported(Globals.BTCNetwork))
+                return (new List<BlockchainScripthashListunspentResult>(), false);
 
             try
             {
@@ -703,27 +710,110 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Monitors Bitcoin transaction confirmations
+        /// Result of a multi-server confirmation lookup. Confirmations is TRI-STATE:
+        ///   >= 1  — confirmed (some server saw it in a block),
+        ///   0     — definitively answered-unconfirmed (a server knows the tx, still in mempool),
+        ///   null  — UNKNOWN: no server produced an answer. Callers must NOT treat null as
+        ///           "unconfirmed" — that collapse is exactly what let a wedged Electrum node
+        ///           hold a FIND-028 contract pin forever after the pinned tx had confirmed.
+        /// </summary>
+        public readonly struct TxConfirmationLookup
+        {
+            public int? Confirmations { get; }
+            public int ServersTried { get; }
+            public string Detail { get; }
+
+            public TxConfirmationLookup(int? confirmations, int serversTried, string detail)
+            {
+                Confirmations = confirmations;
+                ServersTried = serversTried;
+                Detail = detail;
+            }
+        }
+
+        /// <summary>
+        /// Combines per-server GetConfirms answers (>= 1 confirmed, 0 known-but-unconfirmed,
+        /// -1 no/invalid answer) into the tri-state result. Any positive confirmation wins —
+        /// a lagging server's 0 never outvotes a healthy server that saw the block. Pure
+        /// function (no I/O) so the combining rule is unit-testable, like DecideEmptyVerdict.
+        /// </summary>
+        public static int? CombineConfirmationAnswers(IReadOnlyList<int> perServerAnswers)
+        {
+            if (perServerAnswers == null || perServerAnswers.Count == 0)
+                return null;
+
+            foreach (var answer in perServerAnswers)
+            {
+                if (answer >= 1)
+                    return answer;
+            }
+
+            return perServerAnswers.Any(a => a == 0) ? 0 : (int?)null;
+        }
+
+        /// <summary>
+        /// Multi-server Bitcoin tx confirmation lookup. Queries up to MaxElectrumServersForUTXOQuery
+        /// DISTINCT Electrum servers (least-used first, Count/FailCount tracked like every other
+        /// Electrum consumer), short-circuiting on the first positive answer. The old single-server
+        /// version returned 0 for every failure mode, making "Electrum is broken" indistinguishable
+        /// from "tx not confirmed".
+        /// </summary>
+        public static async Task<TxConfirmationLookup> GetTransactionConfirmationsResilient(string txHash)
+        {
+            var answers = new List<int>();
+            var details = new List<string>();
+            int serversTried = 0;
+
+            var candidates = GetElectrumServerCandidates();
+            if (!candidates.Any())
+                ErrorLogUtility.LogError("No Electrum server available", "BitcoinTransactionService.GetTransactionConfirmationsResilient()");
+
+            foreach (var server in candidates)
+            {
+                if (serversTried >= MaxElectrumServersForUTXOQuery)
+                    break;
+                serversTried++;
+                server.Count++;
+
+                try
+                {
+                    using (var client = new Client(server.Host, server.Port, true))
+                    {
+                        var confirms = await client.GetConfirms(txHash);
+                        answers.Add(confirms);
+
+                        if (confirms >= 1)
+                        {
+                            details.Add($"{server.Host}:{server.Port}={confirms}");
+                            return new TxConfirmationLookup(confirms, serversTried, string.Join(", ", details));
+                        }
+
+                        details.Add($"{server.Host}:{server.Port}={(confirms == 0 ? "0 (mempool)" : "no-answer")}");
+                        if (confirms < 0)
+                            server.FailCount++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    server.FailCount++;
+                    details.Add($"{server.Host}:{server.Port}=error({ex.Message})");
+                    ErrorLogUtility.LogError($"Electrum confirmation query failed on {server.Host}:{server.Port}: {ex.Message}", "BitcoinTransactionService.GetTransactionConfirmationsResilient()");
+                }
+            }
+
+            return new TxConfirmationLookup(CombineConfirmationAnswers(answers), serversTried,
+                details.Any() ? string.Join(", ", details) : "no servers tried");
+        }
+
+        /// <summary>
+        /// Legacy single-value confirmation check. UNKNOWN collapses to 0 here — callers that must
+        /// distinguish "couldn't ask" from "unconfirmed" (pin release, pinned-tx disposition) use
+        /// GetTransactionConfirmationsResilient directly.
         /// </summary>
         public static async Task<int> GetTransactionConfirmations(string txHash)
         {
-            try
-            {
-                var client = await GetElectrumClient();
-                if (client == null)
-                    return 0;
-
-                using (client)
-                {
-                    var confirmations = await client.GetConfirms(txHash);
-                    return confirmations;
-                }
-            }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Error getting transaction confirmations: {ex}", "BitcoinTransactionService.GetTransactionConfirmations()");
-                return 0;
-            }
+            var lookup = await GetTransactionConfirmationsResilient(txHash);
+            return lookup.Confirmations ?? 0;
         }
 
         /// <summary>

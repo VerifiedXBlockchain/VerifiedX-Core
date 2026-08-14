@@ -206,5 +206,54 @@ namespace VerifiedXCore.Tests
             var (blocked, _) = FrostWithdrawalSigningTracker.CheckWithdrawalSigning(ScUID, "");
             Assert.False(blocked);
         }
+
+        // ---------- Pin observability (reconciler / /frost/status support) ----------
+
+        [Fact]
+        public void GetAllContractPins_ReturnsPinnedData()
+        {
+            var tx1Outpoints = new List<string> { "TXID1:0", "txid1:1" };
+            FrostWithdrawalSigningTracker.RecordSigningCompleted(ScUID, Wrh, "s0", 0, SighashA, tx1Outpoints, "btc-txid-1");
+
+            var pins = FrostWithdrawalSigningTracker.GetAllContractPins();
+            var pin = Assert.Single(pins);
+            Assert.Equal(ScUID, pin.ScUID);
+            Assert.Equal(Wrh, pin.WithdrawalRequestHash);
+            Assert.Equal("btc-txid-1", pin.BtcTxId);
+            Assert.Equal(new List<string> { "txid1:0", "txid1:1" }, pin.Outpoints); // stored lowercased
+            Assert.True(pin.PinnedAt > 0);
+            Assert.Equal(0, pin.LastReleaseCheckTime); // never checked yet
+        }
+
+        [Fact]
+        public void GetAllContractPins_EmptyWhenNothingPinned()
+        {
+            Assert.Empty(FrostWithdrawalSigningTracker.GetAllContractPins());
+        }
+
+        [Fact]
+        public void NotePinReleaseCheck_StampsOutcomeWithoutReleasing()
+        {
+            var tx1Outpoints = new List<string> { "txid1:0" };
+            FrostWithdrawalSigningTracker.RecordSigningCompleted(ScUID, Wrh, "s0", 0, SighashA, tx1Outpoints, "btc-txid-1");
+
+            FrostWithdrawalSigningTracker.NotePinReleaseCheck(ScUID, "kept: txlookup=UNKNOWN");
+
+            var pin = Assert.Single(FrostWithdrawalSigningTracker.GetAllContractPins());
+            Assert.Equal("kept: txlookup=UNKNOWN", pin.LastReleaseCheckOutcome);
+            Assert.True(pin.LastReleaseCheckTime > 0);
+
+            // Pin must still be enforced — the note is telemetry, not a release.
+            var disjoint = new List<string> { "txid9:0" };
+            var (blocked, _) = FrostWithdrawalSigningTracker.CheckWithdrawalSigning(ScUID, Wrh2, 0, SighashB, null, disjoint);
+            Assert.True(blocked);
+        }
+
+        [Fact]
+        public void NotePinReleaseCheck_NoPin_IsNoOp()
+        {
+            FrostWithdrawalSigningTracker.NotePinReleaseCheck("no-such-contract", "kept: whatever");
+            Assert.Empty(FrostWithdrawalSigningTracker.GetAllContractPins());
+        }
     }
 }

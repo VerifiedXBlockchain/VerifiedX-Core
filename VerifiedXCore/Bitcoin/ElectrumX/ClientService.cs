@@ -1,5 +1,6 @@
 ﻿using Elmah.ContentSyndication;
 using VerifiedXCore.Bitcoin.Models;
+using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Bitcoin.ElectrumX
 {
@@ -98,47 +99,69 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
             }
         }
 
+        /// <summary>
+        /// Returns the selectable Electrum servers (FailCount under the threshold) ordered by
+        /// least-used first. If every server has exceeded the threshold, the pool is reset
+        /// wholesale (mirroring Bitcoin.ElectrumXRun) so a long outage cannot permanently
+        /// exhaust it — the old behavior left a node with zero usable servers until restart.
+        /// </summary>
+        public static List<ClientSettings> GetServerCandidates(ulong failThreshold = 10)
+        {
+            var candidates = Globals.ClientSettings?.Where(x => x.FailCount < failThreshold).OrderBy(x => x.Count).ToList()
+                ?? new List<ClientSettings>();
+
+            if (!candidates.Any() && Globals.ClientSettings?.Any() == true)
+            {
+                foreach (var server in Globals.ClientSettings)
+                    server.FailCount = 0;
+
+                candidates = Globals.ClientSettings.Where(x => x.FailCount < failThreshold).OrderBy(x => x.Count).ToList();
+            }
+
+            return candidates;
+        }
+
+        /// <summary>
+        /// Gets a handshake-verified Electrum client, or null if no server could be reached.
+        /// One bounded pass over the candidate pool: each server gets a single handshake attempt
+        /// (the old loop re-hammered the same least-used server until its FailCount hit the
+        /// threshold, then returned the last BROKEN client object once the pool was exhausted).
+        /// </summary>
         public static async Task<Client?> GetElectrumClient()
         {
-            Client? client = null;
-            bool electrumServerFound = false;
+            var candidates = GetServerCandidates();
 
-            while (!electrumServerFound)
+            foreach (var electrumServer in candidates)
             {
-                var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 10).OrderBy(x => x.Count).FirstOrDefault();
-                if (electrumServer != null)
+                Client? client = null;
+                try
                 {
-                    try
-                    {
-                        client = new Client(electrumServer.Host, electrumServer.Port, true);
-                        var serverVersion = await client.GetServerVersion();
+                    client = new Client(electrumServer.Host, electrumServer.Port, true);
+                    var serverVersion = await client.GetServerVersion();
 
-                        if (serverVersion == null)
-                            throw new Exception("Bad server response or no connection.");
+                    // GetServerVersion never returns null; a dead server yields an empty result whose
+                    // ProtocolVersion access throws below — the generic catch is the real guard.
+                    if (serverVersion == null)
+                        throw new Exception("Bad server response or no connection.");
 
-                        if (serverVersion.ProtocolVersion.Major != 1 && serverVersion.ProtocolVersion.Minor < 4)
-                            throw new Exception("Bad version.");
+                    if (serverVersion.ProtocolVersion.Major != 1 && serverVersion.ProtocolVersion.Minor < 4)
+                        throw new Exception("Bad version.");
 
-                        electrumServerFound = true;
-                        electrumServer.Count++;
-                    }
-                    catch (Exception ex)
-                    {
-                        //TODO: ADD LOGS
-                        electrumServer.FailCount++;
-                        electrumServer.Count++;
-                        await Task.Delay(1000);
-                    }
-
+                    electrumServer.Count++;
+                    return client;
                 }
-                else
+                catch (Exception ex)
                 {
-                    //no servers found
-                    break;
+                    electrumServer.FailCount++;
+                    electrumServer.Count++;
+                    client?.Dispose();
+                    ErrorLogUtility.LogError($"Electrum handshake failed on {electrumServer.Host}:{electrumServer.Port}: {ex.Message}", "ClientService.GetElectrumClient()");
+                    await Task.Delay(1000);
                 }
-                //TODO: ADD LOGS
             }
-            return client;
+
+            ErrorLogUtility.LogError($"All {candidates.Count} Electrum server(s) failed handshake — no client available", "ClientService.GetElectrumClient()");
+            return null;
         }
     }
 }

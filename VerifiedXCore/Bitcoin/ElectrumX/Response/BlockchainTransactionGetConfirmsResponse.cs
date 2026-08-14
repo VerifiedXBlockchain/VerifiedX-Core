@@ -8,7 +8,9 @@ namespace VerifiedXCore.Bitcoin.ElectrumX.Response
         public BlockchainTransactionGetConfirmsResult Result { get; set; }
         public int GetResultModel()
         {
-            return Result.Confirmations;
+            // Result is null when the server returned a JSON-RPC error (e.g. tx not found,
+            // verbose unsupported) — report the established "no answer" sentinel instead of NRE'ing.
+            return Result == null ? -1 : Result.Confirmations;
         }
     }
 }

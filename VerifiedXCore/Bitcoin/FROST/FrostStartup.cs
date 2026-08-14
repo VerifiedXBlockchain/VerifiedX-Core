@@ -61,6 +61,129 @@ namespace VerifiedXCore.Bitcoin.FROST
                     await context.Response.WriteAsync(response);
                 });
 
+                #endregion
+
+                #region Operator Endpoints (localhost-only)
+
+                // These endpoints are gated at the SOCKET level (loopback source address), not by
+                // signatures: only someone with a shell on this box can call them, and that person
+                // can already restart the process — which wipes ALL pins unconditionally. So nothing
+                // here grants capability beyond what box access already implies, and the public
+                // FROST surface is unchanged.
+
+                /// <summary>
+                /// GET /frost/status - FIND-028 pin + Electrum health snapshot for operators.
+                /// The pin data answers "why is this validator 409ing withdrawals" without log
+                /// spelunking; the Electrum FailCounts answer "is this node's Bitcoin view wedged".
+                /// </summary>
+                endpoints.MapGet("/frost/status", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+
+                    var response = JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        ValidatorAddress = Globals.ValidatorAddress,
+                        BTCNetwork = Globals.BTCNetwork?.Name,
+                        Timestamp = TimeUtil.GetTime(),
+                        PinnedContracts = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetAllContractPins(),
+                        ElectrumServers = Globals.ClientSettings?.Select(s => new { s.Host, s.Port, s.Count, s.FailCount })
+                    }, Formatting.Indented);
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(response);
+                });
+
+                /// <summary>
+                /// POST /frost/pins/reconcile/{scUID} - Run the on-chain pin release check NOW instead
+                /// of waiting for the 5-minute reconciler. Intrinsically safe: it can only release a
+                /// pin when Bitcoin itself provides the evidence (pinned tx confirmed, or its inputs
+                /// definitively spent) — the same check the background loop runs.
+                /// </summary>
+                endpoints.MapPost("/frost/pins/reconcile/{scUID}", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+
+                    var scUID = context.Request.RouteValues["scUID"]?.ToString();
+                    if (string.IsNullOrEmpty(scUID))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "scUID required" }));
+                        return;
+                    }
+
+                    var released = await TryReleaseContractPinIfObservedOnChain(scUID);
+                    var pinAfter = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetAllContractPins()
+                        .FirstOrDefault(p => p.ScUID == scUID);
+
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Released = released,
+                        Outcome = released ? "pin released (or no pin was held)" : pinAfter?.LastReleaseCheckOutcome ?? "pin kept",
+                        Pin = pinAfter
+                    }, Formatting.Indented));
+                });
+
+                /// <summary>
+                /// POST /frost/pins/clear/{scUID}?confirm=true - Manual operator override that clears
+                /// the pin WITHOUT on-chain evidence. Use /frost/pins/reconcile first; this exists for
+                /// the case where the operator has verified resolution out-of-band and is strictly
+                /// less disruptive than the alternative escape hatch (restarting the validator, which
+                /// wipes every pin). Requires the explicit confirm flag.
+                /// </summary>
+                endpoints.MapPost("/frost/pins/clear/{scUID}", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+
+                    var scUID = context.Request.RouteValues["scUID"]?.ToString();
+                    if (string.IsNullOrEmpty(scUID))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "scUID required" }));
+                        return;
+                    }
+
+                    if (context.Request.Query["confirm"] != "true")
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = "This clears a FIND-028 double-payout pin WITHOUT on-chain evidence. Try /frost/pins/reconcile/{scUID} first; to proceed anyway, add ?confirm=true."
+                        }));
+                        return;
+                    }
+
+                    var hadPin = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetContractPin(scUID) != null;
+                    LogUtility.Log($"[FROST Dedup] WARNING: manual operator pin clear requested for {scUID} via localhost endpoint (no on-chain evidence)", "FrostStartup./frost/pins/clear");
+                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ClearContractPin(scUID, "manual operator clear via localhost endpoint");
+
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Cleared = hadPin,
+                        Message = hadPin ? "Pin cleared by operator override." : "No pin was held for this contract."
+                    }, Formatting.Indented));
+                });
+
+                #endregion
+
+                #region Public Key Endpoint
+
                 /// <summary>
                 /// GET /frost/key/pubkey/{scUID} - Retrieve the FROST pubkey package for a contract.
                 /// Public data (no secrets) — needed by non-validator coordinators for signature aggregation.
@@ -2428,6 +2551,23 @@ namespace VerifiedXCore.Bitcoin.FROST
         #region DKG Finalization Helper
 
         /// <summary>
+        /// Socket-level gate for the operator endpoints: true only when the request originates from
+        /// this machine (loopback source address). Checked against the actual connection address —
+        /// not headers — so it cannot be spoofed remotely.
+        /// </summary>
+        private static bool IsLoopbackRequest(HttpContext context)
+        {
+            var remoteIp = context.Connection.RemoteIpAddress;
+            return remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp);
+        }
+
+        private static async Task WriteForbiddenAsync(HttpContext context)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Operator endpoint — localhost only." }));
+        }
+
+        /// <summary>
         /// FIND-024 Fix: Shared helper to finalize DKG when all required shares have been received.
         /// Calls FrostNative.DKGRound3Finalize, derives the Taproot address via NBitcoin,
         /// <summary>
@@ -2440,7 +2580,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// releasing it early would reopen the double-payout window this pin exists to close.
         /// Returns true if the pin was released.
         /// </summary>
-        private static async Task<bool> TryReleaseContractPinIfObservedOnChain(string scUID)
+        internal static async Task<bool> TryReleaseContractPinIfObservedOnChain(string scUID)
         {
             try
             {
@@ -2448,20 +2588,32 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (pin == null)
                     return true; // Nothing pinned (already released)
 
-                // 1) Pinned tx confirmed?
+                string txCheckDetail;
+
+                // 1) Pinned tx confirmed? Multi-server lookup — the old single-server check meant one
+                // wedged Electrum connection held the pin forever after the tx had long confirmed.
                 if (!string.IsNullOrEmpty(pin.Value.BtcTxId))
                 {
-                    var confirmations = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
-                        .GetTransactionConfirmations(pin.Value.BtcTxId);
-                    if (confirmations > 0)
+                    var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
+                        .GetTransactionConfirmationsResilient(pin.Value.BtcTxId);
+                    if (lookup.Confirmations >= 1)
                     {
                         VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                            .ClearContractPin(scUID, $"pinned tx confirmed with {confirmations} confirmation(s)");
+                            .ClearContractPin(scUID, $"pinned tx confirmed with {lookup.Confirmations} confirmation(s)");
                         return true;
                     }
+
+                    txCheckDetail = lookup.Confirmations == 0
+                        ? $"txlookup=unconfirmed ({lookup.ServersTried} server(s): {lookup.Detail})"
+                        : $"txlookup=UNKNOWN ({lookup.ServersTried} server(s): {lookup.Detail})";
+                }
+                else
+                {
+                    txCheckDetail = "txlookup=skipped (no BtcTxId on pin)";
                 }
 
                 // 2) All pinned outpoints spent (conflicting tx confirmed)?
+                string utxoCheckDetail;
                 var depositAddress = VerifiedXCore.Bitcoin.Models.VBTCContractV2.GetContract(scUID)?.DepositAddress;
                 if (!string.IsNullOrEmpty(depositAddress))
                 {
@@ -2471,20 +2623,35 @@ namespace VerifiedXCore.Bitcoin.FROST
                         var unspent = lookup.Utxos
                             .Select(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant())
                             .ToHashSet();
-                        var anyStillUnspent = pin.Value.Outpoints.Any(op => unspent.Contains(op.ToLowerInvariant()));
-                        if (!anyStillUnspent)
+                        var stillUnspent = pin.Value.Outpoints.Count(op => unspent.Contains(op.ToLowerInvariant()));
+                        if (stillUnspent == 0)
                         {
                             VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                 .ClearContractPin(scUID, "all pinned outpoints spent on-chain (pinned tx confirmed or conflicted away)");
                             return true;
                         }
+                        utxoCheckDetail = $"utxolookup={stillUnspent}/{pin.Value.Outpoints.Count} pinned outpoint(s) still unspent";
+                    }
+                    else
+                    {
+                        utxoCheckDetail = $"utxolookup=failed ({lookup.Error})";
                     }
                 }
+                else
+                {
+                    utxoCheckDetail = "utxolookup=skipped (no local contract/deposit address)";
+                }
 
-                return false; // Inconclusive or still outstanding — keep the pin.
+                // Keep the pin — but never silently: stamp and log WHY, so a stuck pin is diagnosable
+                // from /frost/status and the logs instead of invisible until the next blocked withdrawal.
+                var outcome = $"kept: {txCheckDetail}; {utxoCheckDetail}";
+                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, outcome);
+                LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.Value.BtcTxId}) — {outcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
+                return false;
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, $"kept: check threw {ex.Message}");
                 LogUtility.Log($"[FROST Dedup] Pin release check failed for {scUID} (keeping pin): {ex.Message}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
                 return false;
             }

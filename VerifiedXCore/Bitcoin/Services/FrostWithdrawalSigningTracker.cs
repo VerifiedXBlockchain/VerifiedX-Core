@@ -334,6 +334,41 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Snapshot of every outstanding contract pin, for the background reconciler and the
+        /// localhost-only /frost/status endpoint. All fields are on-chain/contract-public data.
+        /// </summary>
+        public static List<ContractPinInfo> GetAllContractPins()
+        {
+            return _contractPins.Values
+                .Select(pin => new ContractPinInfo
+                {
+                    ScUID = pin.ScUID,
+                    WithdrawalRequestHash = pin.WithdrawalRequestHash,
+                    BtcTxId = pin.BtcTxId,
+                    Outpoints = pin.Outpoints.ToList(),
+                    PinnedAt = pin.Timestamp,
+                    LastReleaseCheckTime = pin.LastReleaseCheckTime,
+                    LastReleaseCheckOutcome = pin.LastReleaseCheckOutcome
+                })
+                .ToList();
+        }
+
+        /// <summary>
+        /// Stamps the outcome of a pin-release check onto the live pin (kept + why), so a pin that
+        /// is being held is visibly being held for a REASON — the old release path kept pins with
+        /// no telemetry at all, which is how two validators sat on a confirmed tx's pin for hours.
+        /// No-op if the pin no longer exists (released concurrently).
+        /// </summary>
+        public static void NotePinReleaseCheck(string scUID, string outcome)
+        {
+            if (_contractPins.TryGetValue(scUID, out var pin))
+            {
+                pin.LastReleaseCheckTime = TimeUtil.GetTime();
+                pin.LastReleaseCheckOutcome = outcome;
+            }
+        }
+
+        /// <summary>
         /// Cleanup expired withdrawal records (older than 24 hours). Contract pins are intentionally
         /// NOT expired here — see ClearContractPin.
         /// </summary>
@@ -401,6 +436,24 @@ namespace VerifiedXCore.Bitcoin.Services
             public string BtcTxId { get; set; } = string.Empty;
             public List<string> Outpoints { get; set; } = new();
             public long Timestamp { get; set; }
+            /// <summary>Unix time of the last release check that ran against this pin (0 = never checked).</summary>
+            public long LastReleaseCheckTime { get; set; }
+            /// <summary>Outcome of that check ("kept: ..." detail); empty until the first check.</summary>
+            public string LastReleaseCheckOutcome { get; set; } = string.Empty;
+        }
+
+        /// <summary>
+        /// Public snapshot of a contract pin — see GetAllContractPins.
+        /// </summary>
+        public class ContractPinInfo
+        {
+            public string ScUID { get; set; } = string.Empty;
+            public string WithdrawalRequestHash { get; set; } = string.Empty;
+            public string BtcTxId { get; set; } = string.Empty;
+            public List<string> Outpoints { get; set; } = new();
+            public long PinnedAt { get; set; }
+            public long LastReleaseCheckTime { get; set; }
+            public string LastReleaseCheckOutcome { get; set; } = string.Empty;
         }
 
         private enum SigningState
