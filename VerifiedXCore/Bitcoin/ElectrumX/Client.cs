@@ -91,6 +91,7 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
 
             using var cts = new CancellationTokenSource(ReadTimeout);
 
+            //system not reference to system of an object error here
             await SslStream.WriteAsync(requestData, 0, requestData.Length, cts.Token);
 
             var responseBuilder = new StringBuilder();

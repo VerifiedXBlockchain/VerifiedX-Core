@@ -331,7 +331,17 @@ namespace VerifiedXCore.Nodes
                 BanService.UnbanCasterIPs();
 
                 if (!Globals.IsBootstrapMode)
+                {
                     await PingCasters();
+
+                    // HEAL: add-only re-admission of record-era committee members that PingCasters
+                    // evicted during a transient outage and that are reachable again. Removal stays
+                    // with PingCasters + signed-rotation reconcile. No-op in the legacy era.
+                    // try/catch is required — this loop body has no exception guard, and an escaped
+                    // exception would silently kill the monitor loop.
+                    try { await CasterMembershipService.TryHealBlockCastersFromRecordAsync(); }
+                    catch (Exception ex) { CasterLogUtility.Log($"HEAL error: {ex.Message}", "CasterFlow"); }
+                }
 
                 // EVICTION-AWARE: Periodic check — if we think we're a caster but no peer
                 // caster lists us, we were evicted (e.g., after a network blip where peers
@@ -657,6 +667,22 @@ namespace VerifiedXCore.Nodes
             }
         }
 
+        /// <summary>
+        /// Single heartbeat GET with a 3s timeout — the same probe PingCasters uses for eviction,
+        /// so the heal path re-admits on exactly the criterion eviction uses. Any failure mode
+        /// (non-success status, timeout, connect error) returns false.
+        /// </summary>
+        internal static async Task<bool> IsCasterReachableAsync(string peerIp)
+        {
+            try
+            {
+                using var client = Globals.HttpClientFactory.CreateClient();
+                var uri = $"http://{peerIp.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat";
+                var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
+                return response.IsSuccessStatusCode;
+            }
+            catch { return false; }
+        }
 
         #endregion
 

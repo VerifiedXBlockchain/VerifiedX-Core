@@ -199,6 +199,115 @@ namespace VerifiedXCore.Services
             }
         }
 
+        /// <summary>Consecutive-successful-probe ticks required before an evicted record member is
+        /// re-added. Asymmetric with PingCasters' 3-consecutive-failure eviction so a marginal link
+        /// cannot flap the pool (every bag-count change resets round timing committee-wide).</summary>
+        internal const int RequiredHealProbeStreak = 2;
+
+        /// <summary>Per-address consecutive successful heal-probe counter. Entries are dropped on a
+        /// failed probe, on successful re-add, and when the address is no longer missing.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _healProbeStreaks = new();
+
+        /// <summary>Test hook: clears heal hysteresis state.</summary>
+        internal static void ResetHealState() => _healProbeStreaks.Clear();
+
+        /// <summary>
+        /// ADD-ONLY heal of the live connectivity pool (Globals.BlockCasters) against the signed
+        /// membership record. PingCasters eviction is otherwise permanent in steady state — the
+        /// event-driven reconcile only runs at bootstrap or on newer-record adoption — so a
+        /// transient heartbeat outage used to desync a caster's pool until restart. This re-admits
+        /// record members that answer heartbeats for <see cref="RequiredHealProbeStreak"/>
+        /// consecutive monitor ticks. Never removes entries and never touches self (PingCasters and
+        /// eviction-awareness own those decisions). No-ops in the legacy era (bag = quorum basis
+        /// there) and in bootstrap mode. Returns the number of casters re-added.
+        /// </summary>
+        internal static async Task<int> TryHealBlockCastersFromRecordAsync(
+            CasterMembershipRecord? record = null,
+            Func<string, Task<bool>>? probe = null)
+        {
+            record ??= CasterMembershipStore.GetCurrent();
+            if (record == null)
+                return 0;
+
+            if (Globals.IsBootstrapMode)
+                return 0;
+
+            var bagAddrs = Globals.BlockCasters.ToList()
+                .Where(p => !string.IsNullOrEmpty(p.ValidatorAddress))
+                .Select(p => p.ValidatorAddress!)
+                .ToHashSet(StringComparer.Ordinal);
+
+            var missing = record.Casters
+                .Where(c => !string.IsNullOrEmpty(c.Address)
+                    && !string.IsNullOrEmpty(c.PeerIP)
+                    && c.Address != Globals.ValidatorAddress
+                    && !bagAddrs.Contains(c.Address))
+                .ToList();
+
+            // Bound the streak dict to currently-missing members; anything that returned via
+            // another path (or left the record) restarts its streak if evicted again later.
+            foreach (var key in _healProbeStreaks.Keys)
+                if (!missing.Any(m => m.Address == key))
+                    _healProbeStreaks.TryRemove(key, out _);
+
+            if (missing.Count == 0)
+                return 0;
+
+            probe ??= Nodes.BlockcasterNode.IsCasterReachableAsync;
+
+            var added = 0;
+            foreach (var member in missing)
+            {
+                var ip = member.PeerIP.Replace("::ffff:", "");
+
+                bool reachable;
+                try { reachable = await probe(ip); }
+                catch { reachable = false; }
+
+                if (!reachable)
+                {
+                    _healProbeStreaks.TryRemove(member.Address, out _);
+                    continue;
+                }
+
+                var streak = _healProbeStreaks.AddOrUpdate(member.Address, 1, (_, v) => v + 1);
+                if (streak < RequiredHealProbeStreak)
+                {
+                    CasterLogUtility.Log(
+                        $"HEAL: {member.Address} ({ip}) reachable ({streak}/{RequiredHealProbeStreak}) — awaiting streak before re-add.",
+                        "CasterFlow");
+                    continue;
+                }
+
+                var addResult = CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers
+                {
+                    IsIncoming = false,
+                    IsOutgoing = true,
+                    PeerIP = ip,
+                    IsValidator = true,
+                    ValidatorAddress = member.Address,
+                    ValidatorPublicKey = member.PublicKey
+                });
+
+                _healProbeStreaks.TryRemove(member.Address, out _);
+
+                if (addResult)
+                {
+                    added++;
+                    CasterLogUtility.Log(
+                        $"HEAL: re-added {member.Address} ({ip}) after eviction — record seq {record.RecordSeq}.",
+                        "CasterFlow");
+                    ConsoleWriterService.OutputValCaster(
+                        $"[Heal] Re-added recovered caster {member.Address} ({ip}) to the pool.");
+                }
+            }
+
+            if (added > 0)
+                Globals.SyncKnownCastersFromBlockCasters();
+
+            return added;
+        }
+
         /// <summary>
         /// Endpoint-side signing decision: verifies the candidate derives from OUR head, that we
         /// are a member of the previous set, and that we have not signed a different record at
