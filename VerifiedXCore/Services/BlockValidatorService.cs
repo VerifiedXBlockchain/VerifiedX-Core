@@ -280,7 +280,14 @@ namespace VerifiedXCore.Services
                             //    await node.Connection.DisposeAsync();
                             // Suppress spam during full state rebuild — blocks are expected to be rejected
                             if (!BlockRollbackUtility.IsResetTreisRunning)
-                                ConsoleWriterService.Output($"Block: {block.Height} was rejected from: {block.Validator}");
+                            {
+                                // The rollback that failed this block fired synchronously just above,
+                                // so its tag names the failing gate (e.g. ValidateBlock()-cert).
+                                BlockDiagnostics.RecordBlockRejection(block.Height, block.Validator, block.Hash);
+                                var rejectReason = BlockDiagnostics.MostRecentRollbackTag();
+                                ConsoleWriterService.Output($"Block: {block.Height} was rejected from: {block.Validator}" +
+                                    (string.IsNullOrEmpty(rejectReason) ? "" : $" | reason: {rejectReason}"));
+                            }
                             //ErrorLogUtility.LogError($"Block: {block.Height} was rejected from: {block.Validator}", "ValidateBlocks");
                         }
                         else

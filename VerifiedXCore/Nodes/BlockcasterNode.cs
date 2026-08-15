@@ -4060,6 +4060,25 @@ namespace VerifiedXCore.Nodes
                 Globals.CasterRoundDict.TryUpdate(block.Height, round, compareRound);
             }
 
+            // CERT-FIX(1): attach the quorum certificate BEFORE the local commit runs.
+            // Without this, ValidateBlocks() below rejected our own agreed block 100% of the
+            // time at enforced heights (cert gate in BlockValidatorService) and the node
+            // silently depended on a peer's message-7 broadcast to advance. All casters enter
+            // this path near-simultaneously post-agreement; each self-attests + pushes, so the
+            // majority quorum forms in well under a second on a healthy round. Gated on
+            // CertEnforceHeight → zero behavior change on unarmed chains. On attach failure we
+            // fall through unchanged: ValidateBlocks rejects exactly as before and the
+            // peer-broadcast fallback still applies — the verifier remains the enforcement
+            // point. The cert is NOT part of the block hash, so mutating the block here cannot
+            // break the already-registered agreed hash. Short poll budget: the broadcast-side
+            // attach below retries with the full budget anyway.
+            if (block.Height >= Globals.CertEnforceHeight && Globals.LastBlock.Height + 1 == block.Height)
+            {
+                var certAttached = await ConsensusCertificateHelper.TryAttachCertificateAsync(block, terminalWinner, maxPollRounds: 4);
+                if (!certAttached)
+                    CasterLogUtility.Log($"CERT: pre-commit attach failed at height {block.Height} — falling through to reject/peer-broadcast path.", "CERT");
+            }
+
             var nextHeight = Globals.LastBlock.Height + 1;
             var currentHeight = block.Height;
 
@@ -4079,27 +4098,31 @@ namespace VerifiedXCore.Nodes
                     await BlockDownloadService.GetAllBlocks();
             }
 
-            if (winnerCraftedLayout)
+            // CERT-FIX(2): unified broadcast. The old winnerCraftedLayout branch was dead code —
+            // its outer `currentHeight < nextHeight` contradicted every inner condition — so a
+            // winner-crafted commit never broadcast its block and the chain relied on the
+            // peer-fetch-layout casters. Both layouts now broadcast when this block was the next
+            // expected one. Receivers dedupe via the _acceptedHeight CAS claim and LastBlock
+            // height checks in ReceiveConfirmedBlock; BroadcastConsensusBlockAsync still enforces
+            // HOLD-UNTIL-QUORUM (its attach short-circuits when the cert is already at quorum).
+            if (nextHeight == currentHeight)
             {
-                if (currentHeight < nextHeight)
-                {
-                    if (Globals.LastBlock.Height < block.Height)
-                        await BlockValidatorService.ValidateBlocks();
-
-                    if (nextHeight == currentHeight)
-                    {
-                        CasterRoundAudit?.AddStep($"Block found. Broadcasting.", true);
-                        await BroadcastConsensusBlockAsync(block, terminalWinner);
-                    }
-
-                    if (nextHeight < currentHeight)
-                        await BlockDownloadService.GetAllBlocks();
-                }
+                if (winnerCraftedLayout)
+                    CasterRoundAudit?.AddStep($"Block found. Broadcasting.", true);
+                await BroadcastConsensusBlockAsync(block, terminalWinner);
             }
-            else
+
+            // CERT-FIX(3): refresh the desync stall clock on successful LOCAL commit.
+            // _lastBlockAcceptedTick was previously refreshed only in ReceiveConfirmedBlock —
+            // which ran every round precisely BECAUSE the local commit always failed. Once local
+            // commits succeed, message-7 arrivals early-return; without this refresh the tick
+            // goes stale on any caster that commits first, and 45s later a racing message-7
+            // would fire TriggerDesyncReconcile (escalating to full fork recovery after 2
+            // attempts) on a perfectly healthy chain.
+            if (Globals.LastBlock.Height >= currentHeight)
             {
-                if (nextHeight == currentHeight)
-                    await BroadcastConsensusBlockAsync(block, terminalWinner);
+                Interlocked.Exchange(ref _lastBlockAcceptedTick, Environment.TickCount64);
+                Interlocked.Exchange(ref _desyncReconcileAttempts, 0);
             }
 
             _consecutiveBlockHashAgreementFailures = 0;

@@ -83,7 +83,7 @@ namespace VerifiedXCore.Services
         /// enforced heights must HOLD the broadcast otherwise); runs during bootstrap too
         /// (reduced seed quorum via RequiredAttestationsForHeight).
         /// </summary>
-        public static async Task<bool> TryAttachCertificateAsync(Block block, string? winnerAddress = null)
+        public static async Task<bool> TryAttachCertificateAsync(Block block, string? winnerAddress = null, int maxPollRounds = 15)
         {
             if (block == null || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
                 return false;
@@ -155,7 +155,7 @@ namespace VerifiedXCore.Services
                 [acc.Address] = new CasterAttestation { CasterAddress = acc.Address, Signature = sig, Timestamp = TimeUtil.GetTime() }
             };
 
-            for (var i = 0; i < 15 && merged.Count < needCount; i++)
+            for (var i = 0; i < maxPollRounds && merged.Count < needCount; i++)
             {
                 foreach (var peer in Globals.BlockCasters.ToList())
                 {

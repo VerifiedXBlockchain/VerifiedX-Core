@@ -1617,5 +1617,160 @@ namespace VerifiedXCore.Controllers
         }
 
         #endregion
+
+        #region Consensus Diagnostics (read-only)
+
+        private bool IsBannedRemote()
+        {
+            var remoteIp = HttpContext?.Connection?.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+            return remoteIp != null && Globals.BannedIPs?.ContainsKey(remoteIp) == true;
+        }
+
+        /// <summary>
+        /// Recent block rejections (height/validator/hash + the rollback tag naming the failing
+        /// validation gate) and recent DB rollbacks. In-memory ring, ~200 entries, newest first.
+        /// Read-only; exposes no secrets.
+        /// </summary>
+        [HttpGet]
+        [Route("GetRejectionLog")]
+        public ActionResult<string> GetRejectionLog()
+        {
+            if (IsBannedRemote())
+                return Unauthorized();
+            try
+            {
+                var payload = new
+                {
+                    BlockRejections = BlockDiagnostics.RejectionSnapshot(),
+                    RecentRollbacks = BlockDiagnostics.RollbackSnapshot()
+                };
+                return Ok(JsonConvert.SerializeObject(payload, Formatting.Indented));
+            }
+            catch (Exception ex)
+            {
+                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// One-call consensus snapshot: tip, sync state, cert enforcement, committee/caster pool,
+        /// recent round winners and approved hashes, pending BlockDict heights, failed producers,
+        /// and attestation counts near the tip. Read-only; no proof/validator IPs beyond the
+        /// already-public caster list.
+        /// </summary>
+        [HttpGet]
+        [Route("GetConsensusState")]
+        public ActionResult<string> GetConsensusState()
+        {
+            if (IsBannedRemote())
+                return Unauthorized();
+            try
+            {
+                var lastBlock = Globals.LastBlock;
+                var tip = lastBlock?.Height ?? -1L;
+                var head = CasterMembershipStore.GetCurrent();
+
+                var approvedHashes = Globals.CasterApprovedBlockHashDict
+                    .OrderByDescending(kv => kv.Key).Take(5)
+                    .Select(kv => new { Height = kv.Key, Hash = kv.Value })
+                    .ToList();
+
+                var rounds = Globals.CasterRoundDict
+                    .OrderByDescending(kv => kv.Key).Take(5)
+                    .Select(kv => new
+                    {
+                        Height = kv.Key,
+                        Validator = kv.Value?.Validator,
+                        RoundAttempts = kv.Value?.RoundAttempts,
+                        HasBlock = kv.Value?.Block != null,
+                        BlockHash = kv.Value?.Block?.Hash
+                    })
+                    .ToList();
+
+                var attestationCounts = new List<object>();
+                for (var h = tip; h > tip - 3 && h > 0; h--)
+                    attestationCounts.Add(new { Height = h, Count = ConsensusAttestationStore.GetForHeight(h).Count });
+
+                var payload = new
+                {
+                    TimeUtc = DateTime.UtcNow,
+                    Height = tip,
+                    TipHash = lastBlock?.Hash ?? "",
+                    TipValidator = lastBlock?.Validator ?? "",
+                    TipTimestamp = lastBlock?.Timestamp ?? 0,
+                    SecondsSinceLastBlock = Globals.LastBlockAddedTimestamp > 0 ? TimeUtil.GetTime() - Globals.LastBlockAddedTimestamp : -1,
+                    Globals.IsChainSynced,
+                    Globals.IsBlockCaster,
+                    Globals.BlockTimeDiff,
+                    Globals.CertEnforceHeight,
+                    CertEnforcementActive = tip >= 0 && tip + 1 >= Globals.CertEnforceHeight,
+                    Globals.ConsensusVersion,
+                    MembershipRecordSeq = head?.RecordSeq ?? -1,
+                    Committee = head?.Casters?.Select(c => c.Address).ToList() ?? new List<string>(),
+                    BlockCasters = Globals.BlockCasters.ToList()
+                        .Select(c => new { Address = c.ValidatorAddress, PeerIP = (c.PeerIP ?? "").Replace("::ffff:", "") })
+                        .ToList(),
+                    NetworkValidatorCount = Globals.NetworkValidators.Count,
+                    FailedProducers = Globals.FailedProducerDict
+                        .Select(kv => new { Address = kv.Key, LastFailTime = kv.Value.Item1, FailCount = kv.Value.Item2 })
+                        .ToList(),
+                    PendingBlockDictHeights = BlockDownloadService.BlockDict
+                        .Select(kv => new { Height = kv.Key, Candidates = kv.Value?.Count ?? 0 })
+                        .OrderBy(x => x.Height)
+                        .ToList(),
+                    ApprovedBlockHashes = approvedHashes,
+                    RecentRounds = rounds,
+                    AttestationCounts = attestationCounts
+                };
+                return Ok(JsonConvert.SerializeObject(payload, Formatting.Indented));
+            }
+            catch (Exception ex)
+            {
+                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+            }
+        }
+
+        /// <summary>
+        /// Per-round consensus audit narrative. No height → the live in-progress round; with a
+        /// height → the archived audit (retained ~1000 blocks behind tip). StepMessages is
+        /// one-behind by design — CurrentStepMessage carries the newest step.
+        /// </summary>
+        [HttpGet]
+        [Route("GetRoundAudit/{blockHeight?}")]
+        public ActionResult<string> GetRoundAudit(long? blockHeight = null)
+        {
+            if (IsBannedRemote())
+                return Unauthorized();
+            try
+            {
+                CasterRoundAudit? audit;
+                if (blockHeight == null)
+                    audit = BlockcasterNode.CasterRoundAudit;
+                else
+                    Globals.CasterRoundAuditDict.TryGetValue(blockHeight.Value, out audit);
+
+                if (audit == null)
+                    return Ok(JsonConvert.SerializeObject(new { Found = false, RequestedHeight = blockHeight }));
+
+                var payload = new
+                {
+                    Found = true,
+                    audit.BlockHeight,
+                    audit.TimeStart,
+                    audit.Cycles,
+                    audit.Step,
+                    CurrentStepMessage = audit.StepMessage,
+                    StepHistory = audit.StepMessages?.ToList() ?? new List<string>(),
+                    ElapsedMs = (long)audit.GetElapsedTime().TotalMilliseconds
+                };
+                return Ok(JsonConvert.SerializeObject(payload, Formatting.Indented));
+            }
+            catch (Exception ex)
+            {
+                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+            }
+        }
+
+        #endregion
     }
 }

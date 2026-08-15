@@ -351,6 +351,11 @@ namespace VerifiedXCore.Data
         {
             bool isStateUpdating = Globals.TreisUpdating;
 
+            // In-memory diagnostic ring (exposed via valapi GetRejectionLog) — the errorlog file
+            // stops writing at 100MB and is not remotely readable, so this is the only reliable
+            // way to see WHY a validation failed without SSH access.
+            Services.BlockDiagnostics.RecordRollback(location, message);
+
             if(isStateUpdating)
             {
                 ErrorLogUtility.LogError($"Rollback Has Occurred during Trei Update! Message: {message}", location);

@@ -125,6 +125,17 @@ namespace VerifiedXCore.Services
                         totalRemoved++;
                 }
 
+                // Cleanup CasterApprovedBlockHashDict (was never pruned — unbounded growth)
+                var oldApprovedHashes = Globals.CasterApprovedBlockHashDict
+                    .Where(kvp => kvp.Key < currentHeight - 1000)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+                foreach (var key in oldApprovedHashes)
+                {
+                    if (Globals.CasterApprovedBlockHashDict.TryRemove(key, out _))
+                        totalRemoved++;
+                }
+
                 // Cleanup DuplicatesBroadcastedDict (old duplicates)
                 var oldDuplicates = Globals.DuplicatesBroadcastedDict
                     .Where(kvp => kvp.Value.LastDetection < cutoffTime)
