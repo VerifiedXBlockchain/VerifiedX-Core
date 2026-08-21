@@ -89,13 +89,28 @@ namespace VerifiedXCore.Bitcoin.Integrations
         /// </summary>
         public static async Task<List<BlockchainScripthashListunspentResult>> GetAddressUTXOList(string address)
         {
+            var (results, _) = await TryGetAddressUTXOList(address);
+            return results;
+        }
+
+        /// <summary>
+        /// As <see cref="GetAddressUTXOList"/>, but reports whether the provider actually ANSWERED
+        /// (HTTP success) rather than merely failing to throw. Callers that treat an empty list as
+        /// authoritative — the UTXO cross-check deciding "this vault is confirmed empty" — must use
+        /// this: a 429 or 5xx yields an empty list too, and reading that as "no UTXOs exist" can
+        /// release a double-payout pin or blacklist a funded contract.
+        /// </summary>
+        public static async Task<(List<BlockchainScripthashListunspentResult> Utxos, bool Answered)> TryGetAddressUTXOList(string address)
+        {
             var results = new List<BlockchainScripthashListunspentResult>();
+            var answered = false;
             var baseUri = GetBaseURL();
             var uri = $"{baseUri}/address/{address}/utxo";
 
             using (var client = Globals.HttpClientFactory.CreateClient())
             {
                 var httpResponse = await client.GetAsync(uri);
+                answered = httpResponse.IsSuccessStatusCode;
                 if (httpResponse.IsSuccessStatusCode)
                 {
                     var responseContent = await httpResponse.Content.ReadAsStringAsync();
@@ -118,7 +133,7 @@ namespace VerifiedXCore.Bitcoin.Integrations
                 }
             }
 
-            return results;
+            return (results, answered);
         }
         public class Status
         {

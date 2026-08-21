@@ -81,16 +81,23 @@ namespace VerifiedXCore.Bitcoin.Services
                         : currentTime - x.Timestamp > RETIRE_AFTER_SECONDS)
                     .ToList();
 
-                foreach (var row in staleRows)
-                {
-                    row.Status = VBTCWithdrawalStatus.Cancelled;
-                    row.IsCompleted = true;
-                    vwrDb.UpdateSafe(row);
-                }
-
+                // REPORT ONLY — this service must not write Status/IsCompleted.
+                //
+                // Both fields are read by consensus: TransactionValidatorService rejects
+                // VBTC_V2_WITHDRAWAL_COMPLETE and VBTC_V2_WITHDRAWAL_CANCEL when IsCompleted is
+                // set, and VerifyTX runs under block validation. This service fires from a
+                // node-local 60-minute timer whose due time is measured from process start, and
+                // its trigger mixes chain height with wall clock — so the moment a given node
+                // flips a given row is not agreed on-chain. A node that had already retired a row
+                // would reject a completion block that a freshly-restarted peer accepts: a fork,
+                // permanently, since the retirement never un-sets.
+                //
+                // Retirement is also not needed for correctness: HasActiveContractRequest,
+                // GetActiveRequest and IsRequestorInRepeatCooldown already treat rows this old as
+                // non-blocking. It bought tidiness only.
                 if (staleRows.Count > 0)
                 {
-                    LogUtility.Log($"Retired {staleRows.Count} long-expired incomplete vBTC withdrawal request(s) (older than {RETIRE_AFTER_BLOCKS} blocks)",
+                    LogUtility.Log($"{staleRows.Count} long-expired incomplete vBTC withdrawal request(s) are older than {RETIRE_AFTER_BLOCKS} blocks (already non-blocking under every gate; not mutated — Status/IsCompleted are consensus-read fields)",
                         "VBTCWithdrawalCleanupService.RunCleanup");
                 }
             }
