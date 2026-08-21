@@ -313,10 +313,15 @@ namespace VerifiedXCore.Bitcoin.Models
                 return 0M;
             }
 
+            // Status must be Completed, not merely IsCompleted: cancellation votes
+            // (StateData.VoteOnVBTCV2Cancellation), Cancel(), and the cleanup janitor all set
+            // IsCompleted=true WITHOUT writing the offsetting burn row this add-back exists to
+            // cancel out. Counting those would credit the owner vBTC that no BTC backs.
             var completedWithdrawals = vwrDb.Query()
                 .Where(x => x.RequestorAddress == address &&
                             x.SmartContractUID == scUID &&
-                            x.IsCompleted)
+                            x.IsCompleted &&
+                            x.Status == VBTCWithdrawalStatus.Completed)
                 .ToList();
 
             if (completedWithdrawals.Any())
@@ -383,6 +388,12 @@ namespace VerifiedXCore.Bitcoin.Models
                     existingRequest.LastSigningSessionId = request.LastSigningSessionId;
                 if (!string.IsNullOrEmpty(request.LastSignedBtcTxId))
                     existingRequest.LastSignedBtcTxId = request.LastSignedBtcTxId;
+
+                // FIND-028 durable pin: assigned UNCONDITIONALLY, never carried forward. The
+                // RebuildFresh disposition clears the pin by saving nulls, so a null-guard here
+                // would make that clear a permanent no-op and strand the stale build.
+                existingRequest.PinnedUnsignedTxHex = request.PinnedUnsignedTxHex;
+                existingRequest.PinnedCoinsJson = request.PinnedCoinsJson;
 
                 vwrDb.UpdateSafe(existingRequest);
                 return true;

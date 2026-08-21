@@ -143,11 +143,16 @@ namespace VerifiedXCore.Bitcoin.Services
             if (!IsEsploraCrossCheckSupported(Globals.BTCNetwork))
                 return (new List<BlockchainScripthashListunspentResult>(), false);
 
+            // "Answered" must mean the provider returned HTTP success — NOT merely that the call
+            // did not throw. Both integrations swallow non-success status codes and return an
+            // empty list, so a 429 (mempool.space rate-limits hard) or a 5xx would otherwise be
+            // read as an authoritative "this address holds nothing" and could upgrade a single
+            // lagging Electrum answer into ConfirmedEmpty on a funded vault.
             try
             {
-                var mempoolUtxos = await MempoolSpace.GetAddressUTXOList(address);
-                answered = true;
-                if (mempoolUtxos != null && mempoolUtxos.Any())
+                var (mempoolUtxos, mempoolAnswered) = await MempoolSpace.TryGetAddressUTXOList(address);
+                answered |= mempoolAnswered;
+                if (mempoolAnswered && mempoolUtxos != null && mempoolUtxos.Any())
                     return (mempoolUtxos, true);
             }
             catch (Exception ex)
@@ -157,9 +162,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
             try
             {
-                var blockstreamUtxos = await Blockstream.GetAddressUTXOList(address);
-                answered = true;
-                if (blockstreamUtxos != null && blockstreamUtxos.Any())
+                var (blockstreamUtxos, blockstreamAnswered) = await Blockstream.TryGetAddressUTXOList(address);
+                answered |= blockstreamAnswered;
+                if (blockstreamAnswered && blockstreamUtxos != null && blockstreamUtxos.Any())
                     return (blockstreamUtxos, true);
             }
             catch (Exception ex)
@@ -301,6 +306,23 @@ namespace VerifiedXCore.Bitcoin.Services
         /// validators' contract pin requires to sign a different withdrawal (and what guarantees at
         /// most one of the two ever confirms).
         /// </summary>
+        /// <summary>
+        /// Transaction builder for withdrawal builds. NBitcoin shuffles inputs AND outputs by
+        /// default (ShuffleInputs/ShuffleOutputs default true), and BIP341 sighashes commit to the
+        /// input index, sha_prevouts and sha_outputs — so a permutation changes every per-input
+        /// sighash and the txid. A retry that reselects the SAME coins would then be refused by the
+        /// validators' per-withdrawal sighash pin as a second transaction (FIND-028), wedging the
+        /// contract. SortUtxosDeterministic only fixes the *selection* order; the builder must not
+        /// re-permute afterwards. Factored out so the determinism rule is unit-testable.
+        /// </summary>
+        public static NBitcoin.TransactionBuilder CreateDeterministicTransactionBuilder()
+        {
+            var txBuilder = Globals.BTCNetwork.CreateTransactionBuilder();
+            txBuilder.ShuffleInputs = false;
+            txBuilder.ShuffleOutputs = false;
+            return txBuilder;
+        }
+
         public static async Task<(bool Success, NBitcoin.Transaction? UnsignedTx, ulong Fee, List<Coin> SpentCoins, List<BlockchainScripthashListunspentResult> UsedUtxos, string ErrorMessage)>
             BuildUnsignedTaprootTransaction(
                 string taprootAddress,
@@ -434,8 +456,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 ulong userReceives = amountToSend - feeEstimate;
 
                 // Build the unsigned transaction
-                var txBuilder = Globals.BTCNetwork.CreateTransactionBuilder();
-                
+                var txBuilder = CreateDeterministicTransactionBuilder();
+
                 txBuilder.AddCoins(unspentCoins.ToArray());
                 txBuilder.Send(toAddress, new Money(userReceives, MoneyUnit.Satoshi));
                 txBuilder.SetChange(fromAddress);
