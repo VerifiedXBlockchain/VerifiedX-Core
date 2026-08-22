@@ -152,6 +152,17 @@ namespace VerifiedXCore
         /// in Program/WardenService.
         /// </summary>
         public static long V2WithdrawalOwnerAddBackFixHeight = 999_999_999_999L;
+        /// <summary>
+        /// Activation height for the legacy TransferVBTCV2() dispatcher's blockVerify bypass.
+        /// At/after this height an owner-balance shortfall in that path is bypassed during block
+        /// verification (trust the block crafter's ElectrumX check), matching VBTC_V2_TRANSFER,
+        /// VBTC_V2_WITHDRAWAL_REQUEST, and the bridge-lock path. Before it, the legacy path
+        /// hard-enforced the owner formula at block acceptance with ElectrumX skipped — the one
+        /// site where divergent local withdrawal stores or a mixed-version fleet could reject
+        /// otherwise-valid blocks. Permissive-only. Inert until set; values assigned in
+        /// Program/WardenService.
+        /// </summary>
+        public static long VbtcLegacyTransferBypassFixHeight = 999_999_999_999L;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds

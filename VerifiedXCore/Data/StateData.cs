@@ -3314,8 +3314,17 @@ namespace VerifiedXCore.Data
                 var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
                 if (withdrawalRequest == null)
                 {
-                    ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Withdrawal request not found for hash - {withdrawalRequestHash}", "StateData.CompleteVBTCV2Withdrawal()");
-                    return;
+                    // Store-divergence recovery: the request row is chain-derived (the REQUEST tx is
+                    // mined), so a missing row means THIS node's local store is incomplete — e.g. a
+                    // Databases folder that arrived by file copy. Bailing here would silently skip
+                    // the consensus burn row below and permanently fork this node's state trei from
+                    // every healthy node. Reconstruct the row from the mined REQUEST tx and proceed.
+                    withdrawalRequest = Bitcoin.Services.VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(withdrawalRequestHash, tx.Height);
+                    if (withdrawalRequest == null)
+                    {
+                        ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Withdrawal request not found for hash - {withdrawalRequestHash} (chain recovery also failed — run POST /frost/withdrawals/rebuild)", "StateData.CompleteVBTCV2Withdrawal()");
+                        return;
+                    }
                 }
 
                 // FIND-002 FIX: Validate that the person completing is the original requester
@@ -3577,9 +3586,23 @@ namespace VerifiedXCore.Data
                             var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash);
                             if (withdrawalRequest != null)
                             {
-                                withdrawalRequest.Status = VBTCWithdrawalStatus.Cancelled;
-                                withdrawalRequest.IsCompleted = true;
-                                VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+                                // At/after V2WithdrawalOwnerAddBackFixHeight: never flip a burn-backed
+                                // Completed row to Cancelled. If the withdrawal already completed (BTC
+                                // provably left the deposit and the burn row exists), a late vote
+                                // threshold must not retire the row from the owner add-back — doing so
+                                // would permanently understate the owner by the burned amount. Gated on
+                                // the mined vote height so historical replay stays deterministic.
+                                var voteFixActive = tx.Height >= Globals.V2WithdrawalOwnerAddBackFixHeight;
+                                if (voteFixActive && withdrawalRequest.IsCompleted && withdrawalRequest.Status == VBTCWithdrawalStatus.Completed)
+                                {
+                                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation: threshold reached but withdrawal {cancellation.WithdrawalRequestHash} already completed with a burn — leaving row Completed.", "StateData.VoteOnVBTCV2Cancellation()");
+                                }
+                                else
+                                {
+                                    withdrawalRequest.Status = VBTCWithdrawalStatus.Cancelled;
+                                    withdrawalRequest.IsCompleted = true;
+                                    VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+                                }
                             }
 
                             // Reset contract withdrawal status back to None (funds unlocked)

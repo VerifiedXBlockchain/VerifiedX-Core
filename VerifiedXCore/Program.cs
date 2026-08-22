@@ -125,6 +125,7 @@ namespace VerifiedXCore
             Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 999_999_999_999L /* TODO set testnet disable height */ : 999_999_999_999L /* TODO set mainnet disable height */;
             Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinate with caster-upgrade fork deploy) */;
             Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
+            Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
@@ -497,6 +498,9 @@ namespace VerifiedXCore
             await VFXLogging.ClearElmah();
             StartupService.SetBlockHeight(); //sets current block height
             StartupService.SetLastBlock(); //puts last known block into memory
+            // Heal an empty consensus-read withdrawal store from chain data (fire-and-forget;
+            // merge-only and idempotent, so it is safe alongside live block processing).
+            _ = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MaybeAutoRebuildOnStartupAsync();
             StartupService.StartupMemBlocks(); //puts 400 blocks into memory (height, hash)
             StartupService.StartupMemMultiTransfer();
             StartupService.StartupBlockHashes();

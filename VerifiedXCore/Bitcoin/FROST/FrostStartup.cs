@@ -180,6 +180,82 @@ namespace VerifiedXCore.Bitcoin.FROST
                     }, Formatting.Indented));
                 });
 
+                /// <summary>
+                /// GET /frost/withdrawals/status - Withdrawal-store health snapshot: row counts by
+                /// status, mined vs local-only rows, the rebuild marker, and the last rebuild result.
+                /// Answers "does this node's consensus-read withdrawal store look complete" without
+                /// log spelunking.
+                /// </summary>
+                endpoints.MapGet("/frost/withdrawals/status", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+
+                    var vwrDb = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb();
+                    var rows = vwrDb?.FindAll().ToList() ?? new List<VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest>();
+
+                    var response = JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Timestamp = TimeUtil.GetTime(),
+                        TotalRows = rows.Count,
+                        MinedRows = rows.Count(x => !string.IsNullOrEmpty(x.TransactionHash)),
+                        LocalOnlyRows = rows.Count(x => string.IsNullOrEmpty(x.TransactionHash)),
+                        ByStatus = rows.GroupBy(x => x.Status.ToString()).ToDictionary(g => g.Key, g => g.Count()),
+                        RebuildRunning = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning,
+                        RebuildMeta = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.GetMeta(),
+                        LastRebuildResult = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.LastResult
+                    }, Formatting.Indented);
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(response);
+                });
+
+                /// <summary>
+                /// POST /frost/withdrawals/rebuild?confirm=true - Merge-rebuild the withdrawal store
+                /// from the local block store. Non-destructive (inserts missing rows, applies missing
+                /// terminal transitions, never touches pins or local-only rows) and idempotent, but a
+                /// full chain scan takes minutes — hence the confirm flag. Runs in the background;
+                /// poll /frost/withdrawals/status for the result.
+                /// </summary>
+                endpoints.MapPost("/frost/withdrawals/rebuild", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+
+                    if (context.Request.Query["confirm"] != "true")
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = "This streams the entire local block store to merge-rebuild the withdrawal DB (safe but heavy). Add ?confirm=true to proceed."
+                        }));
+                        return;
+                    }
+
+                    if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status409Conflict;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A rebuild is already running." }));
+                        return;
+                    }
+
+                    _ = Task.Run(() => VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("operator request via /frost/withdrawals/rebuild"));
+
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "Rebuild started in the background. Poll GET /frost/withdrawals/status for progress and the final result."
+                    }, Formatting.Indented));
+                });
+
                 #endregion
 
                 #region Public Key Endpoint

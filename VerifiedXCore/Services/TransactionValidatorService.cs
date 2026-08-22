@@ -1189,7 +1189,23 @@ namespace VerifiedXCore.Services
 
                                                     decimal ownerBalance = depositBalance + ledgerBalance;
                                                     if (ownerBalance < amount.Value)
-                                                        return (txResult, $"Insufficient vBTC balance (owner). Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                                                    {
+                                                        // At/after VbtcLegacyTransferBypassFixHeight this legacy dispatcher path
+                                                        // gets the same trust-the-crafter bypass as VBTC_V2_TRANSFER: ElectrumX is
+                                                        // skipped under blockVerify (depositBalance stays 0), so without the bypass
+                                                        // the owner formula was enforced on the ledger alone at block acceptance —
+                                                        // rejecting blocks whose crafter verified the deposit live, and turning any
+                                                        // local withdrawal-store divergence into block rejections.
+                                                        var legacyBypassHeight = blockHeight ?? Globals.LastBlock?.Height ?? 0;
+                                                        if (blockVerify && legacyBypassHeight >= Globals.VbtcLegacyTransferBypassFixHeight)
+                                                        {
+                                                            // Trust the block crafter's ElectrumX verification
+                                                        }
+                                                        else
+                                                        {
+                                                            return (txResult, $"Insufficient vBTC balance (owner). Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                                                        }
+                                                    }
                                                 }
                                                 else
                                                 {
@@ -2745,7 +2761,11 @@ namespace VerifiedXCore.Services
 
                                 if (!string.IsNullOrEmpty(wdDepositAddr))
                                 {
-                                    if (!blockDownloads)
+                                    // Skip live ElectrumX during block verification too (matches the
+                                    // transfer/bridge sites): the owner-shortfall check below is bypassed
+                                    // under blockVerify regardless of the queried value, so the query was
+                                    // pure nondeterministic network I/O at block acceptance time.
+                                    if (!blockDownloads && !blockVerify)
                                     {
                                         try
                                         {
