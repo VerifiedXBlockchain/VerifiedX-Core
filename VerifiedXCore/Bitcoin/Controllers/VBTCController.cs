@@ -3200,33 +3200,36 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     // double-counts the owner's own withdrawal burns against the deposit balance).
                     ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
 
-                    // For the owner, query ElectrumX for the real-time deposit address balance
-                    if (contract != null && !string.IsNullOrEmpty(contract.DepositAddress))
+                    // For the owner, query ElectrumX for the real-time deposit address balance.
+                    // Deposit address falls back to the state-trei contract code, so owner balances
+                    // resolve correctly on nodes with no local VBTCContractV2 record (e.g. casters).
+                    var depositAddr = Services.VBTCService.ResolveDepositAddress(scState, contract);
+                    if (!string.IsNullOrEmpty(depositAddr))
                     {
                         try
                         {
                             using var client = await VerifiedXCore.Bitcoin.Bitcoin.ElectrumXClient();
                             if (client != null)
                             {
-                                var balance = await client.GetBalance(contract.DepositAddress, false);
+                                var balance = await client.GetBalance(depositAddr, false);
                                 depositBalance = balance.Confirmed / 100_000_000M;
+
+                                // Also update the local contract balance while we have it
+                                if (contract != null && contract.Balance != depositBalance)
+                                {
+                                    contract.Balance = depositBalance;
+                                    VBTCContractV2.UpdateContract(contract);
+                                }
                             }
                             else
                             {
-                                depositBalance = contract.Balance;
-                            }
-
-                            // Also update the local contract balance while we have it
-                            if (contract.Balance != depositBalance)
-                            {
-                                contract.Balance = depositBalance;
-                                VBTCContractV2.UpdateContract(contract);
+                                depositBalance = contract?.Balance ?? 0M;
                             }
                         }
                         catch (Exception elxEx)
                         {
                             // If ElectrumX is unavailable, fall back to cached local balance
-                            depositBalance = contract.Balance;
+                            depositBalance = contract?.Balance ?? 0M;
                             ErrorLogUtility.LogError($"ElectrumX query failed, using cached balance: {elxEx.Message}", "VBTCController.GetVBTCBalance");
                         }
                     }

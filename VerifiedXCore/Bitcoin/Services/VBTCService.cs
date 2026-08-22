@@ -51,6 +51,41 @@ namespace VerifiedXCore.Bitcoin.Services
             return ledgerBalance;
         }
 
+        /// <summary>
+        /// Deposit address for a vBTC contract: the local VBTCContractV2 record when present, else
+        /// decompiled from the contract code stored in the state trei — available on ALL nodes, so
+        /// owner balances resolve correctly on casters/remote nodes with no local record.
+        /// </summary>
+        public static string? ResolveDepositAddress(SmartContractStateTrei scState, VBTCContractV2? contract)
+        {
+            if (!string.IsNullOrEmpty(contract?.DepositAddress))
+                return contract.DepositAddress;
+
+            if (string.IsNullOrEmpty(scState?.ContractData))
+                return null;
+
+            try
+            {
+                var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                if (scMainDecompile?.Features != null)
+                {
+                    var tknzFeature = scMainDecompile.Features
+                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                        .Select(x => x.FeatureFeatures)
+                        .FirstOrDefault();
+
+                    if (tknzFeature is TokenizationV2Feature tknz)
+                        return tknz.DepositAddress;
+                }
+            }
+            catch (Exception decompileEx)
+            {
+                ErrorLogUtility.LogError($"Failed to decompile contract {scState.SmartContractUID} for deposit address: {decompileEx.Message}",
+                    "VBTCService.ResolveDepositAddress()");
+            }
+            return null;
+        }
+
         public static async Task<(bool success, decimal availableBalance, string? error)> TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress, long? blockHeight = null)
         {
             try
@@ -94,31 +129,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     // Remote node fallback: owner address from State Trei, deposit address from contract code
                     ownerAddress = scState.OwnerAddress;
-
-                    if (!string.IsNullOrEmpty(scState.ContractData))
-                    {
-                        try
-                        {
-                            var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
-                            if (scMainDecompile?.Features != null)
-                            {
-                                var tknzFeature = scMainDecompile.Features
-                                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                                    .Select(x => x.FeatureFeatures)
-                                    .FirstOrDefault();
-
-                                if (tknzFeature is TokenizationV2Feature tknz)
-                                {
-                                    depositAddress = tknz.DepositAddress;
-                                }
-                            }
-                        }
-                        catch (Exception decompileEx)
-                        {
-                            ErrorLogUtility.LogError($"Failed to decompile contract {scUid} for deposit address: {decompileEx.Message}",
-                                "VBTCService.TryGetAvailableTransparentVbtcBalance()");
-                        }
-                    }
+                    depositAddress = ResolveDepositAddress(scState, null);
                 }
 
                 bool isOwner = !string.IsNullOrEmpty(ownerAddress) && ownerAddress == fromAddress;
