@@ -172,11 +172,22 @@ namespace VerifiedXCore.Nodes
         {
             if (Globals.StopAllTimers && !Globals.IsChainSynced)
                 return;
-            // Hardcoded bootstrap caster list does not require P2P; allow injection while Nodes is still empty.
-            if (Globals.Nodes.Count == 0 && !SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
+
+            var mayInjectHardcoded = SeedNodeService.ShouldInjectHardcodedBootstrapPeers();
+            // SEED-DISCOVERY FIX: a seed restarting into a LIVE network is blocked from hardcoded
+            // self-injection by the Phase E agreement gate — correct, but it must still DISCOVER
+            // the live caster list as an observer. Without this, its BlockCasters stays empty
+            // forever (MonitorCasters retries GetBlockcasters every 5s and this method returned
+            // early each time): it cannot fetch blocks from casters, cannot route proofs, and
+            // serves a signed empty list from GetCasterList that poisons other nodes' discovery.
+            var discoveryOnly = !mayInjectHardcoded && SeedNodeService.ShouldDiscoverLiveCasters();
+
+            // Hardcoded bootstrap caster list does not require P2P; allow injection while Nodes is
+            // still empty. Discovery-only likewise runs over HTTP to known IPs, not P2P.
+            if (Globals.Nodes.Count == 0 && !mayInjectHardcoded && !discoveryOnly)
                 return;
 
-            if (!SeedNodeService.ShouldInjectHardcodedBootstrapPeers())
+            if (!mayInjectHardcoded && !discoveryOnly)
             {
                 Globals.SyncKnownCastersFromBlockCasters();
                 return;
@@ -197,8 +208,10 @@ namespace VerifiedXCore.Nodes
 
             if (Globals.IsChainSynced || Globals.LastBlock.Height > 0)
             {
-                // Chain is running — try to get the live caster list from peers first
-                var liveCasters = await CasterDiscoveryService.FetchLiveCasterListFromPeersAsync(bootstrapIPs);
+                // Chain is running — try to get the live caster list from peers first.
+                // SEED-DISCOVERY FIX: discovery-only callers skip record adoption — a stood-down
+                // seed's own record may be stale, and adoption would re-serve (and push) it.
+                var liveCasters = await CasterDiscoveryService.FetchLiveCasterListFromPeersAsync(bootstrapIPs, includeRecordAdoption: !discoveryOnly);
                 if (liveCasters != null && liveCasters.Count > 0)
                 {
                     // Peers are reachable and have a live caster list — use THAT instead of hardcoded.
@@ -243,6 +256,15 @@ namespace VerifiedXCore.Nodes
                 CasterLogUtility.Log(
                     "GetBlockcasters EVICTION-AWARE: no peers responded to live caster query — using hardcoded fallback",
                     "EVICTION-AWARE");
+            }
+
+            // SEED-DISCOVERY FIX: discovery-only callers may never self-inject the hardcoded
+            // list — that is exactly the re-assertion the Phase E agreement gate forbids.
+            // Retry on the next MonitorCasters tick instead.
+            if (!mayInjectHardcoded)
+            {
+                Globals.SyncKnownCastersFromBlockCasters();
+                return;
             }
 
             // Cold start or no peers reachable — use hardcoded list with MaxCasters cap

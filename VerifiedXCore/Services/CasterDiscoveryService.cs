@@ -1991,32 +1991,47 @@ namespace VerifiedXCore.Services
         /// Used by GetBlockcasters() to replace hardcoded injection with the actual network state
         /// when the chain is already running.
         /// Returns the live caster list as Peers objects, or null if no peers responded.
+        /// SEED-DISCOVERY FIX: <paramref name="includeRecordAdoption"/>=false skips the
+        /// record-chain phase entirely — a stood-down seed's local record may be stale relative
+        /// to the live network (e.g. frozen at genesis while casters rotated via the legacy
+        /// path), and running adoption would both return that stale committee as the "live"
+        /// list and push it to every recordless peer via straggler healing.
         /// </summary>
-        public static async Task<List<Peers>?> FetchLiveCasterListFromPeersAsync(IEnumerable<string> peerIPs)
+        public static async Task<List<Peers>?> FetchLiveCasterListFromPeersAsync(IEnumerable<string> peerIPs, bool includeRecordAdoption = true)
         {
-            // Wave 3/6: ALWAYS try signed-record-chain adoption first — query MANY peers (seeds +
+            // Wave 3/6: try signed-record-chain adoption first — query MANY peers (seeds +
             // known validators, not seeds-only), verify each returned chain independently, adopt
             // the highest valid seq, push the chain back to stragglers. A single valid response is
             // cryptographically trustworthy. Trying regardless of local era state is what lets a
             // fresh/legacy node ARM itself the moment its peers have a genesis record (Wave 6).
             // Null (no records anywhere) → legacy first-responder list below.
-            var recordPeers = peerIPs
-                .Concat(Globals.ValidatorNodes.Values.Select(n => n.NodeIP))
-                .Concat(SeedNodeService.GetBootstrapSeedPeers().Select(p => p.PeerIP))
+            if (includeRecordAdoption)
+            {
+                var recordPeers = peerIPs
+                    .Concat(Globals.ValidatorNodes.Values.Select(n => n.NodeIP))
+                    .Concat(SeedNodeService.GetBootstrapSeedPeers().Select(p => p.PeerIP))
+                    .Where(ip => !string.IsNullOrEmpty(ip))
+                    .Select(ip => ip!.Replace("::ffff:", ""))
+                    .Distinct()
+                    .Take(10)
+                    .ToList();
+                var recordResult = await FetchAndAdoptMembershipAsync(recordPeers);
+                if (recordResult != null)
+                    return recordResult;
+            }
+
+            // SEED-DISCOVERY FIX: query beyond the passed (usually seed) IPs. Stood-down seeds
+            // answer GetCasters with an EMPTY list, so a caller that only asks the seeds learns
+            // nothing; connected validator peers carry the real list. Empty responses are
+            // skipped below, so extra candidates only cost time on unreachable hosts.
+            var ipsToQuery = peerIPs
+                .Concat(Globals.ValidatorNodes.Values.Select(n => (string?)n.NodeIP))
+                .Concat(Globals.NetworkValidators.Values.Select(v => (string?)v.IPAddress))
                 .Where(ip => !string.IsNullOrEmpty(ip))
                 .Select(ip => ip!.Replace("::ffff:", ""))
+                .Where(ip => ip != Globals.ReportedIP)
                 .Distinct()
                 .Take(10)
-                .ToList();
-            var recordResult = await FetchAndAdoptMembershipAsync(recordPeers);
-            if (recordResult != null)
-                return recordResult;
-
-            var ipsToQuery = peerIPs
-                .Where(ip => !string.IsNullOrEmpty(ip))
-                .Select(ip => ip.Replace("::ffff:", ""))
-                .Distinct()
-                .Take(3)
                 .ToList();
 
             foreach (var ip in ipsToQuery)

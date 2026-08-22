@@ -146,6 +146,33 @@ namespace VerifiedXCore.Services
             return genesis;
         }
 
+        /// <summary>
+        /// Operator disaster-recovery reset (localhost-only ClearMembershipRecord endpoint):
+        /// wipes the record chain + signed-seq markers and returns the node to the LEGACY era —
+        /// cached head cleared, cert enforcement disarmed (CertEnforceHeight back to MaxValue).
+        /// Use when the stored chain no longer reflects the live network (e.g. seeds restarted
+        /// holding a genesis record while casters rotated via the legacy path) and the record
+        /// era will be re-minted at a future coordinated restart. Returns records removed.
+        /// </summary>
+        public static int ClearAllForOperatorReset()
+        {
+            lock (Mut)
+            {
+                int removed = 0;
+                var col = Collection();
+                if (col != null)
+                    removed = col.DeleteAll();
+                MarkerCollection()?.DeleteAll();
+                _cachedHead = null;
+                _armed = false;
+                Globals.CertEnforceHeight = long.MaxValue;
+                CasterLogUtility.Log(
+                    $"MEMBERSHIP: OPERATOR RESET — cleared {removed} record(s) + signed-seq markers; record era inactive, cert enforcement disarmed.",
+                    "MEMBERSHIP");
+                return removed;
+            }
+        }
+
         // ── Reads ────────────────────────────────────────────────────────
 
         public static CasterMembershipRecord? GetCurrent()

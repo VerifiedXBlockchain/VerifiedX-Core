@@ -36,6 +36,20 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// SEED-DISCOVERY FIX: separate gate for OBSERVER discovery of the live caster list.
+        /// True whenever the caster bag is effectively empty. Unlike
+        /// <see cref="ShouldInjectHardcodedBootstrapPeers"/> this is NOT blocked by the Phase E
+        /// agreement gate: a stood-down seed must still learn who the live casters are (it never
+        /// adds itself — GetBlockcasters only adopts the list peers report). For non-seed nodes
+        /// an empty bag already makes ShouldInjectHardcodedBootstrapPeers true, so this changes
+        /// seed behavior only.
+        /// </summary>
+        public static bool ShouldDiscoverLiveCasters()
+        {
+            return !Globals.BlockCasters.Any(p => !string.IsNullOrEmpty(p.ValidatorAddress));
+        }
+
+        /// <summary>
         /// Phase E: single source of truth for the hardcoded bootstrap seed peers
         /// (mainnet / testnet / customtestnet). Moved from ValidatorNode.GetBlockcasters so the
         /// bootstrap coordination service, injection paths, and caster fallback all share it.

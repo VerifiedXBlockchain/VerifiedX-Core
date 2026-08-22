@@ -1308,6 +1308,32 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
+        /// Operator maintenance, LOCALHOST ONLY: wipes the caster membership record chain and
+        /// returns the node to the legacy era (cert enforcement disarmed). For disaster recovery
+        /// when the stored chain has diverged from the live network — e.g. seeds holding a
+        /// genesis record whose committee no longer matches the actual caster set. The record
+        /// era is re-minted at the next coordinated restart.
+        /// </summary>
+        [HttpGet]
+        [Route("ClearMembershipRecord")]
+        public ActionResult<string> ClearMembershipRecord()
+        {
+            var remoteIp = HttpContext.Connection.RemoteIpAddress;
+            var mapped = remoteIp != null && remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
+            if (mapped == null || !System.Net.IPAddress.IsLoopback(mapped))
+                return Unauthorized(JsonConvert.SerializeObject(new { Success = false, Message = "ClearMembershipRecord is localhost-only." }));
+
+            var removed = CasterMembershipStore.ClearAllForOperatorReset();
+            return Ok(JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                RecordsRemoved = removed,
+                RecordEraActive = CasterMembershipStore.RecordEraActive,
+                CertEnforceHeight = Globals.CertEnforceHeight
+            }));
+        }
+
+        /// <summary>
         /// Wave 3: a proposer requests our signature on a candidate rotation record. We sign only
         /// if it derives correctly from OUR head, we are in the previous set, and we have not
         /// signed a different record at that seq (equivocation guard).
