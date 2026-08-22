@@ -44,7 +44,7 @@ namespace VerifiedXCore.Services
                 return (false, "vBTC privacy transactions are temporarily disabled.");
 
             if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
-                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification);
+                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification, blockHeight);
 
             var accStTrei = StateData.GetAccountStateTrei();
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);
@@ -1154,7 +1154,7 @@ namespace VerifiedXCore.Services
                                                     // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
                                                     // bridge locks stay debited; only withdrawal burns (already reflected in the
                                                     // ElectrumX deposit balance) are cancelled out.
-                                                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress);
+                                                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
                                                     // Owner: query ElectrumX for deposit address balance and add ledger balance
                                                     decimal depositBalance = 0M;
@@ -2409,7 +2409,7 @@ namespace VerifiedXCore.Services
                                 // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
                                 // bridge locks stay debited; only withdrawal burns (already reflected in the
                                 // ElectrumX deposit balance) are cancelled out.
-                                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress);
+                                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
                                 // Owner: get deposit address from state trei contract data (available on ALL nodes)
                                 decimal depositBalance = 0M;
@@ -2728,7 +2728,7 @@ namespace VerifiedXCore.Services
                                 // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
                                 // bridge locks stay debited; only withdrawal burns (already reflected in the
                                 // ElectrumX deposit balance) are cancelled out.
-                                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress);
+                                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
                                 // Get deposit address from state trei contract data (available on ALL nodes)
                                 decimal depositBalance = 0M;
@@ -2998,7 +2998,7 @@ namespace VerifiedXCore.Services
                     if (VBTCBridgeLockState.GetByLockId(lockId) != null)
                         return (txResult, "Bridge LockId already exists on-chain.");
 
-                    var spendCheck = await ValidateVbtcTransparentSpendForBridgeLock(scUID, txRequest.FromAddress, amount.Value, blockVerify, blockDownloads);
+                    var spendCheck = await ValidateVbtcTransparentSpendForBridgeLock(scUID, txRequest.FromAddress, amount.Value, blockVerify, blockDownloads, blockHeight ?? Globals.LastBlock?.Height ?? 0);
                     if (!spendCheck.Ok)
                         return (txResult, spendCheck.Message);
                 }
@@ -3347,7 +3347,8 @@ namespace VerifiedXCore.Services
             string fromAddress,
             decimal amount,
             bool blockVerify,
-            bool blockDownloads)
+            bool blockDownloads,
+            long currentHeight)
         {
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
             if (scStateTreiRec == null)
@@ -3371,7 +3372,7 @@ namespace VerifiedXCore.Services
                 // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
                 // bridge locks stay debited; only withdrawal burns (already reflected in the
                 // ElectrumX deposit balance) are cancelled out.
-                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress);
+                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, currentHeight);
 
                 decimal depositBalance = 0M;
                 string? depositAddr2 = null;

@@ -139,6 +139,19 @@ namespace VerifiedXCore
         /// Inert (rule never active) until set. Testnet/mainnet values assigned in Program/WardenService.
         /// </summary>
         public static long V2WithdrawalExpiryFixHeight = 999_999_999_999L;
+        /// <summary>
+        /// vBTC owner add-back consensus fix activation height. At/after this height the owner
+        /// balance add-back (VBTCWithdrawalRequest.GetCompletedWithdrawalAmount) counts ALL
+        /// completed withdrawals on the contract instead of only the owner's own: every completed
+        /// withdrawal shrank the shared BTC deposit pot, but only the requestor got a burn row, so
+        /// an owner-only add-back understated the owner by the sum of non-owner completed
+        /// withdrawals. Permissive-only (owner balances can only rise), so historical replay is
+        /// safe; the gate exists for the mixed-fleet upgrade window (the legacy TransferVBTCV2()
+        /// validator site enforces the owner formula at block acceptance with no crafter-trust
+        /// bypass). Inert (legacy owner-only behavior) until set. Testnet/mainnet values assigned
+        /// in Program/WardenService.
+        /// </summary>
+        public static long V2WithdrawalOwnerAddBackFixHeight = 999_999_999_999L;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds

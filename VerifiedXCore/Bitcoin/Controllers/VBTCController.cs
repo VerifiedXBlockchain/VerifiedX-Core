@@ -3188,14 +3188,20 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     }
                 }
 
-                // Check if this address is the contract owner (check both local DB and state trei)
+                // Check if this address is the contract owner. State trei is authoritative (available
+                // on ALL nodes); the local VBTCContractV2 record only supplies the deposit address.
                 var contract = VBTCContractV2.GetContract(scUID);
-                if (contract != null && (contract.OwnerAddress == address || scState.OwnerAddress == address))
+                if (scState.OwnerAddress == address || contract?.OwnerAddress == address)
                 {
                     isOwner = true;
 
+                    // Owner ledger: full sum + completed-withdrawal add-back (same formula as
+                    // GetAllVBTCBalances and the consensus validators — the inline raw sum above
+                    // double-counts the owner's own withdrawal burns against the deposit balance).
+                    ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
+
                     // For the owner, query ElectrumX for the real-time deposit address balance
-                    if (!string.IsNullOrEmpty(contract.DepositAddress))
+                    if (contract != null && !string.IsNullOrEmpty(contract.DepositAddress))
                     {
                         try
                         {
@@ -3309,7 +3315,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         // rows aren't double-counted against the deposit balance (which already
                         // reflects them), while transfer debits and bridge locks stay debited.
                         if (isOwner && scState != null)
-                            ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address);
+                            ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
 
                         if (isOwner && !string.IsNullOrEmpty(contract.DepositAddress))
                         {

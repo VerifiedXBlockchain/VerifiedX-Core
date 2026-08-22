@@ -736,79 +736,20 @@ namespace VerifiedXCore.Services
                             return;
                         }
 
-                        // FIND-002 FIX: Validate balance for requesterAddress (tx.FromAddress), not ownerAddress
-                        var scState = SmartContractStateTrei.GetSmartContractState(scUID);
-                        if (scState?.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                        // FIND-002 FIX: Validate balance for requesterAddress (tx.FromAddress), not ownerAddress.
+                        // Post-consensus local wallet bookkeeping only — uses the same formula as request
+                        // creation and consensus validation (owner branch = live deposit balance + full
+                        // ledger + completed-withdrawal add-back) so a mined, consensus-valid owner
+                        // request is not stamped Invalid in the local wallet tx list.
+                        var balCheck = await Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(scUID, requesterAddress, blockHeight);
+                        if (!balCheck.success || balCheck.availableBalance < amount.Value)
                         {
-                            var transactions = scState.SCStateTreiTokenizationTXes
-                                .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
-                                .ToList();
-
-                            decimal balance = 0M;
-                            if (transactions.Any())
-                            {
-                                var received = transactions.Where(x => x.ToAddress == requesterAddress).Sum(x => x.Amount);
-                                var sent = transactions.Where(x => x.FromAddress == requesterAddress).Sum(x => x.Amount);
-                                balance = received + sent;
-                            }
-
-                            if (balance < amount.Value)
-                            {
-                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Insufficient balance. Requester: {requesterAddress}, Available: {balance}, Requested: {amount.Value}", 
-                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                                var txdata = TransactionData.GetAll();
-                                tx.TransactionStatus = TransactionStatus.Invalid;
-                                txdata.InsertSafe(tx);
-                                return;
-                            }
-                        }
-                        else
-                        {
-                            // No ledger transactions — but owner may still have deposit balance
-                            bool isRequesterOwnerNoTx = scStateTrei.OwnerAddress == requesterAddress;
-                            decimal depositBal = 0M;
-                            if (isRequesterOwnerNoTx)
-                            {
-                                // Get deposit address from state trei contract data (available on ALL nodes)
-                                string wdDepositAddr = null;
-                                var scMainWd = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
-                                if (scMainWd?.Features != null)
-                                {
-                                    var tknzV2Wd = scMainWd.Features
-                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
-                                    if (tknzV2Wd != null)
-                                        wdDepositAddr = ((TokenizationV2Feature)tknzV2Wd).DepositAddress;
-                                }
-                                if (!string.IsNullOrEmpty(wdDepositAddr))
-                                {
-                                    try
-                                    {
-                                        using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
-                                        if (elxClient != null)
-                                        {
-                                            var bal = await elxClient.GetBalance(wdDepositAddr, false);
-                                            depositBal = bal.Confirmed / 100_000_000M;
-                                        }
-                                    }
-                                    catch { /* ElectrumX unavailable — depositBal stays 0 */ }
-                                }
-                            }
-                            if (isRequesterOwnerNoTx && depositBal >= amount.Value)
-                            {
-                                // Owner has sufficient deposit balance even without ledger transactions
-                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST: Owner {requesterAddress} using deposit balance ({depositBal}) for withdrawal of {amount.Value}",
-                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            }
-                            else
-                            {
-                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: No balance available for withdrawal. Requester: {requesterAddress}, IsOwner: {isRequesterOwnerNoTx}, DepositBalance: {depositBal}",
-                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                                var txdata = TransactionData.GetAll();
-                                tx.TransactionStatus = TransactionStatus.Invalid;
-                                txdata.InsertSafe(tx);
-                                return;
-                            }
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Insufficient balance. Requester: {requesterAddress}, Available: {balCheck.availableBalance}, Requested: {amount.Value}",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            var txdata = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                            return;
                         }
 
                         // Mark as success and insert

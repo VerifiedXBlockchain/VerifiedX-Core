@@ -123,7 +123,9 @@ namespace VerifiedXCore.Tests
             Assert.True(VBTCWithdrawalRequest.Save(cancelled));
 
             // Only the burn-backed 0.5 counts; the cancelled 1.0 must contribute nothing.
-            Assert.Equal(0.5M, VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(owner, sc));
+            // (Height 0 = pre-owner-add-back-fix legacy behavior; both-sides-of-gate coverage
+            // lives in VBTCOwnerAddBackFixTests.)
+            Assert.Equal(0.5M, VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(owner, sc, 0));
         }
 
         [Fact]
@@ -139,7 +141,7 @@ namespace VerifiedXCore.Tests
             retired.IsCompleted = true;
             Assert.True(VBTCWithdrawalRequest.Save(retired));
 
-            Assert.Equal(0M, VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(owner, sc));
+            Assert.Equal(0M, VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(owner, sc, 0));
         }
 
         // ── Rebuilds of the same coin set must be byte-identical ─────────────────────

@@ -41,7 +41,7 @@ namespace VerifiedXCore.BrowserWalletServices
                     // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
                     // bridge locks stay debited; only withdrawal burns (already reflected in the
                     // deposit address balance) are cancelled out.
-                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, address);
+                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
                 }
                 else if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
                 {

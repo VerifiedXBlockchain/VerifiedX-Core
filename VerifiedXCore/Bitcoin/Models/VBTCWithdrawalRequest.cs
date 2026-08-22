@@ -297,14 +297,25 @@ namespace VerifiedXCore.Bitcoin.Models
 
         #region Get Completed Withdrawal Amount
         /// <summary>
-        /// Gets the total amount of COMPLETED withdrawals for an address and smart contract.
-        /// Completed withdrawals already reduced the BTC deposit address balance (ElectrumX reflects
-        /// them) AND wrote a burn row (ToAddress "-") to the tokenization ledger. Owner balance math
-        /// adds this amount back so the burn rows aren't double-counted against the deposit balance,
-        /// while transfer debits and bridge locks (same "-" row shape, but BTC never left the deposit)
-        /// correctly remain debited. Withdrawal records are consensus-critical and exist on ALL nodes.
+        /// Gets the total amount of COMPLETED withdrawals to add back into the OWNER's balance for a
+        /// smart contract. Completed withdrawals already reduced the BTC deposit address balance
+        /// (ElectrumX reflects them) but only the requestor got a burn row (ToAddress "-") in the
+        /// tokenization ledger. The owner's balance is implicit (deposit pot + owner ledger rows), so
+        /// EVERY completed withdrawal's pot-shrinkage must be added back — the owner's own (whose burn
+        /// row would otherwise double-count against the deposit) AND non-owners' (whose pot-shrinkage
+        /// would otherwise be charged to the owner). Transfer debits and bridge locks (same "-" row
+        /// shape, but BTC never left the deposit) correctly remain debited.
+        /// At/after V2WithdrawalOwnerAddBackFixHeight all completed withdrawals on the contract count;
+        /// before it, only rows with RequestorAddress == address (the historical owner-only behavior,
+        /// which understated the owner by the sum of non-owner completed withdrawals). The address
+        /// parameter is therefore dead post-activation — it must stay for pre-activation determinism,
+        /// do NOT "clean it up" without a new height gate.
+        /// Known accepted window: a row flips to Completed when the WITHDRAWAL_COMPLETE tx processes,
+        /// before the BTC tx confirms and the ElectrumX confirmed pot drops — the owner is transiently
+        /// overstated by that amount until confirmation (bounded by the per-contract single-active-
+        /// request gate). Withdrawal records are consensus-critical and exist on ALL nodes.
         /// </summary>
-        public static decimal GetCompletedWithdrawalAmount(string address, string scUID)
+        public static decimal GetCompletedWithdrawalAmount(string address, string scUID, long currentHeight)
         {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
@@ -318,11 +329,14 @@ namespace VerifiedXCore.Bitcoin.Models
             // IsCompleted=true WITHOUT writing the offsetting burn row this add-back exists to
             // cancel out. Counting those would credit the owner vBTC that no BTC backs.
             var completedWithdrawals = vwrDb.Query()
-                .Where(x => x.RequestorAddress == address &&
-                            x.SmartContractUID == scUID &&
+                .Where(x => x.SmartContractUID == scUID &&
                             x.IsCompleted &&
                             x.Status == VBTCWithdrawalStatus.Completed)
                 .ToList();
+
+            var fixActive = currentHeight >= Globals.V2WithdrawalOwnerAddBackFixHeight;
+            if (!fixActive)
+                completedWithdrawals = completedWithdrawals.Where(x => x.RequestorAddress == address).ToList();
 
             if (completedWithdrawals.Any())
             {

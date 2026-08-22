@@ -15,7 +15,8 @@ namespace VerifiedXCore.Privacy
             bool blockVerify,
             bool twSkipVerify,
             Dictionary<string, long>? processedNonces,
-            bool skipPlonkProofVerification = false)
+            bool skipPlonkProofVerification = false,
+            long? blockHeight = null)
         {
             _ = blockVerify;
             _ = twSkipVerify;
@@ -74,7 +75,7 @@ namespace VerifiedXCore.Privacy
 
             if (PrivateTransactionTypes.IsTransparentShield(txRequest.TransactionType))
             {
-                var shield = await ValidateTransparentShield(txRequest, payload!, processedNonces);
+                var shield = await ValidateTransparentShield(txRequest, payload!, processedNonces, blockHeight);
                 if (!shield.ok)
                     return shield;
             }
@@ -262,7 +263,8 @@ namespace VerifiedXCore.Privacy
         private static async Task<(bool ok, string message)> ValidateTransparentShield(
             Transaction txRequest,
             PrivateTxPayload payload,
-            Dictionary<string, long>? processedNonces)
+            Dictionary<string, long>? processedNonces,
+            long? blockHeight)
         {
             if (txRequest.FromAddress == "Coinbase_BlkRwd" || txRequest.FromAddress == "Coinbase_TrxFees")
                 return (false, "Invalid private shield from address.");
@@ -299,7 +301,8 @@ namespace VerifiedXCore.Privacy
                 {
                     var vbtcBalResult = await VerifiedXCore.Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(
                             payload.VbtcContractUid,
-                            txRequest.FromAddress);
+                            txRequest.FromAddress,
+                            blockHeight);
                     if (!vbtcBalResult.success)
                         return (false, vbtcBalResult.error ?? "Could not resolve vBTC transparent balance for shield.");
 

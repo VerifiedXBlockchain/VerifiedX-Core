@@ -33,7 +33,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// deposit balance and would otherwise be double-counted.
         /// Owner available = ElectrumX deposit balance + this value.
         /// </summary>
-        public static decimal GetOwnerLedgerBalance(SmartContractStateTrei scState, string ownerAddress)
+        public static decimal GetOwnerLedgerBalance(SmartContractStateTrei scState, string ownerAddress, long currentHeight)
         {
             decimal ledgerBalance = 0M;
             if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
@@ -46,12 +46,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     ledgerBalance = ownerRows.Sum(x => x.Amount);
             }
 
-            ledgerBalance += VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(ownerAddress, scState.SmartContractUID);
+            ledgerBalance += VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(ownerAddress, scState.SmartContractUID, currentHeight);
 
             return ledgerBalance;
         }
 
-        public static async Task<(bool success, decimal availableBalance, string? error)> TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress)
+        public static async Task<(bool success, decimal availableBalance, string? error)> TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress, long? blockHeight = null)
         {
             try
             {
@@ -132,7 +132,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Owner: must verify actual BTC deposit balance to prevent inflation.
                 // Full ledger sum (transfer debits and bridge locks stay debited) plus an add-back
                 // of completed withdrawals whose burn rows the ElectrumX balance already reflects.
-                ledgerBalance = GetOwnerLedgerBalance(scState, fromAddress);
+                ledgerBalance = GetOwnerLedgerBalance(scState, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
                 // Query Electrum for real-time balance of the deposit address.
                 decimal btcDepositBalance = 0M;
