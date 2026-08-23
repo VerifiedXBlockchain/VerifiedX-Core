@@ -524,33 +524,7 @@ namespace VerifiedXCore.Models
                     SaveReserveAccount(rAccount);
                 }
 
-                var scStateTrei = SmartContractStateTrei.GetSCST();
-                var scs = scStateTrei.Query().Where(x => x.OwnerAddress == rAccount.Address).ToEnumerable();
-
-                if (scs.Count() > 0)
-                {
-                    foreach (var sc in scs)
-                    {
-                        try
-                        {
-                            var scMain = SmartContractMain.GenerateSmartContractInMemory(sc.ContractData);
-                            if (sc.MinterManaged == true)
-                            {
-                                if (sc.MinterAddress == rAccount.Address)
-                                {
-                                    scMain.IsMinter = true;
-                                }
-                            }
-
-                            SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
-                        }
-                        catch (Exception ex)
-                        {
-                            ErrorLogUtility.LogError($"Failed to import Smart contract during account restore. SCUID: {sc.SmartContractUID}", "ReserveAccount.RestoreReserveAccount()");
-
-                        }
-                    }
-                }
+                await AccountData.RestoreSmartContractsForAddress(rAccount.Address);
 
                 //AddToAccount(account); //only add if not already in accounts
                 if (rescanForTx == true)
@@ -602,9 +576,6 @@ namespace VerifiedXCore.Models
                 account.PrivateKey = recPrivateKeySecretHex;
                 account.PublicKey = "04" + ByteToHex(recPubKey.toString());
                 account.Address = AccountData.GetHumanAddress(account.PublicKey);
-
-                var scStateTrei = SmartContractStateTrei.GetSCST();
-                var scs = scStateTrei.Query().Where(x => x.OwnerAddress == rAccount.Address).ToEnumerable();
 
                 rAccount = new ReserveAccount();
                 rAccountInfo = new ReserveAccountInfo();
@@ -658,30 +629,9 @@ namespace VerifiedXCore.Models
                     SaveReserveAccount(rAccount);
                 }
 
-                if (scs.Count() > 0)
-                {
-                    foreach (var sc in scs)
-                    {
-                        try
-                        {
-                            var scMain = SmartContractMain.GenerateSmartContractInMemory(sc.ContractData);
-                            if (sc.MinterManaged == true)
-                            {
-                                if (sc.MinterAddress == rAccount.Address)
-                                {
-                                    scMain.IsMinter = true;
-                                }
-                            }
-
-                            SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
-                        }
-                        catch (Exception ex)
-                        {
-                            ErrorLogUtility.LogError($"Failed to import Smart contract during account restore. SCUID: {sc.SmartContractUID}", "ReserveAccount.RestoreReserveAccount()");
-
-                        }
-                    }
-                }
+                // NOTE: this previously queried the state trei for rAccount.Address BEFORE the
+                // address was derived, so this overload restored zero smart contracts.
+                await AccountData.RestoreSmartContractsForAddress(rAccount.Address);
 
                 var accountCheck = AccountData.GetSingleAccount(account.Address);
                 if (accountCheck == null)

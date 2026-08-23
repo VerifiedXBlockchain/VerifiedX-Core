@@ -397,7 +397,7 @@ namespace VerifiedXCore.Commands
                     break;
                 case "3hd": // restore HD Wallet
                     Globals.StopConsoleOutput = true;
-                    var mnemonicRestore = BaseCommandServices.RestoreHDWallet();
+                    var mnemonicRestore = await BaseCommandServices.RestoreHDWallet();
                     Console.WriteLine("-----------------------HD Wallet Process Result------------------------");
                     Console.WriteLine($"Result: {mnemonicRestore}");
                     Console.WriteLine("----------------------Type /menu to return to menu---------------------");

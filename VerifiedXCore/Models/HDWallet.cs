@@ -2,6 +2,7 @@
 using VerifiedXCore.Data;
 using VerifiedXCore.BIP39;
 using VerifiedXCore.BIP32;
+using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Models
 {
@@ -51,7 +52,7 @@ namespace VerifiedXCore.Models
                 return (true,myMnemonic);
             }
 
-            public static string RestoreHDWallet(string mnemonicStr, string password = "")
+            public static async Task<string> RestoreHDWallet(string mnemonicStr, string password = "")
             {
                 var hd = GetHDWalletData();
                 var hdwExist = GetHDWallet();
@@ -80,7 +81,55 @@ namespace VerifiedXCore.Models
 
                 Globals.HDWallet = true;
 
-                return "Mnemonic Restored...";
+                // Gap-limit scan: previously used addresses are not recoverable from the seed alone,
+                // so probe derivation indices against chain state and restore every active one.
+                // Stops after GapLimit consecutive addresses with no on-chain activity.
+                const int GapLimit = 10;
+                int restoredCount = 0;
+                try
+                {
+                    BIP32.BIP32 bip32 = new BIP32.BIP32();
+                    var scStateTrei = SmartContractStateTrei.GetSCST();
+                    int index = 0;
+                    int consecutiveUnused = 0;
+                    int highestActiveIndex = -1;
+
+                    while (consecutiveUnused < GapLimit)
+                    {
+                        var derivePath = bip32.DerivePath($"{hdw.Path}/{index}'", myMnemonicSeed);
+                        var key = derivePath.Key.ToStringHex();
+                        var address = AccountData.GetAddressFromHDKey(key);
+
+                        bool active =
+                            StateData.GetSpecificAccountStateTrei(address) != null ||
+                            Adnr.GetAdnr(address) != null ||
+                            scStateTrei.Exists(x => x.OwnerAddress == address || (x.MinterAddress == address && x.MinterManaged == true));
+
+                        if (active)
+                        {
+                            await AccountData.RestoreHDAccount(key);
+                            highestActiveIndex = index;
+                            consecutiveUnused = 0;
+                            restoredCount++;
+                        }
+                        else
+                        {
+                            consecutiveUnused++;
+                        }
+                        index++;
+                    }
+
+                    // Continue new-address derivation after the last used index.
+                    hdw.Nonce = highestActiveIndex + 1;
+                    hd.UpdateSafe(hdw);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"HD address scan failed after restoring {restoredCount} address(es). Error: {ex}", "HDWallet.RestoreHDWallet()");
+                    return $"Mnemonic Restored... Address scan failed after restoring {restoredCount} address(es). Remaining addresses can be re-derived one at a time with the new address command.";
+                }
+
+                return $"Mnemonic Restored... {restoredCount} previously used address(es) restored.";
             }
 
             public static HDWallet? GetHDWallet()
@@ -97,7 +146,7 @@ namespace VerifiedXCore.Models
                 return null;
             }
 
-            public static Account? GenerateAddress()
+            public static async Task<Account?> GenerateAddress()
             {
                 var hd = GetHDWalletData();
                 var hdw = GetHDWallet();
@@ -111,7 +160,7 @@ namespace VerifiedXCore.Models
                     BIP32.BIP32 bip32 = new BIP32.BIP32();
                     var derivePath = bip32.DerivePath(expectedPath, seed);
                     var key = derivePath.Key.ToStringHex();
-                    var account = AccountData.RestoreHDAccount(key);
+                    var account = await AccountData.RestoreHDAccount(key);
 
                     IncrementNonce(hdw);
 

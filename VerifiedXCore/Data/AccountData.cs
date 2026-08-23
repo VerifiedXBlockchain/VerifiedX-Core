@@ -111,8 +111,6 @@ namespace VerifiedXCore.Data
 				//Update balance from state trei
 				var accountState = StateData.GetSpecificAccountStateTrei(account.Address);
 				var adnrState = Adnr.GetAdnr(account.Address);
-				var scStateTrei = SmartContractStateTrei.GetSCST();
-				var scs = scStateTrei.Find(x => x.OwnerAddress == account.Address || (x.MinterAddress == account.Address && x.MinterManaged == true)).ToList();
 
 				account.ADNR = adnrState != null ? adnrState : null;
 				account.Balance = accountState != null ? accountState.Balance : 0M;
@@ -131,123 +129,7 @@ namespace VerifiedXCore.Data
                         }
                     }
 
-                    if (scs.Count() > 0)
-                    {
-                        foreach (var sc in scs)
-                        {
-                            try
-                            {
-                                var scMain = SmartContractMain.GenerateSmartContractInMemory(sc.ContractData);
-
-                                // vBTC contracts are always MinterManaged, but a minter who transferred
-                                // ownership away has no remaining role — only restore for the state-trei owner.
-                                // A retained token balance is picked up by the balance pass below.
-                                bool isVbtc = scMain.Features?.Any(x => x.FeatureName == FeatureName.Tokenization || x.FeatureName == FeatureName.TokenizationV2) == true;
-                                if (isVbtc && sc.OwnerAddress != account.Address)
-                                    continue;
-
-                                if (sc.MinterManaged == true)
-                                {
-                                    if (sc.MinterAddress == account.Address)
-                                    {
-                                        scMain.IsMinter = true;
-                                    }
-                                }
-
-                                SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
-
-							if(scMain.Features != null)
-							{
-                                    var tokenizedBitcoinFeature = scMain.Features.Where(x => x.FeatureName == FeatureName.Tokenization).FirstOrDefault();
-								if(tokenizedBitcoinFeature != null)
-								{
-                                        await TokenizedBitcoin.SaveSmartContract(scMain, null, account.Address);
-                                    }
-                                    
-                                    // vBTC V2 restoration
-                                    var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
-                                    if(tokenizedBitcoinV2Feature != null)
-                                    {
-                                        await VBTCContractV2.SaveSmartContract(scMain, null, account.Address);
-                                    }
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                ErrorLogUtility.LogError($"Failed to import Smart contract during account restore. SCUID: {sc.SmartContractUID}", "AccountData.RestoreAccount()");
-
-                            }
-                        }
-                    }
-
-                    // Check for smart contracts where this address has a tokenization balance
-                    var allContracts = scStateTrei.Query().ToEnumerable();
-                    var contractsWithBalance = allContracts.Where(contract =>
-                        contract.SCStateTreiTokenizationTXes != null &&
-                        contract.SCStateTreiTokenizationTXes.Any(tx =>
-                            tx.ToAddress == account.Address || tx.FromAddress == account.Address));
-
-                    if (contractsWithBalance.Any())
-                    {
-                        foreach (var sc in contractsWithBalance)
-                        {
-                            // Skip only if actually restored as owner above — a minter-matched contract
-                            // that was transferred away must still fall through to the balance check.
-                            if (scs.Any(x => x.SmartContractUID == sc.SmartContractUID && x.OwnerAddress == account.Address))
-                                continue;
-
-                            try
-                            {
-								if (sc.SCStateTreiTokenizationTXes == null)
-									continue;
-                                // Calculate balance for this address
-                                var transactions = sc.SCStateTreiTokenizationTXes.Where(tx =>
-                                    tx.ToAddress == account.Address || tx.FromAddress == account.Address).ToList();
-                                var balance = transactions.Sum(x => x.Amount);
-
-                                // Only import if balance is greater than zero
-                                if (balance <= 0)
-                                    continue;
-
-                                var scMain = SmartContractMain.GenerateSmartContractInMemory(sc.ContractData);
-                                
-                                SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
-
-                                if (scMain.Features != null)
-                                {
-                                    var tokenizedBitcoinFeature = scMain.Features.Where(x => x.FeatureName == FeatureName.Tokenization).FirstOrDefault();
-                                    if (tokenizedBitcoinFeature != null)
-                                    {
-                                        await TokenizedBitcoin.SaveSmartContractCoinTransfer(scMain, account.Address, null);
-                                        
-                                        // Update the balance for the restored token
-                                        var tokenDb = TokenizedBitcoin.GetDb();
-                                        var token = tokenDb.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.RBXAddress == account.Address);
-                                        if (token != null)
-                                        {
-                                            token.Balance = balance;
-                                            await tokenDb.UpdateSafeAsync(token);
-                                        }
-                                    }
-                                    
-                                    // vBTC V2 balance restoration
-                                    // FIND-001 FIX: Only ensure the canonical contract record exists.
-                                    // Token balances are tracked in SmartContractStateTrei.SCStateTreiTokenizationTXes,
-                                    // not in holder-specific VBTCContractV2 records.
-                                    var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
-                                    if (tokenizedBitcoinV2Feature != null)
-                                    {
-                                        await VBTCContractV2.SaveSmartContractTransfer(scMain, account.Address, null);
-                                        // Note: Balance is not updated here as it's tracked in SmartContractStateTrei
-                                    }
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                ErrorLogUtility.LogError($"Failed to import Smart contract with tokenization balance during account restore. SCUID: {sc.SmartContractUID}", "AccountData.RestoreAccount()");
-                            }
-                        }
-                    }
+                    await RestoreSmartContractsForAddress(account.Address);
 
                     var accountCheck = AccountData.GetSingleAccount(account.Address);
                     if (accountCheck == null)
@@ -276,7 +158,148 @@ namespace VerifiedXCore.Data
 			return account;
 		}
 
-		public static Account RestoreHDAccount(string privKey)
+		/// <summary>
+		/// Restores all locally-tracked smart contract records for an address from the state trei:
+		/// owned/minter-managed contracts (incl. vBTC V1/V2 wallet records) plus contracts where the
+		/// address holds a tokenization balance. Shared by normal, HD, and reserve account restores.
+		/// </summary>
+		public static async Task RestoreSmartContractsForAddress(string address)
+		{
+			var scStateTrei = SmartContractStateTrei.GetSCST();
+			var scs = scStateTrei.Find(x => x.OwnerAddress == address || (x.MinterAddress == address && x.MinterManaged == true)).ToList();
+
+			if (scs.Count() > 0)
+			{
+				foreach (var sc in scs)
+				{
+					try
+					{
+						var scMain = SmartContractMain.GenerateSmartContractInMemory(sc.ContractData);
+
+						// vBTC contracts are always MinterManaged, but a minter who transferred
+						// ownership away has no remaining role — only restore for the state-trei owner.
+						// A retained token balance is picked up by the balance pass below.
+						bool isVbtc = scMain.Features?.Any(x => x.FeatureName == FeatureName.Tokenization || x.FeatureName == FeatureName.TokenizationV2) == true;
+						if (isVbtc && sc.OwnerAddress != address)
+							continue;
+
+						if (sc.MinterManaged == true)
+						{
+							if (sc.MinterAddress == address)
+							{
+								scMain.IsMinter = true;
+							}
+						}
+
+						SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
+
+						if (scMain.Features != null)
+						{
+							var tokenizedBitcoinFeature = scMain.Features.Where(x => x.FeatureName == FeatureName.Tokenization).FirstOrDefault();
+							if (tokenizedBitcoinFeature != null)
+							{
+								await TokenizedBitcoin.SaveSmartContract(scMain, null, address);
+							}
+
+							// vBTC V2 restoration
+							var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
+							if (tokenizedBitcoinV2Feature != null)
+							{
+								await VBTCContractV2.SaveSmartContract(scMain, null, address);
+							}
+						}
+					}
+					catch (Exception ex)
+					{
+						ErrorLogUtility.LogError($"Failed to import Smart contract during account restore. SCUID: {sc.SmartContractUID}", "AccountData.RestoreSmartContractsForAddress()");
+					}
+				}
+			}
+
+			// Check for smart contracts where this address has a tokenization balance
+			var allContracts = scStateTrei.Query().ToEnumerable();
+			var contractsWithBalance = allContracts.Where(contract =>
+				contract.SCStateTreiTokenizationTXes != null &&
+				contract.SCStateTreiTokenizationTXes.Any(tx =>
+					tx.ToAddress == address || tx.FromAddress == address));
+
+			if (contractsWithBalance.Any())
+			{
+				foreach (var sc in contractsWithBalance)
+				{
+					// Skip only if actually restored as owner above — a minter-matched contract
+					// that was transferred away must still fall through to the balance check.
+					if (scs.Any(x => x.SmartContractUID == sc.SmartContractUID && x.OwnerAddress == address))
+						continue;
+
+					try
+					{
+						if (sc.SCStateTreiTokenizationTXes == null)
+							continue;
+						// Calculate balance for this address
+						var transactions = sc.SCStateTreiTokenizationTXes.Where(tx =>
+							tx.ToAddress == address || tx.FromAddress == address).ToList();
+						var balance = transactions.Sum(x => x.Amount);
+
+						// Only import if balance is greater than zero
+						if (balance <= 0)
+							continue;
+
+						var scMain = SmartContractMain.GenerateSmartContractInMemory(sc.ContractData);
+
+						SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
+
+						if (scMain.Features != null)
+						{
+							var tokenizedBitcoinFeature = scMain.Features.Where(x => x.FeatureName == FeatureName.Tokenization).FirstOrDefault();
+							if (tokenizedBitcoinFeature != null)
+							{
+								await TokenizedBitcoin.SaveSmartContractCoinTransfer(scMain, address, null);
+
+								// Update the balance for the restored token
+								var tokenDb = TokenizedBitcoin.GetDb();
+								var token = tokenDb.FindOne(x => x.SmartContractUID == scMain.SmartContractUID && x.RBXAddress == address);
+								if (token != null)
+								{
+									token.Balance = balance;
+									await tokenDb.UpdateSafeAsync(token);
+								}
+							}
+
+							// vBTC V2 balance restoration
+							// FIND-001 FIX: Only ensure the canonical contract record exists.
+							// Token balances are tracked in SmartContractStateTrei.SCStateTreiTokenizationTXes,
+							// not in holder-specific VBTCContractV2 records.
+							var tokenizedBitcoinV2Feature = scMain.Features.Where(x => x.FeatureName == FeatureName.TokenizationV2).FirstOrDefault();
+							if (tokenizedBitcoinV2Feature != null)
+							{
+								await VBTCContractV2.SaveSmartContractTransfer(scMain, address, null);
+								// Note: Balance is not updated here as it's tracked in SmartContractStateTrei
+							}
+						}
+					}
+					catch (Exception ex)
+					{
+						ErrorLogUtility.LogError($"Failed to import Smart contract with tokenization balance during account restore. SCUID: {sc.SmartContractUID}", "AccountData.RestoreSmartContractsForAddress()");
+					}
+				}
+			}
+		}
+
+		/// <summary>
+		/// Derives the VFX address for an HD private key (zero-padded like RestoreHDAccount)
+		/// without saving anything — used by the mnemonic-restore address scan.
+		/// </summary>
+		public static string GetAddressFromHDKey(string privKey)
+		{
+			var privateKeyZeroPad = "00" + privKey.Replace(" ", "");
+			BigInteger b1 = BigInteger.Parse(privateKeyZeroPad, NumberStyles.AllowHexSpecifier);
+			PrivateKey privateKey = new PrivateKey("secp256k1", b1);
+			var pubKey = privateKey.publicKey();
+			return GetHumanAddress("04" + ByteToHex(pubKey.toString()));
+		}
+
+		public static async Task<Account> RestoreHDAccount(string privKey)
 		{
 			Account account = new Account();
 			try
@@ -293,6 +316,8 @@ namespace VerifiedXCore.Data
 				account.Address = GetHumanAddress(account.PublicKey);
 				//Update balance from state trei
 				var accountState = StateData.GetSpecificAccountStateTrei(account.Address);
+				var adnrState = Adnr.GetAdnr(account.Address);
+				account.ADNR = adnrState != null ? adnrState : null;
 				account.Balance = accountState != null ? accountState.Balance : 0M;
 
 				var validators = Validators.Validator.GetAll();
@@ -307,6 +332,8 @@ namespace VerifiedXCore.Data
 					}
 				}
 
+				await RestoreSmartContractsForAddress(account.Address);
+
 				var accountCheck = AccountData.GetSingleAccount(account.Address);
 				if (accountCheck == null)
 				{
@@ -315,7 +342,7 @@ namespace VerifiedXCore.Data
 			}
 			catch (Exception ex)
 			{
-				//restore failed				
+				//restore failed
 				Console.WriteLine("Account restore failed. Not a valid private key");
 			}
 

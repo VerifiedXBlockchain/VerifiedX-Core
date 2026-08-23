@@ -1823,6 +1823,64 @@ namespace VerifiedXCore.Services
                     }
                 }
 
+                // vBTC V2 balance transfer received by a reserve account. Record-keeping only —
+                // balances live in the state trei, and reserve claim/unlock semantics do not
+                // apply to VBTC_V2_TRANSFER (consensus has no callback/unlock path for it).
+                // Mirrors the normal-account handling in ProcessIncomingTransactions.
+                if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+                {
+                    try
+                    {
+                        var jobj = JObject.Parse(tx.Data);
+                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                        var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
+                        var toAddress = jobj["ToAddress"]?.ToObject<string?>();
+                        var amount = jobj["Amount"]?.ToObject<decimal?>();
+
+                        var txdata = TransactionData.GetAll();
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(fromAddress) ||
+                            string.IsNullOrEmpty(toAddress) || !amount.HasValue)
+                        {
+                            SCLogUtility.Log($"VBTC_V2_TRANSFER to reserve account failed: Missing required fields. TX: {tx.Hash}",
+                                "BlockTransactionValidatorService.ProcessIncomingReserveTransactions()");
+                            tx.TransactionStatus = TransactionStatus.Invalid;
+                            txdata.InsertSafe(tx);
+                        }
+                        else
+                        {
+                            var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                            if (scStateTrei == null)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_TRANSFER to reserve account failed: Contract not found in state trei - {scUID}",
+                                    "BlockTransactionValidatorService.ProcessIncomingReserveTransactions()");
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                            }
+                            else
+                            {
+                                tx.TransactionStatus = TransactionStatus.Success;
+                                txdata.InsertSafe(tx);
+
+                                // Ensure local contract records exist so the reserve wallet can see this contract.
+                                var scMainRec = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
+                                if (scMainRec?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                {
+                                    SmartContractMain.SmartContractData.SaveSmartContract(scMainRec, null);
+                                    await VBTCContractV2.SaveSmartContractTransfer(scMainRec, tx.ToAddress);
+                                    if (Globals.VBTCDefaultAssetOnly)
+                                        await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Failed to process VBTC_V2_TRANSFER to reserve account. TX: {tx.Hash}. Error: {ex.Message}",
+                            "BlockTransactionValidatorService.ProcessIncomingReserveTransactions()");
+                    }
+                }
+
                 if (tx.TransactionType == TransactionType.ADNR)
                 {
                     var scData = JObject.Parse(tx.Data);

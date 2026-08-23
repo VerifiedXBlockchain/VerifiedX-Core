@@ -370,7 +370,7 @@ namespace VerifiedXCore.Controllers
             var output = "";
             try
             {
-                var mnemonicRestore = HDWallet.HDWalletData.RestoreHDWallet(mnemonic);
+                var mnemonicRestore = await HDWallet.HDWalletData.RestoreHDWallet(mnemonic);
 
                 output = JsonConvert.SerializeObject(new { Result = mnemonicRestore });
             }
@@ -514,7 +514,7 @@ namespace VerifiedXCore.Controllers
             var output = "Fail"; // this will only display if command not recognized.
             if (Globals.HDWallet == true)
             {
-                account = HDWallet.HDWalletData.GenerateAddress();
+                account = await HDWallet.HDWalletData.GenerateAddress();
             }
             else
             {

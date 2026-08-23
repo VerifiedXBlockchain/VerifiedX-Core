@@ -1610,7 +1610,7 @@ namespace VerifiedXCore.Commands
         {
             if (Globals.HDWallet == true)
             {
-                var hdAccount = HDWallet.HDWalletData.GenerateAddress();
+                var hdAccount = await HDWallet.HDWalletData.GenerateAddress();
                 if (hdAccount != null)
                 {
                     Console.WriteLine("-----------------------HD Wallet Address Created------------------------");
@@ -1867,13 +1867,13 @@ namespace VerifiedXCore.Commands
             }
         }
 
-        public static string RestoreHDWallet()
+        public static async Task<string> RestoreHDWallet()
         {
             Console.WriteLine("Please paste your Mnemonic Below...");
             var mnemonicStr = Console.ReadLine();
             if (!string.IsNullOrWhiteSpace(mnemonicStr))
             {
-                var mnemonicResult = HDWallet.HDWalletData.RestoreHDWallet(mnemonicStr);
+                var mnemonicResult = await HDWallet.HDWalletData.RestoreHDWallet(mnemonicStr);
                 if(mnemonicResult.Contains("Restored"))
                 {
                     Globals.HDWallet = true;
