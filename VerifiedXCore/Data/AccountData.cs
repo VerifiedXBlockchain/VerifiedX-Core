@@ -138,6 +138,14 @@ namespace VerifiedXCore.Data
                             try
                             {
                                 var scMain = SmartContractMain.GenerateSmartContractInMemory(sc.ContractData);
+
+                                // vBTC contracts are always MinterManaged, but a minter who transferred
+                                // ownership away has no remaining role — only restore for the state-trei owner.
+                                // A retained token balance is picked up by the balance pass below.
+                                bool isVbtc = scMain.Features?.Any(x => x.FeatureName == FeatureName.Tokenization || x.FeatureName == FeatureName.TokenizationV2) == true;
+                                if (isVbtc && sc.OwnerAddress != account.Address)
+                                    continue;
+
                                 if (sc.MinterManaged == true)
                                 {
                                     if (sc.MinterAddress == account.Address)
@@ -183,8 +191,9 @@ namespace VerifiedXCore.Data
                     {
                         foreach (var sc in contractsWithBalance)
                         {
-                            // Skip if already restored as owner or minter
-                            if (scs.Any(x => x.SmartContractUID == sc.SmartContractUID))
+                            // Skip only if actually restored as owner above — a minter-matched contract
+                            // that was transferred away must still fall through to the balance check.
+                            if (scs.Any(x => x.SmartContractUID == sc.SmartContractUID && x.OwnerAddress == account.Address))
                                 continue;
 
                             try
