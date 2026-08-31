@@ -1094,21 +1094,37 @@ namespace VerifiedXCore.Services
                                                           && x.Hash != blkTransaction.Hash)
                                                 .ToList();
 
+                                            bool sameContractSibling = false;
                                             foreach (var otx in otherVbtcTxs)
                                             {
                                                 try
                                                 {
                                                     var otxData = JObject.Parse(otx.Data);
                                                     if (otxData["ContractUID"]?.ToObject<string>() == vbtcScUID)
+                                                    {
                                                         blockTotal += otxData["Amount"]?.ToObject<decimal?>() ?? 0M;
+                                                        sameContractSibling = true;
+                                                    }
                                                 }
                                                 catch { }
                                             }
 
+                                            // Reserve single-flight: at most ONE reserve exit per sender+contract
+                                            // may be in flight — a block carrying two is invalid regardless of balance.
+                                            if (blkTransaction.FromAddress.StartsWith("xRBX") && sameContractSibling)
+                                                rejectBlock = true;
+
                                             // Check against sender's vBTC balance
                                             var scState = SmartContractStateTrei.GetSmartContractState(vbtcScUID);
-                                            if (scState != null)
+                                            if (scState != null && !rejectBlock)
                                             {
+                                                // Reserve sends defer the ledger debit until unlock — subtract
+                                                // in-flight pending amounts (rows are written at block-apply on
+                                                // every node, so this is deterministic).
+                                                decimal pendingReserveOut = blkTransaction.FromAddress.StartsWith("xRBX")
+                                                    ? ReserveTransactions.GetPendingVBTCTransferTotal(blkTransaction.FromAddress, vbtcScUID, blkTransaction.Hash)
+                                                    : 0M;
+
                                                 bool isOwner = blkTransaction.FromAddress == scState.OwnerAddress;
                                                 if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
                                                 {
@@ -1117,7 +1133,7 @@ namespace VerifiedXCore.Services
                                                         .ToList();
                                                     var received = tokenTxs.Where(x => x.ToAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
                                                     var sent = tokenTxs.Where(x => x.FromAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
-                                                    decimal vbtcBalance = received + sent;
+                                                    decimal vbtcBalance = received + sent - pendingReserveOut;
 
                                                     if (blockTotal > vbtcBalance)
                                                         rejectBlock = true; // vBTC overspend in block
@@ -1578,6 +1594,30 @@ namespace VerifiedXCore.Services
                                     {
                                         //change accounts types
                                         await BlockTransactionValidatorService.ProcessIncomingReserveTransactions(localToTransaction, reserveAccount, block.Height);
+                                    }
+
+                                    // Reserve Recover(): the TX's ToAddress is the "Reserve_Base"
+                                    // sentinel, so no incoming processor fires for the RECOVERY
+                                    // address — without this, seized contracts/vBTC balances never
+                                    // appear in the recovery wallet until a manual account restore.
+                                    if (localToTransaction.TransactionType == TransactionType.RESERVE &&
+                                        localToTransaction.FromAddress != null && localToTransaction.FromAddress.StartsWith("xRBX"))
+                                    {
+                                        try
+                                        {
+                                            var reserveJobj = JObject.Parse(localToTransaction.Data);
+                                            if ((string?)reserveJobj["Function"] == "Recover()")
+                                            {
+                                                var recoveredTo = (string?)reserveJobj["RecoveryAddress"];
+                                                if (!string.IsNullOrEmpty(recoveredTo) &&
+                                                    (AccountData.GetSingleAccount(recoveredTo) != null ||
+                                                     ReserveAccount.GetReserveAccountSingle(recoveredTo) != null))
+                                                {
+                                                    await AccountData.RestoreSmartContractsForAddress(recoveredTo);
+                                                }
+                                            }
+                                        }
+                                        catch { }
                                     }
                                 }
                                 catch { }

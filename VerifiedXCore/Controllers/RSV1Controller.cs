@@ -119,21 +119,65 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
-        /// Dumps out all reserve transactions locally stored.
+        /// Dumps out all reserve transactions locally stored. Optional address filter.
+        /// vBTC V2 rows carry the vBTC amount inside Data (the VFX Amount is 0), so those
+        /// fields are decoded and projected alongside the raw row for UI use.
         /// </summary>
         /// <returns></returns>
+        [HttpGet("GetReserveTransactions/{address}")]
         [HttpGet("GetReserveTransactions")]
-        public async Task<string> GetReserveTransactions()
+        public async Task<string> GetReserveTransactions(string? address = null)
         {
             var output = "Command not recognized."; // this will only display if command not recognized.
 
             var rTXs = ReserveTransactions.GetReserveTransactionsDb();
             if (rTXs != null)
             {
-                var rtxList = rTXs.Query().Where(x => true).ToEnumerable();
+                var rtxList = string.IsNullOrWhiteSpace(address)
+                    ? rTXs.Query().Where(x => true).ToEnumerable().ToList()
+                    : rTXs.Query().Where(x => x.FromAddress == address || x.ToAddress == address).ToEnumerable().ToList();
                 if(rtxList.Any())
                 {
-                    output = JsonConvert.SerializeObject(new { Success = true, Message = $"{rtxList?.Count()} Found!", ReserveTransactions = rtxList }, Formatting.Indented);
+                    var projected = rtxList.Select(rtx =>
+                    {
+                        string? vbtcContractUID = null;
+                        decimal? vbtcAmount = null;
+                        if (rtx.TransactionType == TransactionType.VBTC_V2_TRANSFER && !string.IsNullOrEmpty(rtx.Data))
+                        {
+                            try
+                            {
+                                var jobj = Newtonsoft.Json.Linq.JObject.Parse(rtx.Data);
+                                vbtcContractUID = jobj["ContractUID"]?.ToObject<string>();
+                                vbtcAmount = jobj["Amount"]?.ToObject<decimal?>();
+                            }
+                            catch { }
+                        }
+                        // Back-compat: original field names keep their original types (int
+                        // enums, raw Data) for out-of-repo consumers; human-readable names
+                        // and the decoded vBTC fields are ADDITIVE.
+                        return new
+                        {
+                            rtx.Hash,
+                            rtx.FromAddress,
+                            rtx.ToAddress,
+                            rtx.Amount,
+                            rtx.Fee,
+                            rtx.Nonce,
+                            rtx.Height,
+                            rtx.Timestamp,
+                            rtx.ConfirmTimestamp,
+                            rtx.UnlockTime,
+                            rtx.Data,
+                            rtx.TransactionType,
+                            rtx.ReserveTransactionStatus,
+                            TransactionTypeName = rtx.TransactionType.ToString(),
+                            ReserveTransactionStatusName = rtx.ReserveTransactionStatus.ToString(),
+                            VbtcContractUID = vbtcContractUID,
+                            VbtcAmount = vbtcAmount
+                        };
+                    }).ToList();
+
+                    output = JsonConvert.SerializeObject(new { Success = true, Message = $"{projected.Count} Found!", ReserveTransactions = projected }, Formatting.Indented);
                 }
                 else
                 {

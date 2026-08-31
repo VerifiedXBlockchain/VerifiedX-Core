@@ -1166,7 +1166,10 @@ namespace VerifiedXCore.Data
                                     .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress).ToList();
                                 var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
                                 var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
-                                if (pendingTotal > (received - sent))
+                                // Debit rows carry NEGATIVE amounts, so balance = received + sent.
+                                // (The old "received - sent" ADDED historical outflows back in,
+                                // inflating the balance and disabling this guard.)
+                                if (pendingTotal > (received + sent))
                                     return true; // vBTC overspend detected
                             }
                         }
@@ -1466,6 +1469,26 @@ namespace VerifiedXCore.Data
             var transaction = GetAll().Query().Where(x => x.Hash == hash).FirstOrDefault();
 
             return transaction;
+        }
+
+        /// <summary>
+        /// Updates the status of EVERY local wallet row matching the hash. Same-wallet
+        /// reserve sends store two rows under one hash (negative sender copy + recipient
+        /// copy) — FirstOrDefault-based flips left the second row stuck forever.
+        /// </summary>
+        public static async Task UpdateTxStatusForAllByHash(string hash, TransactionStatus status)
+        {
+            try
+            {
+                var txDb = Transaction.GetAll();
+                var rows = txDb.Query().Where(x => x.Hash == hash).ToList();
+                foreach (var row in rows)
+                {
+                    row.TransactionStatus = status;
+                    await txDb.UpdateSafeAsync(row);
+                }
+            }
+            catch { }
         }
 
         public static IEnumerable<Transaction> GetTxByBlock(long height)

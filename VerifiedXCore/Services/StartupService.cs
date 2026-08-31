@@ -1592,12 +1592,18 @@ namespace VerifiedXCore.Services
                         var owner = scStateTreiRec.OwnerAddress;
                         if(owner != null)
                         {
-                            var isReserve = scStateTreiRec.OwnerAddress.StartsWith("xRBX") ? true : false;
-
                             var account = AccountData.GetSingleAccount(scStateTreiRec.OwnerAddress);
                             var resAccount = ReserveAccount.GetReserveAccountSingle(scStateTreiRec.OwnerAddress);
 
-                            if (account == null && resAccount == null)
+                            // In-flight reserve transfer: for 24h the state-trei owner is still the
+                            // sending xRBX and NextOwner is the recipient. Never prune the recipient's
+                            // local record — finalize flips ownership but does NOT recreate deleted
+                            // local SCs, so pruning here loses the asset locally.
+                            var nextOwnerLocal = scStateTreiRec.NextOwner != null &&
+                                (AccountData.GetSingleAccount(scStateTreiRec.NextOwner) != null ||
+                                 ReserveAccount.GetReserveAccountSingle(scStateTreiRec.NextOwner) != null);
+
+                            if (account == null && resAccount == null && !nextOwnerLocal)
                             {
                                 //not owner
                                 if (sc.Features != null)
@@ -1663,6 +1669,88 @@ namespace VerifiedXCore.Services
                         }
                     }
                 }
+            }
+
+            // vBTC V2 pass: prune stale local VBTCContractV2 rows (and their SC records) for
+            // contracts this wallet neither owns, is about to own (NextOwner), nor holds a
+            // ledger balance on. Stale rows are dangerous: balance pre-flight prefers the
+            // LOCAL row's OwnerAddress, so a stale row can claim ownership (and with it the
+            // BTC deposit balance) for an address the chain says is no longer owner.
+            try
+            {
+                var v2Contracts = VBTCContractV2.GetAllContracts();
+                if (v2Contracts != null && v2Contracts.Any())
+                {
+                    var localAddrs = new HashSet<string>(AccountData.GetAccounts().FindAll().Select(x => x.Address));
+                    var rAccounts = ReserveAccount.GetReserveAccounts();
+                    if (rAccounts != null)
+                    {
+                        foreach (var r in rAccounts)
+                            localAddrs.Add(r.Address);
+                    }
+
+                    // Keep-reason: contracts with an IN-FLIGHT reserve balance send TO a local
+                    // address. The ledger credit is deferred until unlock, so during the window
+                    // the recipient is neither owner, NextOwner, nor a ledger holder — yet its
+                    // local records must survive (nothing recreates them at finalize).
+                    var inboundPending = new HashSet<string>();
+                    try
+                    {
+                        var rtxDbPrune = ReserveTransactions.GetReserveTransactionsDb();
+                        if (rtxDbPrune != null)
+                        {
+                            var pendingInbound = rtxDbPrune.Query().Where(x =>
+                                x.TransactionType == TransactionType.VBTC_V2_TRANSFER &&
+                                x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList();
+                            foreach (var prtx in pendingInbound)
+                            {
+                                if (prtx.ToAddress == null || !localAddrs.Contains(prtx.ToAddress) || string.IsNullOrEmpty(prtx.Data))
+                                    continue;
+                                try
+                                {
+                                    var pj = Newtonsoft.Json.Linq.JObject.Parse(prtx.Data);
+                                    var pScUID = pj["ContractUID"]?.ToObject<string>();
+                                    if (!string.IsNullOrEmpty(pScUID))
+                                        inboundPending.Add(pScUID);
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    catch { }
+
+                    foreach (var v2c in v2Contracts)
+                    {
+                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(v2c.SmartContractUID);
+                        if (scStateTreiRec == null) continue;
+
+                        var ownerLocal = scStateTreiRec.OwnerAddress != null && localAddrs.Contains(scStateTreiRec.OwnerAddress);
+                        var nextOwnerLocal = scStateTreiRec.NextOwner != null && localAddrs.Contains(scStateTreiRec.NextOwner);
+
+                        bool holdsBalance = false;
+                        if (!ownerLocal && !nextOwnerLocal &&
+                            scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                        {
+                            holdsBalance = localAddrs.Any(a => scStateTreiRec.SCStateTreiTokenizationTXes
+                                .Where(t => t.FromAddress == a || t.ToAddress == a)
+                                .Sum(t => t.Amount) > 0);
+                        }
+
+                        if (!ownerLocal && !nextOwnerLocal && !holdsBalance && !inboundPending.Contains(v2c.SmartContractUID))
+                        {
+                            SmartContractMain.SmartContractData.DeleteSmartContract(v2c.SmartContractUID);
+                            VBTCContractV2.DeleteContract(v2c.SmartContractUID);
+                        }
+                        // Balance holders / in-flight recipients keep their rows untouched.
+                        // (No owner re-sync here: consumers OR the state trei for ownership,
+                        // and rewriting OwnerAddress would break owner-keyed lookups for a
+                        // wallet that minted, transferred away, and kept a balance.)
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"UpdateSCOwnership vBTC V2 pass failed: {ex.Message}", "StartupService.UpdateSCOwnership()");
             }
         }
 

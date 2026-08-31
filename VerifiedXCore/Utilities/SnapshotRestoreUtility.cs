@@ -102,6 +102,14 @@ namespace VerifiedXCore.Utilities
                 // 5) Replay local blocks (slotHeight, target] through the standard commit path.
                 var walletAccounts = AccountData.GetAccounts().FindAll().ToList();
                 var walletAddresses = new HashSet<string>(walletAccounts.Select(a => a.Address));
+                // Reserve (xRBX) wallets keep their TX history too — without this, a restore
+                // silently dropped their local rows (incl. Reserved in-flight vBTC exits).
+                var reserveWalletAccounts = ReserveAccount.GetReserveAccounts();
+                if (reserveWalletAccounts != null)
+                {
+                    foreach (var r in reserveWalletAccounts)
+                        walletAddresses.Add(r.Address);
+                }
                 long replayed = 0;
                 long replayFails = 0;
                 int walletTxInserts = 0;
@@ -111,6 +119,14 @@ namespace VerifiedXCore.Utilities
                     .OrderBy(x => x.Height)
                     .ToEnumerable();
 
+                // Reserve rows must be finalized per replayed block (mirroring ReserveService's
+                // live cadence) so replayed CallBack()/Recover() TXs see the same row statuses
+                // the network did — a single finalize at the end let a replayed Recover()
+                // redirect a transfer that matured (settled) earlier inside the window.
+                // Seeded TRUE (unlike ResetTreis' wiped start): the restored slot itself may
+                // contain Pending rows that mature during the window.
+                bool reservePendingPossible = true;
+
                 foreach (var block in replayBlocks)
                 {
                     try
@@ -118,6 +134,31 @@ namespace VerifiedXCore.Utilities
                         var applied = await StateData.UpdateTreis(block);
                         if (!applied) replayFails++;
                         replayed++;
+
+                        if (!reservePendingPossible && block.Transactions != null &&
+                            block.Transactions.Any(t => t.FromAddress != null && t.FromAddress.StartsWith("xRBX") && t.TransactionType != TransactionType.RESERVE))
+                        {
+                            reservePendingPossible = true;
+                        }
+
+                        if (reservePendingPossible)
+                        {
+                            var rtxDbReplay = ReserveTransactions.GetReserveTransactionsDb();
+                            if (rtxDbReplay != null)
+                            {
+                                var pendingRows = rtxDbReplay.Query().Where(x => x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList();
+                                if (pendingRows.Count == 0)
+                                {
+                                    reservePendingPossible = false;
+                                }
+                                else
+                                {
+                                    var maturedRows = pendingRows.Where(x => x.ConfirmTimestamp < block.Timestamp).ToList();
+                                    if (maturedRows.Count > 0)
+                                        await StateData.UpdateTreiFromReserve(maturedRows);
+                                }
+                            }
+                        }
 
                         // Scoped equivalent of ResetTreis Step 4b: re-insert wallet-relevant TXs
                         // for the replayed range only.
@@ -150,7 +191,10 @@ namespace VerifiedXCore.Utilities
                     return false;
                 }
 
-                await ReserveService.Run(); //apply any reserve TXs unlocked as of the restored height
+                // NOTE: no trailing ReserveService.Run() here. Finalization now happens per
+                // replayed block above (using each block's own timestamp). The old call also
+                // read Globals.LastBlock BEFORE RefreshInMemoryTip below, i.e. the pre-restore
+                // (possibly abandoned-fork) tip — finalizing rows early against a stale clock.
 
                 // 6) Resync local wallet balances from the restored + replayed state trei.
                 var accounts = AccountData.GetAccounts();

@@ -119,7 +119,7 @@ namespace VerifiedXCore.Data
                                 {
                                     ReserveTransactions rTx = new ReserveTransactions
                                     {
-                                        ConfirmTimestamp = (long)tx.UnlockTime,
+                                        ConfirmTimestamp = (long)(tx.UnlockTime ?? 0),
                                         FromAddress = tx.FromAddress,
                                         ToAddress = tx.ToAddress,
                                         Hash = tx.Hash,
@@ -477,7 +477,11 @@ namespace VerifiedXCore.Data
                         // vBTC V2 Transfer/Withdrawal Handling - explicit type-based dispatch
                         if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
                         {
-                            TransferVBTCV2(tx);
+                            // Reserve (xRBX) sends are deferred: the Pending ReserveTransactions row
+                            // is written above, and the ledger moves when ReserveService finalizes it
+                            // after UnlockTime (UpdateTreiFromReserve) — or is redirected by recovery.
+                            if (!tx.FromAddress.StartsWith("xRBX"))
+                                TransferVBTCV2(tx);
                         }
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
@@ -547,12 +551,15 @@ namespace VerifiedXCore.Data
                                             break;
                                         case "CallBack()":
                                             var callBackHash = (string?)jobj["Hash"];
-                                            CallBackReserveAccountTx(callBackHash);
+                                            // Awaited: these now mutate the tokenization ledger
+                                            // (consensus state) and must not race the rest of
+                                            // block application or the world-trei update.
+                                            await CallBackReserveAccountTx(callBackHash);
                                             break;
                                         case "Recover()":
                                             string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
                                             string recoverySigScript = jobj["RecoverySigScript"].ToObject<string>();
-                                            RecoverReserveAccountTx(recoveryAddress, tx.FromAddress, block.StateRoot);
+                                            await RecoverReserveAccountTx(recoveryAddress, tx.FromAddress, block.StateRoot);
                                             break;
                                         default:
                                             break;
@@ -611,10 +618,13 @@ namespace VerifiedXCore.Data
             {
                 try
                 {
-                    // HAL-070 Fix: Idempotence guard - skip if already confirmed
-                    if (rtx.ReserveTransactionStatus == ReserveTransactionStatus.Confirmed)
+                    // HAL-070 Fix + reserve-vBTC hardening: re-read the row's CURRENT status from
+                    // the DB (not the caller's snapshot) — real idempotence against re-entry and
+                    // replay. Anything not Pending has already been finalized/cancelled/recovered.
+                    var currentRow = rtxDb.Query().Where(x => x.Id == rtx.Id).FirstOrDefault();
+                    if (currentRow == null || currentRow.ReserveTransactionStatus != ReserveTransactionStatus.Pending)
                     {
-                        ErrorLogUtility.LogError($"UpdateTreiFromReserve skipped for hash {rtx.Hash} - already Confirmed", "StateData.UpdateTreiFromReserve()");
+                        ErrorLogUtility.LogError($"UpdateTreiFromReserve skipped for hash {rtx.Hash} - status {(currentRow?.ReserveTransactionStatus.ToString() ?? "missing")}, not Pending", "StateData.UpdateTreiFromReserve()");
                         continue;
                     }
 
@@ -729,6 +739,38 @@ namespace VerifiedXCore.Data
                         }
                     }
 
+                    if (rtx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+                    {
+                        // Reserve vBTC sends defer the ledger move to here (unlock time reached).
+                        // NOTE: vBTC data is a flat JObject, not the JArray shape used by SC types.
+                        // Poison handling: consensus validated these fields at admission, so a parse
+                        // failure means a corrupt row — mark it CalledBack (funds never moved; the
+                        // sender keeps the balance) instead of retrying forever or, worse, falling
+                        // through to a Confirmed flip without applying the ledger pair.
+                        string? vbtcScUID = null;
+                        decimal? vbtcAmount = null;
+                        try
+                        {
+                            var vbtcData = JObject.Parse(rtx.Data);
+                            vbtcScUID = vbtcData["ContractUID"]?.ToObject<string?>();
+                            vbtcAmount = vbtcData["Amount"]?.ToObject<decimal?>();
+                        }
+                        catch { }
+
+                        if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount.HasValue && vbtcAmount.Value > 0)
+                        {
+                            ApplyVBTCV2LedgerPair(vbtcScUID, rtx.FromAddress, rtx.ToAddress, vbtcAmount.Value, rtx.Hash);
+                        }
+                        else
+                        {
+                            ErrorLogUtility.LogError($"UpdateTreiFromReserve could not parse vBTC V2 transfer data for hash {rtx.Hash} - marking CalledBack (no funds moved)", "StateData.UpdateTreiFromReserve()");
+                            rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
+                            await rtxDb.UpdateSafeAsync(rtx);
+                            await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
+                            continue;
+                        }
+                    }
+
                     var rtxRec = rtxDb.Query().Where(x => x.Id == rtx.Id).FirstOrDefault();
                     var hash = rtx.Hash;
 
@@ -738,12 +780,8 @@ namespace VerifiedXCore.Data
                         await rtxDb.UpdateSafeAsync(rtx);
                     }
 
-                    var txRec = TransactionData.GetTxByHash(hash);
-                    if (txRec != null)
-                    {
-                        txRec.TransactionStatus = TransactionStatus.Success;
-                        await txDb.UpdateSafeAsync(txRec);
-                    }
+                    // Flip ALL local rows for the hash (same-wallet sends store two).
+                    await TransactionData.UpdateTxStatusForAllByHash(hash, TransactionStatus.Success);
                 }
                 catch {  }
             }
@@ -923,8 +961,20 @@ namespace VerifiedXCore.Data
                             }
                         }
 
-                        if(rTX.TransactionType == TransactionType.NFT_TX)
+                        // Unwind the pre-transfer lock for ALL smart-contract transfer envelopes,
+                        // not just NFT_TX — a called-back TKNZ_TX/SC_TX transfer previously left
+                        // NextOwner set + IsLocked=true forever, permanently bricking the contract
+                        // (any further Transfer() is rejected while locked/NextOwner is set).
+                        if(rTX.TransactionType == TransactionType.NFT_TX ||
+                           rTX.TransactionType == TransactionType.TKNZ_TX ||
+                           rTX.TransactionType == TransactionType.SC_TX)
                         {
+                          // Own try/catch: some legacy TKNZ_TX rows carry flat-JObject data and
+                          // the JArray parse throws — that must NEVER skip the unconditional
+                          // status flip below, or the row stays Pending and the finalizer later
+                          // applies a transfer that was called back.
+                          try
+                          {
                             var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
                             var scData = scDataArray[0];
                             var function = (string?)scData["Function"];
@@ -942,24 +992,46 @@ namespace VerifiedXCore.Data
                                         scStateTrei.IsLocked = false;
                                         await scDb.UpdateSafeAsync(scStateTrei);
                                     }
+
+                                    // Re-sync any local vBTC V2 record to the (unchanged) state-trei
+                                    // owner — reverts a recipient's prematurely stamped ownership on
+                                    // every node applying the callback.
+                                    try
+                                    {
+                                        var vbtcContract = VBTCContractV2.GetContract(scUID);
+                                        if (vbtcContract != null && vbtcContract.OwnerAddress != scStateTrei.OwnerAddress)
+                                        {
+                                            vbtcContract.OwnerAddress = scStateTrei.OwnerAddress;
+                                            VBTCContractV2.UpdateContract(vbtcContract);
+                                        }
+                                    }
+                                    catch { }
                                 }
                             }
-                        }
-                        
-
-                        var localTx = TransactionData.GetTxByHash(rTX.Hash);
-                        if(localTx != null)
-                        {
-                            //Change TX status to CalledBack
-                            var txDB = Transaction.GetAll();
-                            localTx.TransactionStatus = TransactionStatus.CalledBack;
-                            rTX.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
-                            if (txDB != null)
-                                await txDB.UpdateSafeAsync(localTx);
+                          }
+                          catch (Exception unwindEx)
+                          {
+                              ErrorLogUtility.LogError($"CallBack SC unwind failed for {rTX.Hash} (status flip proceeds): {unwindEx.Message}", "StateData.CallBackReserveAccountTx()");
+                          }
                         }
 
+                        // VBTC_V2_TRANSFER callback needs no ledger unwind: reserve sends defer the
+                        // ledger move until finalize, which this callback prevents. The generic
+                        // status flip below is all that is required.
+
+
+                        // Flip the reserve row UNCONDITIONALLY — this runs on every node at
+                        // state-apply, and most nodes hold no local wallet TX for the hash.
+                        // Gating this flip on the wallet row left the row Pending on non-wallet
+                        // nodes, where the finalizer would later apply a transfer that was
+                        // called back everywhere else (consensus divergence).
+                        rTX.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
                         if (rtxDb != null)
                             await rtxDb.UpdateSafeAsync(rTX);
+
+                        // Local wallet rows (0, 1, or 2 — same-wallet sends store both the
+                        // sender and recipient copies under one hash).
+                        await TransactionData.UpdateTxStatusForAllByHash(rTX.Hash, TransactionStatus.CalledBack);
                     }
                 }
             }
@@ -1100,19 +1172,38 @@ namespace VerifiedXCore.Data
                             }
                         }
 
-                        var localTx = TransactionData.GetTxByHash(rTX.Hash);
-                        if (localTx != null)
+                        if (rTX.TransactionType == TransactionType.VBTC_V2_TRANSFER)
                         {
-                            //Change TX status to CalledBack
-                            var txDB = Transaction.GetAll();
-                            localTx.TransactionStatus = TransactionStatus.Recovered;
-                            rTX.ReserveTransactionStatus = ReserveTransactionStatus.Recovered;
-                            if (txDB != null)
-                                await txDB.UpdateSafeAsync(localTx);
+                            // In-flight reserve vBTC send: the ledger never moved, so redirect the
+                            // amount to the recovery address instead of the original recipient.
+                            try
+                            {
+                                var recoveryAddress = stateTreiFrom?.RecoveryAccount;
+                                if (recoveryAddress != null && rTX.Data != null)
+                                {
+                                    var vbtcData = JObject.Parse(rTX.Data);
+                                    var vbtcScUID = vbtcData["ContractUID"]?.ToObject<string?>();
+                                    var vbtcAmount = vbtcData["Amount"]?.ToObject<decimal?>();
+                                    if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount.HasValue && vbtcAmount.Value > 0)
+                                    {
+                                        ApplyVBTCV2LedgerPair(vbtcScUID, rTX.FromAddress, recoveryAddress, vbtcAmount.Value, rTX.Hash);
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                ErrorLogUtility.LogError($"Recover failed to redirect pending vBTC transfer {rTX.Hash}: {ex.Message}", "StateData.RecoverReserveAccountTx()");
+                            }
                         }
 
+                        // Flip the reserve row UNCONDITIONALLY (see CallBack note above) —
+                        // on non-wallet nodes a Pending row would otherwise be finalized later,
+                        // applying the ORIGINAL transfer on top of the recovery redirect.
+                        rTX.ReserveTransactionStatus = ReserveTransactionStatus.Recovered;
                         if (rtxDb != null)
                             await rtxDb.UpdateSafeAsync(rTX);
+
+                        await TransactionData.UpdateTxStatusForAllByHash(rTX.Hash, TransactionStatus.Recovered);
                     }
                 }
 
@@ -1151,7 +1242,7 @@ namespace VerifiedXCore.Data
                 if(_scDb != null)
                 {
                     var scList = _scDb.Query().Where(x => x.OwnerAddress == _fromAddress).ToList();
-                    if(scList?.Count > 0 ) 
+                    if(scList?.Count > 0 )
                     {
                         foreach(var sc in scList)
                         {
@@ -1159,6 +1250,42 @@ namespace VerifiedXCore.Data
                             sc.NextOwner = null;
                             sc.IsLocked = false;
                             await _scDb.UpdateSafeAsync(sc);
+                        }
+                    }
+
+                    // Seize vBTC balances: contract ownership alone does not move tokenization
+                    // ledger balances, so sweep every contract where the seized reserve address
+                    // nets positive and move the full balance to the recovery address. Runs after
+                    // the per-pending-TX redirects above so only the remainder moves.
+                    if (_recoveryAddress != null)
+                    {
+                        // FindAll + in-memory filter: a LiteDB BsonExpression over a list property
+                        // is unverified territory, and a throw here is swallowed by the outer catch,
+                        // silently skipping the entire seizure. Recovery is rare; perf is fine.
+                        // Re-run idempotence is implicit: the sweep's own debit row drives the
+                        // address's net to 0, so a second pass writes nothing.
+                        var vbtcHoldings = _scDb.FindAll()
+                            .Where(x => x.SCStateTreiTokenizationTXes != null &&
+                                        x.SCStateTreiTokenizationTXes.Any(t => t.FromAddress == _fromAddress || t.ToAddress == _fromAddress))
+                            .ToList();
+
+                        foreach (var sc in vbtcHoldings)
+                        {
+                            try
+                            {
+                                var net = sc.SCStateTreiTokenizationTXes
+                                    .Where(t => t.FromAddress == _fromAddress || t.ToAddress == _fromAddress)
+                                    .Sum(t => t.Amount);
+
+                                if (net > 0)
+                                {
+                                    ApplyVBTCV2LedgerPair(sc.SmartContractUID, _fromAddress, _recoveryAddress, net, $"RECOVERY:{_fromAddress}");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                ErrorLogUtility.LogError($"Recover failed to sweep vBTC balance on {sc.SmartContractUID}: {ex.Message}", "StateData.RecoverReserveAccountTx()");
+                            }
                         }
                     }
                 }
@@ -2699,51 +2826,61 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
-                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-
-                if (scStateTreiRec != null)
-                {
-                    // Create credit/debit pair for the transfer
-                    // Credit: Add tokens to recipient (tx.ToAddress)
-                    // Debit: Subtract tokens from sender (tx.FromAddress)
-                    List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
-                    {
-                        new SmartContractStateTreiTokenizationTX
-                        {
-                            Amount = amount.Value,
-                            FromAddress = "+",
-                            ToAddress = toAddress
-                        },
-                        new SmartContractStateTreiTokenizationTX
-                        {
-                            Amount = amount.Value * -1.0M,
-                            FromAddress = fromAddress,
-                            ToAddress = "-"
-                        }
-                    };
-
-                    if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                    {
-                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                    }
-                    else
-                    {
-                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-                    }
-
-                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
-
-                    SCLogUtility.Log($"VBTC-TRACE [4-StateLedger]: TransferVBTCV2 completed: {amount.Value} vBTC from {fromAddress} to {toAddress} in contract {scUID}. TX: {tx.Hash}",
-                        "StateData.TransferVBTCV2()");
-                }
-                else
-                {
-                    ErrorLogUtility.LogError($"VBTC-TRACE [4-StateLedger]: TransferVBTCV2 failed: Contract not found - {scUID}. TX: {tx.Hash}", "StateData.TransferVBTCV2()");
-                }
+                ApplyVBTCV2LedgerPair(scUID, fromAddress, toAddress, amount.Value, tx.Hash);
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"TransferVBTCV2 error: {ex.Message}", "StateData.TransferVBTCV2()");
+            }
+        }
+
+        /// <summary>
+        /// Writes the vBTC V2 credit/debit ledger pair for a transfer. Shared by the immediate
+        /// apply path (TransferVBTCV2), the reserve finalize path (UpdateTreiFromReserve), and
+        /// reserve recovery (redirect/sweep).
+        /// </summary>
+        private static void ApplyVBTCV2LedgerPair(string scUID, string fromAddress, string toAddress, decimal amount, string txHash)
+        {
+            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+
+            if (scStateTreiRec != null)
+            {
+                // Create credit/debit pair for the transfer
+                // Credit: Add tokens to recipient
+                // Debit: Subtract tokens from sender
+                List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                {
+                    new SmartContractStateTreiTokenizationTX
+                    {
+                        Amount = amount,
+                        FromAddress = "+",
+                        ToAddress = toAddress
+                    },
+                    new SmartContractStateTreiTokenizationTX
+                    {
+                        Amount = amount * -1.0M,
+                        FromAddress = fromAddress,
+                        ToAddress = "-"
+                    }
+                };
+
+                if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                {
+                    scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                }
+                else
+                {
+                    scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+                }
+
+                SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+
+                SCLogUtility.Log($"VBTC-TRACE [4-StateLedger]: vBTC V2 ledger pair applied: {amount} vBTC from {fromAddress} to {toAddress} in contract {scUID}. TX: {txHash}",
+                    "StateData.ApplyVBTCV2LedgerPair()");
+            }
+            else
+            {
+                ErrorLogUtility.LogError($"VBTC-TRACE [4-StateLedger]: vBTC V2 ledger pair failed: Contract not found - {scUID}. TX: {txHash}", "StateData.ApplyVBTCV2LedgerPair()");
             }
         }
 

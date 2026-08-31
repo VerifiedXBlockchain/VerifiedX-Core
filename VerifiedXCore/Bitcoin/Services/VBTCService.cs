@@ -195,6 +195,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (accounts == null) return;
 
                 var allAddresses = accounts.FindAll().Select(a => a.Address).ToList();
+
+                // Reserve (xRBX) accounts can own vBTC V2 contracts — include them or their
+                // deposit-address Balance cache is never refreshed.
+                var reserveAccounts = ReserveAccount.GetReserveAccounts();
+                if (reserveAccounts != null)
+                    allAddresses.AddRange(reserveAccounts.Select(r => r.Address));
+
                 if (!allAddresses.Any()) return;
 
                 foreach (var address in allAddresses)
@@ -345,11 +352,32 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (scState == null)
                     return await SCLogUtility.LogAndReturn($"SC State Missing: {scUID}", "VBTCService.TransferOwnership()", false);
 
-                // Check owner account exists
-                var account = AccountData.GetSingleAccount(scState.OwnerAddress);
+                // Normalize destination up front so all checks (incl. xRBX rules) see the
+                // resolved address, not an ADNR name.
+                toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
 
-                if (account == null)
+                // Check owner account exists. Reserve (xRBX) owners resolve through the
+                // reserve store and exit on the reserve lifecycle (unlock delay + callback).
+                var account = AccountData.GetSingleAccount(scState.OwnerAddress);
+                var rAccount = scState.OwnerAddress.StartsWith("xRBX") ? ReserveAccount.GetReserveAccountSingle(scState.OwnerAddress) : null;
+
+                if (account == null && rAccount == null)
                     return await SCLogUtility.LogAndReturn($"Owner address account not found.", "VBTCService.TransferOwnership()", false);
+
+                bool isReserveOwner = rAccount != null;
+                VerifiedXCore.EllipticCurve.PrivateKey? reserveKey = null;
+                int reserveUnlockHours = 0;
+                if (isReserveOwner)
+                {
+                    if (toAddress.StartsWith("xRBX"))
+                        return await SCLogUtility.LogAndReturn("Reserve-held vBTC contracts can only be transferred to a normal VFX address.", "VBTCService.TransferOwnership()", false);
+
+                    if (!Globals.ReserveAccountUnlockKeys.TryGetValue(scState.OwnerAddress, out var rAUK))
+                        return await SCLogUtility.LogAndReturn("Reserve account is not unlocked. Please unlock it first.", "VBTCService.TransferOwnership()", false);
+
+                    reserveUnlockHours = rAUK.UnlockTimeHours;
+                    reserveKey = rAccount.GetPrivKey;
+                }
 
                 // Validate balance > 0 (including state trei tokenization TXs)
                 //0 balance check remove for ownership transfers
@@ -357,9 +385,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (Globals.VBTCDefaultAssetOnly)
                 {
                     // Step over beacons: default image only, nothing to upload.
-                    toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
-                    _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, null, "NA", backupURL, false, null, 0, TransactionType.TKNZ_TX));
-                    var response = JsonConvert.SerializeObject(new { Success = true, Message = "vBTC V2 Contract Transfer has been started." });
+                    _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, null, "NA", backupURL, isReserveOwner, reserveKey, reserveUnlockHours, TransactionType.TKNZ_TX));
+                    var response = JsonConvert.SerializeObject(new { Success = true, Message = isReserveOwner ? "vBTC V2 Contract Transfer has been started (reserve: 24h unlock delay applies, callback-able until then)." : "vBTC V2 Contract Transfer has been started." });
                     SCLogUtility.Log($"SC Process Completed in CLI (beacon-free). SCUID: {sc.SmartContractUID}", "VBTCService.TransferOwnership()");
                     return response;
                 }
@@ -381,8 +408,6 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (connectedBeacon == null)
                     return await SCLogUtility.LogAndReturn("Error - You have lost connection to beacons. Please attempt to resend.", "VBTCService.TransferOwnership()", false);
 
-                // Normalize address
-                toAddress = toAddress.Replace(" ", "").ToAddressNormalize();
                 var localAddress = AccountData.GetSingleAccount(toAddress);
 
                 // Get assets and MD5 list
@@ -413,7 +438,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (aqResult)
                     {
                         // Transfer smart contract via standard transfer mechanism
-                        _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, connectedBeacon, md5List, backupURL, false, null, 0, TransactionType.TKNZ_TX));
+                        _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, connectedBeacon, md5List, backupURL, isReserveOwner, reserveKey, reserveUnlockHours, TransactionType.TKNZ_TX));
                         var success = JsonConvert.SerializeObject(new { Success = true, Message = "vBTC V2 Contract Transfer has been started." });
                         SCLogUtility.Log($"SC Process Completed in CLI. SCUID: {sc.SmartContractUID}. Response: {success}", "VBTCService.TransferOwnership()");
                         return success;
@@ -446,12 +471,32 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                // Get account and validate
-                var account = AccountData.GetSingleAccount(fromAddress);
-                if (account == null)
+                // Get account and validate. Reserve (xRBX) senders resolve through the
+                // reserve-account store and go out on the reserve lifecycle (unlock delay,
+                // callback, recovery) — their only permitted destination is a normal VFX address.
+                bool isReserveAccount = fromAddress.StartsWith("xRBX");
+                var account = !isReserveAccount ? AccountData.GetSingleAccount(fromAddress) : null;
+                var rAccount = isReserveAccount ? ReserveAccount.GetReserveAccountSingle(fromAddress) : null;
+                if (account == null && rAccount == null)
                 {
                     SCLogUtility.Log($"Account not found: {fromAddress}", "VBTCService.TransferVBTC()");
                     return (false, $"Account not found: {fromAddress}");
+                }
+
+                // Normalize before any destination checks so an ADNR name resolving to a
+                // reserve address can't slip past the pre-flight (consensus still catches it).
+                toAddress = toAddress.ToAddressNormalize();
+
+                long? unlockTime = null;
+                if (isReserveAccount)
+                {
+                    if (toAddress.StartsWith("xRBX"))
+                        return (false, "Reserve accounts cannot send vBTC to another Reserve Account.");
+
+                    if (Globals.ReserveAccountUnlockKeys.TryGetValue(fromAddress, out var rAUK))
+                        unlockTime = TimeUtil.GetReserveTime(rAUK.UnlockTimeHours);
+                    else
+                        return (false, "Reserve account is no longer unlocked. Please unlock again.");
                 }
 
                 var balResult = await TryGetAvailableTransparentVbtcBalance(scUID, fromAddress);
@@ -461,10 +506,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, balResult.error ?? "Could not resolve vBTC transparent balance.");
                 }
 
-                if (balResult.availableBalance < amount)
+                var availableBalance = balResult.availableBalance;
+                if (isReserveAccount)
+                    availableBalance -= ReserveTransactions.GetPendingVBTCTransferTotal(fromAddress, scUID);
+
+                if (availableBalance < amount)
                 {
-                    SCLogUtility.Log($"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}", "VBTCService.TransferVBTC()");
-                    return (false, $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {amount}");
+                    SCLogUtility.Log($"Insufficient balance. Available: {availableBalance}, Requested: {amount}", "VBTCService.TransferVBTC()");
+                    return (false, $"Insufficient balance. Available: {availableBalance}, Requested: {amount}");
                 }
 
                 toAddress = toAddress.ToAddressNormalize();
@@ -489,7 +538,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     Fee = 0.0M,
                     Nonce = AccountStateTrei.GetNextNonce(fromAddress),
                     TransactionType = TransactionType.VBTC_V2_TRANSFER,
-                    Data = txData
+                    Data = txData,
+                    UnlockTime = unlockTime
                 };
 
                 tokenTx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tokenTx);
@@ -497,8 +547,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Build and sign transaction
                 tokenTx.Build();
                 var txHash = tokenTx.Hash;
-                var privateKey = account.GetPrivKey;
-                var publicKey = account.PublicKey;
+                var privateKey = !isReserveAccount ? account.GetPrivKey : rAccount.GetPrivKey;
+                var publicKey = !isReserveAccount ? account.PublicKey : rAccount.PublicKey;
 
                 if (privateKey == null)
                 {
@@ -519,10 +569,19 @@ namespace VerifiedXCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(tokenTx);
                 if (result.Item1)
                 {
-                    await TransactionData.AddTxToWallet(tokenTx, true);
-                    await AccountData.UpdateLocalBalance(fromAddress, tokenTx.Fee + tokenTx.Amount);
-                    await TransactionData.AddToPool(tokenTx);
-                    await P2PClient.SendTXMempool(tokenTx);
+                    if (isReserveAccount)
+                    {
+                        // Reserve dispatch keeps the reserve balance bookkeeping consistent.
+                        // noLockUp: true — VFX Amount is 0, only the fee moves.
+                        await VerifiedXCore.Services.WalletService.SendReserveTransaction(tokenTx, rAccount, true);
+                    }
+                    else
+                    {
+                        await TransactionData.AddTxToWallet(tokenTx, true);
+                        await AccountData.UpdateLocalBalance(fromAddress, tokenTx.Fee + tokenTx.Amount);
+                        await TransactionData.AddToPool(tokenTx);
+                        await P2PClient.SendTXMempool(tokenTx);
+                    }
                     SCLogUtility.Log($"vBTC V2 Transfer TX Success. SCUID: {scUID}, TxHash: {tokenTx.Hash}", "VBTCService.TransferVBTC()");
                     return (true, tokenTx.Hash);
                 }
@@ -553,6 +612,11 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                // Reserve-held vBTC is locked: consensus denies xRBX withdrawal requests.
+                // Fail here with the real reason instead of a generic account-not-found.
+                if (requestorAddress.StartsWith("xRBX"))
+                    return (false, "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first.");
+
                 // Get account and validate
                 var account = AccountData.GetSingleAccount(requestorAddress);
                 if (account == null)
@@ -1415,6 +1479,10 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                // Reserve-held vBTC is locked: consensus denies xRBX bridge locks.
+                if (ownerAddress.StartsWith("xRBX"))
+                    return (false, "Reserve accounts cannot bridge vBTC. Move the vBTC to a normal VFX address first.", string.Empty);
+
                 var account = AccountData.GetSingleAccount(ownerAddress);
                 if (account == null)
                 {
@@ -1933,6 +2001,16 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (scanned, localInvolvement, created, skippedExisting);
 
                 var localAddresses = accountDb.FindAll().Select(x => x.Address).ToHashSet();
+
+                // Reserve (xRBX) accounts can own and hold vBTC V2 — a wallet holding vBTC
+                // only on reserve addresses previously backfilled nothing after a restore.
+                var reserveAccountsBackfill = ReserveAccount.GetReserveAccounts();
+                if (reserveAccountsBackfill != null)
+                {
+                    foreach (var r in reserveAccountsBackfill)
+                        localAddresses.Add(r.Address);
+                }
+
                 if (!localAddresses.Any())
                 {
                     SCLogUtility.Log($"VBTC-TRACE [6-Backfill]: skipped — no local accounts.", "VBTCService.BackfillLocalVBTCContracts()");
@@ -1996,9 +2074,16 @@ namespace VerifiedXCore.Bitcoin.Services
                         SmartContractMain.SmartContractData.SaveSmartContract(scMain, null);
 
                         if (isLocalOwner)
+                        {
                             await VBTCContractV2.SaveSmartContract(scMain, null, scState.OwnerAddress);
+                        }
                         else
+                        {
+                            // FIND-001: the holder param is deliberately ignored — this creates
+                            // the single canonical record (owner = minter); balances live in the
+                            // state trei, so which local address triggered the backfill is moot.
                             await VBTCContractV2.SaveSmartContractTransfer(scMain, localAddresses.First());
+                        }
 
                         if (Globals.VBTCDefaultAssetOnly)
                             await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scState.SmartContractUID);

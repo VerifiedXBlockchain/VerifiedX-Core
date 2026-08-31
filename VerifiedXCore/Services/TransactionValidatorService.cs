@@ -808,6 +808,11 @@ namespace VerifiedXCore.Services
 
                                     case "TransferCoin()":
                                         {
+                                            // Reserve accounts are vBTC V2-only: legacy V1 coin moves have no
+                                            // reserve lifecycle (no deferred apply/callback), so deny both directions.
+                                            if (txRequest.FromAddress.StartsWith("xRBX") || txRequest.ToAddress.StartsWith("xRBX"))
+                                                return (txResult, "Reserve accounts cannot send or receive legacy vBTC (V1). Use vBTC V2 transfers.");
+
                                             var amountVal = (decimal?)scData["Amount"];
                                             if(!amountVal.HasValue)
                                                 return (txResult, "No amount specified.");
@@ -875,6 +880,10 @@ namespace VerifiedXCore.Services
 
                                     case "TransferCoinMulti()":
                                         {
+                                            // Reserve accounts are vBTC V2-only (see TransferCoin() above).
+                                            if (txRequest.FromAddress.StartsWith("xRBX") || txRequest.ToAddress.StartsWith("xRBX"))
+                                                return (txResult, "Reserve accounts cannot send or receive legacy vBTC (V1). Use vBTC V2 transfers.");
+
                                             var jobj = JObject.Parse(txData);
                                             var signatureInput = jobj["SignatureInput"]?.ToObject<string?>();
                                             var amount = jobj["Amount"]?.ToObject<decimal?>();
@@ -905,6 +914,9 @@ namespace VerifiedXCore.Services
                                             {
                                                 if(input.FromAddress == null || input.Signature == null)
                                                     return (txResult, "Missing signature/from address in inputs.");
+
+                                                if (input.FromAddress.StartsWith("xRBX"))
+                                                    return (txResult, "Reserve accounts cannot send legacy vBTC (V1). Use vBTC V2 transfers.");
 
                                                 var signatureCheck = SignatureService.VerifySignature(input.FromAddress, signatureInput + txRequest.ToAddress + txRequest.FromAddress, input.Signature);
                                                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(input.SCUID);
@@ -972,6 +984,12 @@ namespace VerifiedXCore.Services
 
                                             if(tw == null)
                                                 return (txResult, $"Tokenized Withdrawal was null.");
+
+                                            // Reserve-held vBTC is locked. The holder here is tw.RequestorAddress —
+                                            // tx.FromAddress is the lead arbiter, so the reserve whitelist never
+                                            // sees the holder; deny explicitly.
+                                            if (tw.RequestorAddress != null && tw.RequestorAddress.StartsWith("xRBX"))
+                                                return (txResult, "Reserve accounts cannot request BTC withdrawals.");
 
                                             // ===== HARD CONSENSUS RULE: Only designated lead arbiter may create withdrawal request =====
                                             // This prevents race conditions where multiple arbiters create duplicate requests
@@ -1103,6 +1121,16 @@ namespace VerifiedXCore.Services
                                             break;
                                         }
 
+                                    case "TransferVBTC()":
+                                    case "TransferVBTCMulti()":
+                                        {
+                                            // These legacy-named functions dispatch in StateData (:306-311) to ledger
+                                            // writers with NO balance check, against the shared tokenization ledger
+                                            // that V2 balances live in — an unvalidated mint/exit path. No wallet
+                                            // emits them (VBTCService emits TransferVBTCV2() only); reject outright.
+                                            return (txResult, "Deprecated vBTC transfer function. Use vBTC V2 transfers.");
+                                        }
+
                                     case "TransferVBTCV2()":
                                         {
                                             // FIND-006 FIX: Validate vBTC V2 transfers when called through function dispatcher
@@ -1123,6 +1151,12 @@ namespace VerifiedXCore.Services
                                             // FIND-006 FIX #1: Bind sender - tx.Data.FromAddress MUST match tx.FromAddress
                                             if (txRequest.FromAddress != fromAddress)
                                                 return (txResult, "From address in data must match transaction FromAddress.");
+
+                                            // Reserve moves must use the typed VBTC_V2_TRANSFER path where the
+                                            // reserve lifecycle (unlock time, deferred apply, callback) is enforced —
+                                            // this envelope path would move the ledger immediately.
+                                            if (txRequest.FromAddress.StartsWith("xRBX"))
+                                                return (txResult, "Reserve accounts must use the typed vBTC V2 transfer transaction.");
 
                                             // FIND-006 FIX #2: Validate amount is positive
                                             if (!amount.HasValue || amount.Value <= 0)
@@ -2401,6 +2435,60 @@ namespace VerifiedXCore.Services
                         if (!amount.HasValue || amount.Value <= 0)
                             return (txResult, "Amount must be greater than zero for vBTC V2 transfer.");
 
+                        // Recipient binding: the ledger credits tx.ToAddress, so the validated
+                        // Data.ToAddress must be the same address — otherwise sentinel recipients
+                        // like "Reserve_Base" slip past the generic address check and burn funds.
+                        if (txRequest.ToAddress != toAddress)
+                            return (txResult, "To address in data must match transaction ToAddress for vBTC V2 transfer.");
+
+                        // Reserve (xRBX) rules: a reserve address may hold vBTC, and its only
+                        // permitted vBTC operation is sending it back to a normal VFX address
+                        // (full reserve lifecycle: unlock delay, callback, recovery).
+                        if (txRequest.FromAddress.StartsWith("xRBX"))
+                        {
+                            if (toAddress.StartsWith("xRBX"))
+                                return (txResult, "Reserve accounts cannot send vBTC to another Reserve Account.");
+                            // Strict base58 VFX validation — no ADNR-name resolution (node-dependent →
+                            // divergence) and no shielded destinations (funds would strand in the
+                            // transparent ledger, unspendable).
+                            if (toAddress.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal) ||
+                                !AddressValidateUtility.ValidateRBXAddress(toAddress))
+                                return (txResult, "vBTC held by a Reserve Account can only be sent to a valid normal VFX address.");
+
+                            // Single-flight: one in-flight reserve exit per (sender, contract).
+                            // Deterministic at both mempool admission and block verify (rows are
+                            // written at block-apply on every node) and closes the multi-block
+                            // overspend window the owner-branch blockVerify deposit-trust allows.
+                            if (ReserveTransactions.GetPendingVBTCTransferTotal(txRequest.FromAddress, scUID, txRequest.Hash) > 0)
+                                return (txResult, $"A reserve vBTC transfer is already pending for contract {scUID}. Wait for it to finalize or call it back.");
+
+                            // Same-block defense: reject if another reserve V2 transfer for this
+                            // sender+contract is already waiting in the mempool.
+                            // MEMPOOL-ADMISSION ONLY — mempool contents are per-node, so this
+                            // must NEVER run at block verification or a node still holding the
+                            // losing duplicate would reject a block its peers accept (chain
+                            // split). Determinism is covered by the DB single-flight above and
+                            // the same-contract sibling check in BlockValidatorService.
+                            if (!blockVerify && !blockDownloads)
+                            {
+                                var vbtcMempool = TransactionData.GetPool();
+                                var pendingReserveSends = vbtcMempool.Query().Where(x =>
+                                    x.TransactionType == TransactionType.VBTC_V2_TRANSFER &&
+                                    x.FromAddress == txRequest.FromAddress &&
+                                    x.Hash != txRequest.Hash).ToList();
+                                foreach (var existingReserveTx in pendingReserveSends)
+                                {
+                                    try
+                                    {
+                                        var existingData = JObject.Parse(existingReserveTx.Data);
+                                        if (existingData["ContractUID"]?.ToObject<string>() == scUID)
+                                            return (txResult, $"A reserve vBTC transfer for contract {scUID} is already pending in the mempool.");
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
+
                         // Balance validation for both owner and non-owner
                         var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                         if (scStateTreiRec != null)
@@ -2419,6 +2507,12 @@ namespace VerifiedXCore.Services
                                     ledgerBalance = transactions.Sum(x => x.Amount);
                                 }
                             }
+
+                            // Reserve sends defer the ledger debit until unlock — subtract in-flight
+                            // pending amounts so the balance can't be spent twice during the window.
+                            decimal pendingReserveOut = fromAddress.StartsWith("xRBX")
+                                ? ReserveTransactions.GetPendingVBTCTransferTotal(fromAddress, scUID, txRequest.Hash)
+                                : 0M;
 
                             if (isOwner)
                             {
@@ -2457,7 +2551,7 @@ namespace VerifiedXCore.Services
                                     }
                                 }
 
-                                decimal ownerBalance = depositBalance + ledgerBalance;
+                                decimal ownerBalance = depositBalance + ledgerBalance - pendingReserveOut;
                                 if (ownerBalance < amount.Value)
                                 {
                                     // During block verification, skip deposit balance check for owner.
@@ -2474,9 +2568,9 @@ namespace VerifiedXCore.Services
                             }
                             else
                             {
-                                // Non-owner: just ledger balance
-                                if (ledgerBalance < amount.Value)
-                                    return (txResult, $"Insufficient vBTC balance for transfer. Available: {ledgerBalance}, Requested: {amount.Value}");
+                                // Non-owner: just ledger balance (minus in-flight reserve sends)
+                                if (ledgerBalance - pendingReserveOut < amount.Value)
+                                    return (txResult, $"Insufficient vBTC balance for transfer. Available: {ledgerBalance - pendingReserveOut}, Requested: {amount.Value}");
 
                                 if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
                                     return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
@@ -2675,7 +2769,12 @@ namespace VerifiedXCore.Services
                         // FIND-002 FIX: Use tx.FromAddress as the requester (IGNORE tx.Data.OwnerAddress)
                         var requesterAddress = txRequest.FromAddress;
 
-                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) || 
+                        // Reserve-held vBTC is locked: its only exit is a V2 transfer back to a
+                        // normal VFX address. BTC withdrawals from a reserve address are denied.
+                        if (requesterAddress.StartsWith("xRBX"))
+                            return (txResult, "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first.");
+
+                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) ||
                             !amount.HasValue || !feeRate.HasValue)
                             return (txResult, "Missing required fields for withdrawal request (ContractUID, BTCAddress, Amount, FeeRate).");
 
@@ -2993,6 +3092,10 @@ namespace VerifiedXCore.Services
                     if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId))
                         return (txResult, "ContractUID and LockId are required for bridge lock.");
 
+                    // Reserve-held vBTC is locked: bridge locks from a reserve address are denied.
+                    if (txRequest.FromAddress.StartsWith("xRBX"))
+                        return (txResult, "Reserve accounts cannot bridge vBTC. Move the vBTC to a normal VFX address first.");
+
                     // S3C §6.3: consensus-enforced bridge block — reject bridge-lock for an S3C
                     // contract (IsS3C read from state trei) so a malicious owner can't bypass the
                     // client gate and recreate the third-party stuck-funds danger (§6.2).
@@ -3274,12 +3377,13 @@ namespace VerifiedXCore.Services
 
             if (txRequest.FromAddress.StartsWith("xRBX") && runReserveCheck)
             {
-                if (txRequest.TransactionType != TransactionType.TX && 
-                    txRequest.TransactionType != TransactionType.RESERVE && 
+                if (txRequest.TransactionType != TransactionType.TX &&
+                    txRequest.TransactionType != TransactionType.RESERVE &&
                     txRequest.TransactionType != TransactionType.NFT_TX &&
                     txRequest.TransactionType != TransactionType.FTKN_TX &&
                     txRequest.TransactionType != TransactionType.TKNZ_TX &&
-                    txRequest.TransactionType != TransactionType.SC_TX)
+                    txRequest.TransactionType != TransactionType.SC_TX &&
+                    txRequest.TransactionType != TransactionType.VBTC_V2_TRANSFER)
                     return (txResult, "Invalid Transaction Type was selected.");
 
                 var balanceTooLow = from.Balance - (txRequest.Fee + txRequest.Amount) < 0.5M ? true : false;

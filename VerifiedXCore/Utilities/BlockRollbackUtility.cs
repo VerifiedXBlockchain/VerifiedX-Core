@@ -611,6 +611,14 @@ namespace VerifiedXCore.Utilities
                 int failCount = 0;
                 var rebuildStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
+                // Reserve rows were wiped in Step 2 and are recreated Pending during replay.
+                // They must be finalized per block (mirroring ReserveService's live cadence) so
+                // replayed CallBack()/Recover() TXs see the same row statuses the network did —
+                // otherwise a replayed Recover() redirects long-settled reserve transfers and the
+                // rebuilt vBTC ledger diverges. Flag keeps the per-block DB query off the hot path
+                // until reserve activity actually appears in the chain.
+                bool reservePendingPossible = false;
+
                 foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                 {
                     try
@@ -620,6 +628,31 @@ namespace VerifiedXCore.Utilities
                         // privacy/shielded TXs, bridge locks/unlocks, etc.
                         await StateData.UpdateTreis(block);
                         processedCount++;
+
+                        if (!reservePendingPossible && block.Transactions != null &&
+                            block.Transactions.Any(t => t.FromAddress != null && t.FromAddress.StartsWith("xRBX") && t.TransactionType != TransactionType.RESERVE))
+                        {
+                            reservePendingPossible = true;
+                        }
+
+                        if (reservePendingPossible)
+                        {
+                            var rtxDbReplay = ReserveTransactions.GetReserveTransactionsDb();
+                            if (rtxDbReplay != null)
+                            {
+                                var pendingRows = rtxDbReplay.Query().Where(x => x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList();
+                                if (pendingRows.Count == 0)
+                                {
+                                    reservePendingPossible = false;
+                                }
+                                else
+                                {
+                                    var maturedRows = pendingRows.Where(x => x.ConfirmTimestamp < block.Timestamp).ToList();
+                                    if (maturedRows.Count > 0)
+                                        await StateData.UpdateTreiFromReserve(maturedRows);
+                                }
+                            }
+                        }
 
                         // Progress display: log every 10,000 blocks with percentage + ETA
                         // Uses Console.WriteLine (not \r overwrite) so output is reliable on all terminals
@@ -661,6 +694,14 @@ namespace VerifiedXCore.Utilities
                 // 4a: Update local account balances from rebuilt AccountStateTrei
                 var walletAccounts = accounts.FindAll().ToList();
                 var walletAddresses = new HashSet<string>(walletAccounts.Select(a => a.Address));
+                // Reserve (xRBX) wallets keep their TX history too — without this, a rebuild
+                // silently dropped their local rows (incl. Reserved in-flight vBTC exits).
+                var reserveWalletAccounts = ReserveAccount.GetReserveAccounts();
+                if (reserveWalletAccounts != null)
+                {
+                    foreach (var r in reserveWalletAccounts)
+                        walletAddresses.Add(r.Address);
+                }
 
                 foreach (var account in walletAccounts)
                 {

@@ -1744,6 +1744,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.VFXAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "VFX address cannot be null" });
 
+                if (payload.VFXAddress.StartsWith("xRBX"))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first." });
+
                 if (string.IsNullOrEmpty(payload.BTCAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "BTC address cannot be null" });
 
@@ -2265,10 +2268,28 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (!balResult.success)
                     return JsonConvert.SerializeObject(new { Success = false, Message = balResult.error ?? "Balance lookup failed" });
 
-                if (balResult.availableBalance < payload.Amount)
-                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {payload.Amount}" });
+                // Reserve sends defer the ledger debit until unlock — subtract in-flight
+                // amounts so we don't hand back a signable TX consensus will reject.
+                var rawAvailable = balResult.availableBalance;
+                if (payload.FromAddress.StartsWith("xRBX"))
+                    rawAvailable -= ReserveTransactions.GetPendingVBTCTransferTotal(payload.FromAddress, payload.SmartContractUID);
+
+                if (rawAvailable < payload.Amount)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {rawAvailable}, Requested: {payload.Amount}" });
 
                 var toAddress = payload.ToAddress.ToAddressNormalize();
+
+                // Reserve (xRBX) senders: only exit is a normal VFX address, and consensus
+                // requires an UnlockTime (24h reserve lifecycle) — stamp it here or the signed
+                // raw TX would always be rejected. Consensus remains the authoritative gate.
+                long? unlockTime = null;
+                if (payload.FromAddress.StartsWith("xRBX"))
+                {
+                    if (toAddress.StartsWith("xRBX"))
+                        return JsonConvert.SerializeObject(new { Success = false, Message = "Reserve accounts cannot send vBTC to another Reserve Account." });
+
+                    unlockTime = TimeUtil.GetReserveTime();
+                }
 
                 // Build unsigned transaction
                 var txData = JsonConvert.SerializeObject(new
@@ -2289,7 +2310,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Fee = 0.0M,
                     Nonce = AccountStateTrei.GetNextNonce(payload.FromAddress),
                     TransactionType = TransactionType.VBTC_V2_TRANSFER,
-                    Data = txData
+                    Data = txData,
+                    UnlockTime = unlockTime
                 };
 
                 tx.Fee = FeeCalcService.CalculateTXFee(tx);
@@ -2309,7 +2331,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Fee = tx.Fee,
                     Nonce = tx.Nonce,
                     TransactionType = tx.TransactionType.ToString(),
-                    Message = "Sign the Hash field with your private key (ECDSA secp256k1, UTF-8 encoded hash string) and submit via SendRawTransferVBTCTx."
+                    // Reserve sends: UnlockTime is part of the hash preimage — clients
+                    // reconstructing the TX need it, and UIs should show the 24h hold.
+                    UnlockTime = tx.UnlockTime,
+                    IsReserveSend = unlockTime != null,
+                    Message = unlockTime != null
+                        ? "Sign the Hash field with your private key and submit via SendRawTransferVBTCTx. RESERVE SEND: funds are held until UnlockTime (unix seconds) and the TX hash is callback-able until then."
+                        : "Sign the Hash field with your private key (ECDSA secp256k1, UTF-8 encoded hash string) and submit via SendRawTransferVBTCTx."
                 });
             }
             catch (Exception ex)
@@ -2339,10 +2367,25 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (!valid)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
 
-                await TransactionData.AddTxToWallet(pendingTx, true);
-                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
-                await TransactionData.AddToPool(pendingTx);
-                await P2P.P2PClient.SendTXMempool(pendingTx);
+                // Reserve (xRBX) senders have no AccountData row — dispatch through the reserve
+                // path so local fee bookkeeping hits the ReserveAccount balance instead.
+                var rawReserveAccount = pendingTx.FromAddress.StartsWith("xRBX")
+                    ? ReserveAccount.GetReserveAccountSingle(pendingTx.FromAddress)
+                    : null;
+                if (rawReserveAccount != null)
+                {
+                    await WalletService.SendReserveTransaction(pendingTx, rawReserveAccount, true);
+                }
+                else
+                {
+                    await TransactionData.AddTxToWallet(pendingTx, true);
+                    // Externally-keyed xRBX senders have neither an Account nor a local
+                    // ReserveAccount row — skip local balance bookkeeping entirely.
+                    if (!pendingTx.FromAddress.StartsWith("xRBX"))
+                        await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                    await TransactionData.AddToPool(pendingTx);
+                    await P2P.P2PClient.SendTXMempool(pendingTx);
+                }
 
                 return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "vBTC transfer transaction broadcast successfully." });
             }
@@ -3242,6 +3285,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // Get pending withdrawal amount (locked funds)
                 var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, scUID);
 
+                // Reserve sends defer the ledger debit until unlock — exclude in-flight
+                // amounts from spendable so the UI matches consensus.
+                var pendingReserveSends = address.StartsWith("xRBX")
+                    ? ReserveTransactions.GetPendingVBTCTransferTotal(address, scUID)
+                    : 0M;
+
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
@@ -3251,8 +3300,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Balance = totalBalance,
                     DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
                     LedgerBalance = ledgerBalance,
-                    AvailableBalance = totalBalance - pendingWithdrawals,
+                    AvailableBalance = totalBalance - pendingWithdrawals - pendingReserveSends,
                     PendingWithdrawals = pendingWithdrawals,
+                    PendingReserveSends = pendingReserveSends,
                     IsOwner = isOwner,
                     TransactionCount = scState.SCStateTreiTokenizationTXes?.Count(x => x.FromAddress == address || x.ToAddress == address) ?? 0
                 });
@@ -3356,6 +3406,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         {
                             var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, contract.SmartContractUID);
 
+                            // Reserve sends defer the ledger debit until unlock — exclude
+                            // in-flight amounts from spendable so the UI matches consensus.
+                            var pendingReserveSends = address.StartsWith("xRBX")
+                                ? ReserveTransactions.GetPendingVBTCTransferTotal(address, contract.SmartContractUID)
+                                : 0M;
+
                             contractBalances.Add(new
                             {
                                 SmartContractUID = contract.SmartContractUID,
@@ -3363,8 +3419,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 Balance = contractBalance,
                                 DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
                                 LedgerBalance = ledgerBalance,
-                                AvailableBalance = contractBalance - pendingWithdrawals,
+                                AvailableBalance = contractBalance - pendingWithdrawals - pendingReserveSends,
                                 PendingWithdrawals = pendingWithdrawals,
+                                PendingReserveSends = pendingReserveSends,
                                 TransactionCount = txCount,
                                 IsOwner = isOwner,
                                 WithdrawalStatus = contract.WithdrawalStatus.ToString()
@@ -3847,6 +3904,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
             {
                 if (req == null || string.IsNullOrWhiteSpace(req.FromAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress required." });
+                if (req.FromAddress.StartsWith("xRBX"))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Reserve-held vBTC cannot be shielded. Move it to a normal VFX address first." });
                 if (!AddressValidateUtility.ValidateAddress(req.FromAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid FromAddress." });
                 var account = AccountData.GetSingleAccount(req.FromAddress);

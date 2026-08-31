@@ -65,10 +65,19 @@ namespace VerifiedXCore.BrowserWalletServices
                     }
                 }
 
+                // Reserve sends defer the ledger debit until unlock. Keep `balance` GROSS
+                // (matching VBTCController's Balance/AvailableBalance convention) and expose
+                // the in-flight amount + net spendable separately.
+                decimal pendingReserveSends = address.StartsWith("xRBX")
+                    ? ReserveTransactions.GetPendingVBTCTransferTotal(address, scState.SmartContractUID)
+                    : 0M;
+
                 if (!seen.Add(scState.SmartContractUID))
                     continue;
 
-                if (totalBalance > 0M || isOwner)
+                // Keep the row visible while an exit is in flight — a non-owner sending its
+                // whole balance would otherwise vanish for the 24h window.
+                if (totalBalance > 0M || isOwner || pendingReserveSends > 0M)
                 {
                     var contract = VBTCContractV2.GetContract(scState.SmartContractUID);
                     resultList.Add(new
@@ -77,6 +86,8 @@ namespace VerifiedXCore.BrowserWalletServices
                         ownerAddress = scState.OwnerAddress,
                         depositAddress = depositAddress,
                         balance = totalBalance,
+                        availableBalance = totalBalance - pendingReserveSends,
+                        pendingReserveSends = pendingReserveSends,
                         ledgerBalance = ledgerBalance,
                         isOwner = isOwner,
                         withdrawalStatus = contract?.WithdrawalStatus.ToString() ?? "None",

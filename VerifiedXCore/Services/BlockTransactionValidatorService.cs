@@ -79,7 +79,9 @@ namespace VerifiedXCore.Services
                             if (function == "Transfer()")
                             {
                                 var txdata = TransactionData.GetAll();
-                                tx.TransactionStatus = TransactionStatus.Success;
+                                // Reserve-origin transfers are held for the 24h unlock window —
+                                // show Reserved; the finalize/callback tails flip the status.
+                                tx.TransactionStatus = tx.FromAddress.StartsWith("xRBX") ? TransactionStatus.Reserved : TransactionStatus.Success;
                                 txdata.InsertSafe(tx);
                             }
                             if (function == "TransferCoin()")
@@ -333,7 +335,15 @@ namespace VerifiedXCore.Services
                                         {
                                             // Ensure the local vBTC V2 record exists for the recipient (insert-only;
                                             // existing rows get owner-synced by StateData.TransferSmartContract).
-                                            await VBTCContractV2.SaveSmartContract(sc, null, tx.ToAddress);
+                                            // Reserve-origin transfers are NOT final for 24h (NextOwner/IsLocked) —
+                                            // stamp the current state-trei owner (the reserve), not the recipient;
+                                            // the finalize sync flips it at unlock and callback leaves it correct.
+                                            // Without this, a called-back transfer left the recipient's record
+                                            // claiming ownership (and with it the whole BTC deposit balance).
+                                            var vbtcLocalOwner = tx.FromAddress.StartsWith("xRBX")
+                                                ? (SmartContractStateTrei.GetSmartContractState(scUID)?.OwnerAddress ?? tx.FromAddress)
+                                                : tx.ToAddress;
+                                            await VBTCContractV2.SaveSmartContract(sc, null, vbtcLocalOwner);
                                             // vBTC V2 default-asset mode: associate the local default logo; no beacon download needed.
                                             if (Globals.VBTCDefaultAssetOnly)
                                                 await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
@@ -627,9 +637,11 @@ namespace VerifiedXCore.Services
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         }
 
-                        // Mark as success and insert
+                        // Mark as success and insert. Reserve-origin transfers are deferred until
+                        // unlock, so show Reserved — UpdateTreiFromReserve flips it to Success at
+                        // finalize (or CalledBack/Recovered).
                         var txdataSuccess = TransactionData.GetAll();
-                        tx.TransactionStatus = TransactionStatus.Success;
+                        tx.TransactionStatus = tx.FromAddress.StartsWith("xRBX") ? TransactionStatus.Reserved : TransactionStatus.Success;
                         txdataSuccess.InsertSafe(tx);
 
                         // Ensure local contract records exist so the recipient's wallet can see this
@@ -1075,9 +1087,26 @@ namespace VerifiedXCore.Services
 
         public static async Task ProcessOutgoingTransaction(Transaction tx, Account account, long blockHeight)
         {
-            var fromTx = tx;
-            fromTx.Amount = tx.Amount * -1M;
-            fromTx.Fee = tx.Fee * -1M;
+            // Shallow-clone before negating: `tx` is the same instance still sitting in
+            // block.Transactions, and the incoming pass re-iterates that list — mutating
+            // it in place gave same-wallet recipients negative-amount/fee rows.
+            var fromTx = new Transaction
+            {
+                Hash = tx.Hash,
+                ToAddress = tx.ToAddress,
+                FromAddress = tx.FromAddress,
+                Amount = tx.Amount * -1M,
+                Fee = tx.Fee * -1M,
+                Nonce = tx.Nonce,
+                Timestamp = tx.Timestamp,
+                Data = tx.Data,
+                UnlockTime = tx.UnlockTime,
+                Signature = tx.Signature,
+                Height = tx.Height,
+                TransactionType = tx.TransactionType,
+                TransactionRating = tx.TransactionRating,
+                TransactionStatus = tx.TransactionStatus
+            };
 
             TransactionData.UpdateTxStatusAndHeight(fromTx, TransactionStatus.Success, blockHeight);
 
@@ -1677,7 +1706,15 @@ namespace VerifiedXCore.Services
                                         {
                                             // Ensure the local vBTC V2 record exists for the recipient (insert-only;
                                             // existing rows get owner-synced by StateData.TransferSmartContract).
-                                            await VBTCContractV2.SaveSmartContract(sc, null, tx.ToAddress);
+                                            // Reserve-origin transfers are NOT final for 24h (NextOwner/IsLocked) —
+                                            // stamp the current state-trei owner (the reserve), not the recipient;
+                                            // the finalize sync flips it at unlock and callback leaves it correct.
+                                            // Without this, a called-back transfer left the recipient's record
+                                            // claiming ownership (and with it the whole BTC deposit balance).
+                                            var vbtcLocalOwner = tx.FromAddress.StartsWith("xRBX")
+                                                ? (SmartContractStateTrei.GetSmartContractState(scUID)?.OwnerAddress ?? tx.FromAddress)
+                                                : tx.ToAddress;
+                                            await VBTCContractV2.SaveSmartContract(sc, null, vbtcLocalOwner);
                                             // vBTC V2 default-asset mode: associate the local default logo; no beacon download needed.
                                             if (Globals.VBTCDefaultAssetOnly)
                                                 await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
@@ -1823,9 +1860,10 @@ namespace VerifiedXCore.Services
                     }
                 }
 
-                // vBTC V2 balance transfer received by a reserve account. Record-keeping only —
-                // balances live in the state trei, and reserve claim/unlock semantics do not
-                // apply to VBTC_V2_TRANSFER (consensus has no callback/unlock path for it).
+                // vBTC V2 balance transfer received by a reserve account (deposit direction).
+                // Deposits apply immediately — the reserve lifecycle (deferred apply, unlock
+                // delay, callback) governs the OUTBOUND direction, handled via the generic
+                // reserve pipeline. Record-keeping only here; balances live in the state trei.
                 // Mirrors the normal-account handling in ProcessIncomingTransactions.
                 if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
                 {
@@ -1906,9 +1944,26 @@ namespace VerifiedXCore.Services
 
         public static async Task ProcessOutgoingReserveTransaction(Transaction tx, ReserveAccount account, long blockHeight)
         {
-            var fromTx = tx;
-            fromTx.Amount = tx.Amount * -1M;
-            fromTx.Fee = tx.Fee * -1M;
+            // Shallow-clone before negating: `tx` is the same instance still sitting in
+            // block.Transactions, and the incoming pass re-iterates that list — mutating
+            // it in place gave same-wallet recipients negative-amount/fee rows.
+            var fromTx = new Transaction
+            {
+                Hash = tx.Hash,
+                ToAddress = tx.ToAddress,
+                FromAddress = tx.FromAddress,
+                Amount = tx.Amount * -1M,
+                Fee = tx.Fee * -1M,
+                Nonce = tx.Nonce,
+                Timestamp = tx.Timestamp,
+                Data = tx.Data,
+                UnlockTime = tx.UnlockTime,
+                Signature = tx.Signature,
+                Height = tx.Height,
+                TransactionType = tx.TransactionType,
+                TransactionRating = tx.TransactionRating,
+                TransactionStatus = tx.TransactionStatus
+            };
 
             var status = tx.TransactionType == TransactionType.RESERVE ? TransactionStatus.Success : TransactionStatus.Reserved;
             TransactionData.UpdateTxStatusAndHeight(fromTx, status, blockHeight);
@@ -1997,7 +2052,11 @@ namespace VerifiedXCore.Services
                                 if (callBackHash != null)
                                 {
                                     var localTX = TransactionData.GetTxByHash(callBackHash);
-                                    if(localTX != null)
+                                    // vBTC V2 balance transfers carry flat-JObject data and have no local
+                                    // SC to restore (the deferred ledger never moved; statuses are flipped
+                                    // by StateData.CallBackReserveAccountTx). Skip the SC-restore block —
+                                    // the JArray parse below throws on their data shape.
+                                    if(localTX != null && localTX.TransactionType != TransactionType.VBTC_V2_TRANSFER)
                                     {
                                         var scDataArray = JsonConvert.DeserializeObject<JArray>(localTX.Data);
                                         var scData = scDataArray[0];
@@ -2025,6 +2084,23 @@ namespace VerifiedXCore.Services
                                                     else
                                                     {
                                                         SCLogUtility.Log("SC was not null. Contract already exist.", "BlockTransactionValidatorService.ProcessOutgoingReserveTransaction()");
+                                                    }
+
+                                                    // vBTC V2 contract: recreate the local record if missing so a
+                                                    // called-back contract transfer restores the reserve node's
+                                                    // full vBTC footprint, not just the base SC.
+                                                    try
+                                                    {
+                                                        var scMainRec = SmartContractMain.GenerateSmartContractInMemory(data);
+                                                        if (scMainRec?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true &&
+                                                            VBTCContractV2.GetContract(scUID) == null)
+                                                        {
+                                                            await VBTCContractV2.SaveSmartContract(scMainRec, null, scState.OwnerAddress);
+                                                        }
+                                                    }
+                                                    catch (Exception vbtcEx)
+                                                    {
+                                                        ErrorLogUtility.LogError($"Failed to restore vBTC V2 record on callback. SCUID: {scUID}. Error: {vbtcEx.Message}", "BlockTransactionValidatorService.ProcessOutgoingReserveTransaction()");
                                                     }
                                                 }
                                                 else
@@ -2056,6 +2132,30 @@ namespace VerifiedXCore.Services
                                     rAccount.AvailableBalance = 0.0M;
                                     rAccount.LockedBalance = 0.0M;
                                     ReserveAccount.SaveReserveAccount(rAccount);
+                                }
+
+                                // Local cleanup: the recovery sweep re-owned this address's contracts
+                                // and vBTC balances in the state trei. Remove the seized wallet's local
+                                // footprint so it stops rendering assets it no longer controls.
+                                try
+                                {
+                                    var seizedVbtc = VBTCContractV2.GetContractsByOwner(tx.FromAddress);
+                                    if (seizedVbtc != null)
+                                    {
+                                        foreach (var seizedContract in seizedVbtc)
+                                        {
+                                            VBTCContractV2.DeleteContract(seizedContract.SmartContractUID);
+                                            SmartContractMain.SmartContractData.DeleteSmartContract(seizedContract.SmartContractUID);
+                                        }
+                                    }
+
+                                    // Prune any remaining local SCs whose state-trei owner left this
+                                    // wallet (same logic that otherwise only runs at startup).
+                                    await StartupService.UpdateSCOwnership();
+                                }
+                                catch (Exception recEx)
+                                {
+                                    ErrorLogUtility.LogError($"Failed local cleanup after Recover() for {tx.FromAddress}. Error: {recEx.Message}", "BlockTransactionValidatorService.ProcessOutgoingReserveTransaction()");
                                 }
                             }
 

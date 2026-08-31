@@ -128,6 +128,50 @@ namespace VerifiedXCore.Models
 
         #endregion
 
+        #region Get pending vBTC V2 reserve-transfer total
+        /// <summary>
+        /// Sum of in-flight (Pending) VBTC_V2_TRANSFER amounts from a reserve address for one
+        /// contract. Reserve vBTC sends defer the ledger debit until unlock, so consensus must
+        /// subtract these from the spendable balance or the same balance could be spent
+        /// repeatedly during the unlock window. Rows are written at block-apply on every node,
+        /// so this is deterministic. excludeHash skips the TX being validated (replay safety).
+        /// </summary>
+        public static decimal GetPendingVBTCTransferTotal(string fromAddress, string scUID, string? excludeHash = null)
+        {
+            try
+            {
+                var db = GetReserveTransactionsDb();
+                if (db == null) return 0M;
+
+                var pending = db.Query().Where(x => x.FromAddress == fromAddress
+                    && x.TransactionType == TransactionType.VBTC_V2_TRANSFER
+                    && x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList();
+
+                decimal total = 0M;
+                foreach (var rtx in pending)
+                {
+                    if (excludeHash != null && rtx.Hash == excludeHash) continue;
+                    if (string.IsNullOrEmpty(rtx.Data)) continue;
+                    try
+                    {
+                        var jobj = Newtonsoft.Json.Linq.JObject.Parse(rtx.Data);
+                        if (jobj["ContractUID"]?.ToObject<string>() != scUID) continue;
+                        var amt = jobj["Amount"]?.ToObject<decimal?>();
+                        if (amt.HasValue && amt.Value > 0) total += amt.Value;
+                    }
+                    catch { }
+                }
+                return total;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(ex.ToString(), "ReserveTransactions.GetPendingVBTCTransferTotal()");
+                return 0M;
+            }
+        }
+
+        #endregion
+
         #region Get ReserveTransactions transaction called back list
         public static bool GetTransactionsCalledBack(string hash)
         {
