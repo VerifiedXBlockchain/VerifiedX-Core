@@ -590,6 +590,75 @@ namespace VerifiedXCore.Services
                     {
                         // Parse transaction data
                         var jobj = JObject.Parse(tx.Data);
+
+                        // Multi-contract transfer variant (Function "TransferVBTCMultiV2()",
+                        // committed post-gate only): same processing as the single shape, applied
+                        // per input contract. Never reserve-deferred — the validator rejects xRBX
+                        // multi senders.
+                        if (jobj["Function"]?.ToObject<string?>() == Bitcoin.Services.VBTCService.MultiTransferFunction)
+                        {
+                            var multiInputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>?>();
+                            if (multiInputs == null || !multiInputs.Any())
+                            {
+                                SCLogUtility.Log($"VBTC_V2_TRANSFER (multi) validation failed: Missing inputs",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdataMultiInvalid = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdataMultiInvalid.InsertSafe(tx);
+                                return;
+                            }
+
+                            // Validate every input contract exists via state trei (available on ALL nodes)
+                            foreach (var input in multiInputs)
+                            {
+                                if (string.IsNullOrEmpty(input.SCUID) || SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_TRANSFER (multi) validation failed: Contract not found in state trei - {input.SCUID}",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdataMultiInvalid = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdataMultiInvalid.InsertSafe(tx);
+                                    return;
+                                }
+                            }
+
+                            var txdataMultiSuccess = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Success;
+                            txdataMultiSuccess.InsertSafe(tx);
+
+                            // Per input: ensure local contract records exist (the recipient's
+                            // wallet must see EVERY contract it received value on — balances live
+                            // in the state trei, but wallet endpoints enumerate the local
+                            // VBTCContractV2 table), then prune any contract this wallet no
+                            // longer holds a claim on (startup-pass conditions, applied live).
+                            foreach (var input in multiInputs)
+                            {
+                                try
+                                {
+                                    var scStateMulti = SmartContractStateTrei.GetSmartContractState(input.SCUID);
+                                    var scMainRecMulti = SmartContractMain.GenerateSmartContractInMemory(scStateMulti.ContractData);
+                                    if (scMainRecMulti?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                    {
+                                        SmartContractMain.SmartContractData.SaveSmartContract(scMainRecMulti, null);
+                                        await VBTCContractV2.SaveSmartContractTransfer(scMainRecMulti, tx.ToAddress);
+                                        if (Globals.VBTCDefaultAssetOnly)
+                                            await NFTAssetFileUtility.AssociateDefaultVBTCLogo(input.SCUID);
+                                    }
+                                }
+                                catch (Exception recEx)
+                                {
+                                    ErrorLogUtility.LogError($"VBTC-TRACE [3-LocalRecord]: FAILED to save local vBTC V2 contract records on multi receive. SCUID: {input.SCUID}. Error: {recEx.Message}",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                }
+
+                                try { VBTCContractV2.PruneLocalRecordsIfNoClaim(input.SCUID); } catch { }
+                            }
+
+                            SCLogUtility.Log($"VBTC_V2_TRANSFER (multi) validated successfully. From: {tx.FromAddress}, To: {tx.ToAddress}, Inputs: {multiInputs.Count}",
+                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            return;
+                        }
+
                         var scUID = jobj["ContractUID"]?.ToObject<string?>();
                         var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                         var toAddress = jobj["ToAddress"]?.ToObject<string?>();
@@ -669,6 +738,11 @@ namespace VerifiedXCore.Services
                             ErrorLogUtility.LogError($"VBTC-TRACE [3-LocalRecord]: FAILED to save local vBTC V2 contract records on receive. SCUID: {scUID}. Error: {recEx.Message}",
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                         }
+
+                        // If no local address retains a claim on this contract (e.g. a same-wallet
+                        // sender fully spent out), drop the local records live instead of waiting
+                        // for the startup prune pass.
+                        try { VBTCContractV2.PruneLocalRecordsIfNoClaim(scUID); } catch { }
 
                         SCLogUtility.Log($"VBTC_V2_TRANSFER validated successfully. From: {fromAddress}, To: {toAddress}, Amount: {amount.Value}, SCUID: {scUID}",
                             "BlockTransactionValidatorService.ProcessIncomingTransactions()");
@@ -1109,6 +1183,22 @@ namespace VerifiedXCore.Services
             };
 
             TransactionData.UpdateTxStatusAndHeight(fromTx, TransactionStatus.Success, blockHeight);
+
+            // vBTC V2 transfer (single or multi shape): the ledger debits were applied at
+            // state-apply before this wallet pass runs, so if this send fully consumed the
+            // wallet's balance on a contract it has no other claim to (not owner/NextOwner,
+            // no other local holder, no pending inbound reserve credit), drop the local
+            // records live — same conditions as the startup prune pass. xRBX senders never
+            // route here (reserve sends defer their debit until unlock).
+            if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER)
+            {
+                try
+                {
+                    foreach (var (scUidOut, _) in Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(tx))
+                        VBTCContractV2.PruneLocalRecordsIfNoClaim(scUidOut);
+                }
+                catch { }
+            }
 
             if (tx.TransactionType != TransactionType.TX)
             {
@@ -1870,6 +1960,51 @@ namespace VerifiedXCore.Services
                     try
                     {
                         var jobj = JObject.Parse(tx.Data);
+
+                        // Multi-contract transfer variant received by a reserve account: same
+                        // record-keeping as the single shape, per input contract (the sender is
+                        // never xRBX — the validator rejects reserve multi senders — so the
+                        // credit applied immediately at state-apply).
+                        if (jobj["Function"]?.ToObject<string?>() == Bitcoin.Services.VBTCService.MultiTransferFunction)
+                        {
+                            var multiInputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>?>();
+                            var txdataMulti = TransactionData.GetAll();
+                            if (multiInputs == null || !multiInputs.Any() ||
+                                multiInputs.Any(x => string.IsNullOrEmpty(x.SCUID) || SmartContractStateTrei.GetSmartContractState(x.SCUID) == null))
+                            {
+                                SCLogUtility.Log($"VBTC_V2_TRANSFER (multi) to reserve account failed: Missing/unknown inputs. TX: {tx.Hash}",
+                                    "BlockTransactionValidatorService.ProcessIncomingReserveTransactions()");
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdataMulti.InsertSafe(tx);
+                                return;
+                            }
+
+                            tx.TransactionStatus = TransactionStatus.Success;
+                            txdataMulti.InsertSafe(tx);
+
+                            foreach (var input in multiInputs)
+                            {
+                                try
+                                {
+                                    var scStateMulti = SmartContractStateTrei.GetSmartContractState(input.SCUID);
+                                    var scMainRecMulti = SmartContractMain.GenerateSmartContractInMemory(scStateMulti.ContractData);
+                                    if (scMainRecMulti?.Features?.Exists(x => x.FeatureName == FeatureName.TokenizationV2) == true)
+                                    {
+                                        SmartContractMain.SmartContractData.SaveSmartContract(scMainRecMulti, null);
+                                        await VBTCContractV2.SaveSmartContractTransfer(scMainRecMulti, tx.ToAddress);
+                                        if (Globals.VBTCDefaultAssetOnly)
+                                            await NFTAssetFileUtility.AssociateDefaultVBTCLogo(input.SCUID);
+                                    }
+                                }
+                                catch (Exception recEx)
+                                {
+                                    ErrorLogUtility.LogError($"Failed to save local vBTC V2 contract records on reserve multi receive. SCUID: {input.SCUID}. Error: {recEx.Message}",
+                                        "BlockTransactionValidatorService.ProcessIncomingReserveTransactions()");
+                                }
+                            }
+                            return;
+                        }
+
                         var scUID = jobj["ContractUID"]?.ToObject<string?>();
                         var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
                         var toAddress = jobj["ToAddress"]?.ToObject<string?>();

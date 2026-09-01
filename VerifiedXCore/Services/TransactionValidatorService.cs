@@ -1,4 +1,4 @@
-using NBitcoin.Protocol;
+﻿using NBitcoin.Protocol;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Arbiter;
@@ -2413,172 +2413,306 @@ namespace VerifiedXCore.Services
                     try
                     {
                         var jobj = JObject.Parse(txData);
-                        var scUID = jobj["ContractUID"]?.ToObject<string>();
-                        var fromAddress = jobj["FromAddress"]?.ToObject<string>();
-                        var toAddress = jobj["ToAddress"]?.ToObject<string>();
-                        var amount = jobj["Amount"]?.ToObject<decimal?>();
 
-                        if (string.IsNullOrEmpty(scUID))
-                            return (txResult, "ContractUID cannot be null for vBTC V2 transfer.");
-
-                        if (string.IsNullOrEmpty(fromAddress))
-                            return (txResult, "FromAddress cannot be null for vBTC V2 transfer.");
-
-                        if (string.IsNullOrEmpty(toAddress))
-                            return (txResult, "ToAddress cannot be null for vBTC V2 transfer.");
-
-                        // Sender binding: tx.Data.FromAddress MUST match tx.FromAddress
-                        if (txRequest.FromAddress != fromAddress)
-                            return (txResult, "From address in data must match transaction FromAddress for vBTC V2 transfer.");
-
-                        // Amount validation
-                        if (!amount.HasValue || amount.Value <= 0)
-                            return (txResult, "Amount must be greater than zero for vBTC V2 transfer.");
-
-                        // Recipient binding: the ledger credits tx.ToAddress, so the validated
-                        // Data.ToAddress must be the same address — otherwise sentinel recipients
-                        // like "Reserve_Base" slip past the generic address check and burn funds.
-                        if (txRequest.ToAddress != toAddress)
-                            return (txResult, "To address in data must match transaction ToAddress for vBTC V2 transfer.");
-
-                        // Reserve (xRBX) rules: a reserve address may hold vBTC, and its only
-                        // permitted vBTC operation is sending it back to a normal VFX address
-                        // (full reserve lifecycle: unlock delay, callback, recovery).
-                        if (txRequest.FromAddress.StartsWith("xRBX"))
+                        // vBTC V2 multi-contract transfer: one TX debiting N contracts (Inputs
+                        // array) to a single recipient. Height-gated on BOTH validation (here) and
+                        // state apply (StateData): before the gate every node — old or new —
+                        // ignores Function and treats the TX by its single-shape top-level fields,
+                        // so a pure multi Data (no ContractUID) is deterministically rejected below
+                        // and a hybrid Data (multi Function PLUS valid single fields) validates as
+                        // a single transfer, exactly like old nodes. Gating only one side would let
+                        // a hybrid TX validate one way and apply the other in a mixed-fleet window.
+                        var vbtcV2Function = jobj["Function"]?.ToObject<string>();
+                        var multiGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                        if (vbtcV2Function == Bitcoin.Services.VBTCService.MultiTransferFunction && multiGateHeight >= Globals.V2TransferMultiHeight)
                         {
-                            if (toAddress.StartsWith("xRBX"))
-                                return (txResult, "Reserve accounts cannot send vBTC to another Reserve Account.");
-                            // Strict base58 VFX validation — no ADNR-name resolution (node-dependent →
-                            // divergence) and no shielded destinations (funds would strand in the
-                            // transparent ledger, unspendable).
-                            if (toAddress.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal) ||
-                                !AddressValidateUtility.ValidateRBXAddress(toAddress))
-                                return (txResult, "vBTC held by a Reserve Account can only be sent to a valid normal VFX address.");
+                            var fromAddressMulti = jobj["FromAddress"]?.ToObject<string>();
+                            var toAddressMulti = jobj["ToAddress"]?.ToObject<string>();
+                            var totalAmountMulti = jobj["TotalAmount"]?.ToObject<decimal?>();
+                            var multiInputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>>();
 
-                            // Single-flight: one in-flight reserve exit per (sender, contract).
-                            // Deterministic at both mempool admission and block verify (rows are
-                            // written at block-apply on every node) and closes the multi-block
-                            // overspend window the owner-branch blockVerify deposit-trust allows.
-                            if (ReserveTransactions.GetPendingVBTCTransferTotal(txRequest.FromAddress, scUID, txRequest.Hash) > 0)
-                                return (txResult, $"A reserve vBTC transfer is already pending for contract {scUID}. Wait for it to finalize or call it back.");
+                            // Hybrid hygiene: post-gate a multi TX must not also carry the single
+                            // shape, so it can never be interpreted two ways.
+                            if (jobj["ContractUID"] != null)
+                                return (txResult, "Multi-contract vBTC transfer must not contain a top-level ContractUID.");
 
-                            // Same-block defense: reject if another reserve V2 transfer for this
-                            // sender+contract is already waiting in the mempool.
-                            // MEMPOOL-ADMISSION ONLY — mempool contents are per-node, so this
-                            // must NEVER run at block verification or a node still holding the
-                            // losing duplicate would reject a block its peers accept (chain
-                            // split). Determinism is covered by the DB single-flight above and
-                            // the same-contract sibling check in BlockValidatorService.
-                            if (!blockVerify && !blockDownloads)
+                            if (string.IsNullOrEmpty(fromAddressMulti) || string.IsNullOrEmpty(toAddressMulti))
+                                return (txResult, "FromAddress/ToAddress cannot be null for multi-contract vBTC transfer.");
+
+                            // The ledger debits tx.FromAddress and credits tx.ToAddress (signed,
+                            // authoritative) — Data must match them, same anti-spoof rule as single.
+                            if (txRequest.FromAddress != fromAddressMulti)
+                                return (txResult, "From address in data must match transaction FromAddress for multi-contract vBTC transfer.");
+
+                            if (txRequest.ToAddress != toAddressMulti)
+                                return (txResult, "To address in data must match transaction ToAddress for multi-contract vBTC transfer.");
+
+                            // The reserve lifecycle (deferred apply, callback, recovery) is keyed on
+                            // the single-contract shape — xRBX senders cannot use multi.
+                            if (txRequest.FromAddress.StartsWith("xRBX"))
+                                return (txResult, "Reserve accounts cannot use multi-contract vBTC transfers. Send from a single contract instead.");
+
+                            // Shielded recipients would strand the transparent ledger credit.
+                            if (toAddressMulti.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal))
+                                return (txResult, "Multi-contract vBTC transfers cannot send to a shielded address.");
+
+                            if (multiInputs == null || !multiInputs.Any())
+                                return (txResult, "Inputs cannot be empty for multi-contract vBTC transfer.");
+
+                            if (multiInputs.Count > Bitcoin.Services.VBTCService.MaxMultiTransferInputs)
+                                return (txResult, $"Multi-contract vBTC transfer exceeds the maximum of {Bitcoin.Services.VBTCService.MaxMultiTransferInputs} inputs.");
+
+                            // Duplicate SCUIDs would let each input pass an individual balance
+                            // check while jointly overspending the contract.
+                            if (multiInputs.Select(x => x.SCUID).Distinct().Count() != multiInputs.Count)
+                                return (txResult, "Multi-contract vBTC transfer inputs must reference distinct contracts.");
+
+                            decimal multiInputSum = 0M;
+                            foreach (var input in multiInputs)
                             {
-                                var vbtcMempool = TransactionData.GetPool();
-                                var pendingReserveSends = vbtcMempool.Query().Where(x =>
-                                    x.TransactionType == TransactionType.VBTC_V2_TRANSFER &&
-                                    x.FromAddress == txRequest.FromAddress &&
-                                    x.Hash != txRequest.Hash).ToList();
-                                foreach (var existingReserveTx in pendingReserveSends)
-                                {
-                                    try
-                                    {
-                                        var existingData = JObject.Parse(existingReserveTx.Data);
-                                        if (existingData["ContractUID"]?.ToObject<string>() == scUID)
-                                            return (txResult, $"A reserve vBTC transfer for contract {scUID} is already pending in the mempool.");
-                                    }
-                                    catch { }
-                                }
-                            }
-                        }
-
-                        // Balance validation for both owner and non-owner
-                        var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                        if (scStateTreiRec != null)
-                        {
-                            bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
-
-                            decimal ledgerBalance = 0M;
-                            if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
-                            {
-                                var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
-                                    .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
-                                    .ToList();
-
-                                if (transactions.Any())
-                                {
-                                    ledgerBalance = transactions.Sum(x => x.Amount);
-                                }
+                                if (string.IsNullOrEmpty(input.SCUID))
+                                    return (txResult, "Input SCUID cannot be null for multi-contract vBTC transfer.");
+                                if (input.Amount <= 0)
+                                    return (txResult, "Input amounts must be greater than zero for multi-contract vBTC transfer.");
+                                if (input.Amount != Math.Round(input.Amount, 8))
+                                    return (txResult, "Input amounts cannot have more than 8 decimal places for multi-contract vBTC transfer.");
+                                multiInputSum += input.Amount;
                             }
 
-                            // Reserve sends defer the ledger debit until unlock — subtract in-flight
-                            // pending amounts so the balance can't be spent twice during the window.
-                            decimal pendingReserveOut = fromAddress.StartsWith("xRBX")
-                                ? ReserveTransactions.GetPendingVBTCTransferTotal(fromAddress, scUID, txRequest.Hash)
-                                : 0M;
+                            if (!totalAmountMulti.HasValue || totalAmountMulti.Value != multiInputSum)
+                                return (txResult, "TotalAmount must equal the sum of input amounts for multi-contract vBTC transfer.");
 
-                            if (isOwner)
+                            // Per-input balance semantics identical to N single transfers (no
+                            // pendingReserveOut term — xRBX senders are rejected above).
+                            foreach (var input in multiInputs)
                             {
-                                // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
-                                // bridge locks stay debited; only withdrawal burns (already reflected in the
-                                // ElectrumX deposit balance) are cancelled out.
-                                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
+                                var scStateMulti = SmartContractStateTrei.GetSmartContractState(input.SCUID);
+                                if (scStateMulti == null)
+                                    return (txResult, $"vBTC V2 contract not found in state trei: {input.SCUID}");
 
-                                // Owner: get deposit address from state trei contract data (available on ALL nodes)
-                                decimal depositBalance = 0M;
-                                string depositAddr2 = null;
-                                var scMainDecompile2 = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
-                                if (scMainDecompile2?.Features != null)
+                                bool isOwnerMulti = txRequest.FromAddress == scStateMulti.OwnerAddress;
+                                decimal ledgerBalanceMulti = 0M;
+                                if (scStateMulti.SCStateTreiTokenizationTXes != null && scStateMulti.SCStateTreiTokenizationTXes.Any())
                                 {
-                                    var tknzV2 = scMainDecompile2.Features
-                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
-                                    if (tknzV2 != null)
-                                        depositAddr2 = ((TokenizationV2Feature)tknzV2).DepositAddress;
+                                    var ledgerRows = scStateMulti.SCStateTreiTokenizationTXes
+                                        .Where(x => x.FromAddress == txRequest.FromAddress || x.ToAddress == txRequest.FromAddress)
+                                        .ToList();
+                                    if (ledgerRows.Any())
+                                        ledgerBalanceMulti = ledgerRows.Sum(x => x.Amount);
                                 }
 
-                                if (!string.IsNullOrEmpty(depositAddr2))
+                                if (isOwnerMulti)
                                 {
+                                    // Owner ledger: full sum + completed-withdrawal add-back, plus the
+                                    // live deposit balance — same formula as the single shape.
+                                    ledgerBalanceMulti = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateMulti, txRequest.FromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
+
+                                    decimal depositBalanceMulti = 0M;
                                     if (!blockDownloads && !blockVerify)
                                     {
-                                        try
+                                        var depositAddrMulti = Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateMulti, null);
+                                        if (!string.IsNullOrEmpty(depositAddrMulti))
                                         {
-                                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
-                                            if (elxClient != null)
+                                            try
                                             {
-                                                var balance = await elxClient.GetBalance(depositAddr2, false);
-                                                depositBalance = balance.Confirmed / 100_000_000M;
+                                                using var elxClientMulti = await Bitcoin.Bitcoin.ElectrumXClient();
+                                                if (elxClientMulti != null)
+                                                {
+                                                    var elxBalanceMulti = await elxClientMulti.GetBalance(depositAddrMulti, false);
+                                                    depositBalanceMulti = elxBalanceMulti.Confirmed / 100_000_000M;
+                                                }
                                             }
+                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
                                         }
-                                        catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
+                                    }
+
+                                    if (depositBalanceMulti + ledgerBalanceMulti < input.Amount)
+                                    {
+                                        // At block verification, trust the crafter's ElectrumX check —
+                                        // same owner-branch rule as the single shape.
+                                        if (!blockVerify)
+                                            return (txResult, $"Insufficient vBTC balance (owner) for transfer input {input.SCUID}. Available: {depositBalanceMulti + ledgerBalanceMulti}, Requested: {input.Amount}");
                                     }
                                 }
-
-                                decimal ownerBalance = depositBalance + ledgerBalance - pendingReserveOut;
-                                if (ownerBalance < amount.Value)
+                                else
                                 {
-                                    // During block verification, skip deposit balance check for owner.
-                                    // The block crafter already verified via ElectrumX during mempool admission.
-                                    if (blockVerify)
-                                    {
-                                        // Trust the block crafter's ElectrumX verification
-                                    }
-                                    else
-                                    {
-                                        return (txResult, $"Insufficient vBTC balance (owner) for transfer. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                // Non-owner: just ledger balance (minus in-flight reserve sends)
-                                if (ledgerBalance - pendingReserveOut < amount.Value)
-                                    return (txResult, $"Insufficient vBTC balance for transfer. Available: {ledgerBalance - pendingReserveOut}, Requested: {amount.Value}");
+                                    if (scStateMulti.SCStateTreiTokenizationTXes == null || !scStateMulti.SCStateTreiTokenizationTXes.Any())
+                                        return (txResult, $"No vBTC balance found for {txRequest.FromAddress} in contract {input.SCUID}.");
 
-                                if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
-                                    return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+                                    if (ledgerBalanceMulti < input.Amount)
+                                        return (txResult, $"Insufficient vBTC balance for transfer input {input.SCUID}. Available: {ledgerBalanceMulti}, Requested: {input.Amount}");
+                                }
                             }
                         }
                         else
                         {
-                            return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+                            var scUID = jobj["ContractUID"]?.ToObject<string>();
+                            var fromAddress = jobj["FromAddress"]?.ToObject<string>();
+                            var toAddress = jobj["ToAddress"]?.ToObject<string>();
+                            var amount = jobj["Amount"]?.ToObject<decimal?>();
+
+                            if (string.IsNullOrEmpty(scUID))
+                                return (txResult, "ContractUID cannot be null for vBTC V2 transfer.");
+
+                            if (string.IsNullOrEmpty(fromAddress))
+                                return (txResult, "FromAddress cannot be null for vBTC V2 transfer.");
+
+                            if (string.IsNullOrEmpty(toAddress))
+                                return (txResult, "ToAddress cannot be null for vBTC V2 transfer.");
+
+                            // Sender binding: tx.Data.FromAddress MUST match tx.FromAddress
+                            if (txRequest.FromAddress != fromAddress)
+                                return (txResult, "From address in data must match transaction FromAddress for vBTC V2 transfer.");
+
+                            // Amount validation
+                            if (!amount.HasValue || amount.Value <= 0)
+                                return (txResult, "Amount must be greater than zero for vBTC V2 transfer.");
+
+                            // Recipient binding: the ledger credits tx.ToAddress, so the validated
+                            // Data.ToAddress must be the same address — otherwise sentinel recipients
+                            // like "Reserve_Base" slip past the generic address check and burn funds.
+                            if (txRequest.ToAddress != toAddress)
+                                return (txResult, "To address in data must match transaction ToAddress for vBTC V2 transfer.");
+
+                            // Reserve (xRBX) rules: a reserve address may hold vBTC, and its only
+                            // permitted vBTC operation is sending it back to a normal VFX address
+                            // (full reserve lifecycle: unlock delay, callback, recovery).
+                            if (txRequest.FromAddress.StartsWith("xRBX"))
+                            {
+                                if (toAddress.StartsWith("xRBX"))
+                                    return (txResult, "Reserve accounts cannot send vBTC to another Reserve Account.");
+                                // Strict base58 VFX validation — no ADNR-name resolution (node-dependent →
+                                // divergence) and no shielded destinations (funds would strand in the
+                                // transparent ledger, unspendable).
+                                if (toAddress.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal) ||
+                                    !AddressValidateUtility.ValidateRBXAddress(toAddress))
+                                    return (txResult, "vBTC held by a Reserve Account can only be sent to a valid normal VFX address.");
+
+                                // Single-flight: one in-flight reserve exit per (sender, contract).
+                                // Deterministic at both mempool admission and block verify (rows are
+                                // written at block-apply on every node) and closes the multi-block
+                                // overspend window the owner-branch blockVerify deposit-trust allows.
+                                if (ReserveTransactions.GetPendingVBTCTransferTotal(txRequest.FromAddress, scUID, txRequest.Hash) > 0)
+                                    return (txResult, $"A reserve vBTC transfer is already pending for contract {scUID}. Wait for it to finalize or call it back.");
+
+                                // Same-block defense: reject if another reserve V2 transfer for this
+                                // sender+contract is already waiting in the mempool.
+                                // MEMPOOL-ADMISSION ONLY — mempool contents are per-node, so this
+                                // must NEVER run at block verification or a node still holding the
+                                // losing duplicate would reject a block its peers accept (chain
+                                // split). Determinism is covered by the DB single-flight above and
+                                // the same-contract sibling check in BlockValidatorService.
+                                if (!blockVerify && !blockDownloads)
+                                {
+                                    var vbtcMempool = TransactionData.GetPool();
+                                    var pendingReserveSends = vbtcMempool.Query().Where(x =>
+                                        x.TransactionType == TransactionType.VBTC_V2_TRANSFER &&
+                                        x.FromAddress == txRequest.FromAddress &&
+                                        x.Hash != txRequest.Hash).ToList();
+                                    foreach (var existingReserveTx in pendingReserveSends)
+                                    {
+                                        try
+                                        {
+                                            var existingData = JObject.Parse(existingReserveTx.Data);
+                                            if (existingData["ContractUID"]?.ToObject<string>() == scUID)
+                                                return (txResult, $"A reserve vBTC transfer for contract {scUID} is already pending in the mempool.");
+                                        }
+                                        catch { }
+                                    }
+                                }
+                            }
+
+                            // Balance validation for both owner and non-owner
+                            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                            if (scStateTreiRec != null)
+                            {
+                                bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
+
+                                decimal ledgerBalance = 0M;
+                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                {
+                                    var transactions = scStateTreiRec.SCStateTreiTokenizationTXes
+                                        .Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress)
+                                        .ToList();
+
+                                    if (transactions.Any())
+                                    {
+                                        ledgerBalance = transactions.Sum(x => x.Amount);
+                                    }
+                                }
+
+                                // Reserve sends defer the ledger debit until unlock — subtract in-flight
+                                // pending amounts so the balance can't be spent twice during the window.
+                                decimal pendingReserveOut = fromAddress.StartsWith("xRBX")
+                                    ? ReserveTransactions.GetPendingVBTCTransferTotal(fromAddress, scUID, txRequest.Hash)
+                                    : 0M;
+
+                                if (isOwner)
+                                {
+                                    // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
+                                    // bridge locks stay debited; only withdrawal burns (already reflected in the
+                                    // ElectrumX deposit balance) are cancelled out.
+                                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
+
+                                    // Owner: get deposit address from state trei contract data (available on ALL nodes)
+                                    decimal depositBalance = 0M;
+                                    string depositAddr2 = null;
+                                    var scMainDecompile2 = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                                    if (scMainDecompile2?.Features != null)
+                                    {
+                                        var tknzV2 = scMainDecompile2.Features
+                                            .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                            .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                        if (tknzV2 != null)
+                                            depositAddr2 = ((TokenizationV2Feature)tknzV2).DepositAddress;
+                                    }
+
+                                    if (!string.IsNullOrEmpty(depositAddr2))
+                                    {
+                                        if (!blockDownloads && !blockVerify)
+                                        {
+                                            try
+                                            {
+                                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                                if (elxClient != null)
+                                                {
+                                                    var balance = await elxClient.GetBalance(depositAddr2, false);
+                                                    depositBalance = balance.Confirmed / 100_000_000M;
+                                                }
+                                            }
+                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
+                                        }
+                                    }
+
+                                    decimal ownerBalance = depositBalance + ledgerBalance - pendingReserveOut;
+                                    if (ownerBalance < amount.Value)
+                                    {
+                                        // During block verification, skip deposit balance check for owner.
+                                        // The block crafter already verified via ElectrumX during mempool admission.
+                                        if (blockVerify)
+                                        {
+                                            // Trust the block crafter's ElectrumX verification
+                                        }
+                                        else
+                                        {
+                                            return (txResult, $"Insufficient vBTC balance (owner) for transfer. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount.Value}");
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    // Non-owner: just ledger balance (minus in-flight reserve sends)
+                                    if (ledgerBalance - pendingReserveOut < amount.Value)
+                                        return (txResult, $"Insufficient vBTC balance for transfer. Available: {ledgerBalance - pendingReserveOut}, Requested: {amount.Value}");
+
+                                    if (scStateTreiRec.SCStateTreiTokenizationTXes == null || !scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                                        return (txResult, $"No vBTC balance found for {fromAddress} in contract {scUID}.");
+                                }
+                            }
+                            else
+                            {
+                                return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+                            }
                         }
                     }
                     catch (Exception ex)

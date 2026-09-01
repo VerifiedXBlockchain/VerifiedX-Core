@@ -1345,10 +1345,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Transfer vBTC V2 tokens to multiple recipients
+        /// Send a total vBTC V2 amount to one recipient, auto-allocated across every contract the
+        /// sender holds spendable balance on, as a single transaction (one nonce, one fee).
+        /// Reserve (xRBX) senders are not supported — send per-contract instead.
         /// </summary>
         /// <param name="payload">Multi-transfer details</param>
-        /// <returns>Transaction hash if successful</returns>
+        /// <returns>Transaction hash and per-contract allocations if successful</returns>
         [HttpPost("TransferVBTCMulti")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         public async Task<string> TransferVBTCMulti([FromBody] VBTCTransferMultiPayload payload)
@@ -1358,15 +1360,33 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (payload == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
 
-                // Validate total balance
-                // Create multi-transfer transaction
-                // Broadcast to network
+                if (string.IsNullOrEmpty(payload.FromAddress) || string.IsNullOrEmpty(payload.ToAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
-                return JsonConvert.SerializeObject(new
+                if (payload.TotalAmount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                var result = await Services.VBTCService.TransferVBTCMulti(
+                    payload.FromAddress,
+                    payload.ToAddress,
+                    payload.TotalAmount
+                );
+
+                if (result.Success)
                 {
-                    Success = false,
-                    Message = "Multi-transfer is not yet supported. Use single TransferVBTC for individual transfers."
-                });
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = "vBTC V2 multi-contract transfer transaction created and broadcast successfully",
+                        TransactionHash = result.Result,
+                        From = payload.FromAddress,
+                        To = payload.ToAddress,
+                        TotalAmount = payload.TotalAmount,
+                        Allocations = result.Allocations?.Select(a => new { SmartContractUID = a.SCUID, a.Amount })
+                    });
+                }
+
+                return JsonConvert.SerializeObject(new { Success = false, Message = result.Result });
             }
             catch (Exception ex)
             {
@@ -4578,15 +4598,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
     public class VBTCTransferMultiPayload
     {
-        public string SmartContractUID { get; set; }
         public string FromAddress { get; set; }
-        public List<VBTCTransferRecipient> Recipients { get; set; }
-    }
-
-    public class VBTCTransferRecipient
-    {
         public string ToAddress { get; set; }
-        public decimal Amount { get; set; }
+        /// <summary>
+        /// Total vBTC to send. The node auto-allocates it across the sender's spendable
+        /// contracts (largest available balance first) into one transaction.
+        /// </summary>
+        public decimal TotalAmount { get; set; }
     }
 
     public class VBTCWithdrawalPayload

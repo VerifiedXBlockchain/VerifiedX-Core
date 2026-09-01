@@ -599,6 +599,231 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Data.Function marker for a vBTC V2 multi-contract transfer. Distinct from the dead
+        /// legacy "TransferVBTCMulti()" TKNZ-era name so the two shapes can never collide.
+        /// </summary>
+        public const string MultiTransferFunction = "TransferVBTCMultiV2()";
+
+        /// <summary>
+        /// Consensus cap on Inputs entries in one multi-contract transfer. The 30kb TX size cap
+        /// also bounds it, but an explicit count is deterministic and cheap to check.
+        /// </summary>
+        public const int MaxMultiTransferInputs = 25;
+
+        /// <summary>
+        /// Per-contract vBTC outflows of a committed/candidate VBTC_V2_TRANSFER, for overspend
+        /// accounting: multi-shaped Data (multi Function, no top-level ContractUID) yields one
+        /// entry per input; anything else yields the single-shape (ContractUID, Amount) pair.
+        /// A hybrid Data (multi Function PLUS top-level ContractUID) deliberately parses as
+        /// single — that matches how pre-gate nodes validate/apply it, and post-gate the
+        /// validator rejects the hybrid shape outright. Empty list on parse failure.
+        /// </summary>
+        public static List<(string ScUid, decimal Amount)> GetVbtcV2TransferOutflows(Transaction tx)
+        {
+            var outflows = new List<(string, decimal)>();
+            try
+            {
+                if (tx.TransactionType != TransactionType.VBTC_V2_TRANSFER || string.IsNullOrEmpty(tx.Data))
+                    return outflows;
+
+                var jobj = JObject.Parse(tx.Data);
+                var function = jobj["Function"]?.ToObject<string>();
+                var scUID = jobj["ContractUID"]?.ToObject<string>();
+
+                if (function == MultiTransferFunction && string.IsNullOrEmpty(scUID))
+                {
+                    var inputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>>();
+                    if (inputs != null)
+                    {
+                        foreach (var input in inputs)
+                        {
+                            if (!string.IsNullOrEmpty(input.SCUID) && input.Amount > 0)
+                                outflows.Add((input.SCUID, input.Amount));
+                        }
+                    }
+                    return outflows;
+                }
+
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                if (!string.IsNullOrEmpty(scUID) && amount.HasValue && amount.Value > 0)
+                    outflows.Add((scUID, amount.Value));
+            }
+            catch { }
+            return outflows;
+        }
+
+        /// <summary>
+        /// Transfer a total vBTC V2 amount to one recipient, auto-allocated across every contract
+        /// the sender holds spendable balance on, as ONE transaction (one nonce, one fee).
+        /// Falls back to the plain single-contract path when one contract covers the amount.
+        /// Reserve (xRBX) senders are not supported — the reserve deferred-apply lifecycle is
+        /// keyed on the single-contract shape.
+        /// </summary>
+        public static async Task<(bool Success, string Result, List<VBTCV2MultiTransferInput>? Allocations)> TransferVBTCMulti(string fromAddress, string toAddress, decimal totalAmount)
+        {
+            try
+            {
+                if (fromAddress.StartsWith("xRBX"))
+                    return (false, "Reserve accounts cannot use multi-contract vBTC transfers. Send from a single contract instead.", null);
+
+                if (totalAmount <= 0)
+                    return (false, "Amount must be greater than zero.", null);
+
+                if (totalAmount != Math.Round(totalAmount, 8))
+                    return (false, "Amount cannot have more than 8 decimal places.", null);
+
+                var account = AccountData.GetSingleAccount(fromAddress);
+                if (account == null)
+                    return (false, $"Account not found: {fromAddress}", null);
+
+                toAddress = toAddress.ToAddressNormalize();
+
+                // Allocate greedily across spendable contracts: largest available first so the TX
+                // uses the fewest inputs (deterministic tie-break on SCUID). Availability matches
+                // the single-transfer preflight, minus incomplete withdrawals and any outflows
+                // already pending in the local mempool so we never craft a TX our own
+                // overspend guards would reject.
+                var pendingByContract = new Dictionary<string, decimal>();
+                try
+                {
+                    var pool = TransactionData.GetPool();
+                    var pendingTxs = pool.Find(x => x.FromAddress == fromAddress && x.TransactionType == TransactionType.VBTC_V2_TRANSFER).ToList();
+                    foreach (var ptx in pendingTxs)
+                    {
+                        foreach (var (scUid, amt) in GetVbtcV2TransferOutflows(ptx))
+                        {
+                            pendingByContract.TryGetValue(scUid, out var cur);
+                            pendingByContract[scUid] = cur + amt;
+                        }
+                    }
+                }
+                catch { }
+
+                var candidates = new List<(string ScUid, decimal Available)>();
+                var contracts = VBTCContractV2.GetAllContracts();
+                if (contracts != null)
+                {
+                    foreach (var contract in contracts)
+                    {
+                        var scUid = contract.SmartContractUID;
+                        if (string.IsNullOrEmpty(scUid) || candidates.Any(c => c.ScUid == scUid))
+                            continue;
+
+                        var balResult = await TryGetAvailableTransparentVbtcBalance(scUid, fromAddress);
+                        if (!balResult.success)
+                            continue;
+
+                        var available = balResult.availableBalance;
+                        available -= VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(fromAddress, scUid);
+                        if (pendingByContract.TryGetValue(scUid, out var pendingOut))
+                            available -= pendingOut;
+
+                        available = Math.Round(available, 8);
+                        if (available > 0)
+                            candidates.Add((scUid, available));
+                    }
+                }
+
+                if (!candidates.Any())
+                    return (false, "No spendable vBTC balance found for this address.", null);
+
+                candidates = candidates
+                    .OrderByDescending(c => c.Available)
+                    .ThenBy(c => c.ScUid, StringComparer.Ordinal)
+                    .ToList();
+
+                var allocations = new List<VBTCV2MultiTransferInput>();
+                var remaining = totalAmount;
+                foreach (var candidate in candidates)
+                {
+                    if (remaining <= 0)
+                        break;
+
+                    var useAmount = Math.Round(Math.Min(remaining, candidate.Available), 8);
+                    if (useAmount < 0.00000001M)
+                        continue;
+
+                    allocations.Add(new VBTCV2MultiTransferInput { SCUID = candidate.ScUid, Amount = useAmount });
+                    remaining -= useAmount;
+                }
+
+                if (remaining > 0)
+                {
+                    var totalAvailable = candidates.Sum(c => c.Available);
+                    return (false, $"Insufficient combined vBTC balance. Available: {totalAvailable}, Requested: {totalAmount}", null);
+                }
+
+                if (allocations.Count == 1)
+                {
+                    // One contract covers it — use the plain single-contract path (works even
+                    // before the multi activation height, and keeps the on-chain shape simple).
+                    var singleResult = await TransferVBTC(allocations[0].SCUID, fromAddress, toAddress, totalAmount);
+                    return (singleResult.Item1, singleResult.Item2, allocations);
+                }
+
+                if (Globals.LastBlock.Height + 1 < Globals.V2TransferMultiHeight)
+                    return (false, "Multi-contract vBTC transfers are not active on this network yet. Send from a single contract instead.", null);
+
+                if (allocations.Count > MaxMultiTransferInputs)
+                    return (false, $"Transfer would require {allocations.Count} contract inputs (max {MaxMultiTransferInputs}). Send a smaller amount or consolidate first.", null);
+
+                var txData = JsonConvert.SerializeObject(new
+                {
+                    Function = MultiTransferFunction,
+                    FromAddress = fromAddress,
+                    ToAddress = toAddress,
+                    TotalAmount = totalAmount,
+                    Inputs = allocations
+                });
+
+                var tokenTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = fromAddress,
+                    ToAddress = toAddress,
+                    Amount = 0.0M, // No VFX transferred, only vBTC
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(fromAddress),
+                    TransactionType = TransactionType.VBTC_V2_TRANSFER,
+                    Data = txData
+                };
+
+                tokenTx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tokenTx);
+
+                tokenTx.Build();
+                var privateKey = account.GetPrivKey;
+                if (privateKey == null)
+                    return (false, $"Private key was null for account {fromAddress}", null);
+
+                var signature = VerifiedXCore.Services.SignatureService.CreateSignature(tokenTx.Hash, privateKey, account.PublicKey);
+                if (signature == "ERROR")
+                    return (false, "TX Signature Failed.", null);
+
+                tokenTx.Signature = signature;
+
+                var result = await TransactionValidatorService.VerifyTX(tokenTx);
+                if (result.Item1)
+                {
+                    await TransactionData.AddTxToWallet(tokenTx, true);
+                    await AccountData.UpdateLocalBalance(fromAddress, tokenTx.Fee + tokenTx.Amount);
+                    await TransactionData.AddToPool(tokenTx);
+                    await P2PClient.SendTXMempool(tokenTx);
+
+                    SCLogUtility.Log($"vBTC V2 Multi Transfer TX Success. Inputs: {allocations.Count}, TxHash: {tokenTx.Hash}", "VBTCService.TransferVBTCMulti()");
+                    return (true, tokenTx.Hash, allocations);
+                }
+
+                SCLogUtility.Log($"vBTC V2 Multi Transfer TX Verify Failed: {result.Item2}", "VBTCService.TransferVBTCMulti()");
+                return (false, $"TX Verify Failed: {result.Item2}", null);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Multi Transfer Error: {ex.Message}", "VBTCService.TransferVBTCMulti()");
+                return (false, $"Error: {ex.Message}", null);
+            }
+        }
+
+        /// <summary>
         /// Request withdrawal of vBTC to Bitcoin address.
         /// Any address with a vBTC balance in the contract can request a withdrawal — not just the owner.
         /// </summary>

@@ -1073,70 +1073,75 @@ namespace VerifiedXCore.Services
                                     }
                                 }
 
-                                // vBTC V2 Transfer: Block-level overspend check
-                                // If multiple VBTC_V2_TRANSFER TXs from the same sender for the same contract
-                                // exist in this block, ensure their combined amount doesn't exceed balance.
+                                // vBTC V2 Transfer: Block-level overspend check.
+                                // Iterates per-contract outflows (single shape → one entry, multi
+                                // shape → one per input, see VBTCService.GetVbtcV2TransferOutflows)
+                                // so single and multi transfers from the same sender in one block
+                                // are jointly accounted and cannot combine to overspend a contract.
+                                // For single-shaped TXs this is behaviorally identical to the
+                                // pre-multi guard (a null/invalid shape yields no outflows → skip).
                                 if (blkTransaction.TransactionType == TransactionType.VBTC_V2_TRANSFER && !rejectBlock)
                                 {
                                     try
                                     {
-                                        var vbtcData = JObject.Parse(blkTransaction.Data);
-                                        var vbtcScUID = vbtcData["ContractUID"]?.ToObject<string>();
-                                        var vbtcAmount = vbtcData["Amount"]?.ToObject<decimal?>() ?? 0M;
-
-                                        if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount > 0)
+                                        var vbtcOutflows = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(blkTransaction);
+                                        if (vbtcOutflows.Any())
                                         {
-                                            // Sum all VBTC_V2_TRANSFER amounts from the same sender + contract in this block
-                                            decimal blockTotal = vbtcAmount;
                                             var otherVbtcTxs = block.Transactions
                                                 .Where(x => x.TransactionType == TransactionType.VBTC_V2_TRANSFER
                                                           && x.FromAddress == blkTransaction.FromAddress
                                                           && x.Hash != blkTransaction.Hash)
                                                 .ToList();
 
-                                            bool sameContractSibling = false;
-                                            foreach (var otx in otherVbtcTxs)
+                                            foreach (var (vbtcScUID, vbtcAmount) in vbtcOutflows)
                                             {
-                                                try
+                                                if (rejectBlock)
+                                                    break;
+
+                                                // Sum all outflows for the same sender + contract in this block
+                                                decimal blockTotal = vbtcAmount;
+                                                bool sameContractSibling = false;
+                                                foreach (var otx in otherVbtcTxs)
                                                 {
-                                                    var otxData = JObject.Parse(otx.Data);
-                                                    if (otxData["ContractUID"]?.ToObject<string>() == vbtcScUID)
+                                                    foreach (var (otxScUID, otxAmount) in Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(otx))
                                                     {
-                                                        blockTotal += otxData["Amount"]?.ToObject<decimal?>() ?? 0M;
-                                                        sameContractSibling = true;
+                                                        if (otxScUID == vbtcScUID)
+                                                        {
+                                                            blockTotal += otxAmount;
+                                                            sameContractSibling = true;
+                                                        }
                                                     }
                                                 }
-                                                catch { }
-                                            }
 
-                                            // Reserve single-flight: at most ONE reserve exit per sender+contract
-                                            // may be in flight — a block carrying two is invalid regardless of balance.
-                                            if (blkTransaction.FromAddress.StartsWith("xRBX") && sameContractSibling)
-                                                rejectBlock = true;
+                                                // Reserve single-flight: at most ONE reserve exit per sender+contract
+                                                // may be in flight — a block carrying two is invalid regardless of balance.
+                                                if (blkTransaction.FromAddress.StartsWith("xRBX") && sameContractSibling)
+                                                    rejectBlock = true;
 
-                                            // Check against sender's vBTC balance
-                                            var scState = SmartContractStateTrei.GetSmartContractState(vbtcScUID);
-                                            if (scState != null && !rejectBlock)
-                                            {
-                                                // Reserve sends defer the ledger debit until unlock — subtract
-                                                // in-flight pending amounts (rows are written at block-apply on
-                                                // every node, so this is deterministic).
-                                                decimal pendingReserveOut = blkTransaction.FromAddress.StartsWith("xRBX")
-                                                    ? ReserveTransactions.GetPendingVBTCTransferTotal(blkTransaction.FromAddress, vbtcScUID, blkTransaction.Hash)
-                                                    : 0M;
-
-                                                bool isOwner = blkTransaction.FromAddress == scState.OwnerAddress;
-                                                if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                                // Check against sender's vBTC balance
+                                                var scState = SmartContractStateTrei.GetSmartContractState(vbtcScUID);
+                                                if (scState != null && !rejectBlock)
                                                 {
-                                                    var tokenTxs = scState.SCStateTreiTokenizationTXes
-                                                        .Where(x => x.FromAddress == blkTransaction.FromAddress || x.ToAddress == blkTransaction.FromAddress)
-                                                        .ToList();
-                                                    var received = tokenTxs.Where(x => x.ToAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
-                                                    var sent = tokenTxs.Where(x => x.FromAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
-                                                    decimal vbtcBalance = received + sent - pendingReserveOut;
+                                                    // Reserve sends defer the ledger debit until unlock — subtract
+                                                    // in-flight pending amounts (rows are written at block-apply on
+                                                    // every node, so this is deterministic).
+                                                    decimal pendingReserveOut = blkTransaction.FromAddress.StartsWith("xRBX")
+                                                        ? ReserveTransactions.GetPendingVBTCTransferTotal(blkTransaction.FromAddress, vbtcScUID, blkTransaction.Hash)
+                                                        : 0M;
 
-                                                    if (blockTotal > vbtcBalance)
-                                                        rejectBlock = true; // vBTC overspend in block
+                                                    bool isOwner = blkTransaction.FromAddress == scState.OwnerAddress;
+                                                    if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                                    {
+                                                        var tokenTxs = scState.SCStateTreiTokenizationTXes
+                                                            .Where(x => x.FromAddress == blkTransaction.FromAddress || x.ToAddress == blkTransaction.FromAddress)
+                                                            .ToList();
+                                                        var received = tokenTxs.Where(x => x.ToAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
+                                                        var sent = tokenTxs.Where(x => x.FromAddress == blkTransaction.FromAddress).Sum(x => x.Amount);
+                                                        decimal vbtcBalance = received + sent - pendingReserveOut;
+
+                                                        if (blockTotal > vbtcBalance)
+                                                            rejectBlock = true; // vBTC overspend in block
+                                                    }
                                                 }
                                             }
                                         }

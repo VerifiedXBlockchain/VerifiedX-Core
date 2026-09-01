@@ -481,7 +481,21 @@ namespace VerifiedXCore.Data
                             // is written above, and the ledger moves when ReserveService finalizes it
                             // after UnlockTime (UpdateTreiFromReserve) — or is redirected by recovery.
                             if (!tx.FromAddress.StartsWith("xRBX"))
-                                TransferVBTCV2(tx);
+                            {
+                                // Multi-contract transfer dispatch is height-gated to mirror the
+                                // validator: before V2TransferMultiHeight every node applies single
+                                // semantics regardless of Function (a hybrid Data with multi
+                                // Function plus valid single fields must apply identically on old
+                                // and new nodes during a mixed-fleet window). xRBX never reaches
+                                // here for multi — the validator rejects reserve multi senders.
+                                string? vbtcV2Fn = null;
+                                try { vbtcV2Fn = JObject.Parse(tx.Data)["Function"]?.ToObject<string?>(); } catch { }
+
+                                if (vbtcV2Fn == Bitcoin.Services.VBTCService.MultiTransferFunction && block.Height >= Globals.V2TransferMultiHeight)
+                                    TransferVBTCV2Multi(tx);
+                                else
+                                    TransferVBTCV2(tx);
+                            }
                         }
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
@@ -2755,6 +2769,12 @@ namespace VerifiedXCore.Data
             }
         }
 
+        // DO NOT RE-ENABLE. Legacy TKNZ-era handler, unreachable for new TXs — the validator
+        // rejects Function "TransferVBTCMulti()" outright (deprecated, no balance check, and it
+        // trusts input.FromAddress from tx.Data, so re-enabling it would be an unvalidated
+        // mint/spoof path). Kept only for deterministic replay of any historical block that might
+        // predate the rejection. The live V2 multi path is TransferVBTCV2Multi below
+        // (Function "TransferVBTCMultiV2()", height-gated).
         private static void TransferVBTCMulti(Transaction tx)
         {
             var txData = tx.Data;
@@ -2831,6 +2851,44 @@ namespace VerifiedXCore.Data
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"TransferVBTCV2 error: {ex.Message}", "StateData.TransferVBTCV2()");
+            }
+        }
+
+        /// <summary>
+        /// vBTC V2 multi-contract transfer apply (Function "TransferVBTCMultiV2()", height-gated
+        /// at the dispatch site): writes the same credit/debit ledger pair as a single transfer
+        /// for EVERY input contract, so all downstream balance math (owner ledger formula,
+        /// non-owner received+sent, withdrawal add-back) is unchanged per contract.
+        /// CONSENSUS SAFETY: sender/recipient come from tx.FromAddress/tx.ToAddress (bound to the
+        /// signer) — never from addresses embedded in tx.Data.
+        /// </summary>
+        private static void TransferVBTCV2Multi(Transaction tx)
+        {
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                var inputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiTransferInput>?>();
+
+                if (inputs == null || !inputs.Any())
+                {
+                    ErrorLogUtility.LogError($"VBTC-TRACE [4-StateLedger]: TransferVBTCV2Multi failed: Missing inputs. TX: {tx.Hash}", "StateData.TransferVBTCV2Multi()");
+                    return;
+                }
+
+                foreach (var input in inputs)
+                {
+                    if (string.IsNullOrEmpty(input.SCUID) || input.Amount <= 0)
+                    {
+                        ErrorLogUtility.LogError($"VBTC-TRACE [4-StateLedger]: TransferVBTCV2Multi skipped invalid input. SCUID: {input.SCUID}, Amount: {input.Amount}. TX: {tx.Hash}", "StateData.TransferVBTCV2Multi()");
+                        continue;
+                    }
+
+                    ApplyVBTCV2LedgerPair(input.SCUID, tx.FromAddress, tx.ToAddress, input.Amount, tx.Hash);
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"TransferVBTCV2Multi error: {ex.Message}", "StateData.TransferVBTCV2Multi()");
             }
         }
 

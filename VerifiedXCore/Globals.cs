@@ -163,6 +163,19 @@ namespace VerifiedXCore
         /// Program/WardenService.
         /// </summary>
         public static long VbtcLegacyTransferBypassFixHeight = 999_999_999_999L;
+        /// <summary>
+        /// vBTC V2 multi-contract transfer activation height. At/after this height a
+        /// VBTC_V2_TRANSFER whose Data.Function == "TransferVBTCMultiV2()" is validated and
+        /// applied as one transaction debiting N contracts (Inputs array) to a single recipient.
+        /// Before it, ALL nodes (old and new) ignore Function and treat the TX by its single-shape
+        /// top-level fields — a multi-shaped Data has no ContractUID, so pre-gate/old nodes
+        /// deterministically reject it ("ContractUID cannot be null"). The gate must guard BOTH
+        /// the validator branch and the StateData dispatch: gating only one side would let a
+        /// hybrid TX (multi Function + valid single fields) validate one way and apply the other
+        /// during the mixed-fleet window. Inert until set. Testnet/mainnet values assigned in
+        /// Program/WardenService.
+        /// </summary>
+        public static long V2TransferMultiHeight = 999_999_999_999L;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds

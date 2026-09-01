@@ -1,4 +1,4 @@
-using VerifiedXCore.Utilities;
+﻿using VerifiedXCore.Utilities;
 using System.Diagnostics;
 using System.Net.Http;
 using System.Reflection;
@@ -39,6 +39,7 @@ namespace VerifiedXCore.Services
                 Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinate with caster-upgrade fork deploy) */;
                 Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
                 Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
+                Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy - old nodes reject multi-shaped TXs) */;
             }
             else
             {
@@ -51,6 +52,7 @@ namespace VerifiedXCore.Services
                 Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinate with caster-upgrade fork deploy) */;
                 Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
                 Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
+                Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy - old nodes reject multi-shaped TXs) */;
             }
 
             Config.Config.EstablishConfigFile();

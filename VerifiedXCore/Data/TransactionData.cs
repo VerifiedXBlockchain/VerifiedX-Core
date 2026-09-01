@@ -798,55 +798,55 @@ namespace VerifiedXCore.Data
                             }
 
                             // vBTC V2 Transfer: Prevent overspend across multiple pending transfers.
-                            // Sum all vBTC transfer amounts for this sender + contract already in the
-                            // approved list, add this TX's amount, and compare against balance.
+                            // Iterates per-contract outflows (single shape → one entry, multi shape
+                            // → one per input) against the approved list, so single and multi
+                            // transfers from the same sender are jointly accounted per contract.
                             if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER && !reject)
                             {
                                 try
                                 {
-                                    var jobj = JObject.Parse(tx.Data);
-                                    var txScUID = jobj["ContractUID"]?.ToObject<string>();
-                                    var txAmount = jobj["Amount"]?.ToObject<decimal?>() ?? 0M;
-
-                                    if (!string.IsNullOrEmpty(txScUID) && txAmount > 0)
+                                    var txOutflows = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(tx);
+                                    if (txOutflows.Any())
                                     {
-                                        // Sum amounts already approved for same sender + contract
-                                        decimal pendingTotal = txAmount;
                                         var otherVbtcTxs = approvedMemPoolList
                                             .Where(x => x.TransactionType == TransactionType.VBTC_V2_TRANSFER
                                                      && x.FromAddress == tx.FromAddress
                                                      && x.Hash != tx.Hash)
                                             .ToList();
 
-                                        foreach (var otx in otherVbtcTxs)
+                                        foreach (var (txScUID, txAmount) in txOutflows)
                                         {
-                                            try
+                                            if (reject)
+                                                break;
+
+                                            // Sum amounts already approved for same sender + contract
+                                            decimal pendingTotal = txAmount;
+                                            foreach (var otx in otherVbtcTxs)
                                             {
-                                                var otxData = JObject.Parse(otx.Data);
-                                                var otxScUID = otxData["ContractUID"]?.ToObject<string>();
-                                                var otxAmount = otxData["Amount"]?.ToObject<decimal?>() ?? 0M;
-                                                if (otxScUID == txScUID)
-                                                    pendingTotal += otxAmount;
+                                                foreach (var (otxScUID, otxAmount) in Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(otx))
+                                                {
+                                                    if (otxScUID == txScUID)
+                                                        pendingTotal += otxAmount;
+                                                }
                                             }
-                                            catch { }
-                                        }
 
-                                        // Get sender's vBTC balance from State Trei
-                                        var scState = SmartContractStateTrei.GetSmartContractState(txScUID);
-                                        if (scState != null)
-                                        {
-                                            bool isOwner = tx.FromAddress == scState.OwnerAddress;
-                                            if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                            // Get sender's vBTC balance from State Trei
+                                            var scState = SmartContractStateTrei.GetSmartContractState(txScUID);
+                                            if (scState != null)
                                             {
-                                                var tokenTxs = scState.SCStateTreiTokenizationTXes
-                                                    .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress)
-                                                    .ToList();
-                                                var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
-                                                var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
-                                                decimal vbtcBalance = received + sent;
+                                                bool isOwner = tx.FromAddress == scState.OwnerAddress;
+                                                if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                                {
+                                                    var tokenTxs = scState.SCStateTreiTokenizationTXes
+                                                        .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress)
+                                                        .ToList();
+                                                    var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
+                                                    var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
+                                                    decimal vbtcBalance = received + sent;
 
-                                                if (pendingTotal > vbtcBalance)
-                                                    reject = true; // Overspend detected
+                                                    if (pendingTotal > vbtcBalance)
+                                                        reject = true; // Overspend detected
+                                                }
                                             }
                                         }
                                     }
@@ -1127,50 +1127,50 @@ namespace VerifiedXCore.Data
                 return result;//replay or douple spend has occured
             }
 
-            // vBTC V2 Transfer: Mempool overspend check
-            // Sum all pending VBTC_V2_TRANSFER amounts for this sender+contract and reject if exceeds balance
+            // vBTC V2 Transfer: Mempool overspend check.
+            // Iterates per-contract outflows (single shape → one entry, multi shape → one per
+            // input) so single and multi transfers from the same sender are jointly accounted
+            // and cannot combine to overspend one contract.
             if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER && tx.Data != null)
             {
                 try
                 {
-                    var jobj = JObject.Parse(tx.Data);
-                    var txScUID = jobj["ContractUID"]?.ToObject<string>();
-                    var txAmount = jobj["Amount"]?.ToObject<decimal?>() ?? 0M;
-
-                    if (!string.IsNullOrEmpty(txScUID) && txAmount > 0)
+                    var txOutflows = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(tx);
+                    if (txOutflows.Any())
                     {
                         var otherVbtcTxs = mempool.Find(x =>
                             x.TransactionType == TransactionType.VBTC_V2_TRANSFER
                             && x.FromAddress == tx.FromAddress
                             && x.Hash != tx.Hash).ToList();
 
-                        decimal pendingTotal = txAmount;
-                        foreach (var otx in otherVbtcTxs)
+                        foreach (var (txScUID, txAmount) in txOutflows)
                         {
-                            try
+                            decimal pendingTotal = txAmount;
+                            foreach (var otx in otherVbtcTxs)
                             {
-                                var otxData = JObject.Parse(otx.Data);
-                                if (otxData["ContractUID"]?.ToObject<string>() == txScUID)
-                                    pendingTotal += otxData["Amount"]?.ToObject<decimal?>() ?? 0M;
+                                foreach (var (otxScUID, otxAmount) in Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(otx))
+                                {
+                                    if (otxScUID == txScUID)
+                                        pendingTotal += otxAmount;
+                                }
                             }
-                            catch { }
-                        }
 
-                        var scState = SmartContractStateTrei.GetSmartContractState(txScUID);
-                        if (scState != null)
-                        {
-                            bool isOwner = tx.FromAddress == scState.OwnerAddress;
-                            if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                            var scState = SmartContractStateTrei.GetSmartContractState(txScUID);
+                            if (scState != null)
                             {
-                                var tokenTxs = scState.SCStateTreiTokenizationTXes
-                                    .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress).ToList();
-                                var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
-                                var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
-                                // Debit rows carry NEGATIVE amounts, so balance = received + sent.
-                                // (The old "received - sent" ADDED historical outflows back in,
-                                // inflating the balance and disabling this guard.)
-                                if (pendingTotal > (received + sent))
-                                    return true; // vBTC overspend detected
+                                bool isOwner = tx.FromAddress == scState.OwnerAddress;
+                                if (!isOwner && scState.SCStateTreiTokenizationTXes != null)
+                                {
+                                    var tokenTxs = scState.SCStateTreiTokenizationTXes
+                                        .Where(x => x.FromAddress == tx.FromAddress || x.ToAddress == tx.FromAddress).ToList();
+                                    var received = tokenTxs.Where(x => x.ToAddress == tx.FromAddress).Sum(x => x.Amount);
+                                    var sent = tokenTxs.Where(x => x.FromAddress == tx.FromAddress).Sum(x => x.Amount);
+                                    // Debit rows carry NEGATIVE amounts, so balance = received + sent.
+                                    // (The old "received - sent" ADDED historical outflows back in,
+                                    // inflating the balance and disabling this guard.)
+                                    if (pendingTotal > (received + sent))
+                                        return true; // vBTC overspend detected
+                                }
                             }
                         }
                     }

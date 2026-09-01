@@ -1,4 +1,5 @@
 using LiteDB;
+using Newtonsoft.Json.Linq;
 using VerifiedXCore.Data;
 using VerifiedXCore.Extensions;
 using VerifiedXCore.Utilities;
@@ -304,6 +305,87 @@ namespace VerifiedXCore.Bitcoin.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCContractV2.DeleteContract()");
+            }
+        }
+
+        /// <summary>
+        /// Deletes the local VBTCContractV2 + SmartContractMain records for a contract when NO
+        /// local address retains any claim on it: not owner, not NextOwner, no positive ledger
+        /// balance, and no in-flight reserve send TO a local address (that credit is deferred
+        /// until unlock and nothing recreates local records at finalize). Same keep-conditions as
+        /// the startup prune pass (StartupService.UpdateSCOwnership vBTC V2 pass), applied live
+        /// after a transfer fully consumes this wallet's balance on a contract.
+        /// Returns true when records were removed.
+        /// </summary>
+        public static bool PruneLocalRecordsIfNoClaim(string scUID)
+        {
+            try
+            {
+                if (GetContract(scUID) == null)
+                    return false;
+
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTreiRec == null)
+                    return false;
+
+                var localAddrs = new HashSet<string>(AccountData.GetAccounts().FindAll().Select(x => x.Address));
+                var rAccounts = ReserveAccount.GetReserveAccounts();
+                if (rAccounts != null)
+                {
+                    foreach (var r in rAccounts)
+                        localAddrs.Add(r.Address);
+                }
+
+                if (scStateTreiRec.OwnerAddress != null && localAddrs.Contains(scStateTreiRec.OwnerAddress))
+                    return false;
+
+                if (scStateTreiRec.NextOwner != null && localAddrs.Contains(scStateTreiRec.NextOwner))
+                    return false;
+
+                if (scStateTreiRec.SCStateTreiTokenizationTXes != null && scStateTreiRec.SCStateTreiTokenizationTXes.Any())
+                {
+                    bool holdsBalance = localAddrs.Any(a => scStateTreiRec.SCStateTreiTokenizationTXes
+                        .Where(t => t.FromAddress == a || t.ToAddress == a)
+                        .Sum(t => t.Amount) > 0);
+                    if (holdsBalance)
+                        return false;
+                }
+
+                // Keep-reason: an in-flight reserve send TO a local address (pending reserve
+                // transfers are always single-shape — xRBX cannot send multi).
+                try
+                {
+                    var rtxDb = ReserveTransactions.GetReserveTransactionsDb();
+                    if (rtxDb != null)
+                    {
+                        var pendingInbound = rtxDb.Query().Where(x =>
+                            x.TransactionType == TransactionType.VBTC_V2_TRANSFER &&
+                            x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList();
+                        foreach (var prtx in pendingInbound)
+                        {
+                            if (prtx.ToAddress == null || !localAddrs.Contains(prtx.ToAddress) || string.IsNullOrEmpty(prtx.Data))
+                                continue;
+                            try
+                            {
+                                var pj = JObject.Parse(prtx.Data);
+                                if (pj["ContractUID"]?.ToObject<string>() == scUID)
+                                    return false;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+
+                SmartContractMain.SmartContractData.DeleteSmartContract(scUID);
+                DeleteContract(scUID);
+                SCLogUtility.Log($"Pruned local vBTC V2 records — no local claim remains. SCUID: {scUID}", "VBTCContractV2.PruneLocalRecordsIfNoClaim()");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(ex.ToString(), "VBTCContractV2.PruneLocalRecordsIfNoClaim()");
+                return false;
             }
         }
 
