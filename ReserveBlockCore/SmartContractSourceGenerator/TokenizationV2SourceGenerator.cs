@@ -84,7 +84,7 @@ namespace ReserveBlockCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("   return TokenizationVersion");
             strTknzV2Bld.AppendLine("}");
 
-            // Function: Get IsStC (StC — Self-Sovereign Smart Contracts). Emitted as a string
+            // Function: Get IsStC (StC — Self-Custodial Smart Contracts). Emitted as a string
             // so older contracts that lack this function decode to a null Value → IsStC=false.
             strTknzV2Bld.AppendLine("function GetIsStC() : string");
             strTknzV2Bld.AppendLine("{");
