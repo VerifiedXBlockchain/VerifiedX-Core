@@ -77,7 +77,7 @@ namespace VerifiedXCore.Config
         /// <summary>When true, enables casterlog.txt and caster-scoped validator console diagnostics.</summary>
         public bool CasterLog { get; set; }
 
-        // S3C (Self-Sovereign Smart Contracts)
+        // S3C (Self-Custodial Smart Contracts)
         public string? S3C { get; set; }            // minting node: comma-separated IP:ValidatorAddress pairs
         public bool S3CValidator { get; set; }      // validator node: this validator is private/S3C-only
 
@@ -260,7 +260,7 @@ namespace VerifiedXCore.Config
             if (!string.IsNullOrEmpty(config.S3C))
             {
                 if (Bitcoin.Services.S3CService.ParseAndValidate(config.S3C))
-                    Console.WriteLine($"[S3C] Self-Sovereign Smart Contract mode enabled with {Globals.S3CPool!.Count} validators.");
+                    Console.WriteLine($"[S3C] Self-Custodial Smart Contract mode enabled with {Globals.S3CPool!.Count} validators.");
                 else
                     Console.WriteLine("[S3C] S3C= present but INVALID — vBTC minting will refuse until corrected (see errors above).");
             }

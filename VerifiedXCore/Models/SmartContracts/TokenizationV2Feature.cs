@@ -27,7 +27,7 @@ namespace VerifiedXCore.Models.SmartContracts
         public string? ImageBase { get; set; }
         #endregion
 
-        #region S3C (Self-Sovereign Smart Contracts)
+        #region S3C (Self-Custodial Smart Contracts)
         // True if minted against a private S3C validator pool. Default false → backward
         // compatible. Drives the vBTC.b bridge block (§6) and wallet/explorer disclosure (§1).
         public bool IsS3C { get; set; }

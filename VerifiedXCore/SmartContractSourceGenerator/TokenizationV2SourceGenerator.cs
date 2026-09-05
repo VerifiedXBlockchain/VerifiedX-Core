@@ -84,7 +84,7 @@ namespace VerifiedXCore.SmartContractSourceGenerator
             strTknzV2Bld.AppendLine("   return TokenizationVersion");
             strTknzV2Bld.AppendLine("}");
 
-            // Function: Get IsS3C (S3C — Self-Sovereign Smart Contracts). Emitted as a string
+            // Function: Get IsS3C (S3C — Self-Custodial Smart Contracts). Emitted as a string
             // so older contracts that lack this function decode to a null Value → IsS3C=false.
             strTknzV2Bld.AppendLine("function GetIsStC() : string");
             strTknzV2Bld.AppendLine("{");
