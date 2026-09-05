@@ -224,12 +224,19 @@ namespace VerifiedXCore.Nodes
                     var selfRecovered = false;
                     try
                     {
+                        // SELF-DEMOTE-FLAP FIX: poll EVERY peer caster (was .Take(2)) and require a
+                        // strict majority of responders to list us before flipping IsBlockCaster=true.
+                        // One peer holding a stale pre-restart committee keeps reachable ex-casters in
+                        // its list forever; with any-single-peer semantics that lone stale view
+                        // re-promoted this node every tick while the casting loop (which trusts our
+                        // own BlockCasters list) demoted it right back — an endless [SELF-DEMOTE] flap.
                         var peers = Globals.BlockCasters.ToList()
                             .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
-                            .Take(2)
                             .ToList();
                         if (peers.Any())
                         {
+                            int srPeersReached = 0, srConfirms = 0;
+                            string? srConfirmingResp = null;
                             using var hc = Globals.HttpClientFactory.CreateClient();
                             hc.Timeout = TimeSpan.FromSeconds(5);
                             foreach (var peer in peers)
@@ -239,72 +246,85 @@ namespace VerifiedXCore.Nodes
                                     var ip = peer.PeerIP!.Replace("::ffff:", "");
                                     var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetCasters";
                                     var resp = await hc.GetStringAsync(url);
-                                    if (!string.IsNullOrEmpty(resp) && resp.Contains(Globals.ValidatorAddress!))
+                                    if (string.IsNullOrEmpty(resp))
+                                        continue;
+                                    srPeersReached++;
+                                    if (resp.Contains(Globals.ValidatorAddress!))
                                     {
-                                        CasterLogUtility.Log(
-                                            $"SelfRecovery: peer {ip} reports us in caster list — flipping IsBlockCaster=true",
-                                            "CasterFlow");
-                                        Globals.IsBlockCaster = true;
-                                        selfRecovered = true;
-                                        // Merge peer's caster list into ours
-                                        var parsed = Newtonsoft.Json.JsonConvert.DeserializeObject<dynamic>(resp);
-                                        if (parsed?.Casters != null)
-                                        {
-                                            foreach (var c in parsed.Casters)
-                                            {
-                                                string addr = c.Address?.ToString() ?? "";
-                                                string pip = c.PeerIP?.ToString() ?? "";
-                                                string pk = c.PublicKey?.ToString() ?? "";
-                                                if (!string.IsNullOrEmpty(addr) && !Globals.BlockCasters.Any(x => x.ValidatorAddress == addr))
-                                                {
-                                                    // 6/5-OVERFLOW FIX: use the atomic capped add so a merged peer list
-                                                    // can't push BlockCasters past MaxCasters or duplicate an entry.
-                                                    CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers { ValidatorAddress = addr, PeerIP = pip, ValidatorPublicKey = pk });
-                                                }
-                                            }
-                                        }
-                                        // FIX: Hydrate NetworkValidator entries for ALL casters (including self)
-                                        // after SelfRecovery merges the caster list. Without this, the newly-
-                                        // promoted node's own entry (and any other freshly-discovered casters)
-                                        // may have IsFullyTrusted=false or LastSeen=0 in NetworkValidators,
-                                        // causing GenerateProofsFromNetworkValidatorsLegacy() to filter them
-                                        // out of allProofs — preventing them from ever winning blocks.
-                                        var srNow = TimeUtil.GetTime();
-                                        foreach (var caster in Globals.BlockCasters.ToList())
-                                        {
-                                            if (string.IsNullOrEmpty(caster.ValidatorAddress))
-                                                continue;
-                                            if (Globals.NetworkValidators.TryGetValue(caster.ValidatorAddress, out var nv))
-                                            {
-                                                nv.IsFullyTrusted = true;
-                                                nv.LastSeen = srNow;
-                                                nv.CheckFailCount = 0;
-                                                Globals.NetworkValidators[caster.ValidatorAddress] = nv;
-                                            }
-                                            else if (!string.IsNullOrEmpty(caster.PeerIP))
-                                            {
-                                                Globals.NetworkValidators[caster.ValidatorAddress] = new Models.NetworkValidator
-                                                {
-                                                    Address = caster.ValidatorAddress,
-                                                    IPAddress = (caster.PeerIP ?? "").Replace("::ffff:", ""),
-                                                    PublicKey = caster.ValidatorPublicKey ?? "",
-                                                    IsFullyTrusted = true,
-                                                    LastSeen = srNow,
-                                                    CheckFailCount = 0,
-                                                    FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
-                                                    FirstAdvertised = srNow,
-                                                };
-                                            }
-                                        }
-                                        Utilities.ProofUtility.ClearProofGenerationCache();
-                                        CasterLogUtility.Log(
-                                            $"SelfRecovery: hydrated {Globals.BlockCasters.Count} casters in NetworkValidators and cleared proof cache",
-                                            "CasterFlow");
-
-                                        break;
+                                        srConfirms++;
+                                        srConfirmingResp ??= resp;
                                     }
                                 }
                                 catch { /* peer unreachable, try next */ }
+                            }
+
+                            if (srConfirms > 0 && srConfirms * 2 > srPeersReached)
+                            {
+                                CasterLogUtility.Log(
+                                    $"SelfRecovery: {srConfirms}/{srPeersReached} reachable peers report us in caster list — flipping IsBlockCaster=true",
+                                    "CasterFlow");
+                                Globals.IsBlockCaster = true;
+                                selfRecovered = true;
+                                // Merge the confirming peer's caster list into ours
+                                var parsed = Newtonsoft.Json.JsonConvert.DeserializeObject<dynamic>(srConfirmingResp!);
+                                if (parsed?.Casters != null)
+                                {
+                                    foreach (var c in parsed.Casters)
+                                    {
+                                        string addr = c.Address?.ToString() ?? "";
+                                        string pip = c.PeerIP?.ToString() ?? "";
+                                        string pk = c.PublicKey?.ToString() ?? "";
+                                        if (!string.IsNullOrEmpty(addr) && !Globals.BlockCasters.Any(x => x.ValidatorAddress == addr))
+                                        {
+                                            // 6/5-OVERFLOW FIX: use the atomic capped add so a merged peer list
+                                            // can't push BlockCasters past MaxCasters or duplicate an entry.
+                                            CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers { ValidatorAddress = addr, PeerIP = pip, ValidatorPublicKey = pk });
+                                        }
+                                    }
+                                }
+                                // FIX: Hydrate NetworkValidator entries for ALL casters (including self)
+                                // after SelfRecovery merges the caster list. Without this, the newly-
+                                // promoted node's own entry (and any other freshly-discovered casters)
+                                // may have IsFullyTrusted=false or LastSeen=0 in NetworkValidators,
+                                // causing GenerateProofsFromNetworkValidatorsLegacy() to filter them
+                                // out of allProofs — preventing them from ever winning blocks.
+                                var srNow = TimeUtil.GetTime();
+                                foreach (var caster in Globals.BlockCasters.ToList())
+                                {
+                                    if (string.IsNullOrEmpty(caster.ValidatorAddress))
+                                        continue;
+                                    if (Globals.NetworkValidators.TryGetValue(caster.ValidatorAddress, out var nv))
+                                    {
+                                        nv.IsFullyTrusted = true;
+                                        nv.LastSeen = srNow;
+                                        nv.CheckFailCount = 0;
+                                        Globals.NetworkValidators[caster.ValidatorAddress] = nv;
+                                    }
+                                    else if (!string.IsNullOrEmpty(caster.PeerIP))
+                                    {
+                                        Globals.NetworkValidators[caster.ValidatorAddress] = new Models.NetworkValidator
+                                        {
+                                            Address = caster.ValidatorAddress,
+                                            IPAddress = (caster.PeerIP ?? "").Replace("::ffff:", ""),
+                                            PublicKey = caster.ValidatorPublicKey ?? "",
+                                            IsFullyTrusted = true,
+                                            LastSeen = srNow,
+                                            CheckFailCount = 0,
+                                            FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
+                                            FirstAdvertised = srNow,
+                                        };
+                                    }
+                                }
+                                Utilities.ProofUtility.ClearProofGenerationCache();
+                                CasterLogUtility.Log(
+                                    $"SelfRecovery: hydrated {Globals.BlockCasters.Count} casters in NetworkValidators and cleared proof cache",
+                                    "CasterFlow");
+                            }
+                            else if (srConfirms > 0)
+                            {
+                                CasterLogUtility.Log(
+                                    $"SelfRecovery: only {srConfirms}/{srPeersReached} reachable peers list us — minority (stale peer view?). Staying non-caster.",
+                                    "CasterFlow");
                             }
                         }
                     }
@@ -502,6 +522,16 @@ namespace VerifiedXCore.Nodes
         /// <summary>Throttle the "PingCasters start/end" summary logs to roughly one per 30s so we don't flood the log.</summary>
         private static long _lastPingCastersLogTick;
 
+        /// <summary>DISAVOW FIX: consecutive PingCasters passes in which a listed caster's /Health
+        /// reported IsBlockCaster=false — i.e. the node itself denies being a caster. Keyed by
+        /// validator address. Reachability-only eviction can never clear these entries (an ex-caster
+        /// from before a rolling restart stays online and answers heartbeats forever), which left
+        /// stale committee views feeding phantom re-promotions on other nodes. The streak requirement
+        /// protects a freshly promoted node that hasn't flipped its own IsBlockCaster yet — SelfRecovery
+        /// gets several monitor ticks to do so before the threshold is reached.</summary>
+        private static readonly ConcurrentDictionary<string, int> _casterDisavowalStreaks = new();
+        const int CASTER_DISAVOWAL_THRESHOLD = 3;
+
         public static async Task PingCasters()
         {
             var casterList = Globals.BlockCasters.ToList();
@@ -541,7 +571,10 @@ namespace VerifiedXCore.Nodes
                         using (var client = Globals.HttpClientFactory.CreateClient())
                         {
                             
-                            var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat";
+                            // DISAVOW FIX: probe /Health instead of /heartbeat — identical reachability
+                            // semantics (200 whenever the node is up) but the body carries the peer's own
+                            // IsBlockCaster so stale committee entries can be detected below.
+                            var uri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/Health";
 
 
                             var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 3));
@@ -549,6 +582,21 @@ namespace VerifiedXCore.Nodes
 
                             if (!response.IsSuccessStatusCode)
                             {
+                                // Mixed-version safety: a peer without /Health (pre-upgrade build) 404s.
+                                // Fall back to the legacy /heartbeat probe for reachability so an old but
+                                // healthy caster is never counted offline.
+                                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                                {
+                                    try
+                                    {
+                                        var hbUri = $"http://{caster.PeerIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/heartbeat";
+                                        var hbResponse = await client.GetAsync(hbUri).WaitAsync(new TimeSpan(0, 0, 3));
+                                        if (hbResponse.IsSuccessStatusCode)
+                                            break;
+                                    }
+                                    catch { /* fall through to failure counting */ }
+                                }
+
                                 retryCount++;
                                 if (retryCount == 3)
                                 {
@@ -557,6 +605,41 @@ namespace VerifiedXCore.Nodes
                             }
                             else
                             {
+                                // Reachable. A reachable peer that itself reports IsBlockCaster=false is a
+                                // stale committee entry (e.g. an ex-caster from before a rolling restart);
+                                // reachability alone would keep it in our list forever, and our stale view
+                                // would in turn feed phantom SelfRecovery promotions on that node. Evict
+                                // only after CASTER_DISAVOWAL_THRESHOLD consecutive disavowals so a node
+                                // mid-promotion is never dropped for a transient false.
+                                if (!string.IsNullOrEmpty(caster.ValidatorAddress))
+                                {
+                                    bool? peerSaysCaster = null;
+                                    try
+                                    {
+                                        var body = await response.Content.ReadAsStringAsync();
+                                        var health = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(body, new { IsBlockCaster = (bool?)null });
+                                        peerSaysCaster = health?.IsBlockCaster;
+                                    }
+                                    catch { /* unparsable body — no disavowal signal */ }
+
+                                    if (peerSaysCaster == false)
+                                    {
+                                        var streak = _casterDisavowalStreaks.AddOrUpdate(caster.ValidatorAddress, 1, (_, v) => v + 1);
+                                        if (streak >= CASTER_DISAVOWAL_THRESHOLD)
+                                        {
+                                            removeList.Add(caster.PeerIP);
+                                            CasterLogUtility.Log(
+                                                $"PingCasters DISAVOW: {caster.ValidatorAddress} ({caster.PeerIP}) reported IsBlockCaster=false for {streak} consecutive checks — evicting stale committee entry.",
+                                                "CasterFlow");
+                                            ConsoleWriterService.OutputValCaster(
+                                                $"[PingCasters] Removing {caster.ValidatorAddress} ({caster.PeerIP}) — node reports it is not a caster.");
+                                        }
+                                    }
+                                    else if (peerSaysCaster == true)
+                                    {
+                                        _casterDisavowalStreaks.TryRemove(caster.ValidatorAddress, out _);
+                                    }
+                                }
                                 break;
                             }
                         }
@@ -613,6 +696,19 @@ namespace VerifiedXCore.Nodes
             {
                 CasterLogUtility.Log($"PingCasters end — no evictions", "CasterFlow");
             }
+
+            // DISAVOW FIX: drop disavowal streaks for anyone no longer in the list so a
+            // later re-promotion of the same address starts from a clean slate.
+            try
+            {
+                var trackedAddrs = new HashSet<string>(
+                    Globals.BlockCasters.ToList()
+                        .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
+                        .Select(c => c.ValidatorAddress!));
+                foreach (var key in _casterDisavowalStreaks.Keys.Where(k => !trackedAddrs.Contains(k)).ToList())
+                    _casterDisavowalStreaks.TryRemove(key, out _);
+            }
+            catch { /* best-effort cleanup */ }
 
             // FIX: Periodic cleanup of stale BlockCasterNodes entries.
             // These are SignalR connections that are no longer in the BlockCasters list

@@ -1906,11 +1906,15 @@ namespace VerifiedXCore.Services
         #region Eviction Awareness — "Verify Before You Cast"
 
         /// <summary>
-        /// EVICTION-AWARE: Queries up to 3 known peer caster IPs (from hardcoded bootstrap or current BlockCasters)
+        /// EVICTION-AWARE: Queries the given peer caster IPs (from hardcoded bootstrap or current BlockCasters)
         /// to check whether this node's ValidatorAddress appears in their active caster list.
         /// Returns a tuple: (selfConfirmed, liveCasterList, peersReached).
-        ///   - selfConfirmed: true if at least one reachable peer lists us as a caster.
-        ///   - liveCasterList: the caster list from the first peer that responded (may be null if none responded).
+        ///   - selfConfirmed: true only if a STRICT MAJORITY of reachable peers list us as a caster.
+        ///     (Any-single-peer semantics let one node holding a stale pre-restart committee keep a
+        ///     phantom caster alive indefinitely — the [SELF-DEMOTE] flap.)
+        ///   - liveCasterList: when confirmed, a list that includes us; when NOT confirmed, only a
+        ///     list that does NOT include us (adopting a minority list that still contained us would
+        ///     re-flip IsBlockCaster in the casting loop). Null if no suitable list was seen.
         ///   - peersReached: how many peers responded successfully.
         /// Used to prevent a previously-evicted bootstrap caster from blindly re-adding itself.
         /// </summary>
@@ -1924,14 +1928,14 @@ namespace VerifiedXCore.Services
                 .Where(ip => !string.IsNullOrEmpty(ip))
                 .Select(ip => ip.Replace("::ffff:", ""))
                 .Distinct()
-                .Take(3)
                 .ToList();
 
             if (ipsToQuery.Count == 0)
                 return (false, null, 0);
 
-            bool selfFound = false;
-            List<CasterInfo>? bestCasterList = null;
+            int confirmCount = 0;
+            List<CasterInfo>? confirmingList = null;   // first list that includes us
+            List<CasterInfo>? nonSelfList = null;      // first list that does NOT include us (majority view on eviction)
             int peersReached = 0;
 
             foreach (var ip in ipsToQuery)
@@ -1951,20 +1955,18 @@ namespace VerifiedXCore.Services
                     var parsed = Newtonsoft.Json.JsonConvert.DeserializeObject<SignedCasterListResponse>(resp);
                     if (parsed?.Casters != null && parsed.Casters.Count > 0)
                     {
-                        if (bestCasterList == null)
-                            bestCasterList = parsed.Casters;
-
                         if (parsed.Casters.Any(c => c.Address == Globals.ValidatorAddress))
                         {
-                            selfFound = true;
-                            bestCasterList = parsed.Casters; // prefer the list that includes us
+                            confirmCount++;
+                            confirmingList ??= parsed.Casters;
                             CasterLogUtility.Log(
                                 $"VerifySelfInRemote: peer {ip} confirms us in caster list ({parsed.Casters.Count} casters)",
                                 "EVICTION-AWARE");
-                            break; // one confirmation is enough
+                            // No early exit — majority is decided over ALL responders below.
                         }
                         else
                         {
+                            nonSelfList ??= parsed.Casters;
                             CasterLogUtility.Log(
                                 $"VerifySelfInRemote: peer {ip} does NOT list us. Their casters: [{string.Join(",", parsed.Casters.Select(c => c.Address))}]",
                                 "EVICTION-AWARE");
@@ -1979,8 +1981,14 @@ namespace VerifiedXCore.Services
                 }
             }
 
+            // MAJORITY GATE: a strict majority of responders must list us. A tie (e.g. 1-of-2)
+            // is NOT confirmation — standing down is recoverable via re-promotion, while a
+            // phantom caster kept alive by a stale minority view never converges.
+            var selfFound = confirmCount > 0 && confirmCount * 2 > peersReached;
+            var bestCasterList = selfFound ? confirmingList : nonSelfList;
+
             CasterLogUtility.Log(
-                $"VerifySelfInRemote RESULT: selfConfirmed={selfFound} peersReached={peersReached} liveCasterCount={bestCasterList?.Count ?? 0}",
+                $"VerifySelfInRemote RESULT: selfConfirmed={selfFound} ({confirmCount}/{peersReached} responders list us) liveCasterCount={bestCasterList?.Count ?? 0}",
                 "EVICTION-AWARE");
 
             return (selfFound, bestCasterList, peersReached);
@@ -2224,6 +2232,19 @@ namespace VerifiedXCore.Services
                     Globals.SyncKnownCastersFromBlockCasters();
                     CasterLogUtility.Log(
                         $"EvictionCheck: replaced BlockCasters with {liveCasterList.Count} peers from live list",
+                        "EVICTION-AWARE");
+                }
+
+                // Ensure our own entry is gone — StartCastingRounds trusts our own list, so a
+                // leftover self entry would immediately re-flip IsBlockCaster=true (flap).
+                if (Globals.BlockCasters.Any(c => c.ValidatorAddress == Globals.ValidatorAddress))
+                {
+                    var prunedBag = new System.Collections.Concurrent.ConcurrentBag<Peers>(
+                        Globals.BlockCasters.ToList().Where(c => c.ValidatorAddress != Globals.ValidatorAddress));
+                    Globals.BlockCasters = prunedBag;
+                    Globals.SyncKnownCastersFromBlockCasters();
+                    CasterLogUtility.Log(
+                        "EvictionCheck: pruned self from local BlockCasters after stand-down",
                         "EVICTION-AWARE");
                 }
 
