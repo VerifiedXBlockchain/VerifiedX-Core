@@ -27,7 +27,7 @@ namespace ReserveBlockCore.Bitcoin.Models
         public long BaseSignatureBlockHeight { get; set; }
         public bool IsRegisteredOnBase { get; set; }
 
-        // S3C: true if this validator registered as a Self-Sovereign (private-pool) validator.
+        // S3C: true if this validator registered as a Self-Custodial (private-pool) validator.
         // Default false → backward compatible. Excluded from public ceremony selection
         // (GetPublicValidators) but stays in the inclusive GetActiveValidators for auth/consensus.
         public bool IsS3C { get; set; }

@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 namespace ReserveBlockCore.Bitcoin.Services
 {
     /// <summary>
-    /// S3C (Self-Sovereign Smart Contracts). Parses/validates a minting node's S3C= config and
+    /// S3C (Self-Custodial Smart Contracts). Parses/validates a minting node's S3C= config and
     /// resolves the configured private validator pool for vBTC DKG / withdrawal ceremonies.
     /// See docs/PLAN-S3C.md (§2, §3.4, §4.2, §11).
     /// </summary>

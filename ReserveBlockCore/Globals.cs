@@ -163,7 +163,7 @@ namespace ReserveBlockCore
         public static int ArbiterPort = 3342;
         public static int FrostValidatorPort = 7295;
 
-        // S3C (Self-Sovereign Smart Contracts)
+        // S3C (Self-Custodial Smart Contracts)
         public static List<Bitcoin.Models.S3CEntry>? S3CPool = null;   // minting-node side (parsed from S3C= config)
         public static bool UseS3C => S3CPool != null && S3CPool.Count >= 3;
         public static bool IsS3CValidator = false;                     // validator side (S3CValidator=true)
