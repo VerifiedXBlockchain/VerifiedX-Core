@@ -115,14 +115,14 @@ namespace VerifiedXCore
                 LogUtility.Log("Warden monitoring service started", "Program.Main()");
             }
             //Forced Testnet
-            Globals.IsTestNet = true;
+            //Globals.IsTestNet = true;
             //Globals.IsCustomTestNet = true;
             Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
             Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
             Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
             Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
             Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
-            Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 999_999_999_999L /* TODO set testnet disable height */ : 999_999_999_999L /* TODO set mainnet disable height */;
+            Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1 /* TODO set testnet disable height */ : 999_999_999_999L /* TODO set mainnet disable height */;
             Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinate with caster-upgrade fork deploy) */;
             Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
             Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
