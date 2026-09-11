@@ -2972,7 +2972,7 @@ namespace VerifiedXCore.Nodes
                     _ = FailedToReachConsensus(data);
                     break;
                 case "7":
-                    _ = ReceiveConfirmedBlock(data);
+                    _ = ReceiveConfirmedBlock(data, ipAddress);
                     break;
                 case "FC":
                     _ = ReceiveForkCorrection(data, ipAddress);
@@ -3158,7 +3158,7 @@ namespace VerifiedXCore.Nodes
         }
 
         //7
-        public static async Task ReceiveConfirmedBlock(string data)
+        public static async Task ReceiveConfirmedBlock(string data, string? senderIp = null)
         {
             if (string.IsNullOrEmpty(data)) return;
 
@@ -3169,6 +3169,18 @@ namespace VerifiedXCore.Nodes
             var lastBlockHeight = Globals.LastBlock.Height;
             if (lastBlockHeight < nextBlock.Height)
             {
+                // SPLIT-GUARD: non-caster validators reach this handler too (they subscribe to the
+                // caster hub), and the height claim below is literally first-write-wins. A validator
+                // now commits a live tip+1 block only once ≥2 distinct casters vouch for this exact
+                // hash. Runs BEFORE the claim so a rejected/pending block never holds the height.
+                if (!Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1)
+                {
+                    if (!await ValidatorCommitGate.ConfirmAsync(nextBlock, senderIp, "BlockcasterNode.ReceiveConfirmedBlock"))
+                        return;
+                    if (Globals.LastBlock.Height >= nextBlock.Height)
+                        return; // committed meanwhile via another path
+                }
+
                 // Height-based deduplication: prevent processing competing blocks at the same height.
                 // Uses Interlocked.CompareExchange so only the first block at a given height proceeds.
                 var currentAccepted = Interlocked.Read(ref _acceptedHeight);
@@ -3245,6 +3257,9 @@ namespace VerifiedXCore.Nodes
                             return;
                         }
                         ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round accept (attested): height {nextBlock.Height} — majority caster attestations verified.");
+                        // SPLIT-GUARD: publish the attested hash so ValidateBlock's caster gate (which now
+                        // refuses a live commit with NO agreed hash) sees this as the agreed block.
+                        RegisterPendingCasterBlockHash(nextBlock.Height, nextBlock.Hash);
                     }
                 }
                 else if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
@@ -3261,6 +3276,8 @@ namespace VerifiedXCore.Nodes
                         return;
                     }
                     ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round accept (attested): height {nextBlock.Height} — majority caster attestations verified.");
+                    // SPLIT-GUARD: see mid-round accept above.
+                    RegisterPendingCasterBlockHash(nextBlock.Height, nextBlock.Hash);
                 }
 
                 // Case 2: Agreed hash exists but doesn't match → reject (actual fork)
@@ -3508,12 +3525,29 @@ namespace VerifiedXCore.Nodes
             var bag = Globals.BlockCasters.ToList();
             var committee = CasterMembershipStore.GetCommitteeForHeight(height);
             if (committee == null)
-                return (bag, bag.Count);
+                return (bag, LegacyQuorumDenominator(bag.Count));
             var filtered = bag
                 .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress) && committee.Contains(c.ValidatorAddress!))
                 .ToList();
             return (filtered, committee.Count);
         }
+
+        /// <summary>
+        /// SPLIT-GUARD (legacy era only — the record era's committee replaces this): every quorum in
+        /// the pre-record era was computed against this node's OWN BlockCasters bag. Two casters whose
+        /// bags had shrunk to 3 entries could form a "majority" of 2 between themselves and commit a
+        /// block the other three casters never agreed to — the local-quorum split-brain from the
+        /// mainnet fork report, and the mechanism behind testnet 912,064. The denominator is now at
+        /// least <see cref="CasterDiscoveryService.MaxCasters"/>, so a quorum is always a majority of
+        /// the FULL pool (3 of 5): two disjoint majorities cannot exist, so two pools cannot both
+        /// produce. Cost: fewer than 3 live, agreeing casters halts production instead of forking —
+        /// eviction + promotion refills the pool from candidates, and seed bootstrap (exempt here,
+        /// its 2-of-3 seed agreement is its own rule) covers a dead network. Pure, unit-tested.
+        /// </summary>
+        internal static int LegacyQuorumDenominator(int bagCount) => LegacyQuorumDenominator(bagCount, Globals.IsBootstrapMode);
+
+        public static int LegacyQuorumDenominator(int bagCount, bool bootstrapMode)
+            => bootstrapMode ? bagCount : Math.Max(bagCount, CasterDiscoveryService.MaxCasters);
 
         private static async Task<bool> WaitForCasterReadiness()
         {

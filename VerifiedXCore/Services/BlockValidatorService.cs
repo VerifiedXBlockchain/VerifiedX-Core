@@ -529,6 +529,25 @@ namespace VerifiedXCore.Services
                             return result;
                         }
                     }
+                    else if (!blockDownloads
+                             && !ForkRecoveryUtility.IsInDownloadPhase
+                             && !Globals.IsResyncing
+                             && !Globals.IsBootstrapMode
+                             && Globals.IsChainSynced
+                             && block.Height == Globals.LastBlock.Height + 1)
+                    {
+                        // SPLIT-GUARD: the "agreement still pending → allow through" window is closed for
+                        // LIVE tip commits. Every legitimate caster commit publishes the agreed/attested
+                        // hash first (CommitCasterBlockPostAgreementAsync, and the attested accept paths
+                        // in ReceiveConfirmedBlock). A live block reaching here with no agreed hash is a
+                        // block this caster never agreed to — committing it is how a caster ends up on
+                        // its own branch. Downloads, recovery redownload, resync and bootstrap are exempt.
+                        LogUtility.Log(
+                            $"[ValidateBlock] CASTER-HASH-PENDING: refusing live commit of block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} — no caster-agreed hash for this height yet.",
+                            "BlockValidatorService");
+                        DbContext.Rollback("BlockValidatorService.ValidateBlock()-casterHashPending");
+                        return result;
+                    }
                 }
 
                 // SAFETY: Enforce strict height continuity — no gaps allowed.

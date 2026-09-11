@@ -1111,28 +1111,30 @@ namespace VerifiedXCore.Controllers
                 // causing phantom mismatches and infinite HASHSYNC loops.
                 
                 // 1. If this is the current committed block, return Globals.LastBlock directly
+                // SPLIT-GUARD: `Committed` tells validators' commit gate whether this hash is our
+                // committed chain (cases 1-2) or only a round draft (case 3). Additive field.
                 if (blockHeight == Globals.LastBlock.Height && !string.IsNullOrEmpty(Globals.LastBlock.Hash))
                 {
-                    var result = new { Hash = Globals.LastBlock.Hash, Validator = Globals.LastBlock.Validator, Height = blockHeight };
+                    var result = new { Hash = Globals.LastBlock.Hash, Validator = Globals.LastBlock.Validator, Height = blockHeight, Committed = true };
                     return Ok(JsonConvert.SerializeObject(result));
                 }
-                
+
                 // 2. If this is a past block, look it up from the actual blockchain database
                 if (blockHeight < Globals.LastBlock.Height)
                 {
                     var block = BlockchainData.GetBlockByHeight(blockHeight);
                     if (block != null && !string.IsNullOrEmpty(block.Hash))
                     {
-                        var result = new { Hash = block.Hash, Validator = block.Validator, Height = blockHeight };
+                        var result = new { Hash = block.Hash, Validator = block.Validator, Height = blockHeight, Committed = true };
                         return Ok(JsonConvert.SerializeObject(result));
                     }
                 }
-                
+
                 // 3. Only for FUTURE blocks (being crafted), use CasterRoundDict
-                if (blockHeight > Globals.LastBlock.Height && 
+                if (blockHeight > Globals.LastBlock.Height &&
                     Globals.CasterRoundDict.TryGetValue(blockHeight, out var round) && round?.Block != null)
                 {
-                    var result = new { Hash = round.Block.Hash, Validator = round.Block.Validator, Height = blockHeight };
+                    var result = new { Hash = round.Block.Hash, Validator = round.Block.Validator, Height = blockHeight, Committed = false };
                     return Ok(JsonConvert.SerializeObject(result));
                 }
                 

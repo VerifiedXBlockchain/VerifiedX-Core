@@ -588,6 +588,12 @@ namespace VerifiedXCore.P2P
                         var nextHeight = Globals.LastBlock.Height + 1;
                         var currentHeight = nextBlock.Height;
 
+                        // SPLIT-GUARD: validator-to-validator gossip of a live tip+1 block is the second
+                        // first-write-wins path. Same rule as message 7: ≥2 casters must vouch for the hash.
+                        if (currentHeight == nextHeight
+                            && !await ValidatorCommitGate.ConfirmAsync(nextBlock, IP, "P2PValidatorServer.ReceiveBlockVal"))
+                            return false;
+
                         if (currentHeight >= nextHeight)
                         {
                             // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list

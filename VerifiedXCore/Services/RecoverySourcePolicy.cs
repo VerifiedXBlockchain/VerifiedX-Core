@@ -118,6 +118,9 @@ namespace VerifiedXCore.Services
                         peer.IsBanned = false;
                         peer.IsPermaBanned = false;
                     }
+                    // A majority source may sit under connect-failure / lag-eviction backoff from
+                    // the churn fix; recovery must be able to dial it regardless.
+                    PeerConnectionBackoff.Clear(ip);
                     _ = P2PClient.ManualConnectToPeers(peer);
                 }
 

@@ -517,7 +517,7 @@ namespace VerifiedXCore.Nodes
                     _ = FailedToReachConsensus(data);
                     break;
                 case "7":
-                    _ = ReceiveConfirmedBlock(data);
+                    _ = ReceiveConfirmedBlock(data, ipAddress);
                     break;
                 case "FC":
                     _ = ReceiveForkCorrection(data, ipAddress);
@@ -621,7 +621,7 @@ namespace VerifiedXCore.Nodes
         }
 
         //7
-        public static async Task ReceiveConfirmedBlock(string data)
+        public static async Task ReceiveConfirmedBlock(string data, string? senderIp = null)
         {
             if (string.IsNullOrEmpty(data)) return;
 
@@ -632,6 +632,15 @@ namespace VerifiedXCore.Nodes
             var lastBlockHeight = Globals.LastBlock.Height;
             if (lastBlockHeight < nextBlock.Height)
             {
+                // SPLIT-GUARD: a non-caster validator commits a live tip+1 block only once ≥2 distinct
+                // casters vouch for exactly this hash (delivery or committed GetBlockHash). First-write-
+                // wins on a single peer's push is what stranded four validators at testnet 912,064.
+                if (!Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1)
+                {
+                    if (!await ValidatorCommitGate.ConfirmAsync(nextBlock, senderIp, "ValidatorNode.ReceiveConfirmedBlock"))
+                        return;
+                }
+
                 string? agreedHashForGate = null;
                 Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
 
