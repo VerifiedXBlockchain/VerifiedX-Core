@@ -1406,7 +1406,13 @@ namespace VerifiedXCore.Services
                     if ((lastBlock.Height - 5) > highestReportedBlock?.NodeHeight)
                         continue;
 
-                    if((lastBlock.Timestamp >= currentTimestamp || Globals.IsTestNet || Globals.IsBlockCaster) && (lastBlock.Height + 2 >= highestReportedBlock?.NodeHeight))
+                    // Coordinated cold start on MAINNET: the chain is halted so the tip is hours old,
+                    // IsTestNet is false, and BlockCasters is empty this early in startup (IsBlockCaster
+                    // false). If leftover peers are still online and reporting a height, the no-peer
+                    // exit above never fires either, so a seed spun here forever and never became
+                    // IsChainSynced — which stall detection requires — so bootstrap never started.
+                    // A seed caster at (or within 2 of) the highest reported height IS synced.
+                    if((lastBlock.Timestamp >= currentTimestamp || Globals.IsTestNet || Globals.IsBlockCaster || Globals.IsLocalBootstrapCaster) && (lastBlock.Height + 2 >= highestReportedBlock?.NodeHeight))
                     {
                         DateTime endTime = DateTime.UtcNow;
                         ConsoleWriterService.Output($"Block downloads finished on: {endTime.ToLocalTime()}");
