@@ -288,11 +288,12 @@ namespace VerifiedXCore.P2P
                 return;
 
             var url = "http://" + peer.PeerIP + ":" + Globals.Port + "/blockchain";
+            HubConnection? hubConnection = null;
             try
             {
                 if (!ConnectLock.TryAdd(url, true))
                     return;
-                var hubConnection = new HubConnectionBuilder()
+                hubConnection = new HubConnectionBuilder()
                        .WithUrl(url, options =>
                        {
 
@@ -392,13 +393,20 @@ namespace VerifiedXCore.P2P
                     await node.Connection.DisposeAsync();
                 }                                
             }
-            catch 
+            catch
             {
                 Globals.SkipPeers.TryAdd(peer.PeerIP, 0);
                 peer.FailCount += 1;
                 if (peer.FailCount > 4)
                     peer.IsOutgoing = false;
                 Peers.GetAll()?.UpdateSafe(peer);
+
+                // LEAK-FIX: a failed StartAsync left the HubConnection (and its HttpClient / sockets)
+                // undisposed on every failed dial.
+                if (hubConnection != null)
+                {
+                    try { await hubConnection.DisposeAsync(); } catch { }
+                }
             }
             finally
             {
@@ -420,10 +428,15 @@ namespace VerifiedXCore.P2P
             // that peers report back to us (our own IP as seen by them). Including them in the
             // skip set was incorrectly preventing connections to legitimate peers whose IP happened
             // to match an entry in ReportedIPs.
+            // CHURN-FIX: peers evicted for lagging (or under connect-failure backoff) are excluded in
+            // BOTH passes below, so a node dropped by the height check is not re-dialed 10s later.
+            var cooldownIPs = PeerConnectionBackoff.BlockedIPs();
+
             var SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.ReportedIPs.Keys)
-                .Union(Globals.SkipPeers.Keys));
+                .Union(Globals.SkipPeers.Keys)
+                .Union(cooldownIPs));
 
             Random rnd = new Random();
             var newPeers = peerDB.Find(x => x.IsOutgoing == true).ToArray()
@@ -439,7 +452,8 @@ namespace VerifiedXCore.P2P
             if(!newPeers.Any())
             {
                 SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
-                .Union(Globals.BannedIPs.Keys));
+                .Union(Globals.BannedIPs.Keys)
+                .Union(cooldownIPs));
 
                 newPeers = peerDB.Find(x => x.IsOutgoing == true).ToArray()
                 .Where(x => !SkipIPs.Contains(x.PeerIP))

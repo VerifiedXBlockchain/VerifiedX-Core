@@ -1138,7 +1138,13 @@ namespace VerifiedXCore
                     foreach (var node in Globals.Nodes.Values)
                     {
                         if (node.NodeHeight < MaxHeight - 3)
+                        {
+                            // CHURN-FIX: remember the eviction so ConnectToPeers does not re-dial this
+                            // same lagging node 10 seconds later (a -1 height means the probe failed,
+                            // which gets a shorter cooldown than confirmed lag).
+                            PeerConnectionBackoff.MarkLagEvicted(node.NodeIP, probeFailed: node.NodeHeight < 0);
                             await P2PClient.RemoveNode(node);
+                        }
                     }
 
                     DebugUtility.WriteToDebugFile("debug.txt", await StaticVariableUtility.GetStaticVars());

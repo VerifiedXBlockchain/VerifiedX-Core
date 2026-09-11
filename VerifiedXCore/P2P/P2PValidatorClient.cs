@@ -42,6 +42,9 @@ namespace VerifiedXCore.P2P
         /// </summary>
         private const int MAX_FAIL_COUNT_FOR_CONNECT = 200;
 
+        /// <summary>Connect ceiling exposed for the on-chain rehabilitation clamp in ValidatorService.</summary>
+        public const int MaxFailCountForConnect = MAX_FAIL_COUNT_FOR_CONNECT;
+
         /// <summary>
         /// Peers with FailCount at or above this value get demoted (IsValidator = false).
         /// This prevents them from being selected at all until re-discovered on-chain.
@@ -321,10 +324,30 @@ namespace VerifiedXCore.P2P
             }
         }
 
+        /// <summary>
+        /// "HttpRequestException: An error occurred while sending the request." says nothing on its own;
+        /// the socket-level cause (connection refused / reset / response ended prematurely) lives in the
+        /// inner exception chain. Append it so CONNECT-FAIL lines are actionable.
+        /// </summary>
+        internal static string DescribeInnerException(Exception ex)
+        {
+            var parts = new List<string>();
+            var inner = ex.InnerException;
+            var depth = 0;
+            while (inner != null && depth < 4)
+            {
+                parts.Add($"{inner.GetType().Name}: {inner.Message}");
+                inner = inner.InnerException;
+                depth++;
+            }
+            return parts.Count == 0 ? string.Empty : " <- " + string.Join(" <- ", parts);
+        }
+
         private static ConcurrentDictionary<string, bool> ConnectLock = new ConcurrentDictionary<string, bool>();
         private static async Task Connect(Peers peer)
         {
             var url = "http://" + peer.PeerIP.Replace("::ffff:", "") + ":" + Globals.ValPort + "/consensus";
+            HubConnection? hubConnection = null;
             try
             {
                 if (!ConnectLock.TryAdd(url, true))
@@ -340,7 +363,7 @@ namespace VerifiedXCore.P2P
                 var nonce = GenerateSecureNonce();
                 var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey + ":" + nonce);
 
-                var hubConnection = new HubConnectionBuilder()
+                hubConnection = new HubConnectionBuilder()
                     .WithUrl(url, options =>
                     {
                         options.Headers.Add("address", validator.Address);
@@ -383,6 +406,9 @@ namespace VerifiedXCore.P2P
                 if (!await VerifyServerConsensusVersionAsync(hubConnection, IPAddress))
                 {
                     Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    // CHURN-FIX: an old-binary peer was being fully handshaked and dropped every few
+                    // minutes; keep it off the dial list for a while instead.
+                    PeerConnectionBackoff.MarkIncompatible(peer.PeerIP);
                     try { await hubConnection.DisposeAsync(); } catch { }
                     return;
                 }
@@ -424,6 +450,7 @@ namespace VerifiedXCore.P2P
                     ConsoleWriterService.OutputSameLine($"Connected to Validators {Globals.ValidatorNodes.Count}/{Globals.MaxValPeers}");
                     peer.IsOutgoing = true;
                     peer.FailCount = 0; //peer responded. Reset fail count
+                    PeerConnectionBackoff.Clear(peer.PeerIP);
                     Peers.GetAll()?.UpdateSafe(peer);
                 }
                 else
@@ -442,11 +469,22 @@ namespace VerifiedXCore.P2P
                 if (peer.FailCount <= FAIL_LOG_THROTTLE_AFTER || peer.FailCount % FAIL_LOG_THROTTLE_INTERVAL == 0)
                 {
                     LogUtility.Log(
-                        $"CONNECT-FAIL: Validator connection to {peer.PeerIP} failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                        $"CONNECT-FAIL: Validator connection to {peer.PeerIP} failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}" +
+                        $"{DescribeInnerException(ex)}",
                         "P2PValidatorClient.Connect");
                 }
 
+                // LEAK-FIX: a failed StartAsync left the HubConnection (and its HttpClient / sockets)
+                // undisposed on every failed dial — thousands per day on a node stuck below target.
+                if (hubConnection != null)
+                {
+                    try { await hubConnection.DisposeAsync(); } catch { }
+                }
+
                 Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                // CHURN-FIX: exponential dial backoff (30s, 60s, 120s ... 10 min) that survives the
+                // SkipValPeers.Clear() in ConnectToValidators.
+                PeerConnectionBackoff.MarkConnectFailure(peer.PeerIP, peer.FailCount);
 
                 if (peer.FailCount > 600)
                     peer.IsOutgoing = false;
@@ -483,10 +521,14 @@ namespace VerifiedXCore.P2P
             //Force unban quicker
             await BanService.RunUnban();
 
+            // CHURN-FIX: lag-evicted, backing-off and incompatible peers are excluded in both passes.
+            var cooldownIPs = PeerConnectionBackoff.BlockedIPs();
+
             var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
+                .Union(Globals.ReportedIPs.Keys)
+                .Union(cooldownIPs));
 
             var connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
 
@@ -518,7 +560,8 @@ namespace VerifiedXCore.P2P
                 SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
+                .Union(Globals.ReportedIPs.Keys)
+                .Union(cooldownIPs));
 
                 connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
 
@@ -651,6 +694,7 @@ namespace VerifiedXCore.P2P
         public static async Task ConnectBlockcaster(Peers peer)
         {
             var url = "http://" + peer.PeerIP.Replace("::ffff:", "") + ":" + Globals.ValPort + "/blockcaster";
+            HubConnection? hubConnection = null;
             try
             {
                 if (!ConnectBlockcasterLock.TryAdd(url, true))
@@ -666,7 +710,7 @@ namespace VerifiedXCore.P2P
                 var nonce = GenerateSecureNonce();
                 var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey + ":" + nonce);
 
-                var hubConnection = new HubConnectionBuilder()
+                hubConnection = new HubConnectionBuilder()
                     .WithUrl(url, options =>
                     {
                         options.Headers.Add("address", validator.Address);
@@ -706,6 +750,9 @@ namespace VerifiedXCore.P2P
                 if (!await VerifyServerConsensusVersionAsync(hubConnection, IPAddress))
                 {
                     Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);
+                    // CHURN-FIX: an old-binary peer was being fully handshaked and dropped every few
+                    // minutes; keep it off the dial list for a while instead.
+                    PeerConnectionBackoff.MarkIncompatible(peer.PeerIP);
                     try { await hubConnection.DisposeAsync(); } catch { }
                     return;
                 }
@@ -765,8 +812,15 @@ namespace VerifiedXCore.P2P
                 if (peer.FailCount <= FAIL_LOG_THROTTLE_AFTER || peer.FailCount % FAIL_LOG_THROTTLE_INTERVAL == 0)
                 {
                     LogUtility.Log(
-                        $"CONNECT-CASTER-FAIL: Blockcaster connection to {peer.PeerIP} ({url}) failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}",
+                        $"CONNECT-CASTER-FAIL: Blockcaster connection to {peer.PeerIP} ({url}) failed (FailCount={peer.FailCount}): {ex.GetType().Name}: {ex.Message}" +
+                        $"{DescribeInnerException(ex)}",
                         "P2PValidatorClient.ConnectBlockcaster");
+                }
+
+                // LEAK-FIX: dispose the HubConnection whose StartAsync failed.
+                if (hubConnection != null)
+                {
+                    try { await hubConnection.DisposeAsync(); } catch { }
                 }
 
                 Globals.SkipValPeers.TryAdd(peer.PeerIP, 0);

@@ -117,10 +117,12 @@ namespace VerifiedXCore.Services
                                 var existingPeer = peerDB.FindOne(x => x.PeerIP == cleanIP);
                                 if (existingPeer != null)
                                 {
-                                    // Reset fail count for known on-chain validators
-                                    if (existingPeer.FailCount > 0 || !existingPeer.IsOutgoing)
+                                    // CHURN-FIX: re-enable known on-chain validators, but do NOT zero
+                                    // FailCount here — this runs every 10s and was erasing the backoff
+                                    // signal. FailCount is reset only by a successful connection.
+                                    if (!existingPeer.IsOutgoing || !existingPeer.IsValidator ||
+                                        string.IsNullOrEmpty(existingPeer.ValidatorAddress))
                                     {
-                                        existingPeer.FailCount = 0;
                                         existingPeer.IsOutgoing = true;
                                         existingPeer.IsValidator = true;
                                         if (string.IsNullOrEmpty(existingPeer.ValidatorAddress))

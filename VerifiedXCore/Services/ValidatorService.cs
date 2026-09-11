@@ -577,21 +577,24 @@ namespace VerifiedXCore.Services
         /// No gossip trust gates, rate limits, or cross-validation needed since the data
         /// comes from committed, validated blocks.
         /// </summary>
-        private static void PopulateValidatorPeersFromBlocks()
+        /// <returns>True when at least one previously-unknown validator peer was inserted (or a demoted
+        /// one was re-enabled), so the caller can dial immediately instead of waiting out its backoff.</returns>
+        private static bool PopulateValidatorPeersFromBlocks()
         {
+            bool newPeerAvailable = false;
             try
             {
                 if (!Globals.IsChainSynced)
-                    return;
+                    return false;
 
                 var activeValidators = VBTCValidatorRegistry.GetActiveValidators();
                 if (activeValidators == null || !activeValidators.Any())
-                    return;
+                    return false;
 
                 var myIP = Globals.ReportedIP?.Replace("::ffff:", "") ?? "";
                 var peerDB = Peers.GetAll();
                 if (peerDB == null)
-                    return;
+                    return false;
 
                 int upsertedCount = 0;
 
@@ -629,26 +632,31 @@ namespace VerifiedXCore.Services
                             if (!string.IsNullOrEmpty(val.FrostPublicKey))
                                 existingPeer.ValidatorPublicKey = val.FrostPublicKey;
                             needsUpdate = true;
+                            newPeerAvailable = true;
                         }
 
-                        // STALE-PEER-FIX: Reset FailCount for validators that are actively on-chain.
-                        // This is the recovery mechanism: when a validator comes back online and sends
-                        // a heartbeat TX that gets included in a block, we detect it here and reset
-                        // their FailCount so the connection loop will try them again.
-                        if (existingPeer.FailCount > 0)
+                        if (!existingPeer.IsOutgoing)
                         {
-                            var previousFailCount = existingPeer.FailCount;
-                            existingPeer.FailCount = 0;
                             existingPeer.IsOutgoing = true;
                             needsUpdate = true;
+                        }
 
-                            if (previousFailCount >= 50)
-                            {
-                                LogUtility.Log(
-                                    $"PEER-REHABILITATED: Reset FailCount for {cleanIP} (was {previousFailCount}) — " +
-                                    $"validator {val.ValidatorAddress} found active on-chain.",
-                                    "ValidatorService.PopulateValidatorPeersFromBlocks");
-                            }
+                        // CHURN-FIX: this used to zero FailCount on every 15s pass, which meant an
+                        // unreachable validator was re-dialed every 30s forever with FailCount stuck at 1
+                        // and the MAX_FAIL_COUNT_FOR_CONNECT gate could never engage. FailCount is now
+                        // only reset by a successful connection (P2PValidatorClient.Connect). A peer that
+                        // has hit the ceiling but is still heartbeating on-chain is clamped just below it,
+                        // so it stays eligible at the maximum backoff instead of being retried instantly.
+                        if (existingPeer.FailCount >= P2PValidatorClient.MaxFailCountForConnect)
+                        {
+                            var previousFailCount = existingPeer.FailCount;
+                            existingPeer.FailCount = P2PValidatorClient.MaxFailCountForConnect - 1;
+                            needsUpdate = true;
+
+                            LogUtility.Log(
+                                $"PEER-REHABILITATED: FailCount for {cleanIP} clamped to {existingPeer.FailCount} (was {previousFailCount}) — " +
+                                $"validator {val.ValidatorAddress} found active on-chain; will retry at max backoff.",
+                                "ValidatorService.PopulateValidatorPeersFromBlocks");
                         }
 
                         if (needsUpdate)
@@ -672,6 +680,7 @@ namespace VerifiedXCore.Services
                         };
                         peerDB.InsertSafe(newPeer);
                         upsertedCount++;
+                        newPeerAvailable = true;
                     }
                 }
 
@@ -690,6 +699,27 @@ namespace VerifiedXCore.Services
                     $"Error populating validator peers from blocks: {ex.Message}",
                     "ValidatorService.PopulateValidatorPeersFromBlocks");
             }
+
+            return newPeerAvailable;
+        }
+
+        // CHURN-FIX: throttle state for the validator connect routine. When the reachable validator
+        // population is smaller than TARGET_VAL_CONNECTIONS the old loop re-ran ConnectToValidators
+        // every 15s forever (thousands of log lines and failed dials per day per node). Now each pass
+        // that makes no progress doubles the wait before the next attempt, capped at 5 minutes. A drop
+        // in connected count or a newly discovered validator peer resets the wait to zero.
+        private const int VAL_CONNECT_MAX_BACKOFF_MS = 5 * 60 * 1000;
+        private static long _nextValConnectAttemptMs = 0;
+        private static int _valConnectNoProgressStreak = 0;
+        private static int _lastValConnectedCount = 0;
+
+        /// <summary>Milliseconds to wait after a validator connect pass that made no progress.</summary>
+        internal static long ValConnectBackoffMs(int noProgressStreak)
+        {
+            if (noProgressStreak <= 0)
+                return 0;
+            var exponent = Math.Clamp(noProgressStreak - 1, 0, 5); // 30s, 60s, 120s, 240s, 300s cap
+            return Math.Min(30_000L << exponent, VAL_CONNECT_MAX_BACKOFF_MS);
         }
 
         internal static async Task StartupValidators()
@@ -759,23 +789,51 @@ namespace VerifiedXCore.Services
                 {
                     // Populate peer DB from on-chain validator registry (block-based discovery).
                     // This runs every loop iteration so new validators from new blocks get picked up.
-                    PopulateValidatorPeersFromBlocks();
+                    var newPeerDiscovered = PopulateValidatorPeersFromBlocks();
 
                     var ConnectedCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
                     if (ConnectedCount < TARGET_VAL_CONNECTIONS)
                     {
-                        await P2PValidatorClient.ConnectToValidators();
+                        var nowMs = Environment.TickCount64;
+                        var lostConnections = ConnectedCount < _lastValConnectedCount;
+                        var attemptDue = nowMs >= _nextValConnectAttemptMs || lostConnections || newPeerDiscovered;
 
-                        // Log connection progress for diagnostics
-                        var newCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
-                        if (newCount < TARGET_VAL_CONNECTIONS)
+                        if (attemptDue)
                         {
-                            LogUtility.Log(
-                                $"VAL-CONNECT: {newCount}/{TARGET_VAL_CONNECTIONS} validator connections " +
-                                $"(target not yet met, will retry next loop)",
-                                "ValidatorService.StartupValidators()");
+                            await P2PValidatorClient.ConnectToValidators();
+
+                            var newCount = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).Count();
+                            if (newCount < TARGET_VAL_CONNECTIONS)
+                            {
+                                if (newCount > ConnectedCount)
+                                    _valConnectNoProgressStreak = 0;
+                                else
+                                    _valConnectNoProgressStreak++;
+
+                                var backoffMs = ValConnectBackoffMs(_valConnectNoProgressStreak);
+                                _nextValConnectAttemptMs = Environment.TickCount64 + backoffMs;
+
+                                LogUtility.Log(
+                                    $"VAL-CONNECT: {newCount}/{TARGET_VAL_CONNECTIONS} validator connections " +
+                                    $"(target not yet met, next attempt in {backoffMs / 1000}s)",
+                                    "ValidatorService.StartupValidators()");
+                            }
+                            else
+                            {
+                                _valConnectNoProgressStreak = 0;
+                                _nextValConnectAttemptMs = 0;
+                            }
+
+                            ConnectedCount = newCount;
                         }
                     }
+                    else
+                    {
+                        _valConnectNoProgressStreak = 0;
+                        _nextValConnectAttemptMs = 0;
+                    }
+
+                    _lastValConnectedCount = ConnectedCount;
 
                     if(Globals.BlockCasters.Any())
                     {
@@ -1690,7 +1748,12 @@ namespace VerifiedXCore.Services
                     foreach (var node in Globals.ValidatorNodes.Values)
                     {
                         if (node.NodeHeight < MaxHeight - 3)
+                        {
+                            // CHURN-FIX: cooldown the evicted validator so ConnectToValidators does not
+                            // rebuild the same SignalR connection on its next pass.
+                            PeerConnectionBackoff.MarkLagEvicted(node.NodeIP, probeFailed: node.NodeHeight < 0);
                             await P2PValidatorClient.RemoveNode(node);
+                        }
                     }
 
                     // Wave 5: hash-based fork detection for validators (previously height-only).
