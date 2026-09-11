@@ -70,6 +70,7 @@ namespace VerifiedXCore.Services
             new SnapColl { Tag = "vbtcwd", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS },
             new SnapColl { Tag = "bridgelocks", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = VBTCBridgeLockState.CollectionName },
             new SnapColl { Tag = "bridgeexits", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = VBTCBridgeBtcExitState.CollectionName },
+            new SnapColl { Tag = "bridgeburns", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = VBTCBridgeConsumedBurn.CollectionName },
             new SnapColl { Tag = "vbtcv2c", SourceDb = () => DbContext.DB_vBTC, SourceColl = DbContext.RSRV_VBTC_V2_CONTRACTS },
             new SnapColl { Tag = "vbtcv2x", SourceDb = () => DbContext.DB_vBTC, SourceColl = DbContext.RSRV_VBTC_V2_CANCELLATIONS },
             // Shielded pool chain state (~229 KB today). CommitmentRecord mutates (IsSpent), so

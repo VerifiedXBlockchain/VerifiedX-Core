@@ -3193,6 +3193,9 @@ namespace VerifiedXCore.Data
                     BridgeLockRecord.FinalizeFromChainUnlockIfPending(alloc.LockId);
                 }
 
+                // Burn hashes are single-use: record consumption so no later unlock can reuse it.
+                VBTCBridgeConsumedBurn.TryMarkConsumed(exitBurnTxHash, "POOL_UNLOCK", tx.Hash, tx.Height);
+
                 SCLogUtility.Log($"ApplyVBTCBridgePoolUnlock: totalAmount={totalAmount.Value} BTC, dest={vfxDestinationAddress}, allocations={allocations.Count}, exitBurn={exitBurnTxHash}",
                     "StateData.ApplyVBTCBridgePoolUnlock()");
             }

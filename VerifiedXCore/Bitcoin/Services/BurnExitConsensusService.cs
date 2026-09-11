@@ -300,7 +300,11 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 5: Broadcast confirmation (sign the vote so TryVerifyVotes can validate it)
             var burnType = BurnTypeString(record.ExitType);
             var timestamp = TimeUtil.GetTime();
-            var voteSig = SignVoteMessage(baseBurnTxHash, burnType, timestamp);
+            // Bound vote: commits to the burned amount and payout destination so the consensus
+            // validator can refuse an unlock that pays a different amount/address than was burned.
+            var voteAmountSats = (long)(record.Amount * 100_000_000M);
+            var voteDestination = record.ExitType == BurnExitType.VfxPoolUnlock ? record.VfxDestinationAddress : record.BtcDestination;
+            var voteSig = SignVoteMessage(baseBurnTxHash, burnType, voteAmountSats, voteDestination, timestamp);
             var confirmation = new BurnExitConfirmation
             {
                 BaseBurnTxHash = baseBurnTxHash,
@@ -1036,7 +1040,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Sign a vote message for a burn exit confirmation using this node's validator key.
         /// Returns empty string on failure.
         /// </summary>
-        private static string SignVoteMessage(string baseBurnTxHash, string burnType, long timestamp)
+        private static string SignVoteMessage(string baseBurnTxHash, string burnType, long amountSats, string destination, long timestamp)
         {
             try
             {
@@ -1045,7 +1049,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var privKey = account.GetPrivKey;
                 var pubKey = account.PublicKey;
                 if (privKey == null) return "";
-                var msg = BridgeCasterConsensus.BuildVoteMessage(baseBurnTxHash, burnType, timestamp);
+                var msg = BridgeCasterConsensus.BuildBoundVoteMessage(baseBurnTxHash, burnType, amountSats, destination, timestamp);
                 var sig = VerifiedXCore.Services.SignatureService.CreateSignature(msg, privKey, pubKey);
                 return sig == "ERROR" ? "" : sig;
             }

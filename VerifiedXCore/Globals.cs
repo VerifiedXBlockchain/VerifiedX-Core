@@ -176,6 +176,16 @@ namespace VerifiedXCore
         /// Program/WardenService.
         /// </summary>
         public static long V2TransferMultiHeight = 999_999_999_999L;
+
+        /// <summary>
+        /// Bridge burn-binding hardening (security fix): at/after this height, bridge unlock /
+        /// pool-unlock / exit-to-BTC TXs require caster votes from the committee governing the block
+        /// height that also bind the burned amount + destination, the Base receipt must carry the
+        /// matching burn event on the bridge contract, burn hashes are single-use, and allocations
+        /// are validated against lock state. Before it, legacy (unbound) verification applies so
+        /// historical blocks stay valid.
+        /// </summary>
+        public static long BridgeBurnBindingHeight = 999_999_999_999L;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds

@@ -213,7 +213,104 @@ namespace VerifiedXCore.Bitcoin.Services
             return 2;
         }
 
-        /// <summary>Best-effort: confirms a Base tx receipt exists and succeeded.</summary>
+        public sealed class BurnEventInfo
+        {
+            public long AmountSats { get; set; }
+            public string Destination { get; set; } = "";
+            public string Burner { get; set; } = "";
+        }
+
+        private static string NormalizeTxHash(string txHash)
+        {
+            var h = txHash.Trim();
+            return h.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? h : "0x" + h;
+        }
+
+        /// <summary>
+        /// Confirms a Base tx succeeded AND was sent to the bridge contract. Unlike
+        /// <see cref="HasSuccessfulReceiptAsync"/>, an arbitrary successful transfer does not pass.
+        /// </summary>
+        public static async Task<(bool Ok, string Reason)> HasSuccessfulReceiptToContractAsync(string txHash)
+        {
+            if (!IsBridgeConfigured) return (false, "Bridge not configured");
+            if (string.IsNullOrWhiteSpace(txHash)) return (false, "Empty tx hash");
+            var h = NormalizeTxHash(txHash);
+            string lastErr = "no RPC reachable";
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var web3 = new Web3(url);
+                    var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
+                    if (r == null) { lastErr = "receipt not found"; continue; }
+                    if (r.Status?.Value != 1) return (false, "Base transaction did not succeed");
+                    if (!string.Equals(r.To, ContractAddress, StringComparison.OrdinalIgnoreCase))
+                        return (false, "Base transaction was not sent to the bridge contract");
+                    return (true, "");
+                }
+                catch (Exception ex) { lastErr = ex.Message; }
+            }
+            return (false, $"Could not read Base receipt: {lastErr}");
+        }
+
+        /// <summary>
+        /// Reads the burn event from a Base receipt: the tx must have succeeded, been sent to the
+        /// bridge contract, and emitted exactly one VfxExitBurned (pool unlock) or BTCExitBurned
+        /// (BTC exit) event from the bridge contract. Returns the burned amount and destination so
+        /// the consensus validator can bind the unlock to what was actually burned.
+        /// </summary>
+        public static async Task<(bool Ok, BurnEventInfo? Info, string Reason)> TryGetBurnEventAsync(string txHash, bool vfxExit)
+        {
+            if (!IsBridgeConfigured) return (false, null, "Bridge not configured");
+            if (string.IsNullOrWhiteSpace(txHash)) return (false, null, "Empty tx hash");
+            var h = NormalizeTxHash(txHash);
+            string lastErr = "no RPC reachable";
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var web3 = new Web3(url);
+                    var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
+                    if (r == null) { lastErr = "receipt not found"; continue; }
+                    if (r.Status?.Value != 1) return (false, null, "Base transaction did not succeed");
+                    if (!string.Equals(r.To, ContractAddress, StringComparison.OrdinalIgnoreCase))
+                        return (false, null, "Base transaction was not sent to the bridge contract");
+
+                    BurnEventInfo? info = null;
+                    int matches = 0;
+                    if (vfxExit)
+                    {
+                        foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.VfxExitBurnedEventDTO>())
+                        {
+                            if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
+                            var amt = ev.Event.Amount;
+                            if (amt <= 0 || amt > long.MaxValue) return (false, null, "Burn amount out of range");
+                            matches++;
+                            info = new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.VfxDestinationAddress?.Trim() ?? "", Burner = ev.Event.Burner ?? "" };
+                        }
+                    }
+                    else
+                    {
+                        foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.BTCExitBurnedEventDTO>())
+                        {
+                            if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
+                            var amt = ev.Event.Amount;
+                            if (amt <= 0 || amt > long.MaxValue) return (false, null, "Burn amount out of range");
+                            matches++;
+                            info = new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.BtcDestination?.Trim() ?? "", Burner = ev.Event.Burner ?? "" };
+                        }
+                    }
+
+                    if (matches == 0) return (false, null, "No matching burn event emitted by the bridge contract");
+                    if (matches > 1) return (false, null, "Multiple burn events in one receipt");
+                    return (true, info, "");
+                }
+                catch (Exception ex) { lastErr = ex.Message; }
+            }
+            return (false, null, $"Could not read Base receipt: {lastErr}");
+        }
+
+        /// <summary>Best-effort: confirms a Base tx receipt exists and succeeded (legacy, pre-gate).</summary>
         public static async Task<bool> HasSuccessfulReceiptAsync(string txHash)
         {
             if (string.IsNullOrWhiteSpace(txHash)) return false;

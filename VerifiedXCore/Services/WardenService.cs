@@ -40,6 +40,7 @@ namespace VerifiedXCore.Services
                 Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
                 Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
                 Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy - old nodes reject multi-shaped TXs) */;
+                Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
             }
             else
             {
@@ -53,6 +54,7 @@ namespace VerifiedXCore.Services
                 Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
                 Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (same coordinated deploy as V2WithdrawalExpiryFixHeight) */;
                 Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy - old nodes reject multi-shaped TXs) */;
+                Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
             }
 
             Config.Config.EstablishConfigFile();

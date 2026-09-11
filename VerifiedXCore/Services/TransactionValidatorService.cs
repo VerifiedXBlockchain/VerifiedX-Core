@@ -3301,7 +3301,29 @@ namespace VerifiedXCore.Services
                     if (!IsValidEvmTxHash32(exitBurnTxHash))
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
-                    if (BaseBridgeService.IsBridgeConfigured)
+                    var unlockGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                    var unlockStrict = unlockGateHeight >= Globals.BridgeBurnBindingHeight;
+                    if (unlockStrict)
+                    {
+                        // Hardened: votes must come from the caster committee for this height; the
+                        // Base tx must be a successful call INTO the bridge contract; burn is single-use.
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "Bridge unlock requires CasterConsensusVotes array.");
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        var (votesOk, votesReason) = BridgeCasterConsensus.TryVerifyVotesFromCommittee(votes, exitBurnTxHash!.Trim(), "EXIT", unlockGateHeight);
+                        if (!votesOk)
+                            return (txResult, $"Caster consensus votes rejected for VBTCb unlock: {votesReason}");
+                        if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(exitBurnTxHash))
+                            return (txResult, "Exit burn transaction has already been consumed.");
+                        if (BaseBridgeService.IsBridgeConfigured)
+                        {
+                            var (rcptOk, rcptReason) = await BaseBridgeService.HasSuccessfulReceiptToContractAsync(exitBurnTxHash.Trim());
+                            if (!rcptOk)
+                                return (txResult, $"Exit burn transaction could not be verified on Base: {rcptReason}");
+                        }
+                    }
+                    else if (BaseBridgeService.IsBridgeConfigured)
                     {
                         var votesTok = jobj["CasterConsensusVotes"];
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
@@ -3377,17 +3399,53 @@ namespace VerifiedXCore.Services
                     if (allocations == null || allocations.Type != JTokenType.Array || !allocations.HasValues)
                         return (txResult, "Allocations array is required for bridge pool unlock.");
 
-                    if (BaseBridgeService.IsBridgeConfigured)
+                    // Height-gated hardening (BridgeBurnBindingHeight): votes must come from the caster
+                    // committee for this height and bind amount + destination; the Base burn must be a
+                    // real VfxExitBurned event on the bridge contract matching them; the burn hash is
+                    // single-use; allocations must be valid against current lock state.
+                    var poolGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                    var poolStrict = poolGateHeight >= Globals.BridgeBurnBindingHeight;
+                    var poolBurnHash = exitBurnTxHash!.Trim();
+
+                    if (poolStrict)
+                    {
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, poolBurnHash, "POOL_EXIT", totalAmountSats.Value, vfxDestAddr, poolGateHeight);
+                        if (!votesOk)
+                            return (txResult, $"Caster consensus votes rejected for pool unlock: {votesReason}");
+
+                        if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(poolBurnHash))
+                            return (txResult, "Exit burn transaction has already been consumed.");
+
+                        var (allocOk, allocReason) = ValidateBridgeAllocations(allocations, totalAmount.Value);
+                        if (!allocOk)
+                            return (txResult, $"Bridge pool unlock allocations invalid: {allocReason}");
+
+                        if (BaseBridgeService.IsBridgeConfigured)
+                        {
+                            var (evOk, ev, evReason) = await BaseBridgeService.TryGetBurnEventAsync(poolBurnHash, vfxExit: true);
+                            if (!evOk || ev == null)
+                                return (txResult, $"Exit burn transaction could not be verified on Base: {evReason}");
+                            if (ev.AmountSats != totalAmountSats.Value)
+                                return (txResult, "Exit burn amount does not match TotalAmountSats.");
+                            if (!string.Equals(ev.Destination, vfxDestAddr.Trim(), StringComparison.Ordinal))
+                                return (txResult, "Exit burn destination does not match VfxDestinationAddress.");
+                        }
+                    }
+                    else if (BaseBridgeService.IsBridgeConfigured)
                     {
                         var votesTok = jobj["CasterConsensusVotes"];
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
 
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnTxHash!.Trim(), "POOL_EXIT"))
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, poolBurnHash, "POOL_EXIT"))
                             return (txResult, "Caster consensus votes invalid or insufficient for pool unlock.");
 
-                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(exitBurnTxHash.Trim());
+                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(poolBurnHash);
                         if (!burnOk)
                             return (txResult, "Exit burn transaction could not be verified on Base.");
                     }
@@ -3438,15 +3496,54 @@ namespace VerifiedXCore.Services
                     if (VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash) != null)
                         return (txResult, "Duplicate Base burn transaction for bridge exit to BTC.");
 
-                    if (BaseBridgeService.IsBridgeConfigured)
+                    var exitGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                    var exitStrict = exitGateHeight >= Globals.BridgeBurnBindingHeight;
+                    var exitBurnHash = baseBurnTxHash.Trim();
+
+                    if (exitStrict)
+                    {
+                        // V3 payloads carry TotalAmount/TotalAmountSats + Allocations; legacy carries Amount/AmountSats.
+                        var exitTotal = jobj["TotalAmount"]?.ToObject<decimal?>() ?? amount.Value;
+                        var exitTotalSats = jobj["TotalAmountSats"]?.ToObject<long?>() ?? amountSats.Value;
+                        if ((long)(exitTotal * 100_000_000M) != exitTotalSats)
+                            return (txResult, "TotalAmountSats does not match TotalAmount for bridge exit to BTC.");
+
+                        var votesTok = jobj["CasterConsensusVotes"];
+                        if (votesTok == null || votesTok.Type != JTokenType.Array)
+                            return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
+                        var votes = votesTok.ToObject<List<CasterConsensusVote>>();
+                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight);
+                        if (!votesOk)
+                            return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
+
+                        var exitAllocs = jobj["Allocations"];
+                        if (exitAllocs != null && exitAllocs.Type == JTokenType.Array && exitAllocs.HasValues)
+                        {
+                            var (allocOk, allocReason) = ValidateBridgeAllocations(exitAllocs, exitTotal);
+                            if (!allocOk)
+                                return (txResult, $"Bridge exit to BTC allocations invalid: {allocReason}");
+                        }
+
+                        if (BaseBridgeService.IsBridgeConfigured)
+                        {
+                            var (evOk, ev, evReason) = await BaseBridgeService.TryGetBurnEventAsync(exitBurnHash, vfxExit: false);
+                            if (!evOk || ev == null)
+                                return (txResult, $"Base burn transaction could not be verified: {evReason}");
+                            if (ev.AmountSats != exitTotalSats)
+                                return (txResult, "Base burn amount does not match the exit amount.");
+                            if (!string.Equals(ev.Destination, btcDestination.Trim(), StringComparison.Ordinal))
+                                return (txResult, "Base burn destination does not match BtcDestination.");
+                        }
+                    }
+                    else if (BaseBridgeService.IsBridgeConfigured)
                     {
                         var votesTok = jobj["CasterConsensusVotes"];
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, baseBurnTxHash.Trim(), "BTC_EXIT"))
+                        if (votes == null || !BridgeCasterConsensus.TryVerifyVotes(votes, exitBurnHash, "BTC_EXIT"))
                             return (txResult, "Caster consensus votes invalid or insufficient for exit to BTC.");
-                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(baseBurnTxHash.Trim());
+                        var burnOk = await BaseBridgeService.HasSuccessfulReceiptAsync(exitBurnHash);
                         if (!burnOk)
                             return (txResult, "Base burn transaction could not be verified.");
                     }
@@ -3584,6 +3681,39 @@ namespace VerifiedXCore.Services
                 }
             }
 
+        }
+
+        /// <summary>
+        /// Validates a bridge allocation plan against current lock state: distinct known locks,
+        /// not unlocked/blacklisted, positive amounts within each lock's remaining balance, and a
+        /// sum equal to the declared total.
+        /// </summary>
+        private static (bool Ok, string Reason) ValidateBridgeAllocations(JToken? allocationsToken, decimal totalAmount)
+        {
+            List<PoolUnlockAllocation>? allocations;
+            try { allocations = allocationsToken?.ToObject<List<PoolUnlockAllocation>>(); }
+            catch (Exception ex) { return (false, $"unparseable allocations: {ex.Message}"); }
+
+            if (allocations == null || allocations.Count == 0) return (false, "no allocations");
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            decimal sum = 0M;
+            foreach (var a in allocations)
+            {
+                if (a == null || string.IsNullOrWhiteSpace(a.LockId)) return (false, "allocation missing LockId");
+                if (!seen.Add(a.LockId)) return (false, $"duplicate lock {a.LockId}");
+                if (a.UnlockAmount <= 0M) return (false, $"non-positive amount for lock {a.LockId}");
+                var rec = VBTCBridgeLockState.GetByLockId(a.LockId);
+                if (rec == null) return (false, $"unknown lock {a.LockId}");
+                if (rec.IsUnlocked) return (false, $"lock {a.LockId} already fully unlocked");
+                if (rec.IsBlacklisted) return (false, $"lock {a.LockId} is blacklisted");
+                if (!string.IsNullOrEmpty(a.SmartContractUID) && !string.Equals(a.SmartContractUID, rec.SmartContractUID, StringComparison.Ordinal))
+                    return (false, $"lock {a.LockId} contract mismatch");
+                if (a.UnlockAmount > rec.RemainingAmount + 0.00000001M)
+                    return (false, $"lock {a.LockId} has {rec.RemainingAmount} remaining, allocation asks {a.UnlockAmount}");
+                sum += a.UnlockAmount;
+            }
+            if (Math.Abs(sum - totalAmount) > 0.00000001M) return (false, $"allocation sum {sum} != total {totalAmount}");
+            return (true, "");
         }
 
         private static bool IsValidEvmTxHash32(string? h)

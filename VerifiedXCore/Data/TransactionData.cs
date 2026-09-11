@@ -379,7 +379,48 @@ namespace VerifiedXCore.Data
                 }
             }
 
+            // ===== POOL_UNLOCK MEMPOOL DUPLICATE DETECTION =====
+            // A Base burn is single-use; refuse a second pool unlock for the same ExitBurnTxHash.
+            if (transaction.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK)
+            {
+                try
+                {
+                    var newBurnHash = ExtractExitBurnTxHashFromPoolUnlockTx(transaction);
+                    if (!string.IsNullOrEmpty(newBurnHash))
+                    {
+                        var dup = TransactionPool.Find(x =>
+                                x.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
+                                x.Hash != transaction.Hash)
+                            .Any(x => string.Equals(ExtractExitBurnTxHashFromPoolUnlockTx(x), newBurnHash, StringComparison.OrdinalIgnoreCase));
+                        if (dup)
+                        {
+                            LogUtility.Log($"[Mempool] Rejecting POOL_UNLOCK {transaction.Hash}: duplicate ExitBurnTxHash {newBurnHash} already in mempool",
+                                "TransactionData.AddToPool()");
+                            return;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"[Mempool] POOL_UNLOCK conflict check error (allowing TX): {ex.Message}", "TransactionData.AddToPool()");
+                }
+            }
+
             await TransactionPool.InsertSafeAsync(transaction);
+        }
+
+        /// <summary>
+        /// Extract ExitBurnTxHash from a POOL_UNLOCK transaction's Data field.
+        /// </summary>
+        private static string ExtractExitBurnTxHashFromPoolUnlockTx(Transaction tx)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(tx.Data)) return "";
+                var obj = JObject.Parse(tx.Data);
+                return obj["ExitBurnTxHash"]?.ToString() ?? "";
+            }
+            catch { return ""; }
         }
 
         /// <summary>
@@ -913,6 +954,37 @@ namespace VerifiedXCore.Data
                                 }
                             }
 
+                            // ===== POOL_UNLOCK STALE/DUPLICATE EVICTION =====
+                            // (a) ExitBurnTxHash already consumed on-chain -> stale, evict
+                            // (b) Another POOL_UNLOCK with the same ExitBurnTxHash already approved in this batch -> first-wins
+                            if (!reject && tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK)
+                            {
+                                try
+                                {
+                                    var poolBurnHash = ExtractExitBurnTxHashFromPoolUnlockTx(tx);
+                                    if (!string.IsNullOrEmpty(poolBurnHash))
+                                    {
+                                        if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(poolBurnHash))
+                                        {
+                                            reject = true;
+                                            LogUtility.Log($"[ProcessTxPool] Evicting stale POOL_UNLOCK {tx.Hash}: ExitBurnTxHash {poolBurnHash} already consumed on-chain.",
+                                                "TransactionData.ProcessTxPool()");
+                                        }
+                                        else if (approvedMemPoolList.Any(a =>
+                                            a.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK &&
+                                            string.Equals(ExtractExitBurnTxHashFromPoolUnlockTx(a), poolBurnHash, StringComparison.OrdinalIgnoreCase)))
+                                        {
+                                            reject = true;
+                                            LogUtility.Log($"[ProcessTxPool] Evicting duplicate POOL_UNLOCK {tx.Hash}: ExitBurnTxHash {poolBurnHash} already in approved batch.",
+                                                "TransactionData.ProcessTxPool()");
+                                        }
+                                    }
+                                }
+                                catch (Exception poolChkEx)
+                                {
+                                    ErrorLogUtility.LogError($"[ProcessTxPool] POOL_UNLOCK stale check error: {poolChkEx.Message}", "TransactionData.ProcessTxPool()");
+                                }
+                            }
                             if (reject == false)
                             {
                                 // ZK-authorized private TXs (z2z, z2t) use PLONK sentinel signature
