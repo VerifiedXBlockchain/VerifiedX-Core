@@ -28,6 +28,7 @@ namespace VerifiedXCore.Nodes
         private static bool ActiveValidatorRequestDone = false;
         private static bool AlertValidatorsOfStatusDone = false;
         static SemaphoreSlim NotifyExplorerLock = new SemaphoreSlim(1, 1);
+        private static bool _explorerSilencedLogged = false;
         
         // HAL-16 Fix: Throttle concurrent broadcasts to prevent thread pool exhaustion
         // Limits to 5 concurrent broadcasts (50 max SignalR connections if 10 validators)
@@ -871,6 +872,27 @@ namespace VerifiedXCore.Nodes
                     {
                         await delay;
                         continue;
+                    }
+
+                    // STALL-RESOLVE: a stalled/recovering node deliberately goes silent toward the
+                    // explorer. An "alive" check-in from a node stranded on a dead fork is a lie —
+                    // it hides the fault. Going quiet lets operators see it drop off; the Health
+                    // endpoint (SyncState/StallSeconds/DivergenceHeight) explains why.
+                    if (Services.ForkDetectionService.IsStalled)
+                    {
+                        if (!_explorerSilencedLogged)
+                        {
+                            _explorerSilencedLogged = true;
+                            LogUtility.Log($"Explorer check-ins suspended: node is {Services.ForkDetectionService.SyncState} at height {Globals.LastBlock?.Height}. Resumes automatically once the chain advances.", "ValidatorNode.NotifyExplorer()");
+                            ConsoleWriterService.Output($"[Sync] Explorer check-ins suspended — node is {Services.ForkDetectionService.SyncState} at height {Globals.LastBlock?.Height}.");
+                        }
+                        await delay;
+                        continue;
+                    }
+                    if (_explorerSilencedLogged)
+                    {
+                        _explorerSilencedLogged = false;
+                        LogUtility.Log("Explorer check-ins resumed: chain is advancing again.", "ValidatorNode.NotifyExplorer()");
                     }
 
                     var account = AccountData.GetLocalValidator();

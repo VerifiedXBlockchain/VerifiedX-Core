@@ -95,6 +95,15 @@ namespace VerifiedXCore.Services
                             continue;
                         }
 
+                        // STALL-RESOLVE: no on-chain heartbeats while stranded. They cannot be mined
+                        // on a dead branch and, if the node peers with the live network, a heartbeat
+                        // built against forked state must not be broadcast as if we were healthy.
+                        if (ForkDetectionService.IsStalled)
+                        {
+                            await Task.Delay(TimeSpan.FromMinutes(1));
+                            continue;
+                        }
+
                         var currentBlock = Globals.LastBlock.Height;
                         var myValidator = VBTCValidatorRegistry.GetValidator(Globals.ValidatorAddress);
 

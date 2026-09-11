@@ -470,7 +470,10 @@ namespace VerifiedXCore
             && !IsDeparting
             && !Utilities.ForkRecoveryUtility.IsRecoveryInProgress
             && !Utilities.SnapshotRestoreUtility.IsRestoreRunning
-            && !Services.BlockValidatorService.GetProbationStatus().Active;
+            && !Services.BlockValidatorService.GetProbationStatus().Active
+            // STALL-RESOLVE: a node whose tip has not moved while the network is ahead is
+            // stranded on a dead branch — casters must not select it as a winner.
+            && !Services.ForkDetectionService.IsStalled;
 
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>

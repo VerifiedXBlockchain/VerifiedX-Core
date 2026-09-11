@@ -435,12 +435,14 @@ namespace VerifiedXCore.Controllers
                 return Ok(JsonConvert.SerializeObject(round.Block));
             }
 
-            // Wave 5: also serve COMMITTED blocks, windowed to tip−100 to bound the
-            // unauthenticated serving surface (deep history stays on the bulk GetAllBlocks path).
-            // Enables single-block fetch for fork detection/reorg on all node roles, and makes
-            // the caster hash-sync fetch reliable instead of depending on CasterRoundDict residue.
+            // Wave 5 served COMMITTED blocks windowed to tip−100. STALL-RESOLVE lifts the window:
+            // that window was the direct cause of stranded validators never self-healing — once
+            // the majority moved more than 100 blocks past the divergence, the fork-choice detector
+            // and the reorg both fetched "0" here and silently gave up. Single committed blocks are
+            // small, and the main API already serves any height unauthenticated (GetBlockByHeight),
+            // so there is no new exposure. Bulk history still goes through GetAllBlocks.
             var tip = Globals.LastBlock?.Height ?? -1;
-            if (blockHeight <= tip && blockHeight >= Math.Max(0, tip - 100))
+            if (blockHeight >= 0 && blockHeight <= tip)
             {
                 var committed = BlockchainData.GetBlockByHeight(blockHeight);
                 if (committed != null)
@@ -1396,6 +1398,17 @@ namespace VerifiedXCore.Controllers
                 Probation = new { Active = probation.Active, Streak = probation.Streak },
                 MembershipRecordSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1L,
                 ForkStatus = ForkDetectionService.ForkStatusText,
+                // STALL-RESOLVE: explicit self-report. SyncState is Healthy | Stalled | Recovering.
+                // A stalled node stops explorer check-ins and on-chain heartbeats, so an operator
+                // seeing it vanish from the explorer can hit this endpoint to tell "offline" from
+                // "online but stuck", and read exactly where it is stuck and what it has tried.
+                SyncState = ForkDetectionService.SyncState,
+                StallSeconds = ForkDetectionService.StallSeconds,
+                StalledAtHeight = ForkDetectionService.StalledAtHeight,
+                DivergenceHeight = ForkDetectionService.KnownDivergenceHeight,
+                RecoveryAttempts = ForkDetectionService.RecoveryAttempts,
+                LastRecoveryAttemptUtc = ForkDetectionService.LastRecoveryAttemptUtc,
+                LastRecoveryResult = ForkDetectionService.LastRecoveryResult,
                 ProducerReady = Globals.ProducerReady,
                 PeerCount = Globals.Nodes.Count,
                 ValidatorPeerCount = Globals.ValidatorNodes.Count,

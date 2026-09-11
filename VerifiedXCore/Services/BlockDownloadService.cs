@@ -63,16 +63,22 @@ namespace VerifiedXCore.Services
                 stopwatch1.Start();
                     
                 await Globals.BlocksDownloadV2Slim.WaitAsync();
+                _abortRequested = false;
+                long lastProgressHeight = Globals.LastBlock.Height;
+                long lastProgressTime = TimeUtil.GetTime();
                 var coolDownTime = TimeUtil.GetTime();
                 long blockStart = 0;
                 while (Globals.LastBlock.Height < P2PClient.MaxHeight() || P2PClient.MaxHeight() == -1)
                 {
+                    if (ShouldExitLoop(ref lastProgressHeight, ref lastProgressTime, "GetAllBlocksV2"))
+                        break;
+
                     //set the  next block height
                     var heightToDownload = Globals.LastBlock.Height + 1;
                     var blockBag = new ConcurrentBag<(Block, string)>();
                     ConcurrentDictionary<NodeInfo, (long, long)?> NodeDict = new ConcurrentDictionary<NodeInfo, (long, long)?>();
                     //Get the nodes who have the height I need.
-                    var heightsFromNodes = Globals.Nodes.Values.Where(x => x.NodeHeight >= heightToDownload && x.IsConnected).ToArray();
+                    var heightsFromNodes = Globals.Nodes.Values.Where(x => x.NodeHeight >= heightToDownload && x.IsConnected && RecoverySourcePolicy.IsEligible(x)).ToArray();
 
                     if (!heightsFromNodes.Any())
                     {
@@ -225,6 +231,45 @@ namespace VerifiedXCore.Services
                  
             }
         }
+        /// <summary>
+        /// STALL-RESOLVE: the download loops run "while peers are ahead". A node stranded on a
+        /// dead fork with a live peer connected is ALWAYS behind, and every block it pulls fails
+        /// PREVHASH validation, so the loop spun forever — and because every recovery path awaits
+        /// the same download semaphore, recovery hung behind it indefinitely (IsRecoveryInProgress
+        /// stuck true, fork detection never ran again). Two exits fix that:
+        ///  1) a no-progress watchdog — tip unchanged for NO_PROGRESS_EXIT_SECONDS → leave the loop
+        ///     (the height-check loops re-enter it every 10s anyway);
+        ///  2) an explicit abort a recovery raises before it needs the semaphore.
+        /// </summary>
+        public const int NO_PROGRESS_EXIT_SECONDS = 90;
+        private static volatile bool _abortRequested = false;
+
+        /// <summary>Ask any running download loop to yield at its next iteration.</summary>
+        public static void RequestAbort() => _abortRequested = true;
+
+        private static bool ShouldExitLoop(ref long lastProgressHeight, ref long lastProgressTime, string loopName)
+        {
+            if (_abortRequested)
+            {
+                LogUtility.Log($"[{loopName}] download loop yielding: abort requested (recovery needs the download path).", "BlockDownloadService");
+                return true;
+            }
+            var h = Globals.LastBlock.Height;
+            var now = TimeUtil.GetTime();
+            if (h != lastProgressHeight)
+            {
+                lastProgressHeight = h;
+                lastProgressTime = now;
+                return false;
+            }
+            if (now - lastProgressTime >= NO_PROGRESS_EXIT_SECONDS)
+            {
+                LogUtility.Log($"[{loopName}] download loop exiting: no progress past height {h} for {now - lastProgressTime}s while peers report {P2PClient.MaxHeight()} (likely a fork — stall resolution takes over).", "BlockDownloadService");
+                return true;
+            }
+            return false;
+        }
+
         public static async Task<bool> GetAllBlocks()
         {
             try
@@ -235,15 +280,24 @@ namespace VerifiedXCore.Services
                     return false;
                 }
                 await Globals.BlocksDownloadSlim.WaitAsync();
+                _abortRequested = false;
+                long lastProgressHeight = Globals.LastBlock.Height;
+                long lastProgressTime = TimeUtil.GetTime();
                 try
                 {
                     while (Globals.LastBlock.Height < P2PClient.MaxHeight() || P2PClient.MaxHeight() == -1)
                     {
+                        if (ShouldExitLoop(ref lastProgressHeight, ref lastProgressTime, "GetAllBlocks"))
+                            break;
+
                         var coolDownTime = TimeUtil.GetTime();
                         var taskDict = new ConcurrentDictionary<long, (Task<Block> task, string ipAddress)>();
                         var heightToDownload = Globals.LastBlock.Height + 1;
 
-                        var heightsFromNodes = Globals.Nodes.Values.Where(x => x.NodeHeight >= heightToDownload && x.IsConnected).GroupBy(x => x.NodeHeight)
+                        // STALL-RESOLVE: while a fork recovery is in flight, only majority-verified
+                        // sources are eligible and peers holding our losing hash are quarantined
+                        // (see RecoverySourcePolicy). Outside recovery the policy is inert.
+                        var heightsFromNodes = Globals.Nodes.Values.Where(x => x.NodeHeight >= heightToDownload && x.IsConnected && RecoverySourcePolicy.IsEligible(x)).GroupBy(x => x.NodeHeight)
                             .OrderBy(x => x.Key).Select((x, i) => (node: x.First(), height: heightToDownload + i))
                              .Where(x => x.node.NodeHeight >= x.height).ToArray();
 
@@ -261,6 +315,8 @@ namespace VerifiedXCore.Services
 
                         while (taskDict.Any())
                         {
+                            if (_abortRequested)
+                                break;
                             var completedTask = await Task.WhenAny(taskDict.Values.Select(x => x.task));
                             var result = await completedTask;
 
@@ -303,7 +359,7 @@ namespace VerifiedXCore.Services
                             }
 
                             _ = P2PClient.DropLowBandwidthPeers();
-                            var AvailableNode = Globals.Nodes.Values.Where(x => x.IsSendingBlock == 0).OrderByDescending(x => x.NodeHeight).FirstOrDefault();
+                            var AvailableNode = Globals.Nodes.Values.Where(x => x.IsSendingBlock == 0 && RecoverySourcePolicy.IsEligible(x)).OrderByDescending(x => x.NodeHeight).FirstOrDefault();
                             if (AvailableNode != null)
                             {
                                 var DownloadBuffer = BlockDict.AsParallel().Sum(x => x.Value.Sum(b => b.block.Size));

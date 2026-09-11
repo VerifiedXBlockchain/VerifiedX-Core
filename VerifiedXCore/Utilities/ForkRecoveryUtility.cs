@@ -175,7 +175,7 @@ namespace VerifiedXCore.Utilities
                             // Re-download the blocks above the restore point from peers.
                             BanService.UnbanAllForForkRecovery();
                             await Task.Delay(2000);
-                            await BlockDownloadService.GetAllBlocks();
+                            BlockDownloadService.RequestAbort(); await BlockDownloadService.GetAllBlocks(); // STALL-RESOLVE: yield any spinning downloader first, or we wait on its semaphore forever
                             return true;
                         }
 
@@ -268,7 +268,7 @@ namespace VerifiedXCore.Utilities
                         Globals.IsResyncing = false;
                         _isInDownloadPhase = true;
                         
-                        await BlockDownloadService.GetAllBlocks(); 
+                        BlockDownloadService.RequestAbort(); await BlockDownloadService.GetAllBlocks(); // STALL-RESOLVE: yield any spinning downloader first, or we wait on its semaphore forever 
                         LogUtility.Log(
                             $"[{caller}] FORK-RECOVERY: Block download completed. " +
                             $"New height={Globals.LastBlock.Height}",
@@ -411,22 +411,14 @@ namespace VerifiedXCore.Utilities
                     _isInDownloadPhase = true;
                     try
                     {
-                        Models.Block? winningBlock = null;
-                        try
-                        {
-                            using var client = Globals.HttpClientFactory.CreateClient();
-                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                            var uri = $"http://{sourceIP}:{Globals.ValAPIPort}/valapi/validator/GetBlock/{divergenceHeight}";
-                            var resp = await client.GetAsync(uri, cts.Token);
-                            if (resp.IsSuccessStatusCode)
-                            {
-                                var body = await resp.Content.ReadAsStringAsync();
-                                if (!string.IsNullOrEmpty(body) && body != "0")
-                                    winningBlock = Newtonsoft.Json.JsonConvert.DeserializeObject<Models.Block>(body);
-                            }
-                        }
-                        catch { }
+                        // STALL-RESOLVE: make sure we can actually reach a majority source over P2P
+                        // and that peers holding our losing hash are disconnected (policy set by caller).
+                        if (RecoverySourcePolicy.IsActive)
+                            await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
 
+                        var winningBlock = await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
+
+                        // Full consensus validation — header, proof, signature, every TX — same as a live block.
                         if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
                         {
                             await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
@@ -434,7 +426,7 @@ namespace VerifiedXCore.Utilities
 
                         BanService.UnbanAllForForkRecovery();
                         await Task.Delay(2000);
-                        await BlockDownloadService.GetAllBlocks();
+                        BlockDownloadService.RequestAbort(); await BlockDownloadService.GetAllBlocks(); // STALL-RESOLVE: yield any spinning downloader first, or we wait on its semaphore forever
                     }
                     finally
                     {
@@ -481,6 +473,192 @@ namespace VerifiedXCore.Utilities
             }
 
             return success;
+        }
+
+        /// <summary>
+        /// STALL-RESOLVE: reorg onto a majority branch whose divergence is DEEPER than
+        /// MAX_REORG_DEPTH. Restores the nearest anchor-verified snapshot slot at or below
+        /// divergence−1 (heights below the divergence are common with the majority, so the
+        /// verified picker accepts them), which also drops our blocks above the target, then
+        /// fetches the winning block and redownloads the rest — ONLY from majority sources when
+        /// RecoverySourcePolicy is active. Falls back to a fast block rollback when no slot is
+        /// usable and the depth is modest. Never triggers a genesis rebuild; a failed attempt
+        /// simply returns false and the detector retries on its backoff.
+        /// Every adopted block runs the full ValidateBlock consensus path.
+        /// </summary>
+        public static async Task<bool> DeepReorgAsync(long divergenceHeight, string expectedHash, string sourceIP, string caller = "StallResolve")
+        {
+            const int MAX_FALLBACK_ROLLBACK = 500;
+
+            var myHeight = Globals.LastBlock.Height;
+            var depth = myHeight - divergenceHeight + 1;
+            if (depth < 1 || divergenceHeight < 1)
+            {
+                LogUtility.Log($"[{caller}] DEEP-REORG-REFUSED: invalid depth {depth} (divergence {divergenceHeight}, tip {myHeight}).", $"{caller}.DeepReorg");
+                return false;
+            }
+
+            if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
+            {
+                LogUtility.Log($"[{caller}] DEEP-REORG: recovery already in progress, skipping.", $"{caller}.DeepReorg");
+                return false;
+            }
+
+            var success = false;
+            try
+            {
+                var target = divergenceHeight - 1;
+                LogUtility.Log(
+                    $"[{caller}] DEEP-REORG: divergence h={divergenceHeight} is {depth} blocks below tip {myHeight} (> {ForkChoiceUtility.MAX_REORG_DEPTH}). Restoring anchor snapshot at/below {target}, then redownloading from majority sources ({sourceIP} + {RecoverySourcePolicy.AllowedCount - 1} more).",
+                    $"{caller}.DeepReorg");
+                ConsoleWriterService.Output($"[{caller}] DEEP-REORG: fork is {depth} blocks deep — restoring snapshot below height {divergenceHeight} and resyncing from the majority…");
+
+                var wasResyncing = Globals.IsResyncing;
+                var wasStopTimers = Globals.StopAllTimers;
+                Globals.IsResyncing = true;
+                Globals.StopAllTimers = true;
+                try
+                {
+                    var rewound = await SnapshotRestoreUtility.TryRestoreAsync(target, manageFlags: false);
+                    if (!rewound)
+                    {
+                        if (depth <= MAX_FALLBACK_ROLLBACK)
+                        {
+                            LogUtility.Log($"[{caller}] DEEP-REORG: no usable snapshot slot at/below {target} — falling back to fast rollback of {depth} block(s).", $"{caller}.DeepReorg");
+                            rewound = await BlockRollbackUtility.RollbackBlocksFast((int)depth, manageIsResyncing: false);
+                        }
+                        if (!rewound)
+                        {
+                            _consecutiveRecoveryFailures++;
+                            LogUtility.Log($"[{caller}] DEEP-REORG: could not rewind below the divergence (no snapshot slot, rollback unavailable). Chain unchanged — will retry.", $"{caller}.DeepReorg");
+                            return false;
+                        }
+                    }
+
+                    Globals.StopAllTimers = wasStopTimers;
+                    Globals.IsResyncing = false;
+                    _isInDownloadPhase = true;
+                    try
+                    {
+                        if (RecoverySourcePolicy.IsActive)
+                            await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
+
+                        if (Globals.LastBlock.Height == divergenceHeight - 1)
+                        {
+                            var winningBlock = await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
+                            if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
+                                await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
+                        }
+
+                        BanService.UnbanAllForForkRecovery();
+                        await Task.Delay(2000);
+                        BlockDownloadService.RequestAbort(); await BlockDownloadService.GetAllBlocks(); // STALL-RESOLVE: yield any spinning downloader first, or we wait on its semaphore forever
+                    }
+                    finally
+                    {
+                        _isInDownloadPhase = false;
+                        Globals.IsResyncing = true;
+                    }
+
+                    var adopted = divergenceHeight == Globals.LastBlock.Height
+                        ? Globals.LastBlock.Hash
+                        : Data.BlockchainData.GetBlockByHeight(divergenceHeight)?.Hash;
+                    success = string.Equals(adopted, expectedHash, StringComparison.Ordinal);
+
+                    if (success)
+                    {
+                        _consecutiveRecoveryFailures = 0;
+                        LogUtility.Log($"[{caller}] DEEP-REORG COMPLETE: h={divergenceHeight} now {expectedHash[..Math.Min(16, expectedHash.Length)]}…, tip={Globals.LastBlock.Height}.", $"{caller}.DeepReorg");
+                        ConsoleWriterService.Output($"[{caller}] DEEP-REORG complete — now at height {Globals.LastBlock.Height} on the majority branch.");
+                    }
+                    else
+                    {
+                        _consecutiveRecoveryFailures++;
+                        LogUtility.Log(
+                            $"[{caller}] DEEP-REORG INCOMPLETE: h={divergenceHeight} is {adopted?[..Math.Min(16, adopted?.Length ?? 0)]} not the expected hash (tip now {Globals.LastBlock.Height}). Will retry.",
+                            $"{caller}.DeepReorg");
+                    }
+                }
+                finally
+                {
+                    Globals.IsResyncing = wasResyncing;
+                    Globals.StopAllTimers = wasStopTimers;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[{caller}] DEEP-REORG: exception — {ex.Message}", $"{caller}.DeepReorg");
+                _consecutiveRecoveryFailures++;
+            }
+            finally
+            {
+                _isInDownloadPhase = false;
+                Interlocked.Exchange(ref _recoveryInProgress, 0);
+            }
+
+            return success;
+        }
+
+        /// <summary>
+        /// Single committed-block fetch. Tries the validator API GetBlock first (unwindowed on
+        /// upgraded nodes), then falls back to the P2P SendBlock path, which has never been
+        /// windowed — so a freshly upgraded stranded node can pull the divergence block from a
+        /// NOT-yet-upgraded majority peer. The P2P fallback uses the P2P link to that IP when we
+        /// hold one, otherwise any connected peer the recovery source policy allows.
+        /// </summary>
+        public static async Task<Models.Block?> FetchCommittedBlockAsync(string ip, long height)
+        {
+            try
+            {
+                using var client = Globals.HttpClientFactory.CreateClient();
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetBlock/{height}";
+                var resp = await client.GetAsync(uri, cts.Token);
+                if (resp.IsSuccessStatusCode)
+                {
+                    var body = await resp.Content.ReadAsStringAsync();
+                    if (!string.IsNullOrEmpty(body) && body != "0")
+                    {
+                        var b = Newtonsoft.Json.JsonConvert.DeserializeObject<Models.Block>(body);
+                        if (b != null && b.Height == height) return b;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                var want = RecoverySourcePolicy.Normalize(ip);
+                var candidates = Globals.Nodes.Values
+                    .Where(n => n.IsConnected)
+                    .OrderByDescending(n => RecoverySourcePolicy.Normalize(n.NodeIP) == want)
+                    .ThenByDescending(n => n.NodeHeight)
+                    .Where(n => RecoverySourcePolicy.Normalize(n.NodeIP) == want || RecoverySourcePolicy.IsEligible(n))
+                    .Take(3)
+                    .ToList();
+                foreach (var node in candidates)
+                {
+                    var b = await P2P.P2PClient.GetBlock(height, node);
+                    if (b != null && b.Height == height)
+                    {
+                        LogUtility.Log($"[ForkRecovery] Fetched block {height} over P2P from {node.NodeIP} (validator API fetch from {ip} unavailable — peer likely not upgraded).", "ForkRecovery");
+                        return b;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// STALL-RESOLVE: clears the escalation ladder (failure count + loop-breaker height) after
+        /// a successful majority reorg so an old "exhausted" state can never block future recovery.
+        /// </summary>
+        public static void ResetEscalation()
+        {
+            _consecutiveRecoveryFailures = 0;
+            _lastEscalationRestoreHeight = -1;
+            ResetTracking();
         }
 
         /// <summary>
