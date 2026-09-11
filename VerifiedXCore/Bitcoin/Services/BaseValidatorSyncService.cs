@@ -35,6 +35,134 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Typed, caster-signed request body for <c>valapi/Validator/SignValidatorUpdate</c>.
+        /// The requester (a block caster) signs <see cref="BuildSignRequestMessage"/> with its VFX key.
+        /// </summary>
+        public class ValidatorUpdateSignRequest
+        {
+            public string Action { get; set; } = "";
+            public string[] TargetAddresses { get; set; } = Array.Empty<string>();
+            public long VfxBlockHeight { get; set; }
+            public string RequesterAddress { get; set; } = "";
+            public long Timestamp { get; set; }
+            public string Signature { get; set; } = "";
+        }
+
+        /// <summary>Max clock skew (seconds) accepted on a sign request.</summary>
+        private const long SIGN_REQUEST_MAX_AGE_SECONDS = 300;
+        /// <summary>Max distance between the requester's VfxBlockHeight and our local height.</summary>
+        private const long SIGN_REQUEST_MAX_HEIGHT_DRIFT = 50;
+
+        public static string BuildSignRequestMessage(string action, IEnumerable<string> targetAddresses, long vfxBlockHeight, string requesterAddress, long timestamp)
+        {
+            var targets = string.Join(",", targetAddresses.Select(t => t.Trim().ToLowerInvariant()).OrderBy(t => t, StringComparer.Ordinal));
+            return $"VFX_BASE_VALSYNC|{NormalizeAction(action)}|{targets}|{vfxBlockHeight}|{requesterAddress}|{timestamp}";
+        }
+
+        private static string NormalizeAction(string action)
+        {
+            var a = (action ?? "").Trim().ToUpperInvariant();
+            if (a.EndsWith("_BATCH", StringComparison.Ordinal))
+                a = a[..^"_BATCH".Length];
+            return a;
+        }
+
+        private static bool IsEvmAddress(string? addr)
+        {
+            if (string.IsNullOrWhiteSpace(addr)) return false;
+            var a = addr.Trim();
+            if (!a.StartsWith("0x", StringComparison.OrdinalIgnoreCase) || a.Length != 42) return false;
+            return a[2..].All(Uri.IsHexDigit);
+        }
+
+        private static bool IsKnownCasterAddress(string address)
+        {
+            if (string.IsNullOrWhiteSpace(address)) return false;
+            if (Globals.BootstrapCasterAddresses.Contains(address)) return true;
+            if (Globals.BlockCasters.Any(p => string.Equals(p.ValidatorAddress, address, StringComparison.Ordinal))) return true;
+            lock (Globals.KnownCasters)
+            {
+                if (Globals.KnownCasters.Any(c => string.Equals(c.Address, address, StringComparison.Ordinal))) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Builds the current (lower-cased Base address -> VFX address) map of registered public
+        /// VFX validators. This is the authoritative "should be on the Base contract" set.
+        /// </summary>
+        private static Dictionary<string, string> BuildVfxValidatorBaseAddressMap()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var val in VBTCValidatorRegistry.GetPublicValidators())
+            {
+                var baseAddr = val.BaseAddress;
+                if (string.IsNullOrEmpty(baseAddr) && !string.IsNullOrEmpty(val.FrostPublicKey))
+                    baseAddr = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(val.FrostPublicKey);
+                if (!string.IsNullOrEmpty(baseAddr))
+                    map[baseAddr.ToLowerInvariant()] = val.ValidatorAddress;
+            }
+            return map;
+        }
+
+        /// <summary>
+        /// Authorizes a remote request to sign a validator ADD/REMOVE for the Base contract.
+        /// A node only signs a change that it has INDEPENDENTLY detected (present in its own
+        /// pending queue, past cooldown) and that still agrees with current VFX validator state,
+        /// and only when the request itself is signed by a known block caster with a fresh timestamp.
+        /// This is the guard against an unauthenticated caller collecting signatures for an
+        /// attacker-chosen validator set change.
+        /// </summary>
+        public static (bool Ok, string Reason) AuthorizeSignRequest(ValidatorUpdateSignRequest? req)
+        {
+            if (req == null) return (false, "Empty request");
+            if (!BaseBridgeService.IsBridgeConfigured) return (false, "Base bridge not configured");
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress)) return (false, "Not a validator");
+
+            var action = NormalizeAction(req.Action);
+            if (action != "ADD" && action != "REMOVE") return (false, "Unsupported action");
+
+            var targets = (req.TargetAddresses ?? Array.Empty<string>())
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Select(t => t.Trim().ToLowerInvariant())
+                .Distinct()
+                .ToArray();
+            if (targets.Length == 0) return (false, "Missing target address");
+            if (targets.Length > MAX_BATCH_SIZE) return (false, "Too many targets");
+            if (targets.Any(t => !IsEvmAddress(t))) return (false, "Invalid target address");
+
+            var now = TimeUtil.GetTime();
+            if (Math.Abs(now - req.Timestamp) > SIGN_REQUEST_MAX_AGE_SECONDS) return (false, "Request timestamp out of range");
+
+            var localHeight = Globals.LastBlock?.Height ?? 0;
+            if (Math.Abs(localHeight - req.VfxBlockHeight) > SIGN_REQUEST_MAX_HEIGHT_DRIFT) return (false, "VfxBlockHeight too far from local height");
+
+            if (string.IsNullOrWhiteSpace(req.RequesterAddress) || string.IsNullOrWhiteSpace(req.Signature))
+                return (false, "Requester address and signature required");
+            if (!IsKnownCasterAddress(req.RequesterAddress)) return (false, "Requester is not a known block caster");
+
+            var msg = BuildSignRequestMessage(action, targets, req.VfxBlockHeight, req.RequesterAddress, req.Timestamp);
+            if (!VerifiedXCore.Services.SignatureService.VerifySignature(req.RequesterAddress, msg, req.Signature))
+                return (false, "Invalid requester signature");
+
+            // Independent proof: every target must be a change THIS node has queued and aged.
+            var pending = action == "ADD" ? _pendingAdds : _pendingRemoves;
+            var vfxMap = BuildVfxValidatorBaseAddressMap();
+            foreach (var t in targets)
+            {
+                if (!pending.TryGetValue(t, out var pa)) return (false, $"No pending {action} sync action for {t}");
+                if (localHeight - pa.DetectedAtBlock < COOLDOWN_BLOCKS) return (false, $"Pending {action} for {t} has not passed cooldown");
+
+                // Re-check against live VFX validator state at signing time.
+                var isVfxValidator = vfxMap.ContainsKey(t);
+                if (action == "ADD" && !isVfxValidator) return (false, $"{t} is not a registered VFX validator");
+                if (action == "REMOVE" && isVfxValidator) return (false, $"{t} is still a registered VFX validator");
+            }
+
+            return (true, "");
+        }
+
+        /// <summary>
         /// Background loop: checks for validator set changes and syncs to Base contract.
         /// </summary>
         public static async Task ValidatorSyncLoop(CancellationToken ct = default)
@@ -83,20 +211,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     baseValidators.Select(v => v.ToLowerInvariant()));
 
                 // Get active VFX validators with Base addresses
-                var vfxValidators = VBTCValidatorRegistry.GetPublicValidators();
-                var vfxValidatorBaseAddresses = new Dictionary<string, string>();
-
-                foreach (var val in vfxValidators)
-                {
-                    var baseAddr = val.BaseAddress;
-
-                    // Fallback: derive from FrostPublicKey if BaseAddress not set
-                    if (string.IsNullOrEmpty(baseAddr) && !string.IsNullOrEmpty(val.FrostPublicKey))
-                        baseAddr = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(val.FrostPublicKey);
-
-                    if (!string.IsNullOrEmpty(baseAddr))
-                        vfxValidatorBaseAddresses[baseAddr.ToLowerInvariant()] = val.ValidatorAddress;
-                }
+                var vfxValidatorBaseAddresses = BuildVfxValidatorBaseAddressMap();
 
                 var currentBlock = Globals.LastBlock?.Height ?? 0;
 
@@ -199,7 +314,18 @@ namespace VerifiedXCore.Bitcoin.Services
             if (localSig != null)
                 signatures.Add(localSig);
 
-            // Collect from remote validators via HTTP
+            // Collect from remote validators via HTTP. The request is signed with this caster's
+            // VFX key; remote nodes refuse unsigned or non-caster requests (see AuthorizeSignRequest).
+            var targetAddresses = actions.Select(a => a.BaseAddress).ToArray();
+            var requestTimestamp = TimeUtil.GetTime();
+            var requestSignature = VerifiedXCore.Services.SignatureService.ValidatorSignature(
+                BuildSignRequestMessage(action, targetAddresses, vfxBlockHeight, Globals.ValidatorAddress, requestTimestamp));
+            if (string.IsNullOrEmpty(requestSignature))
+            {
+                ErrorLogUtility.LogError("[BaseValidatorSync] Could not sign validator update request; skipping remote collection.", "BaseValidatorSyncService");
+                return signatures;
+            }
+
             var validators = VBTCValidatorRegistry.GetPublicValidators();
             using var httpClient = Globals.HttpClientFactory.CreateClient();
             httpClient.Timeout = TimeSpan.FromSeconds(10);
@@ -211,11 +337,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     try
                     {
                         var url = $"http://{v.IPAddress}:{Globals.ValAPIPort}/valapi/Validator/SignValidatorUpdate";
-                        var payload = new
+                        var payload = new ValidatorUpdateSignRequest
                         {
                             Action = action,
-                            TargetAddresses = actions.Select(a => a.BaseAddress).ToArray(),
-                            VfxBlockHeight = vfxBlockHeight
+                            TargetAddresses = targetAddresses,
+                            VfxBlockHeight = vfxBlockHeight,
+                            RequesterAddress = Globals.ValidatorAddress,
+                            Timestamp = requestTimestamp,
+                            Signature = requestSignature
                         };
                         var content = new StringContent(
                             Newtonsoft.Json.JsonConvert.SerializeObject(payload),

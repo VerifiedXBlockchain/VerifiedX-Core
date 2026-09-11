@@ -68,39 +68,30 @@ namespace VerifiedXCore.Controllers
         /// </summary>
         [HttpPost]
         [Route("SignValidatorUpdate")]
-        public ActionResult<string> SignValidatorUpdate([FromBody] object requestBody)
+        public ActionResult<string> SignValidatorUpdate([FromBody] Bitcoin.Services.BaseValidatorSyncService.ValidatorUpdateSignRequest? request)
         {
+            var reqIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
             try
             {
-                if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Not a validator" }));
-
-                var json = requestBody?.ToString() ?? "";
-                var request = JsonConvert.DeserializeObject<dynamic>(json);
-                string action = request?.Action;
-                long vfxBlockHeight = request?.VfxBlockHeight ?? 0;
-
-                // Get target addresses
-                var targetAddresses = new List<string>();
-                if (request?.TargetAddresses != null)
+                // Security: this endpoint is publicly reachable. Only sign a validator set change
+                // that this node has independently queued from VFX state AND that a known caster
+                // has signed for. Never sign caller-chosen targets.
+                var (ok, reason) = Bitcoin.Services.BaseValidatorSyncService.AuthorizeSignRequest(request);
+                if (!ok)
                 {
-                    foreach (var addr in request.TargetAddresses)
-                        targetAddresses.Add((string)addr);
+                    LogUtility.Log($"[BaseValidatorSync] SignValidatorUpdate REJECTED from IP={reqIp}, requester={request?.RequesterAddress}, action={request?.Action}: {reason}",
+                        "ValidatorController.SignValidatorUpdate");
+                    return StatusCode(403, JsonConvert.SerializeObject(new { Success = false, Message = reason }));
                 }
-                else if (request?.TargetAddress != null)
-                {
-                    targetAddresses.Add((string)request.TargetAddress);
-                }
-
-                if (string.IsNullOrEmpty(action) || !targetAddresses.Any())
-                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Missing action or target address" }));
 
                 var sig = Bitcoin.Services.BaseValidatorSyncService.SignValidatorUpdateLocally(
-                    action, targetAddresses.ToArray(), vfxBlockHeight);
+                    request!.Action, request.TargetAddresses, request.VfxBlockHeight);
 
                 if (sig == null)
                     return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Failed to sign" }));
 
+                LogUtility.Log($"[BaseValidatorSync] SignValidatorUpdate signed {request.Action} for {request.TargetAddresses.Length} target(s), requester={request.RequesterAddress}",
+                    "ValidatorController.SignValidatorUpdate");
                 return Ok(JsonConvert.SerializeObject(new { Success = true, Signature = "0x" + Convert.ToHexString(sig).ToLowerInvariant() }));
             }
             catch (Exception ex)
