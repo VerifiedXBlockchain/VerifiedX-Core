@@ -574,7 +574,13 @@ namespace VerifiedXCore.Bitcoin.Services
                     InputCount = unsignedTx.Inputs.Count,
                     AllInputSighashes = allSighashes,
                     TxInputOutpoints = unsignedTx.Inputs.Select(inp => $"{inp.PrevOut.Hash}:{inp.PrevOut.N}".ToLowerInvariant()).ToList(),
-                    BtcTxId = unsignedTx.GetHash().ToString()
+                    BtcTxId = unsignedTx.GetHash().ToString(),
+                    // Validators rebuild every sighash from the unsigned tx + prevouts and refuse
+                    // to sign anything they cannot reproduce and authorize (FrostSigningAuthorization).
+                    UnsignedTxHex = unsignedTx.ToHex(),
+                    Prevouts = unsignedTx.Inputs
+                        .Select(inp => PinnedWithdrawalCoin.FromCoin(spentCoins.First(c => c.Outpoint == inp.PrevOut)))
+                        .ToList()
                 };
 
                 // FIND-020 Fix: Sign each input individually with its own BIP341 sighash.

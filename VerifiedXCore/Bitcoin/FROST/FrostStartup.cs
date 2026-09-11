@@ -1575,11 +1575,31 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // SECURITY: a validator must never produce a share over a sighash it cannot
+                            // tie to an authorized spend. Rebuild the sighash from the unsigned tx +
+                            // prevouts, require the inputs to be the contract vault, the outputs to be
+                            // the consensus-recorded destination (bounded) or vault change, and the
+                            // leader to be the owner / a registered validator / a known caster.
+                            // WithdrawalRequestHash (or the bridge-exit reference) is MANDATORY.
+                            var (authOk, authReason) = FrostSigningAuthorization.Authorize(request);
+                            if (!authOk)
+                            {
+                                var authIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                                ErrorLogUtility.LogError($"FROST sign/start REFUSED (unauthorized spend) from IP={authIp}, leader={request.LeaderAddress}, sc={request.SmartContractUID}, wrh={request.WithdrawalRequestHash}: {authReason}",
+                                    "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"Unauthorized signing request: {authReason}"
+                                }));
+                                return;
+                            }
+
                             // FIND-028: Validator-side withdrawal dedup check (per input, sighash-aware).
-                            // If this signing request carries a WithdrawalRequestHash, verify that
-                            // we haven't already signed a DIFFERENT transaction for this withdrawal
-                            // input, and that no other withdrawal's signed tx is outstanding for the
-                            // contract unless this tx conflicts with it. This is the network-level
+                            // Verify that we haven't already signed a DIFFERENT transaction for this
+                            // withdrawal input, and that no other withdrawal's signed tx is outstanding
+                            // for the contract unless this tx conflicts with it. This is the network-level
                             // defense against double-spend — even if the coordinator's code is modified.
                             if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                             {
@@ -1755,6 +1775,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 MessageHash = request.MessageHash,
                                 SmartContractUID = request.SmartContractUID,
                                 LeaderAddress = request.LeaderAddress,
+                                LeaderStartTimestamp = request.Timestamp,
+                                LeaderStartSignature = request.LeaderSignature,
                                 WithdrawalRequestHash = request.WithdrawalRequestHash,  // FIND-028
                                 SignerAddresses = request.SignerAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
@@ -2041,6 +2063,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
+                        // Only the session leader (proven by replaying the start signature) may
+                        // trigger share generation — this is the step that commits our key share.
+                        if (!FrostSigningAuthorization.VerifyLeaderHeaders(context, session, out var r2AuthReason))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Leader auth failed: {r2AuthReason}" }));
+                            return;
+                        }
+
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
@@ -2166,6 +2197,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                         {
                             context.Response.StatusCode = StatusCodes.Status404NotFound;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Signing session not found" }));
+                            return;
+                        }
+
+                        if (!FrostSigningAuthorization.VerifyLeaderHeaders(context, session, out var shareAuthReason))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Leader auth failed: {shareAuthReason}" }));
                             return;
                         }
 

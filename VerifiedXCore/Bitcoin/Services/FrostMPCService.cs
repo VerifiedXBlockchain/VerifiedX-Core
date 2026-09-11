@@ -852,7 +852,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
 
                 // Phase 3: Signing Round 2 - Signature shares
-                var round2Shares = await CollectSigningRound2Shares(sessionId, validators, round1Nonces);
+                var round2Shares = await CollectSigningRound2Shares(sessionId, validators, round1Nonces, leaderAddress, startTimestamp, startSignature);
                 if (round2Shares == null || round2Shares.Count < requiredCount)
                 {
                     var got = round2Shares?.Count ?? 0;
@@ -929,6 +929,17 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// First 16 chars of a hash for compact log lines.
         /// </summary>
+        /// <summary>
+        /// Round messages prove leadership by replaying the session's start signature
+        /// (validators check it against the session they created at sign/start).
+        /// </summary>
+        private static void AddLeaderAuthHeaders(HttpRequestMessage req, string leaderAddress, long startTimestamp, string startSignature)
+        {
+            req.Headers.TryAddWithoutValidation("X-Frost-Leader", leaderAddress);
+            req.Headers.TryAddWithoutValidation("X-Frost-Timestamp", startTimestamp.ToString());
+            req.Headers.TryAddWithoutValidation("X-Frost-Signature", startSignature);
+        }
+
         private static string Shorten(string? hash)
         {
             if (string.IsNullOrEmpty(hash)) return "-";
@@ -993,7 +1004,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     InputCount = txContext?.InputCount ?? 1,
                     AllInputSighashes = txContext?.AllInputSighashes,
                     TxInputOutpoints = txContext?.TxInputOutpoints,
-                    BtcTxId = txContext?.BtcTxId
+                    BtcTxId = txContext?.BtcTxId,
+                    UnsignedTxHex = txContext?.UnsignedTxHex,
+                    Prevouts = txContext?.Prevouts
                 };
 
                 var tasks = validators.Select(async validator =>
@@ -1114,7 +1127,10 @@ namespace VerifiedXCore.Bitcoin.Services
         private static async Task<Dictionary<string, string>?> CollectSigningRound2Shares(
             string sessionId,
             List<VBTCValidator> validators,
-            Dictionary<string, string> nonces)
+            Dictionary<string, string> nonces,
+            string leaderAddress,
+            long startTimestamp,
+            string startSignature)
         {
             try
             {
@@ -1132,7 +1148,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/round2/{sessionId}";
                         var content = new StringContent(noncePayload, Encoding.UTF8, "application/json");
-                        var response = await _httpClient.PostAsync(url, content);
+                        using var round2Req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+                        AddLeaderAuthHeaders(round2Req, leaderAddress, startTimestamp, startSignature);
+                        var response = await _httpClient.SendAsync(round2Req);
                         
                         if (response.IsSuccessStatusCode)
                         {
@@ -1218,7 +1236,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         try
                         {
                             var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/share/{sessionId}";
-                            var response = await _httpClient.GetAsync(url);
+                            using var shareReq = new HttpRequestMessage(HttpMethod.Get, url);
+                            AddLeaderAuthHeaders(shareReq, leaderAddress, startTimestamp, startSignature);
+                            var response = await _httpClient.SendAsync(shareReq);
                             
                             if (response.IsSuccessStatusCode)
                             {

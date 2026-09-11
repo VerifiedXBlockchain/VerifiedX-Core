@@ -33,6 +33,24 @@ namespace VerifiedXCore.Bitcoin.Models
             return GetCollection().FindOne(x => x.BaseBurnTxHash == baseBurnTxHash.Trim());
         }
 
+        /// <summary>
+        /// Exits whose BaseBurnTxHash starts with the given prefix (case-insensitive). Used to
+        /// resolve the synthetic "btcexit_{burn[..16]}_{sc[..8]}" signing reference back to the
+        /// consensus-recorded exit.
+        /// </summary>
+        public static List<VBTCBridgeBtcExitState> FindByBurnHashPrefix(string burnHashPrefix)
+        {
+            if (string.IsNullOrWhiteSpace(burnHashPrefix)) return new List<VBTCBridgeBtcExitState>();
+            var p = burnHashPrefix.Trim().ToLowerInvariant();
+            try
+            {
+                return GetCollection().FindAll()
+                    .Where(x => (x.BaseBurnTxHash ?? "").ToLowerInvariant().StartsWith(p))
+                    .ToList();
+            }
+            catch { return new List<VBTCBridgeBtcExitState>(); }
+        }
+
         public static bool TryInsert(VBTCBridgeBtcExitState rec)
         {
             try

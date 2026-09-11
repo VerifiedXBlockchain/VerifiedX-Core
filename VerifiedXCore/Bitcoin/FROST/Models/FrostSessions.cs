@@ -67,6 +67,11 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public int RequiredThreshold { get; set; }
         public long StartTimestamp { get; set; }
 
+        /// <summary>Timestamp from the leader's start message (the value the leader signed over).</summary>
+        public long LeaderStartTimestamp { get; set; }
+        /// <summary>Leader's start signature — round messages must replay it to prove leadership.</summary>
+        public string? LeaderStartSignature { get; set; }
+
         /// <summary>Which transaction input this session signs (multi-input withdrawals; 0 = legacy).</summary>
         public int InputIndex { get; set; }
         /// <summary>"txid:vout" of every input of the transaction being signed (for the contract-level conflict pin).</summary>

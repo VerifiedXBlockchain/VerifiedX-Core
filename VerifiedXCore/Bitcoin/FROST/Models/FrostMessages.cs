@@ -124,6 +124,16 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// detect on-chain confirmation and release the contract-level pin.
         /// </summary>
         public string? BtcTxId { get; set; }
+
+        /// <summary>
+        /// Full unsigned transaction (hex). REQUIRED: validators rebuild every input's BIP341 sighash
+        /// from this plus <see cref="Prevouts"/> and refuse to sign a MessageHash they cannot reproduce,
+        /// or a transaction whose inputs/outputs are not an authorized spend of the contract vault.
+        /// </summary>
+        public string? UnsignedTxHex { get; set; }
+
+        /// <summary>Prevout (value + scriptPubKey) of every input, in input order. REQUIRED.</summary>
+        public List<VerifiedXCore.Bitcoin.Models.PinnedWithdrawalCoin>? Prevouts { get; set; }
     }
 
     /// <summary>
@@ -153,6 +163,10 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public List<string> AllInputSighashes { get; set; } = new();
         public List<string> TxInputOutpoints { get; set; } = new();
         public string BtcTxId { get; set; } = "";
+        /// <summary>Unsigned transaction hex — validators rebuild sighashes from it.</summary>
+        public string UnsignedTxHex { get; set; } = "";
+        /// <summary>Prevouts in input order — validators rebuild sighashes from them.</summary>
+        public List<VerifiedXCore.Bitcoin.Models.PinnedWithdrawalCoin> Prevouts { get; set; } = new();
     }
 
     /// <summary>
