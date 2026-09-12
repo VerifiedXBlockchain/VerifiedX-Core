@@ -244,8 +244,21 @@ namespace VerifiedXCore.Services
         public const int NO_PROGRESS_EXIT_SECONDS = 90;
         private static volatile bool _abortRequested = false;
 
+        /// <summary>
+        /// DOWNLOAD-LOOP-FIX (Sep 2026): the inner task loop of <see cref="GetAllBlocks"/> re-arms
+        /// itself — a block at tip+1 that downloads fine but is rejected by the validator is
+        /// discarded from BlockDict and immediately re-queued, so the task dictionary never empties,
+        /// the outer no-progress watchdog never runs, and the recovery that awaits this method hangs
+        /// with IsRecoveryInProgress stuck (bootstrap node, block 7286401, 4h20m). After this many
+        /// re-fetches of the same tip+1 height with no tip movement the loop exits.
+        /// </summary>
+        public const int MAX_TIP_REFETCHES_WITHOUT_PROGRESS = 25;
+
         /// <summary>Ask any running download loop to yield at its next iteration.</summary>
         public static void RequestAbort() => _abortRequested = true;
+
+        /// <summary>True once the same tip+1 height has been re-fetched more than the cap allows.</summary>
+        internal static bool ExceededTipRefetches(int refetches) => refetches > MAX_TIP_REFETCHES_WITHOUT_PROGRESS;
 
         private static bool ShouldExitLoop(ref long lastProgressHeight, ref long lastProgressTime, string loopName)
         {
@@ -311,12 +324,22 @@ namespace VerifiedXCore.Services
                         heightsFromNodes.ParallelLoop(h =>
                         {
                             taskDict[h.height] = (P2PClient.GetBlock(h.height, h.node), h.node.NodeIP);
-                        });                        
+                        });
+
+                        var exitRequested = false;
+                        long tipRefetchHeight = -1;
+                        var tipRefetches = 0;
 
                         while (taskDict.Any())
                         {
-                            if (_abortRequested)
+                            // DOWNLOAD-LOOP-FIX: the abort flag and the no-progress watchdog must be
+                            // honoured here too — this loop re-arms itself when tip+1 keeps getting
+                            // rejected, so the outer-loop check alone never runs.
+                            if (ShouldExitLoop(ref lastProgressHeight, ref lastProgressTime, "GetAllBlocks"))
+                            {
+                                exitRequested = true;
                                 break;
+                            }
                             var completedTask = await Task.WhenAny(taskDict.Values.Select(x => x.task));
                             var result = await completedTask;
 
@@ -386,11 +409,39 @@ namespace VerifiedXCore.Services
                                         heightToDownload++;
                                     if (heightToDownload > P2PClient.MaxHeight())
                                         continue;
+
+                                    // DOWNLOAD-LOOP-FIX: count re-fetches of the same tip+1 height. A block
+                                    // that downloads but is rejected every time is not a download problem —
+                                    // bail so the caller (fork recovery, height-check loop) can act on it.
+                                    if (heightToDownload == nextHeightToValidate)
+                                    {
+                                        if (heightToDownload == tipRefetchHeight)
+                                            tipRefetches++;
+                                        else
+                                        {
+                                            tipRefetchHeight = heightToDownload;
+                                            tipRefetches = 1;
+                                        }
+
+                                        if (ExceededTipRefetches(tipRefetches))
+                                        {
+                                            LogUtility.Log(
+                                                $"[GetAllBlocks] download loop exiting: block {heightToDownload} was fetched {tipRefetches} times " +
+                                                $"without the tip advancing past {Globals.LastBlock.Height} — it is being rejected by validation, not failing to download.",
+                                                "BlockDownloadService");
+                                            exitRequested = true;
+                                            break;
+                                        }
+                                    }
+
                                     taskDict[heightToDownload] = (P2PClient.GetBlock(heightToDownload, AvailableNode),
                                         AvailableNode.NodeIP);
                                 }
                             }
                         }
+
+                        if (exitRequested)
+                            break;
                     }
                 }
                 catch (Exception ex)

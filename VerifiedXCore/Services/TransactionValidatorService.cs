@@ -22,6 +22,11 @@ namespace VerifiedXCore.Services
 {
     public class TransactionValidatorService
     {
+        /// <summary>Rejection reason returned when a TX hash is already present in the
+        /// <see cref="Globals.MemBlocks"/> replay guard. Shared so callers can recognise it
+        /// as a replay-guard result rather than a state-trie problem.</summary>
+        public const string TX_ALREADY_SENT_REASON = "This transactions has already been sent.";
+
         public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null)
         {
             bool txResult = false;
@@ -178,7 +183,7 @@ namespace VerifiedXCore.Services
                 }
             }
 
-            //Prev Tx in Block Check - this is to prevent someone sending a signed TX again            
+            //Prev Tx in Block Check - this is to prevent someone sending a signed TX again
             var txExist = Globals.MemBlocks.ContainsKey(txRequest.Hash);
             if (txExist)
             {
@@ -188,7 +193,7 @@ namespace VerifiedXCore.Services
                     mempool.DeleteManySafe(x => x.Hash == txRequest.Hash);
                     TransactionData.ReleasePrivateMempoolNullifiersForTx(txRequest.Hash);
                 }
-                return (txResult, "This transactions has already been sent.");
+                return (txResult, TX_ALREADY_SENT_REASON);
             }
 
             var checkSize = await VerifyTXSize(txRequest);

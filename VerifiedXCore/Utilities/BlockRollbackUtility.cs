@@ -282,11 +282,37 @@ namespace VerifiedXCore.Utilities
             foreach (var key in hashKeysToRemove)
                 Globals.BlockHashes.TryRemove(key, out _);
 
+            // REPLAY-GUARD-FIX (Sep 2026): Globals.MemBlocks is the "this transaction has already
+            // been sent" replay guard (TX hash → block height). It was never pruned on rollback or
+            // snapshot restore, so a rolled-back block's TXs stayed marked as spent and the SAME
+            // block re-delivered by the majority failed ValidateBlock()-13 forever. Only a process
+            // restart (StartupMemBlocks) cleared it. Prune every entry above the new tip.
+            var memBlockTxsRemoved = PruneMemBlocksAbove(targetHeight);
+
             LogUtility.Log(
                 $"[RefreshInMemoryTip] Cleared in-memory queues above height {targetHeight}: " +
                 $"NetworkBlockQueue={removedQueueCount}, BlockQueueBroadcasted={broadcastKeysToRemove.Count}, " +
-                $"BackupProofs={backupKeysToRemove.Count}, BlockHashes={hashKeysToRemove.Count}",
+                $"BackupProofs={backupKeysToRemove.Count}, BlockHashes={hashKeysToRemove.Count}, " +
+                $"MemBlocksTXs={memBlockTxsRemoved}",
                 "BlockRollback");
+        }
+
+        /// <summary>
+        /// Removes every TX-hash entry in the <see cref="Globals.MemBlocks"/> replay guard that was
+        /// recorded at a height above <paramref name="targetHeight"/>, so transactions from removed
+        /// blocks can be re-accepted when the correct block at that height arrives.
+        /// Returns the number of entries removed.
+        /// </summary>
+        public static int PruneMemBlocksAbove(long targetHeight)
+        {
+            var staleTxHashes = Globals.MemBlocks.Where(x => x.Value > targetHeight).Select(x => x.Key).ToList();
+            var removed = 0;
+            foreach (var txHash in staleTxHashes)
+            {
+                if (Globals.MemBlocks.TryRemove(txHash, out _))
+                    removed++;
+            }
+            return removed;
         }
 
         /// <summary>

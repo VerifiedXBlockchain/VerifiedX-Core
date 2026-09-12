@@ -49,10 +49,24 @@ namespace VerifiedXCore.Nodes
     private static long _acceptedHeight = -1;
     /// <summary>Timestamp (Environment.TickCount64) of the last successful block acceptance. Used for desync recovery.</summary>
     private static long _lastBlockAcceptedTick = Environment.TickCount64;
-    const int DESYNC_RECOVERY_TIMEOUT_MS = 45000; // 45 seconds without a new block → trigger reconcile (A4: no longer a gate bypass)
+    internal const int DESYNC_RECOVERY_TIMEOUT_MS = 45000; // 45 seconds without a new block → trigger reconcile (A4: no longer a gate bypass)
     /// <summary>A4: single-flight guard + attempt counter for the desync reconcile path that replaced the gate bypass.</summary>
     private static int _desyncReconcileRunning = 0;
     private static int _desyncReconcileAttempts = 0;
+    /// <summary>DESYNC-ESCALATION-FIX (Sep 2026): tick of the last counted reconcile attempt. Two
+    /// message-7 arrivals 6 s apart during ONE stall used to count as "2 failed attempts" and roll
+    /// back a healthy tip; an arrival within DESYNC_RECOVERY_TIMEOUT_MS of the previous attempt no
+    /// longer advances the counter.</summary>
+    private static long _lastDesyncAttemptTick = 0;
+    /// <summary>Escalation to a rollback requires this many SPACED reconcile attempts.</summary>
+    internal const int DESYNC_ESCALATION_ATTEMPTS = 2;
+
+    /// <summary>A reconcile attempt only counts toward escalation if a full stall window has passed since the previous one.</summary>
+    internal static bool CountsAsNewDesyncAttempt(long msSinceLastAttempt) => msSinceLastAttempt >= DESYNC_RECOVERY_TIMEOUT_MS;
+
+    /// <summary>Roll back only after enough spaced attempts AND when the stall is not this node's own pending-hash gate.</summary>
+    internal static bool ShouldEscalateDesyncToRollback(int spacedAttempts, bool ownPendingGateStall)
+        => spacedAttempts >= DESYNC_ESCALATION_ATTEMPTS && !ownPendingGateStall;
         /// <summary>Throttle for "block rejected" log messages — tracks last logged height per validator to prevent spam.</summary>
         private static readonly ConcurrentDictionary<string, long> _rejectionLogTracker = new();
 
@@ -3131,19 +3145,42 @@ namespace VerifiedXCore.Nodes
             {
                 try
                 {
-                    var attempt = Interlocked.Increment(ref _desyncReconcileAttempts);
+                    // DESYNC-ESCALATION-FIX: only a reconcile that starts a full stall window after
+                    // the previous one advances the escalation counter.
+                    var nowTick = Environment.TickCount64;
+                    var sinceLastAttempt = nowTick - Interlocked.Read(ref _lastDesyncAttemptTick);
+                    Interlocked.Exchange(ref _lastDesyncAttemptTick, nowTick);
+                    var attempt = CountsAsNewDesyncAttempt(sinceLastAttempt)
+                        ? Interlocked.Increment(ref _desyncReconcileAttempts)
+                        : Interlocked.CompareExchange(ref _desyncReconcileAttempts, 0, 0);
                     ConsoleWriterService.OutputValCaster($"[Desync Recovery] Stuck for {stalledMs}ms — reconciling with peers (attempt {attempt}). Gates remain enforced.");
-                    CasterLogUtility.Log($"DesyncReconcile attempt {attempt} (stalled {stalledMs}ms)", "DESYNC");
+                    CasterLogUtility.Log($"DesyncReconcile attempt {attempt} (stalled {stalledMs}ms, {sinceLastAttempt}ms since previous)", "DESYNC");
 
                     await SyncBlockHashWithPeersAsync();
                     await SyncHeightWithPeersAsync();
                     try { await BlockDownloadService.GetAllBlocks(); } catch { }
 
-                    if (Interlocked.CompareExchange(ref _desyncReconcileAttempts, 0, 0) >= 2)
+                    var spacedAttempts = Interlocked.CompareExchange(ref _desyncReconcileAttempts, 0, 0);
+                    if (spacedAttempts >= DESYNC_ESCALATION_ATTEMPTS)
                     {
-                        CasterLogUtility.Log("DesyncReconcile escalating to ForkRecoveryUtility.RecoverAsync after 2 attempts.", "DESYNC");
-                        await ForkRecoveryUtility.RecoverAsync(Globals.LastBlock.Height, "DesyncReconcile");
-                        Interlocked.Exchange(ref _desyncReconcileAttempts, 0);
+                        // PENDING-GATE-STALL: if tip+1 was refused by OUR OWN caster-agreed-hash gate,
+                        // the chain is intact and a rollback would remove a correct block (the exact
+                        // sequence that stranded the bootstrap node at 7286400). Reconcile+download
+                        // is the right heal — the download path is exempt from that gate.
+                        var ownGateStall = BlockValidatorService.IsOwnPendingGateStall(Globals.LastBlock.Height, 2L * DESYNC_RECOVERY_TIMEOUT_MS);
+                        if (ShouldEscalateDesyncToRollback(spacedAttempts, ownGateStall))
+                        {
+                            CasterLogUtility.Log($"DesyncReconcile escalating to ForkRecoveryUtility.RecoverAsync after {spacedAttempts} spaced attempts.", "DESYNC");
+                            await ForkRecoveryUtility.RecoverAsync(Globals.LastBlock.Height, "DesyncReconcile");
+                            Interlocked.Exchange(ref _desyncReconcileAttempts, 0);
+                        }
+                        else
+                        {
+                            CasterLogUtility.Log(
+                                $"DesyncReconcile NOT escalating to rollback: block {Globals.LastBlock.Height + 1} was refused by this node's own CASTER-HASH-PENDING gate " +
+                                $"(not a lineage mismatch). Tip {Globals.LastBlock.Height} kept; reconcile+download only. Spaced attempts={spacedAttempts}.",
+                                "DESYNC");
+                        }
                     }
                 }
                 catch (Exception ex)

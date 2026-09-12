@@ -43,7 +43,7 @@ namespace VerifiedXCore.Privacy
                     mempool.DeleteManySafe(x => x.Hash == txRequest.Hash);
                     TransactionData.ReleasePrivateMempoolNullifiersForTx(txRequest.Hash);
                 }
-                return (false, "This transactions has already been sent.");
+                return (false, TransactionValidatorService.TX_ALREADY_SENT_REASON);
             }
 
             if (txRequest.FromAddress.StartsWith("xRBX") || txRequest.ToAddress.StartsWith("xRBX"))

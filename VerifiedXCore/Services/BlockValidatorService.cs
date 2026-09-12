@@ -52,6 +52,60 @@ namespace VerifiedXCore.Services
         /// same height means the snapshot carries the corruption — recovery is exhausted (manual
         /// 'rebuildstate' required) instead of looping restores.</summary>
         private static long _lastTxFailRestoreHeight = -1;
+        /// <summary>RECOVERY-SPAM-FIX (Sep 2026): once snapshot recovery is exhausted, the trigger
+        /// re-fired every TX_FAIL_RECOVERY_THRESHOLD rejections (every 1–3 s for four hours on the
+        /// bootstrap node), re-flagging the trie and re-logging the same message. Re-flag/re-log at
+        /// most once per this interval.</summary>
+        public const int RECOVERY_EXHAUSTED_LOG_INTERVAL_MINUTES = 5;
+        private static DateTime _lastRecoveryExhaustedLogUtc = DateTime.MinValue;
+
+        /// <summary>
+        /// STATE-CORRUPTION-SIGNAL: only TX rejections that can be explained by a wrong state trie
+        /// should feed the rebuild counter. A replay-guard hit ("already been sent") or an in-block
+        /// duplicate is a property of the block/guard, not of the state — counting it triggered a
+        /// pointless snapshot restore and then a permanent "recovery exhausted" flag on a node whose
+        /// state was fine. Unknown reasons are still counted (previous behaviour).
+        /// </summary>
+        internal static bool IsStateCorruptionSignal(string? reason)
+        {
+            if (string.IsNullOrEmpty(reason))
+                return true;
+            if (reason == TransactionValidatorService.TX_ALREADY_SENT_REASON)
+                return false;
+            if (reason.StartsWith("Duplicate nullifier", StringComparison.Ordinal))
+                return false;
+            if (reason.StartsWith("Duplicate withdrawal request", StringComparison.Ordinal))
+                return false;
+            return true;
+        }
+
+        /// <summary>Height of the most recent CASTER-HASH-PENDING refusal and when it happened.</summary>
+        private static long _lastCasterHashPendingHeight = -1;
+        private static long _lastCasterHashPendingTick = 0;
+
+        internal static void RecordCasterHashPending(long height, long nowTick)
+        {
+            Interlocked.Exchange(ref _lastCasterHashPendingHeight, height);
+            Interlocked.Exchange(ref _lastCasterHashPendingTick, nowTick);
+        }
+
+        /// <summary>
+        /// PENDING-GATE-STALL: true when the block this node is waiting for (tip+1) was refused
+        /// recently by our OWN caster-agreed-hash gate. That stall is not a fork — the chain is
+        /// intact and the block only needs an agreed hash or a download-path commit — so the desync
+        /// escalation must not roll back the (correct) tip to "fix" it.
+        /// </summary>
+        public static bool IsOwnPendingGateStall(long tipHeight, long withinMs)
+            => IsOwnPendingGateStall(tipHeight, withinMs, Environment.TickCount64);
+
+        internal static bool IsOwnPendingGateStall(long tipHeight, long withinMs, long nowTick)
+        {
+            var pendingHeight = Interlocked.Read(ref _lastCasterHashPendingHeight);
+            if (pendingHeight != tipHeight + 1)
+                return false;
+            var age = nowTick - Interlocked.Read(ref _lastCasterHashPendingTick);
+            return age >= 0 && age <= withinMs;
+        }
 
         /// <summary>STATE PROBATION: consecutive cleanly-committed blocks while the state trie is
         /// flagged unverified. Automatic rebuilds are disabled, so a node whose flag is dirty but
@@ -545,6 +599,7 @@ namespace VerifiedXCore.Services
                         LogUtility.Log(
                             $"[ValidateBlock] CASTER-HASH-PENDING: refusing live commit of block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} — no caster-agreed hash for this height yet.",
                             "BlockValidatorService");
+                        RecordCasterHashPending(block.Height, Environment.TickCount64);
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-casterHashPending");
                         return result;
                     }
@@ -1187,20 +1242,31 @@ namespace VerifiedXCore.Services
                             // with "new account with no balance". Blocks at different heights interleave
                             // (6610256, 6610258, 6610259...) so we must count ALL failures, not per-height.
                             // After TX_FAIL_RECOVERY_THRESHOLD consecutive failures, trigger full state rebuild.
-                            if (!validateOnly)
+                            // STATE-CORRUPTION-SIGNAL: replay-guard / in-block-duplicate rejections say
+                            // nothing about the state trie and must not drive a rebuild.
+                            if (!validateOnly && IsStateCorruptionSignal(rejectBlockReason))
                             {
                                 _txFailCount++;
 
                                 if (_txFailCount >= TX_FAIL_RECOVERY_THRESHOLD)
                                 {
+                                    // Reset counter before recovery
+                                    _txFailCount = 0;
+
+                                    // RECOVERY-SPAM-FIX: if recovery is already exhausted near this height
+                                    // and we flagged it recently, there is nothing new to do — stay quiet.
+                                    var alreadyExhausted = _lastTxFailRestoreHeight >= 0
+                                        && Math.Abs(Globals.LastBlock.Height - _lastTxFailRestoreHeight) <= 20;
+                                    var throttled = alreadyExhausted
+                                        && (DateTime.UtcNow - _lastRecoveryExhaustedLogUtc).TotalMinutes < RECOVERY_EXHAUSTED_LOG_INTERVAL_MINUTES;
+
+                                    if (!throttled)
+                                    {
                                     LogUtility.Log(
-                                        $"[ValidateBlock] STATE-REBUILD-TRIGGER: {_txFailCount} consecutive TX-validation failures " +
+                                        $"[ValidateBlock] STATE-REBUILD-TRIGGER: {TX_FAIL_RECOVERY_THRESHOLD} consecutive TX-validation failures " +
                                         $"(latest at block {block.Height}). Bad TX: {rejectBlockTxHash}. Reason: {rejectBlockReason}. " +
                                         $"State trie appears corrupted. Triggering full state rebuild (ResetTreis).",
                                         "BlockValidatorService");
-
-                                    // Reset counter before recovery
-                                    _txFailCount = 0;
 
                                     // Fire-and-forget state recovery: snapshot restore (seconds)
                                     // first, full genesis rebuild only as fallback.
@@ -1238,6 +1304,7 @@ namespace VerifiedXCore.Services
                                             // slot, or a restore already ran and TX failures persist — the
                                             // snapshot likely carries the corruption). The multi-hour genesis
                                             // replay is operator-only. Flag the state so this is visible.
+                                            _lastRecoveryExhaustedLogUtc = DateTime.UtcNow;
                                             StateTreiStatusService.SetFailed(
                                                 $"Repeated TX validation failures at height {Globals.LastBlock.Height}; snapshot recovery exhausted.");
                                             ErrorLogUtility.LogError(
@@ -1254,6 +1321,7 @@ namespace VerifiedXCore.Services
                                                 "BlockValidatorService");
                                         }
                                     });
+                                    }
                                 }
                             }
 
