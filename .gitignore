@@ -305,3 +305,4 @@ deploy/typechain-types/
 .env.*
 .github/copilot-instructions.md
 CLAUDE.md
+/error_rbx_logs
