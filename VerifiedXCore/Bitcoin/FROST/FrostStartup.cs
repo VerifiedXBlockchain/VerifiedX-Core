@@ -2377,7 +2377,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // Verify signature: message = "{OwnerAddress}.{SmartContractUID}.{Timestamp}"
-                            var signMessage = $"{ownerAddress}.{smartContractUID}.{timestamp}";
+                            // Signature must cover the blob (see FrostKeyBackupService.BuildStoreSignMessage).
+                            var signMessage = VerifiedXCore.Bitcoin.Services.FrostKeyBackupService.BuildStoreSignMessage(ownerAddress, smartContractUID, timestamp, encryptedBlob);
                             var sigValid = SignatureService.VerifySignature(ownerAddress, signMessage, signature);
                             if (!sigValid)
                             {

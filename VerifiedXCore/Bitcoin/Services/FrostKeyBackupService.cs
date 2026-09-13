@@ -35,6 +35,17 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Backup format version</summary>
         private const int BACKUP_VERSION = 1;
 
+        /// <summary>
+        /// The store request signature must cover the encrypted blob itself. Signing only
+        /// owner/contract/timestamp let a replayed request (within the freshness window) swap in a
+        /// garbage blob and overwrite the honest backup on every peer.
+        /// </summary>
+        public static string BuildStoreSignMessage(string ownerAddress, string smartContractUID, long timestamp, string encryptedBlob)
+        {
+            var blobHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(encryptedBlob ?? string.Empty))).ToLowerInvariant();
+            return $"{ownerAddress}.{smartContractUID}.{timestamp}.{blobHash}";
+        }
+
         #region Encryption / Decryption
 
         /// <summary>
@@ -275,7 +286,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Sign the backup request
                 var timestamp = TimeUtil.GetTime();
-                var signMessage = $"{validatorAddress}.{smartContractUID}.{timestamp}";
+                var signMessage = BuildStoreSignMessage(validatorAddress, smartContractUID, timestamp, encryptedBlob);
                 var signature = VerifiedXCore.Services.SignatureService.AddressSignature(validatorAddress, signMessage);
                 if (signature == "ERROR")
                 {
@@ -442,7 +453,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Sign backup request once (reused for all peers)
                 var timestamp = TimeUtil.GetTime();
-                var signMessage = $"{validatorAddress}.{smartContractUID}.{timestamp}";
+                var signMessage = BuildStoreSignMessage(validatorAddress, smartContractUID, timestamp, encryptedBlob);
                 var signature = VerifiedXCore.Services.SignatureService.AddressSignature(validatorAddress, signMessage);
                 if (signature == "ERROR") return (0, 0, validators.Count);
 
