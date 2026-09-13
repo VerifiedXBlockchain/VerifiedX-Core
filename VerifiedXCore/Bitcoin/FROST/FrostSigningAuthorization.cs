@@ -86,13 +86,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (!string.IsNullOrWhiteSpace(request.BtcTxId) && !string.Equals(request.BtcTxId.Trim(), txId, StringComparison.OrdinalIgnoreCase))
                     return (false, "BtcTxId does not match the transaction");
 
+                var (derivedTxId, derivedOutpoints) = DeriveTxBinding(tx);
                 if (request.TxInputOutpoints != null && request.TxInputOutpoints.Count > 0)
                 {
-                    var actual = tx.Inputs.Select(x => $"{x.PrevOut.Hash}:{x.PrevOut.N}".ToLowerInvariant()).ToList();
                     var announced = request.TxInputOutpoints.Select(o => (o ?? "").Trim().ToLowerInvariant()).ToList();
-                    if (announced.Count != actual.Count || !announced.SequenceEqual(actual))
+                    if (announced.Count != derivedOutpoints.Count || !announced.SequenceEqual(derivedOutpoints))
                         return (false, "TxInputOutpoints do not match the transaction");
                 }
+
+                // The contract-level outpoint pin (the non-expiring double-payout backstop) and the pin
+                // reconciler key off these two fields. They are DERIVED from the transaction here so a
+                // leader cannot disable the pin by simply omitting them.
+                request.TxInputOutpoints = derivedOutpoints;
+                request.BtcTxId = derivedTxId;
 
                 // ── 2. Every input must spend the contract's own deposit address ───────────────
                 var depositAddress = ResolveDepositAddress(request.SmartContractUID);
@@ -281,6 +287,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                 ErrorLogUtility.LogError($"ResolveDepositAddress({scUID}) failed: {ex.Message}", "FrostSigningAuthorization");
                 return null;
             }
+        }
+
+        /// <summary>Txid and lowercase "txid:vout" outpoints of every input, in input order.</summary>
+        public static (string TxId, List<string> Outpoints) DeriveTxBinding(NBitcoin.Transaction tx)
+        {
+            var outpoints = tx.Inputs.Select(x => $"{x.PrevOut.Hash}:{x.PrevOut.N}".ToLowerInvariant()).ToList();
+            return (tx.GetHash().ToString().ToLowerInvariant(), outpoints);
         }
 
         /// <summary>
