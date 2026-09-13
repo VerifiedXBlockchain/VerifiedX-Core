@@ -52,6 +52,57 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static int RequiredVotesFor(HashSet<string> committee) => Math.Max(2, committee.Count / 2 + 1);
 
+        public const long ALERT_MAX_SKEW_SECONDS = 600;
+
+        /// <summary>Message a caster signs when announcing a detected burn to its peers.</summary>
+        public static string BuildAlertMessage(string baseBurnTxHash, string burnType, long amountSats, string destination, string senderCasterAddress, long timestamp) =>
+            $"VFX_BURN_ALERT|{baseBurnTxHash}|{burnType}|{amountSats}|{(destination ?? string.Empty).Trim()}|{senderCasterAddress}|{timestamp}";
+
+        /// <summary>
+        /// A burn alert is accepted only from a committee member, with a fresh timestamp and a valid
+        /// signature over every field that later flows into the vote. Unauthenticated alerts let
+        /// anyone push a fabricated burn into every caster's consensus queue.
+        /// </summary>
+        public static (bool Ok, string Reason) VerifyBurnAlert(string baseBurnTxHash, string burnType, long amountSats, string destination,
+            string senderCasterAddress, long timestamp, string signature, HashSet<string> committee, long nowSeconds)
+        {
+            if (string.IsNullOrWhiteSpace(baseBurnTxHash)) return (false, "burn hash required");
+            if (string.IsNullOrWhiteSpace(senderCasterAddress)) return (false, "sender required");
+            if (string.IsNullOrWhiteSpace(signature)) return (false, "signature required");
+            if (amountSats <= 0) return (false, "amount must be positive");
+            if (committee == null || !committee.Contains(senderCasterAddress)) return (false, "sender is not a committee caster");
+            if (Math.Abs(nowSeconds - timestamp) > ALERT_MAX_SKEW_SECONDS) return (false, "alert timestamp out of range");
+            var msg = BuildAlertMessage(baseBurnTxHash, burnType, amountSats, destination, senderCasterAddress, timestamp);
+            if (!VerifiedXCore.Services.SignatureService.VerifySignature(senderCasterAddress, msg, signature)) return (false, "invalid alert signature");
+            return (true, "");
+        }
+
+        /// <summary>
+        /// A peer's confirmation is accepted only from a committee member whose signature is the
+        /// bound vote (burn, type, amount, destination) for the burn as THIS caster recorded it.
+        /// </summary>
+        public static (bool Ok, string Reason) VerifyConfirmation(string confirmingCaster, string baseBurnTxHash, string burnType,
+            long amountSats, string destination, long timestamp, string signature, HashSet<string> committee)
+        {
+            if (string.IsNullOrWhiteSpace(confirmingCaster) || string.IsNullOrWhiteSpace(signature)) return (false, "caster and signature required");
+            if (committee == null || !committee.Contains(confirmingCaster)) return (false, "confirming caster is not a committee member");
+            var msg = BuildBoundVoteMessage(baseBurnTxHash, burnType, amountSats, destination, timestamp);
+            if (!VerifiedXCore.Services.SignatureService.VerifySignature(confirmingCaster, msg, signature)) return (false, "invalid confirmation signature");
+            return (true, "");
+        }
+
+        /// <summary>
+        /// The burn event read from Base must match what the caster is about to vote for exactly.
+        /// </summary>
+        public static (bool Ok, string Reason) BurnEvidenceMatches(BaseBridgeService.BurnEventInfo? evidence, long expectedSats, string expectedDestination)
+        {
+            if (evidence == null) return (false, "no burn evidence");
+            if (evidence.AmountSats != expectedSats) return (false, $"burned amount {evidence.AmountSats} != expected {expectedSats}");
+            if (!string.Equals((evidence.Destination ?? "").Trim(), (expectedDestination ?? "").Trim(), StringComparison.Ordinal))
+                return (false, "burn destination does not match");
+            return (true, "");
+        }
+
         /// <summary>Legacy (pre-gate) verification: any VFX address with a valid signature counts.</summary>
         public static bool TryVerifyVotes(IEnumerable<CasterConsensusVote>? votes, string baseBurnTxHash, string burnType)
         {

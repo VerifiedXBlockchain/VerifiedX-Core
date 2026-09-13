@@ -64,6 +64,10 @@ namespace VerifiedXCore.Bitcoin.Services
             public decimal Amount { get; set; }
             public string BurnerAddress { get; set; } = "";
             public string SenderCasterAddress { get; set; } = "";
+            /// <summary>Unix seconds the alert was signed (freshness window).</summary>
+            public long Timestamp { get; set; }
+            /// <summary>Sender's VFX signature over <see cref="BridgeCasterConsensus.BuildAlertMessage"/>.</summary>
+            public string Signature { get; set; } = "";
         }
 
         public class BurnExitProposal
@@ -213,6 +217,11 @@ namespace VerifiedXCore.Bitcoin.Services
 
             LogUtility.Log($"[BurnExitConsensus] Detected burn: {baseBurnTxHash}, type={exitType}, amount={amount}", "BurnExitConsensusService");
 
+            var alertTimestamp = TimeUtil.GetTime();
+            var alertDestination = exitType == BurnExitType.VfxPoolUnlock ? vfxDestinationAddress : btcDestination;
+            var alertSignature = SignMessageWithValidatorKey(
+                BridgeCasterConsensus.BuildAlertMessage(baseBurnTxHash, BurnTypeString(exitType), (long)(amount * 100_000_000M), alertDestination, Globals.ValidatorAddress, alertTimestamp));
+
             await BroadcastBurnAlert(new BurnAlert
             {
                 BaseBurnTxHash = baseBurnTxHash,
@@ -222,7 +231,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 VfxDestinationAddress = vfxDestinationAddress,
                 Amount = amount,
                 BurnerAddress = burnerAddress,
-                SenderCasterAddress = Globals.ValidatorAddress
+                SenderCasterAddress = Globals.ValidatorAddress,
+                Timestamp = alertTimestamp,
+                Signature = alertSignature
             });
 
             await RunConsensusRound(baseBurnTxHash);
@@ -231,8 +242,20 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Handle BurnAlert from another caster via HTTP.</summary>
         public static async Task HandleBurnAlert(BurnAlert alert)
         {
-            if (string.IsNullOrEmpty(alert.BaseBurnTxHash) || _processedBurns.ContainsKey(alert.BaseBurnTxHash))
+            if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash) || _processedBurns.ContainsKey(alert.BaseBurnTxHash))
                 return;
+
+            // SECURITY: only a committee caster's signed, fresh alert enters the consensus queue.
+            var alertDest = alert.ExitType == BurnExitType.VfxPoolUnlock ? alert.VfxDestinationAddress : alert.BtcDestination;
+            var (alertOk, alertReason) = BridgeCasterConsensus.VerifyBurnAlert(
+                alert.BaseBurnTxHash, BurnTypeString(alert.ExitType), (long)(alert.Amount * 100_000_000M), alertDest,
+                alert.SenderCasterAddress, alert.Timestamp, alert.Signature,
+                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0), TimeUtil.GetTime());
+            if (!alertOk)
+            {
+                LogUtility.Log($"[BurnExitConsensus] REJECTED BurnAlert for {alert.BaseBurnTxHash} from {alert.SenderCasterAddress}: {alertReason}", "BurnExitConsensusService");
+                return;
+            }
 
             _processedBurns.TryAdd(alert.BaseBurnTxHash, new ProcessedBurnRecord
             {
@@ -296,6 +319,17 @@ namespace VerifiedXCore.Bitcoin.Services
             record.HandlerCasterAddress = winner.ProposerCasterAddress;
 
             LogUtility.Log($"[BurnExitConsensus] Winner for {baseBurnTxHash}: {winner.ProposerCasterAddress} ({allProposals.Count} proposals)", "BurnExitConsensusService");
+
+            // Step 4b: SECURITY — verify the burn on Base ourselves before signing anything. The
+            // alert is peer-supplied; our vote must commit only to what the chain actually burned.
+            var (evidenceOk, evidenceTransient, evidenceReason) = await VerifyBurnEvidenceAsync(record);
+            if (!evidenceOk)
+            {
+                LogUtility.Log($"[BurnExitConsensus] NOT confirming {baseBurnTxHash}: {evidenceReason}", "BurnExitConsensusService");
+                record.Status = evidenceTransient ? BurnExitStatus.Pending : BurnExitStatus.Failed;
+                _proposals.TryRemove(baseBurnTxHash, out _);
+                return;
+            }
 
             // Step 5: Broadcast confirmation (sign the vote so TryVerifyVotes can validate it)
             var burnType = BurnTypeString(record.ExitType);
@@ -365,7 +399,26 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Handle confirmation from another caster.</summary>
         public static void HandleBurnExitConfirmation(BurnExitConfirmation confirmation)
         {
-            if (string.IsNullOrEmpty(confirmation.BaseBurnTxHash)) return;
+            if (confirmation == null || string.IsNullOrEmpty(confirmation.BaseBurnTxHash)) return;
+
+            // SECURITY: a confirmation counts only from a committee caster whose signature is the
+            // bound vote for the burn exactly as THIS caster recorded it.
+            if (!_processedBurns.TryGetValue(confirmation.BaseBurnTxHash, out var localRecord))
+            {
+                LogUtility.Log($"[BurnExitConsensus] Ignoring confirmation for unknown burn {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}", "BurnExitConsensusService");
+                return;
+            }
+            var localDest = localRecord.ExitType == BurnExitType.VfxPoolUnlock ? localRecord.VfxDestinationAddress : localRecord.BtcDestination;
+            var (confOk, confReason) = BridgeCasterConsensus.VerifyConfirmation(
+                confirmation.ConfirmingCasterAddress, confirmation.BaseBurnTxHash, BurnTypeString(localRecord.ExitType),
+                (long)(localRecord.Amount * 100_000_000M), localDest, confirmation.Timestamp, confirmation.Signature,
+                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0));
+            if (!confOk)
+            {
+                LogUtility.Log($"[BurnExitConsensus] REJECTED confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: {confReason}", "BurnExitConsensusService");
+                return;
+            }
+
             var dict = _confirmations.GetOrAdd(confirmation.BaseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitConfirmation>());
             dict[confirmation.ConfirmingCasterAddress] = confirmation;
             LogUtility.Log($"[BurnExitConsensus] Confirmation from {confirmation.ConfirmingCasterAddress} for {confirmation.BaseBurnTxHash}", "BurnExitConsensusService");
@@ -1040,6 +1093,45 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Sign a vote message for a burn exit confirmation using this node's validator key.
         /// Returns empty string on failure.
         /// </summary>
+        /// <summary>
+        /// Reads the burn event from Base and checks it matches the record (amount + destination).
+        /// Returns Transient=true when the answer could not be obtained (retry later) rather than a
+        /// definitive mismatch.
+        /// </summary>
+        private static async Task<(bool Ok, bool Transient, string Reason)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)
+        {
+            if (!BaseBridgeService.IsBridgeConfigured)
+                return (false, true, "Base bridge RPC not configured on this caster; cannot verify the burn, refusing to vote");
+
+            var expectedSats = (long)(record.Amount * 100_000_000M);
+            var expectedDest = record.ExitType == BurnExitType.VfxPoolUnlock ? record.VfxDestinationAddress : record.BtcDestination;
+
+            var (ok, info, reason) = await BaseBridgeService.TryGetBurnEventAsync(record.BaseBurnTxHash, vfxExit: record.ExitType == BurnExitType.VfxPoolUnlock);
+            if (!ok)
+            {
+                var transient = reason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
+                                || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0;
+                return (false, transient, $"burn evidence unavailable: {reason}");
+            }
+
+            var (matches, mismatch) = BridgeCasterConsensus.BurnEvidenceMatches(info, expectedSats, expectedDest);
+            return matches ? (true, false, "") : (false, false, $"burn evidence mismatch: {mismatch}");
+        }
+
+        private static string SignMessageWithValidatorKey(string message)
+        {
+            try
+            {
+                var account = Data.AccountData.GetSingleAccount(Globals.ValidatorAddress);
+                if (account == null) return "";
+                var privKey = account.GetPrivKey;
+                if (privKey == null) return "";
+                var sig = VerifiedXCore.Services.SignatureService.CreateSignature(message, privKey, account.PublicKey);
+                return sig == "ERROR" ? "" : sig;
+            }
+            catch { return ""; }
+        }
+
         private static string SignVoteMessage(string baseBurnTxHash, string burnType, long amountSats, string destination, long timestamp)
         {
             try
