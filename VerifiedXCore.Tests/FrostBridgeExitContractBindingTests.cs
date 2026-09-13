@@ -138,21 +138,16 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void LegacyRecordWithoutPlan_FallsBackToLockList_AndRefusesForeignContract()
+        public void LegacyRecordWithoutPlan_IsRefused_ForEveryContract()
         {
-            // Pre-field record: only the lock list is available; derive contracts from lock state.
+            // Pre-field record: the lock list says which locks, not how much of each this exit drew,
+            // so no per-contract cap can be derived safely. Fail closed.
             VBTCBridgeLockState.GetCollection().Insert(new VBTCBridgeLockState { LockId = "L1", SmartContractUID = ContractA, OwnerAddress = "xO", Amount = 0.9M, AmountSats = 90_000_000, EvmDestination = "0xabc", LockTxHash = "lt1", LockTimestamp = 1 });
             VBTCBridgeLockState.GetCollection().Insert(new VBTCBridgeLockState { LockId = "L2", SmartContractUID = ContractB, OwnerAddress = "xO", Amount = 0.1M, AmountSats = 10_000_000, EvmDestination = "0xabc", LockTxHash = "lt2", LockTimestamp = 1 });
             InsertExit(Burn, 0.5M, allocations: null, lockIds: "L1,L2");
 
-            var (exitA, capA, _) = FrostSigningAuthorization.ResolveBtcExitForContract(Ref(BurnPrefix, "AAAAAAAA"), ContractA);
-            Assert.NotNull(exitA);
-            Assert.Equal(50_000_000L, capA); // bounded by the exit total, not the 0.9 lock
-
-            var (exitB, capB, _) = FrostSigningAuthorization.ResolveBtcExitForContract(Ref(BurnPrefix, "BBBBBBBB"), ContractB);
-            Assert.NotNull(exitB);
-            Assert.Equal(10_000_000L, capB);
-
+            Assert.Null(FrostSigningAuthorization.ResolveBtcExitForContract(Ref(BurnPrefix, "AAAAAAAA"), ContractA).Exit);
+            Assert.Null(FrostSigningAuthorization.ResolveBtcExitForContract(Ref(BurnPrefix, "BBBBBBBB"), ContractB).Exit);
             var (exitC, _, reasonC) = FrostSigningAuthorization.ResolveBtcExitForContract(Ref(BurnPrefix, "CCCCCCCC"), ContractC);
             Assert.Null(exitC);
             Assert.Contains("does not allocate", reasonC);

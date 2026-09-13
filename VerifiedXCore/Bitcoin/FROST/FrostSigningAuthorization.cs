@@ -317,10 +317,9 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
-        /// How many sats of an exit are drawn from <paramref name="scUID"/>. Uses the allocation plan
-        /// recorded at apply time; for records written before that field existed, falls back to the
-        /// lock list (bounded by the locks' amounts for the contract and by the exit total).
-        /// Returns 0 when the contract is not part of the exit.
+        /// How many sats of an exit are drawn from <paramref name="scUID"/>, from the allocation plan
+        /// recorded at apply time. Returns 0 when the contract is not part of the exit or the record
+        /// has no plan (pre-upgrade record; refused).
         /// </summary>
         public static long ContractAllocationSats(VBTCBridgeBtcExitState exit, string scUID)
         {
@@ -348,22 +347,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                 return Math.Min(sats, exitSats);
             }
 
-            // Legacy record: derive from the lock list.
-            var lockIds = (exit.LockId ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim());
-            decimal lockSum = 0M;
-            var any = false;
-            foreach (var id in lockIds)
-            {
-                var rec = VBTCBridgeLockState.GetByLockId(id);
-                if (rec == null) continue;
-                if (string.Equals(rec.SmartContractUID, scUID, StringComparison.Ordinal))
-                {
-                    any = true;
-                    lockSum += rec.Amount;
-                }
-            }
-            if (!any) return 0;
-            return Math.Min((long)(lockSum * 100_000_000M), exitSats);
+            // Records written before the allocation plan was recorded cannot be bound to a contract:
+            // the lock list only says WHICH locks, not how much of each this exit drew, so any cap
+            // derived from it over-pays a partially drawn contract. Refuse (fail closed). Operators:
+            // such an in-flight exit is recovered through the stuck-exit FAIL + re-exit path, which
+            // writes a record with a plan.
+            return 0;
         }
 
 
