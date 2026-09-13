@@ -103,6 +103,52 @@ namespace VerifiedXCore.Bitcoin.Services
             return (true, "");
         }
 
+        /// <summary>
+        /// Deterministic handler-election hash for a burn: keccak256("{proposer}:{burn}"). Every caster
+        /// can recompute it, so a proposer cannot pick an artificially low hash to win.
+        /// </summary>
+        public static string ComputeProposalHash(string proposerCasterAddress, string baseBurnTxHash)
+        {
+            var input = System.Text.Encoding.UTF8.GetBytes($"{proposerCasterAddress}:{baseBurnTxHash}");
+            return Nethereum.Util.Sha3Keccack.Current.CalculateHashFromHex(Convert.ToHexString(input));
+        }
+
+        public static string BuildProposalMessage(string baseBurnTxHash, string proposerCasterAddress, string proposerHash, long timestamp) =>
+            $"VFX_BURN_PROPOSAL|{baseBurnTxHash}|{proposerCasterAddress}|{proposerHash}|{timestamp}";
+
+        /// <summary>
+        /// A handler proposal is accepted only from a committee caster, with the deterministic hash
+        /// for (proposer, burn), a fresh timestamp and a valid signature. Unauthenticated proposals
+        /// let anyone inject the lowest hash under an address that will never execute, stalling exits.
+        /// </summary>
+        public static (bool Ok, string Reason) VerifyProposal(string baseBurnTxHash, string proposerCasterAddress, string proposerHash,
+            long timestamp, string signature, HashSet<string> committee, long nowSeconds)
+        {
+            if (string.IsNullOrWhiteSpace(baseBurnTxHash) || string.IsNullOrWhiteSpace(proposerCasterAddress)) return (false, "burn and proposer required");
+            if (string.IsNullOrWhiteSpace(signature)) return (false, "signature required");
+            if (committee == null || !committee.Contains(proposerCasterAddress)) return (false, "proposer is not a committee caster");
+            if (!string.Equals(ComputeProposalHash(proposerCasterAddress, baseBurnTxHash), proposerHash, StringComparison.OrdinalIgnoreCase))
+                return (false, "proposal hash is not the deterministic hash for this proposer and burn");
+            if (Math.Abs(nowSeconds - timestamp) > ALERT_MAX_SKEW_SECONDS) return (false, "proposal timestamp out of range");
+            var msg = BuildProposalMessage(baseBurnTxHash, proposerCasterAddress, proposerHash, timestamp);
+            if (!VerifiedXCore.Services.SignatureService.VerifySignature(proposerCasterAddress, msg, signature)) return (false, "invalid proposal signature");
+            return (true, "");
+        }
+
+        /// <summary>
+        /// Lowest deterministic hash among COMMITTEE proposers wins. Non-committee entries never win.
+        /// Returns null when no committee proposer is present.
+        /// </summary>
+        public static string? SelectHandler(IEnumerable<(string Proposer, string Hash)> proposals, HashSet<string> committee)
+        {
+            if (proposals == null || committee == null) return null;
+            return proposals
+                .Where(p => !string.IsNullOrEmpty(p.Proposer) && committee.Contains(p.Proposer))
+                .OrderBy(p => p.Hash, StringComparer.OrdinalIgnoreCase)
+                .Select(p => p.Proposer)
+                .FirstOrDefault();
+        }
+
         /// <summary>Legacy (pre-gate) verification: any VFX address with a valid signature counts.</summary>
         public static bool TryVerifyVotes(IEnumerable<CasterConsensusVote>? votes, string baseBurnTxHash, string burnType)
         {

@@ -75,6 +75,10 @@ namespace VerifiedXCore.Bitcoin.Services
             public string BaseBurnTxHash { get; set; } = "";
             public string ProposerCasterAddress { get; set; } = "";
             public string ProposerHash { get; set; } = "";
+            /// <summary>Unix seconds the proposal was signed (freshness window).</summary>
+            public long Timestamp { get; set; }
+            /// <summary>Proposer's VFX signature over <see cref="BridgeCasterConsensus.BuildProposalMessage"/>.</summary>
+            public string Signature { get; set; } = "";
         }
 
         public class BurnExitConfirmation
@@ -286,15 +290,17 @@ namespace VerifiedXCore.Bitcoin.Services
 
             record.Status = BurnExitStatus.InConsensus;
 
-            // Step 1: Generate deterministic proposal hash
-            var proposalHashInput = Encoding.UTF8.GetBytes($"{Globals.ValidatorAddress}:{baseBurnTxHash}");
-            var proposalHash = Nethereum.Util.Sha3Keccack.Current.CalculateHashFromHex(Convert.ToHexString(proposalHashInput));
+            // Step 1: Generate deterministic proposal hash and sign the proposal
+            var proposalHash = BridgeCasterConsensus.ComputeProposalHash(Globals.ValidatorAddress, baseBurnTxHash);
+            var proposalTimestamp = TimeUtil.GetTime();
 
             var myProposal = new BurnExitProposal
             {
                 BaseBurnTxHash = baseBurnTxHash,
                 ProposerCasterAddress = Globals.ValidatorAddress,
-                ProposerHash = proposalHash
+                ProposerHash = proposalHash,
+                Timestamp = proposalTimestamp,
+                Signature = SignMessageWithValidatorKey(BridgeCasterConsensus.BuildProposalMessage(baseBurnTxHash, Globals.ValidatorAddress, proposalHash, proposalTimestamp))
             };
 
             var proposalDict = _proposals.GetOrAdd(baseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitProposal>());
@@ -315,7 +321,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 return;
             }
 
-            var winner = allProposals.OrderBy(p => p.ProposerHash, StringComparer.OrdinalIgnoreCase).First();
+            // Only committee casters can be elected handler (intake already filters; defend here too).
+            var electionCommittee = BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0);
+            var winnerAddress = BridgeCasterConsensus.SelectHandler(allProposals.Select(p => (p.ProposerCasterAddress, p.ProposerHash)), electionCommittee);
+            if (winnerAddress == null)
+            {
+                record.Status = BurnExitStatus.Pending;
+                LogUtility.Log($"[BurnExitConsensus] No committee proposer for {baseBurnTxHash}; will retry.", "BurnExitConsensusService");
+                _proposals.TryRemove(baseBurnTxHash, out _);
+                return;
+            }
+            var winner = allProposals.First(p => p.ProposerCasterAddress == winnerAddress);
             record.HandlerCasterAddress = winner.ProposerCasterAddress;
 
             LogUtility.Log($"[BurnExitConsensus] Winner for {baseBurnTxHash}: {winner.ProposerCasterAddress} ({allProposals.Count} proposals)", "BurnExitConsensusService");
@@ -390,7 +406,18 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Handle proposal from another caster.</summary>
         public static void HandleBurnExitProposal(BurnExitProposal proposal)
         {
-            if (string.IsNullOrEmpty(proposal.BaseBurnTxHash)) return;
+            if (proposal == null || string.IsNullOrEmpty(proposal.BaseBurnTxHash)) return;
+
+            // SECURITY: only a committee caster's fresh, signed proposal with the deterministic hash counts.
+            var (propOk, propReason) = BridgeCasterConsensus.VerifyProposal(
+                proposal.BaseBurnTxHash, proposal.ProposerCasterAddress, proposal.ProposerHash, proposal.Timestamp, proposal.Signature,
+                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0), TimeUtil.GetTime());
+            if (!propOk)
+            {
+                LogUtility.Log($"[BurnExitConsensus] REJECTED proposal for {proposal.BaseBurnTxHash} from {proposal.ProposerCasterAddress}: {propReason}", "BurnExitConsensusService");
+                return;
+            }
+
             var dict = _proposals.GetOrAdd(proposal.BaseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitProposal>());
             dict[proposal.ProposerCasterAddress] = proposal;
             LogUtility.Log($"[BurnExitConsensus] Proposal from {proposal.ProposerCasterAddress} for {proposal.BaseBurnTxHash}", "BurnExitConsensusService");
