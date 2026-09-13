@@ -112,10 +112,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                 string destination;
                 long maxDestinationSats;
                 bool leaderIsOwner = false;
+                bool isBridgeExit = false;
 
                 var wrh = request.WithdrawalRequestHash.Trim();
                 if (wrh.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
                 {
+                    isBridgeExit = true;
                     var (exit, capSats, exitReason) = ResolveBtcExitForContract(wrh, request.SmartContractUID);
                     if (exit == null) return (false, exitReason);
                     if (exit.IsComplete) return (false, "Bridge exit already completed");
@@ -153,9 +155,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                 var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats);
                 if (!boundsOk) return (false, boundsReason);
 
-                // ── 5. Leader must be the owner, a registered validator, or a known caster ────
-                if (!leaderIsOwner && !IsRegisteredValidator(request.LeaderAddress) && !IsKnownCaster(request.LeaderAddress))
-                    return (false, "Leader is not the withdrawal owner, a registered validator, or a known caster");
+                // ── 5. Leader: the withdrawal owner for user withdrawals; a committee caster for exits ─
+                var (leaderOk, leaderReason) = IsLeaderAllowed(isBridgeExit, leaderIsOwner, IsKnownCaster(request.LeaderAddress));
+                if (!leaderOk) return (false, leaderReason);
 
                 return (true, "");
             }
@@ -164,6 +166,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                 ErrorLogUtility.LogError($"FrostSigningAuthorization error: {ex}", "FrostSigningAuthorization.Authorize");
                 return (false, $"Authorization error: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Who may lead a ceremony. A USER withdrawal is led only by its owner: every legitimate
+        /// coordinator path sets the requester as leader, and letting any registered validator lead
+        /// would let them sign-and-withhold a competing transaction, pinning the contract (FIND-028)
+        /// and stalling the owner's withdrawal indefinitely. A BRIDGE EXIT is led by the handler
+        /// caster, so the leader must be a committee caster.
+        /// </summary>
+        public static (bool Ok, string Reason) IsLeaderAllowed(bool isBridgeExit, bool leaderIsOwner, bool leaderIsCommitteeCaster)
+        {
+            if (isBridgeExit)
+                return leaderIsCommitteeCaster ? (true, "") : (false, "Bridge exit signing must be led by a committee caster");
+            return leaderIsOwner ? (true, "") : (false, "Withdrawal signing must be led by the withdrawal owner");
         }
 
         /// <summary>
@@ -341,15 +357,6 @@ namespace VerifiedXCore.Bitcoin.FROST
             return Math.Min((long)(lockSum * 100_000_000M), exitSats);
         }
 
-        private static bool IsRegisteredValidator(string address)
-        {
-            try
-            {
-                return VBTCValidatorRegistry.GetActiveValidators()
-                    .Any(v => string.Equals(v.ValidatorAddress, address, StringComparison.Ordinal));
-            }
-            catch { return false; }
-        }
 
         private static bool IsKnownCaster(string address)
         {
