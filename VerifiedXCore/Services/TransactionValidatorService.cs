@@ -3416,6 +3416,15 @@ namespace VerifiedXCore.Services
 
                     if (poolStrict)
                     {
+                        // Shape tightening (gated by BridgeIntraBlockGuardHeight): committee submitter,
+                        // canonical valid destination, exact sats/decimal pair.
+                        if (poolGateHeight >= Globals.BridgeIntraBlockGuardHeight)
+                        {
+                            var (shapeOk, shapeReason) = BridgeTxRules.CheckPoolUnlockShape(txRequest.FromAddress, vfxDestAddr, totalAmount.Value, totalAmountSats.Value,
+                                BridgeCasterConsensus.GetCommitteeForHeight(poolGateHeight));
+                            if (!shapeOk) return (txResult, shapeReason);
+                        }
+
                         var votesTok = jobj["CasterConsensusVotes"];
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
@@ -3511,6 +3520,13 @@ namespace VerifiedXCore.Services
 
                     if (exitStrict)
                     {
+                        // Submitter tightening (gated by BridgeIntraBlockGuardHeight): only the handler caster.
+                        if (exitGateHeight >= Globals.BridgeIntraBlockGuardHeight)
+                        {
+                            var (subOk, subReason) = BridgeTxRules.CheckSubmitter(txRequest.FromAddress, BridgeCasterConsensus.GetCommitteeForHeight(exitGateHeight));
+                            if (!subOk) return (txResult, subReason);
+                        }
+
                         // V3 payloads carry TotalAmount/TotalAmountSats + Allocations; legacy carries Amount/AmountSats.
                         var exitTotal = jobj["TotalAmount"]?.ToObject<decimal?>() ?? amount.Value;
                         var exitTotalSats = jobj["TotalAmountSats"]?.ToObject<long?>() ?? amountSats.Value;
