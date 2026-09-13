@@ -142,6 +142,26 @@ namespace VerifiedXCore.Bitcoin.Services
                 .FirstOrDefault();
         }
 
+        /// <summary>Confirmation-specific message: binds WHICH handler the caster agreed to.</summary>
+        public static string BuildConfirmationHandlerMessage(string baseBurnTxHash, string confirmingCaster, string agreedHandler, long timestamp) =>
+            $"VFX_BURN_CONFIRM|{baseBurnTxHash}|{confirmingCaster}|{agreedHandler}|{timestamp}";
+
+        /// <summary>
+        /// The bound vote signature covers burn/type/amount/destination but not the handler the
+        /// caster agreed to; without this second signature an observer could replay a caster's real
+        /// vote under a junk handler and drop it from the count.
+        /// </summary>
+        public static (bool Ok, string Reason) VerifyConfirmationHandler(string confirmingCaster, string baseBurnTxHash, string agreedHandler,
+            long timestamp, string handlerSignature, long nowSeconds)
+        {
+            if (string.IsNullOrWhiteSpace(agreedHandler)) return (false, "agreed handler required");
+            if (string.IsNullOrWhiteSpace(handlerSignature)) return (false, "handler signature required");
+            if (Math.Abs(nowSeconds - timestamp) > ALERT_MAX_SKEW_SECONDS) return (false, "confirmation timestamp out of range");
+            var msg = BuildConfirmationHandlerMessage(baseBurnTxHash, confirmingCaster, agreedHandler, timestamp);
+            if (!VerifiedXCore.Services.SignatureService.VerifySignature(confirmingCaster, msg, handlerSignature)) return (false, "invalid handler signature");
+            return (true, "");
+        }
+
         /// <summary>Legacy (pre-gate) verification: any VFX address with a valid signature counts.</summary>
         public static bool TryVerifyVotes(IEnumerable<CasterConsensusVote>? votes, string baseBurnTxHash, string burnType)
         {

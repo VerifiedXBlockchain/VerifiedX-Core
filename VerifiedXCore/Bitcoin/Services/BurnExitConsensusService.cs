@@ -92,12 +92,20 @@ namespace VerifiedXCore.Bitcoin.Services
             public string BaseBurnTxHash { get; set; } = "";
             public string ConfirmingCasterAddress { get; set; } = "";
             public string AgreedHandlerAddress { get; set; } = "";
+            /// <summary>Bound vote signature (burn/type/amount/destination/ts) — reused in the on-chain tx.</summary>
             public string Signature { get; set; } = "";
             public long Timestamp { get; set; }
+            /// <summary>Signature over <see cref="BridgeCasterConsensus.BuildConfirmationHandlerMessage"/> — binds the agreed handler.</summary>
+            public string HandlerSignature { get; set; } = "";
         }
 
-        /// <summary>Adaptive majority: max(2, casterCount / 2 + 1).</summary>
-        public static int RequiredCasterSignatures => Math.Max(2, Globals.ActiveCasterCount / 2 + 1);
+        /// <summary>
+        /// Adaptive majority of the COMMITTEE for the current height — the same set and threshold
+        /// consensus validation applies to the votes, so a handler never ships a vote set its own
+        /// admission would reject.
+        /// </summary>
+        public static int RequiredCasterSignatures =>
+            BridgeCasterConsensus.RequiredVotesFor(BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0));
 
         /// <summary>
         /// Background loop: catch-up sync on startup, then monitor pending burns and drive consensus.
@@ -393,7 +401,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 ConfirmingCasterAddress = Globals.ValidatorAddress,
                 AgreedHandlerAddress = winner.ProposerCasterAddress,
                 Signature = voteSig,
-                Timestamp = timestamp
+                Timestamp = timestamp,
+                HandlerSignature = SignMessageWithValidatorKey(BridgeCasterConsensus.BuildConfirmationHandlerMessage(baseBurnTxHash, Globals.ValidatorAddress, winner.ProposerCasterAddress, timestamp))
             };
 
             var confirmDict = _confirmations.GetOrAdd(baseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitConfirmation>());
@@ -440,6 +449,13 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (proposal == null || string.IsNullOrEmpty(proposal.BaseBurnTxHash)) return;
 
+            // Only proposals for burns this node itself tracks; anything else is unbounded noise.
+            if (!_processedBurns.ContainsKey(proposal.BaseBurnTxHash))
+            {
+                LogUtility.Log($"[BurnExitConsensus] Ignoring proposal for unknown burn {proposal.BaseBurnTxHash} from {proposal.ProposerCasterAddress}", "BurnExitConsensusService");
+                return;
+            }
+
             // SECURITY: only a committee caster's fresh, signed proposal with the deterministic hash counts.
             var (propOk, propReason) = BridgeCasterConsensus.VerifyProposal(
                 proposal.BaseBurnTxHash, proposal.ProposerCasterAddress, proposal.ProposerHash, proposal.Timestamp, proposal.Signature,
@@ -478,8 +494,24 @@ namespace VerifiedXCore.Bitcoin.Services
                 return;
             }
 
+            // The agreed handler must be signed too (a replayed vote under a junk handler would
+            // otherwise overwrite the real confirmation), and a caster's first verified confirmation
+            // for a burn is kept — later ones cannot displace it.
+            var (handlerOk, handlerReason) = BridgeCasterConsensus.VerifyConfirmationHandler(
+                confirmation.ConfirmingCasterAddress, confirmation.BaseBurnTxHash, confirmation.AgreedHandlerAddress,
+                confirmation.Timestamp, confirmation.HandlerSignature, TimeUtil.GetTime());
+            if (!handlerOk)
+            {
+                LogUtility.Log($"[BurnExitConsensus] REJECTED confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: {handlerReason}", "BurnExitConsensusService");
+                return;
+            }
+
             var dict = _confirmations.GetOrAdd(confirmation.BaseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitConfirmation>());
-            dict[confirmation.ConfirmingCasterAddress] = confirmation;
+            if (!dict.TryAdd(confirmation.ConfirmingCasterAddress, confirmation))
+            {
+                LogUtility.Log($"[BurnExitConsensus] Ignoring duplicate confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress} (first one kept)", "BurnExitConsensusService");
+                return;
+            }
             LogUtility.Log($"[BurnExitConsensus] Confirmation from {confirmation.ConfirmingCasterAddress} for {confirmation.BaseBurnTxHash}", "BurnExitConsensusService");
         }
 
@@ -1130,6 +1162,12 @@ namespace VerifiedXCore.Bitcoin.Services
 
             foreach (var key in toRemove)
                 _processedBurns.TryRemove(key, out _);
+
+            // Orphaned round state (burns no longer tracked) must not accumulate.
+            foreach (var key in _proposals.Keys.Where(k => !_processedBurns.ContainsKey(k)).ToList())
+                _proposals.TryRemove(key, out _);
+            foreach (var key in _confirmations.Keys.Where(k => !_processedBurns.ContainsKey(k)).ToList())
+                _confirmations.TryRemove(key, out _);
         }
 
         public static Dictionary<string, object> GetRegistryStatus() => new()
