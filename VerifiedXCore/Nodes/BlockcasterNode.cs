@@ -61,6 +61,17 @@ namespace VerifiedXCore.Nodes
     /// <summary>Escalation to a rollback requires this many SPACED reconcile attempts.</summary>
     internal const int DESYNC_ESCALATION_ATTEMPTS = 2;
 
+    /// <summary>DESYNC-CLOCK-FIX (Sep 2026): the stall clock used to refresh only on a message-7
+    /// commit, so a validator that received a few blocks via P2P gossip / HeightSync instead looked
+    /// "stuck" to the next message-7 arrival and ran a reconcile — and two such stretches ≥45 s
+    /// apart escalated to a rollback of a correct tip. Every committed block now refreshes it.
+    /// Called from BlockValidatorService right after the block is added to the chain.</summary>
+    internal static void NoteBlockCommitted()
+    {
+        Interlocked.Exchange(ref _lastBlockAcceptedTick, Environment.TickCount64);
+        Interlocked.Exchange(ref _desyncReconcileAttempts, 0);
+    }
+
     /// <summary>A reconcile attempt only counts toward escalation if a full stall window has passed since the previous one.</summary>
     internal static bool CountsAsNewDesyncAttempt(long msSinceLastAttempt) => msSinceLastAttempt >= DESYNC_RECOVERY_TIMEOUT_MS;
 

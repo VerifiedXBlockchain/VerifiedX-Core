@@ -493,10 +493,26 @@ namespace VerifiedXCore.Services
                     }
                     CasterLogUtility.Log($"     promotionAgreement=PASS", "CasterFlow");
 
-                    // Send promotion notification FIRST and wait for acceptance.
-                    // Only add to BlockCasters if the promoted node confirms.
-                    // This prevents "zombie casters" where the promoter's caster list
-                    // includes a node that rejected the promotion, breaking quorum.
+                    // Wave 3 RECORD-FIRST (ROTATION-LIVENESS, Sep 2026): the promotion becomes a
+                    // majority-signed membership record BEFORE the candidate is told. The old order
+                    // (notify → rotate) flipped the candidate to caster on 'accepted', then the
+                    // rotation failed, the candidate found itself in nobody's committee, stood down,
+                    // and was disavowed ~30 s later — a 4↔5 pool flap every ~35 s for eleven hours
+                    // on mainnet, with round timing reset on every change. No-op in the legacy era.
+                    var rotationOk = await CasterMembershipService.ProposeRotationAsync(
+                        "Promotion", v.Address,
+                        new CasterInfo { Address = v.Address, PeerIP = ip, PublicKey = v.PublicKey ?? "" });
+                    if (!rotationOk)
+                    {
+                        CasterLogUtility.Log($"  <<  membership rotation FAILED for {v.Address} — promotion aborted (set unchanged, candidate not notified).", "CasterFlow");
+                        ConsoleWriterService.OutputValCaster($"[CasterDiscovery] Promotion of {v.Address} aborted — membership record could not be signed by majority.");
+                        continue;
+                    }
+
+                    // Notify the candidate and wait for acceptance. Only keep it in BlockCasters if
+                    // the promoted node confirms (prevents "zombie casters"). If it refuses now that
+                    // the record already carries it, undo with a Demotion rotation so record and
+                    // live set stay consistent.
                     CasterLogUtility.Log($"     sending PromoteToCaster HTTP to {ip}…", "CasterFlow");
                     ConsoleWriterService.OutputValCaster($"[CasterFlow] → POST PromoteToCaster {ip}");
                     var (accepted, promotionUnreachable) = await NotifyPromotionAndAwaitAcceptance(ip, v.Address, newCaster).ConfigureAwait(false);
@@ -510,18 +526,21 @@ namespace VerifiedXCore.Services
                         CasterLogUtility.Log($"  <<  promotion REJECTED/failed by candidate (unreachable={promotionUnreachable})", "CasterFlow");
                         ConsoleWriterService.OutputValCaster(
                             $"[CasterDiscovery] Candidate {v.Address} at {ip} did not accept promotion. Not adding to caster pool.");
-                        continue;
-                    }
 
-                    // Wave 3 RECORD-FIRST: the promotion must become a majority-signed membership
-                    // record BEFORE the live set mutates. No-op (returns true) in the legacy era.
-                    var rotationOk = await CasterMembershipService.ProposeRotationAsync(
-                        "Promotion", v.Address,
-                        new CasterInfo { Address = v.Address, PeerIP = ip, PublicKey = v.PublicKey ?? "" });
-                    if (!rotationOk)
-                    {
-                        CasterLogUtility.Log($"  <<  membership rotation FAILED for {v.Address} — promotion aborted (set unchanged).", "CasterFlow");
-                        ConsoleWriterService.OutputValCaster($"[CasterDiscovery] Promotion of {v.Address} aborted — membership record could not be signed by majority.");
+                        if (CasterMembershipStore.RecordEraActive)
+                        {
+                            var undone = await CasterMembershipService.ProposeRotationAsync("Demotion", v.Address, null);
+                            CasterLogUtility.Log(
+                                $"  <<  record-first rollback: Demotion rotation for {v.Address} " +
+                                (undone ? "SUCCEEDED." : "FAILED — record still lists the candidate; eviction/heal will reconcile."),
+                                "CasterFlow");
+                        }
+                        // The rotation reconcile may already have staged the candidate in the bag.
+                        if (Globals.BlockCasters.Any(p => p.ValidatorAddress == v.Address))
+                        {
+                            Globals.BlockCasters = new ConcurrentBag<Peers>(Globals.BlockCasters.Where(p => p.ValidatorAddress != v.Address));
+                            Globals.SyncKnownCastersFromBlockCasters();
+                        }
                         continue;
                     }
 
@@ -936,13 +955,17 @@ namespace VerifiedXCore.Services
                     })
                     .ToList();
 
-                // Add the new candidate to the list
-                existingCasters.Add(new CasterInfo
+                // Add the new candidate to the list (record-first: the rotation reconcile may have
+                // staged it in BlockCasters already — never list it twice).
+                if (!existingCasters.Any(c => c.Address == newCaster.ValidatorAddress))
                 {
-                    Address = newCaster.ValidatorAddress!,
-                    PeerIP = (newCaster.PeerIP ?? "").Replace("::ffff:", ""),
-                    PublicKey = newCaster.ValidatorPublicKey ?? ""
-                });
+                    existingCasters.Add(new CasterInfo
+                    {
+                        Address = newCaster.ValidatorAddress!,
+                        PeerIP = (newCaster.PeerIP ?? "").Replace("::ffff:", ""),
+                        PublicKey = newCaster.ValidatorPublicKey ?? ""
+                    });
+                }
 
                 var blockHeight = Globals.LastBlock.Height;
                 var promoterAddress = Globals.ValidatorAddress ?? "";
@@ -2105,7 +2128,11 @@ namespace VerifiedXCore.Services
                 {
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-                    var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetMembershipRecord/{localHeadSeq}";
+                    // ROTATION-LIVENESS: GetSince is exclusive; ask from head-1 so the peer also returns its record
+
+                    // AT our head seq — a canonical sibling (same set, lower hash) is adopted by TryAppend.
+
+                    var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetMembershipRecord/{localHeadSeq - 1}";
                     var resp = await client.GetAsync(url, cts.Token);
                     if (!resp.IsSuccessStatusCode) return;
                     var body = await resp.Content.ReadAsStringAsync();

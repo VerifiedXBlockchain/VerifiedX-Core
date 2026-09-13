@@ -30,6 +30,89 @@ namespace VerifiedXCore.Services
         {
             public long Id { get; set; }            // = RecordSeq
             public string RecordHash { get; set; } = "";
+            /// <summary>ROTATION-LIVENESS (Sep 2026): identity of the caster SET signed at this seq
+            /// (see <see cref="ComputeCasterSetHash(CasterMembershipRecord)"/>). Empty on markers
+            /// written before the fix.</summary>
+            public string SetHash { get; set; } = "";
+        }
+
+        /// <summary>
+        /// ROTATION-LIVENESS (Sep 2026): rotation records are built per proposer, and the record
+        /// hash covers EffectiveFromHeight (proposer's tip + margin) plus each member's PeerIP /
+        /// PublicKey as that proposer knows them. Two casters proposing the SAME change seconds
+        /// apart therefore produced different hashes, each locked itself to its own hash at that
+        /// seq, nobody reached 3-of-5, and — because every retry is a new height — the committee
+        /// deadlocked at seq 3 on mainnet for eleven hours (3922 "already signed a DIFFERENT
+        /// record" aborts on one caster). Quantizing the effective height to a block window makes
+        /// proposers that see the same tip window produce the same height.
+        /// </summary>
+        public const int RotationHeightWindow = 10;
+
+        /// <summary>Margin so a new record propagates before it starts governing rounds.</summary>
+        public const int RotationEffectiveMargin = 2;
+
+        /// <summary>Pure (tested): the effective height for a rotation proposed at <paramref name="tipHeight"/>
+        /// on top of a head effective at <paramref name="headEffectiveFromHeight"/>.</summary>
+        public static long ComputeRotationEffectiveHeight(long headEffectiveFromHeight, long tipHeight)
+        {
+            var minimum = tipHeight + RotationEffectiveMargin;
+            var quantized = ((minimum + RotationHeightWindow - 1) / RotationHeightWindow) * RotationHeightWindow;
+            return Math.Max(headEffectiveFromHeight + 1, quantized);
+        }
+
+        /// <summary>Identity of a record's caster SET: sorted addresses only — independent of
+        /// EffectiveFromHeight, PeerIP, PublicKey and signatures.</summary>
+        public static string ComputeCasterSetHash(CasterMembershipRecord r)
+            => ComputeCasterSetHash(r.Casters?.Select(c => c.Address));
+
+        public static string ComputeCasterSetHash(IEnumerable<string?>? addresses)
+        {
+            var joined = string.Join("|",
+                (addresses ?? Enumerable.Empty<string?>())
+                    .Where(a => !string.IsNullOrEmpty(a))
+                    .Select(a => a!)
+                    .OrderBy(a => a, StringComparer.Ordinal));
+            using var sha256 = SHA256.Create();
+            return Convert.ToHexString(sha256.ComputeHash(Encoding.UTF8.GetBytes("CASTER-SET-V1|" + joined))).ToLowerInvariant();
+        }
+
+        internal enum SignedMarkDecision { Insert, Idempotent, SameSetRefresh, LegacyUpgrade, Refuse }
+
+        /// <summary>
+        /// Pure (tested) equivocation decision. The guard protects against signing two DIFFERENT
+        /// caster sets at one seq (a real committee fork). Re-signing the same set with a different
+        /// hash (another proposer's height/IP view of the same change) is allowed. A marker written
+        /// before this fix has no SetHash and cannot be compared; it is upgraded to the first new
+        /// request's identity — those markers are exactly the deadlock artifact, and any record
+        /// they belong to that DID complete elsewhere would have advanced our head already.
+        /// </summary>
+        internal static SignedMarkDecision EvaluateSignedMarker(SignedSeqMarker? existing, string recordHash, string setHash)
+        {
+            if (existing == null)
+                return SignedMarkDecision.Insert;
+            if (string.Equals(existing.RecordHash, recordHash, StringComparison.OrdinalIgnoreCase))
+                return SignedMarkDecision.Idempotent;
+            if (string.IsNullOrEmpty(existing.SetHash))
+                return SignedMarkDecision.LegacyUpgrade;
+            if (string.Equals(existing.SetHash, setHash, StringComparison.OrdinalIgnoreCase))
+                return SignedMarkDecision.SameSetRefresh;
+            return SignedMarkDecision.Refuse;
+        }
+
+        /// <summary>
+        /// Pure (tested): a "sibling" is a majority-signed record at the SAME seq as our head with the
+        /// same predecessor and the same caster set but a different hash (another proposer's view of
+        /// the same change). Nodes converge on the lexicographically LOWER hash so the chain stays
+        /// unique for the next rotation's PrevRecordHash check.
+        /// </summary>
+        internal static bool IsCanonicalSibling(CasterMembershipRecord head, CasterMembershipRecord candidate)
+        {
+            if (head == null || candidate == null) return false;
+            if (candidate.RecordSeq != head.RecordSeq || candidate.RecordSeq <= 0) return false;
+            if (!string.Equals(candidate.PrevRecordHash, head.PrevRecordHash, StringComparison.OrdinalIgnoreCase)) return false;
+            if (string.IsNullOrEmpty(candidate.RecordHash) || string.Equals(candidate.RecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!string.Equals(ComputeCasterSetHash(candidate), ComputeCasterSetHash(head), StringComparison.OrdinalIgnoreCase)) return false;
+            return string.CompareOrdinal(candidate.RecordHash.ToLowerInvariant(), head.RecordHash.ToLowerInvariant()) < 0;
         }
 
         /// <summary>Wave 6: minimum hardcoded-seed signatures a genesis record must carry.</summary>
@@ -308,6 +391,28 @@ namespace VerifiedXCore.Services
                 var head = GetCurrent();
                 if (head != null && candidate.RecordSeq <= head.RecordSeq)
                 {
+                    // ROTATION-LIVENESS: adopt a canonical sibling of our head (same seq, same
+                    // predecessor, same caster set, lower hash) when it carries a valid majority.
+                    // Membership is unchanged; only the hash chain converges.
+                    if (IsCanonicalSibling(head, candidate))
+                    {
+                        var prevOfHead = Collection()?.FindById(head.RecordSeq - 1);
+                        var siblingReason = "no predecessor record";
+                        if (prevOfHead != null && ValidateSuccessor(prevOfHead, candidate, out siblingReason))
+                        {
+                            var scol = Collection();
+                            if (scol == null) { reason = "db unavailable"; return false; }
+                            scol.Update(candidate.RecordSeq, candidate);
+                            _cachedHead = candidate;
+                            CasterLogUtility.Log(
+                                $"MEMBERSHIP: adopted canonical sibling at seq={candidate.RecordSeq} ({candidate.RecordHash[..Math.Min(16, candidate.RecordHash.Length)]}… replaces {head.RecordHash[..Math.Min(16, head.RecordHash.Length)]}…, same caster set).",
+                                "MEMBERSHIP");
+                            reason = "sibling adopted";
+                            return true;
+                        }
+                        CasterLogUtility.Log($"MEMBERSHIP: sibling at seq={candidate.RecordSeq} NOT adopted — {siblingReason}.", "MEMBERSHIP");
+                    }
+
                     // Wave 6 FIRST-GENESIS-WINS: a DIFFERENT genesis than ours is loud evidence of
                     // a competing restart era — never silently swallowed.
                     if (candidate.RecordSeq == 0)
@@ -353,21 +458,41 @@ namespace VerifiedXCore.Services
         // ── Double-sign protection ───────────────────────────────────────
 
         /// <summary>
-        /// Atomically records that this node signed <paramref name="recordHash"/> at <paramref name="seq"/>.
-        /// Returns false when a DIFFERENT hash was already signed at that seq (equivocation refused).
-        /// Signing the same record twice is allowed (idempotent retries).
+        /// Atomically records that this node signed <paramref name="recordHash"/> (caster set
+        /// <paramref name="setHash"/>) at <paramref name="seq"/>. Returns false only when a DIFFERENT
+        /// caster set was already signed at that seq (equivocation refused). Re-signing the same
+        /// record, or the same set under another proposer's hash, is allowed — see
+        /// <see cref="EvaluateSignedMarker"/> for the rationale and the legacy-marker migration.
         /// </summary>
-        public static bool TryMarkSigned(long seq, string recordHash)
+        public static bool TryMarkSigned(long seq, string recordHash, string setHash)
         {
             lock (Mut)
             {
                 var col = MarkerCollection();
                 if (col == null) return false;
                 var existing = col.FindById(seq);
-                if (existing != null)
-                    return string.Equals(existing.RecordHash, recordHash, StringComparison.OrdinalIgnoreCase);
-                col.Insert(seq, new SignedSeqMarker { Id = seq, RecordHash = recordHash });
-                return true;
+                switch (EvaluateSignedMarker(existing, recordHash, setHash))
+                {
+                    case SignedMarkDecision.Insert:
+                        col.Insert(seq, new SignedSeqMarker { Id = seq, RecordHash = recordHash, SetHash = setHash });
+                        return true;
+                    case SignedMarkDecision.Idempotent:
+                        return true;
+                    case SignedMarkDecision.SameSetRefresh:
+                        existing!.RecordHash = recordHash;
+                        col.Update(seq, existing);
+                        return true;
+                    case SignedMarkDecision.LegacyUpgrade:
+                        CasterLogUtility.Log(
+                            $"MEMBERSHIP: legacy signed-seq marker at seq {seq} ({existing!.RecordHash[..Math.Min(16, existing.RecordHash.Length)]}…) carries no set identity — upgraded to the current request's caster set (one-time migration).",
+                            "MEMBERSHIP");
+                        existing.RecordHash = recordHash;
+                        existing.SetHash = setHash;
+                        col.Update(seq, existing);
+                        return true;
+                    default:
+                        return false;
+                }
             }
         }
 

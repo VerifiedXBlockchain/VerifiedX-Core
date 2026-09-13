@@ -1355,6 +1355,7 @@ namespace VerifiedXCore.Services
                         //}
 
                         await BlockchainData.AddBlock(block, updateCLI);//add block to chain.
+                        Nodes.BlockcasterNode.NoteBlockCommitted(); // DESYNC-CLOCK-FIX: every commit path (message 7, gossip, HeightSync, download) refreshes the stall clock
                         UpdateMemBlocks(block);//update mem blocks
                         UpdateMemBlocksHashes(block);
                         CleanupMempoolAfterBlock(block);//cleanup duplicate withdrawal requests from mempool

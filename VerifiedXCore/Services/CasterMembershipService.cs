@@ -16,9 +16,6 @@ namespace VerifiedXCore.Services
     /// </summary>
     public static class CasterMembershipService
     {
-        /// <summary>Margin so a new record propagates before it starts governing rounds.</summary>
-        private const int EffectiveHeightMargin = 2;
-
         /// <summary>
         /// Builds record head+1 applying the given change, collects majority signatures from the
         /// CURRENT record's casters, appends locally, and broadcasts the finalized record.
@@ -61,7 +58,9 @@ namespace VerifiedXCore.Services
                 var candidate = new CasterMembershipRecord
                 {
                     RecordSeq = head.RecordSeq + 1,
-                    EffectiveFromHeight = Math.Max(head.EffectiveFromHeight + 1, (Globals.LastBlock?.Height ?? 0) + EffectiveHeightMargin),
+                    // ROTATION-LIVENESS: window-quantized so proposers at the same tip window build
+                    // the same record (see CasterMembershipStore.ComputeRotationEffectiveHeight).
+                    EffectiveFromHeight = CasterMembershipStore.ComputeRotationEffectiveHeight(head.EffectiveFromHeight, Globals.LastBlock?.Height ?? 0),
                     Casters = newSet.OrderBy(c => c.Address, StringComparer.Ordinal).ToList(),
                     PrevRecordHash = head.RecordHash,
                     ChangeType = changeType,
@@ -78,9 +77,9 @@ namespace VerifiedXCore.Services
                 var account = AccountData.GetLocalValidator();
                 if (account?.GetPrivKey != null && !string.IsNullOrEmpty(Globals.ValidatorAddress) && prevSet.Contains(Globals.ValidatorAddress))
                 {
-                    if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash))
+                    if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
                     {
-                        CasterLogUtility.Log($"MEMBERSHIP: rotation aborted — already signed a DIFFERENT record at seq {candidate.RecordSeq} (equivocation guard).", "MEMBERSHIP");
+                        CasterLogUtility.Log($"MEMBERSHIP: rotation aborted — already signed a DIFFERENT caster set at seq {candidate.RecordSeq} (equivocation guard).", "MEMBERSHIP");
                         return false;
                     }
                     var selfSig = SignatureService.CreateSignature(payload, account.GetPrivKey, account.PublicKey);
@@ -356,10 +355,10 @@ namespace VerifiedXCore.Services
             if (account?.GetPrivKey == null || string.IsNullOrEmpty(Globals.ValidatorAddress)) return null;
             if (!headSet.Contains(Globals.ValidatorAddress)) return null;
 
-            // Equivocation guard: never sign two different records at the same seq.
-            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash))
+            // Equivocation guard: never sign two different caster SETS at the same seq.
+            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
             {
-                CasterLogUtility.Log($"MEMBERSHIP: REFUSED double-sign at seq {candidate.RecordSeq} (different hash). Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                CasterLogUtility.Log($"MEMBERSHIP: REFUSED double-sign at seq {candidate.RecordSeq} (different caster set). Proposer={request.ProposerAddress}", "MEMBERSHIP");
                 return null;
             }
 
@@ -393,7 +392,7 @@ namespace VerifiedXCore.Services
             if (account?.GetPrivKey == null)
                 return null;
 
-            if (!CasterMembershipStore.TryMarkSigned(0, candidate.RecordHash))
+            if (!CasterMembershipStore.TryMarkSigned(0, candidate.RecordHash, candidate.RecordHash /* genesis identity stays the full hash */))
             {
                 CasterLogUtility.Log($"MEMBERSHIP: REFUSED genesis double-sign (different hash at seq 0). Proposer={request.ProposerAddress}", "MEMBERSHIP");
                 return null;
