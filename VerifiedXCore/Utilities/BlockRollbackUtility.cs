@@ -501,6 +501,9 @@ namespace VerifiedXCore.Utilities
                     DbContext.DB_VBTCWithdrawalRequests.GetCollection(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS).DeleteAll();
                     DbContext.DB_VBTCWithdrawalRequests.GetCollection(VBTCBridgeLockState.CollectionName).DeleteAll();
                     DbContext.DB_VBTCWithdrawalRequests.GetCollection(VBTCBridgeBtcExitState.CollectionName).DeleteAll();
+                    // Consumed Base burns are chain-derived too. Left in place, a full replay would find
+                    // every post-gate pool unlock "already consumed" and credit nothing (state divergence).
+                    DbContext.DB_VBTCWithdrawalRequests.GetCollection(VBTCBridgeConsumedBurn.CollectionName).DeleteAll();
                 }
             }
             catch (Exception ex)

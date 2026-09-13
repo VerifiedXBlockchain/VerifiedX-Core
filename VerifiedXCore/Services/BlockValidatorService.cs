@@ -76,6 +76,11 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith("Duplicate withdrawal request", StringComparison.Ordinal))
                 return false;
+            // Bridge intra-block conflicts are producer-selection faults, not local state corruption.
+            if (reason.StartsWith("Duplicate Base burn", StringComparison.Ordinal))
+                return false;
+            if (reason.StartsWith("Bridge lock ", StringComparison.Ordinal))
+                return false;
             return true;
         }
 
