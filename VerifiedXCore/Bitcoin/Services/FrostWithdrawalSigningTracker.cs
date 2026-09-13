@@ -1,3 +1,4 @@
+using VerifiedXCore.Bitcoin.Models;
 using System.Collections.Concurrent;
 using VerifiedXCore.Utilities;
 
@@ -225,6 +226,10 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return;
 
+            // Durable evidence (survives restarts and the 24h in-memory expiry): a share for a
+            // transaction of this withdrawal left this validator. Best effort; never blocks signing.
+            try { FrostSignedWithdrawalEvidence.Record(scUID, withdrawalRequestHash, btcTxId, txInputOutpoints); } catch { }
+
             var key = BuildKey(scUID, withdrawalRequestHash);
             var record = _withdrawals.GetOrAdd(key, _ => new WithdrawalRecord
             {
@@ -425,6 +430,9 @@ namespace VerifiedXCore.Bitcoin.Services
             if (_contractPins.TryGetValue(scUID, out var pin)
                 && string.Equals(pin.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.Ordinal))
                 return true;
+
+            // Durable evidence outlives the in-memory records.
+            try { if (FrostSignedWithdrawalEvidence.Get(scUID, withdrawalRequestHash) != null) return true; } catch { }
 
             return false;
         }

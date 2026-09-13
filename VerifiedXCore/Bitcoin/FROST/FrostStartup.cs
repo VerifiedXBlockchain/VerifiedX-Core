@@ -1647,6 +1647,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // Durable double-payout guard: if THIS validator already signed a different
+                            // transaction for this withdrawal, allow a new one only if the old one was
+                            // conflicted away on-chain. If it confirmed, the withdrawal is already paid —
+                            // refuse regardless of what the in-memory tracker remembers (it expires after 24h).
+                            var (priorOk, priorReason) = await CheckPriorSignedTransactionAsync(request.SmartContractUID, request.WithdrawalRequestHash!, request.BtcTxId);
+                            if (!priorOk)
+                            {
+                                LogUtility.Log($"[FROST Dedup] BLOCKED signing start for withdrawal {request.WithdrawalRequestHash}: {priorReason}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = priorReason }));
+                                return;
+                            }
+
                             // FIND-028: Validator-side withdrawal dedup check (per input, sighash-aware).
                             // Verify that we haven't already signed a DIFFERENT transaction for this
                             // withdrawal input, and that no other withdrawal's signed tx is outstanding
@@ -2676,6 +2689,50 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// this machine (loopback source address). Checked against the actual connection address —
         /// not headers — so it cannot be spoofed remotely.
         /// </summary>
+        /// <summary>
+        /// Durable evidence check for a new signing request. Same txid as the recorded one: allowed
+        /// (idempotent multi-input / retry). Different txid: allowed only when the recorded tx is
+        /// provably gone (not confirmed AND none of its outpoints still unspent, i.e. conflicted away);
+        /// refused when it confirmed (already paid) or when the chain could not be consulted.
+        /// </summary>
+        internal static async Task<(bool Ok, string Reason)> CheckPriorSignedTransactionAsync(string scUID, string withdrawalRequestHash, string? requestedTxId)
+        {
+            try
+            {
+                var evidence = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Get(scUID, withdrawalRequestHash);
+                if (evidence == null || string.IsNullOrEmpty(evidence.BtcTxId)) return (true, "");
+                if (string.Equals(evidence.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return (true, "");
+
+                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(evidence.BtcTxId);
+                if (lookup.Confirmations >= 1)
+                    return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another");
+                if (lookup.Confirmations < 0)
+                    return (false, $"Could not determine the fate of previously signed transaction {evidence.BtcTxId}; refusing to sign another until it is known");
+
+                var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
+                if (string.IsNullOrEmpty(depositAddress))
+                    return (false, "Contract deposit address could not be resolved to check the previously signed transaction");
+
+                var utxos = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTaprootUTXOs(depositAddress);
+                if (!utxos.Success)
+                    return (false, $"UTXO lookup failed while checking previously signed transaction {evidence.BtcTxId}; refusing to sign another");
+
+                var unspent = utxos.Utxos.Select(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant()).ToHashSet();
+                var stillUnspent = evidence.Outpoints.Count(op => unspent.Contains(op));
+                if (stillUnspent > 0)
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is still spendable ({stillUnspent} input(s) unspent); refusing to sign a second one");
+
+                // Conflicted away: its inputs were spent by something else and it did not confirm.
+                VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Delete(scUID, withdrawalRequestHash);
+                LogUtility.Log($"[FROST Dedup] Previously signed tx {evidence.BtcTxId} for {withdrawalRequestHash} was conflicted away on-chain; allowing a new transaction.", "FrostStartup.SignStart");
+                return (true, "");
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error checking previously signed transaction: {ex.Message}");
+            }
+        }
+
         private static bool IsLoopbackRequest(HttpContext context)
         {
             var remoteIp = context.Connection.RemoteIpAddress;

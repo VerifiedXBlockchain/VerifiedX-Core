@@ -257,6 +257,8 @@ namespace VerifiedXCore.Bitcoin.FROST
             return true;
         }
 
+        public static string? ResolveDepositAddressForContract(string scUID) => ResolveDepositAddress(scUID);
+
         private static string? ResolveDepositAddress(string scUID)
         {
             try
