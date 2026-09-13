@@ -22,7 +22,7 @@ namespace VerifiedXCore.Tests
             foreach (var id in _created) FrostSessionStorage.DKGSessions.TryRemove(id, out _);
         }
 
-        private void Open(string leader)
+        private void Open(string leader, bool completed = false, long? startedAt = null)
         {
             var id = Guid.NewGuid().ToString();
             _created.Add(id);
@@ -33,8 +33,36 @@ namespace VerifiedXCore.Tests
                 LeaderAddress = leader,
                 ParticipantAddresses = new List<string> { "xV1", "xV2" },
                 RequiredThreshold = 51,
-                StartTimestamp = TimeUtil.GetTime(),
+                StartTimestamp = startedAt ?? TimeUtil.GetTime(),
+                IsCompleted = completed,
             };
+        }
+
+        [Fact]
+        public void CompletedSessions_DoNotCountAgainstTheLeader()
+        {
+            // A user who already created contracts (DKGs completed) must be able to create another.
+            Open("xUser", completed: true); Open("xUser", completed: true); Open("xUser", completed: true); Open("xUser", completed: true);
+            Assert.Equal(0, FrostSessionStorage.CountDkgSessionsForLeader("xUser"));
+            Open("xUser"); // one in progress
+            Assert.Equal(1, FrostSessionStorage.CountDkgSessionsForLeader("xUser"));
+        }
+
+        [Fact]
+        public void StaleAbandonedSessions_DoNotCountAgainstTheLeader()
+        {
+            var now = TimeUtil.GetTime();
+            for (int i = 0; i < FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER; i++)
+                Open("xUser", startedAt: now - FrostSessionStorage.DKG_LEADER_CAP_WINDOW_SECONDS - 1);
+            Assert.Equal(0, FrostSessionStorage.CountDkgSessionsForLeader("xUser", now));
+        }
+
+        [Fact]
+        public void CapExceedsCoordinatorRetryCount()
+        {
+            // The coordinator retries a DKG start up to MAX_DKG_START_RETRIES (2) times with a fresh
+            // session id under the same leader; the cap must leave room for the final attempt.
+            Assert.True(FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER >= 3);
         }
 
         [Fact]

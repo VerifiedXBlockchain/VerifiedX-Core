@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Bitcoin.FROST.Models
 {
@@ -164,10 +165,15 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public const int MAX_DKG_SESSIONS = 50;
 
         /// <summary>
-        /// Max concurrent DKG sessions a single leader address may hold open. Without a per-leader
-        /// cap, any address can fill the global cap and block legitimate contract creation.
+        /// Max IN-PROGRESS DKG sessions a single leader address may hold open. Without a per-leader
+        /// cap, any address can fill the global cap and block legitimate contract creation. Must
+        /// exceed the coordinator's own start-retry count (each retry opens a new session id under
+        /// the same leader) or a legitimate retry would be refused by exactly the validators it needs.
         /// </summary>
-        public const int MAX_DKG_SESSIONS_PER_LEADER = 2;
+        public const int MAX_DKG_SESSIONS_PER_LEADER = 4;
+
+        /// <summary>An in-progress DKG session older than this no longer counts against its leader.</summary>
+        public const int DKG_LEADER_CAP_WINDOW_SECONDS = 900;
         
         /// <summary>Maximum concurrent signing sessions allowed</summary>
         public const int MAX_SIGNING_SESSIONS = 50;
@@ -189,11 +195,21 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         
         public static ConcurrentDictionary<string, DKGSession> DKGSessions { get; } = new();
 
-        /// <summary>Number of open DKG sessions led by <paramref name="leaderAddress"/>.</summary>
-        public static int CountDkgSessionsForLeader(string? leaderAddress)
+        /// <summary>
+        /// Number of RECENT, IN-PROGRESS DKG sessions led by <paramref name="leaderAddress"/>.
+        /// Completed sessions stay in storage until the hourly cleanup so results can be fetched, and
+        /// abandoned ones linger too; neither may count against the leader, or a user creating a third
+        /// contract (or the coordinator retrying a start) would be refused.
+        /// </summary>
+        public static int CountDkgSessionsForLeader(string? leaderAddress) => CountDkgSessionsForLeader(leaderAddress, TimeUtil.GetTime());
+
+        public static int CountDkgSessionsForLeader(string? leaderAddress, long nowSeconds)
         {
             if (string.IsNullOrEmpty(leaderAddress)) return 0;
-            return DKGSessions.Values.Count(s => string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal));
+            var cutoff = nowSeconds - DKG_LEADER_CAP_WINDOW_SECONDS;
+            return DKGSessions.Values.Count(s => !s.IsCompleted
+                                                 && s.StartTimestamp >= cutoff
+                                                 && string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal));
         }
 
         /// <summary>Pure cap rule, testable without touching the storage.</summary>
