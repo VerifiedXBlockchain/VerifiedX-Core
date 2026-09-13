@@ -162,6 +162,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
     {
         /// <summary>Maximum concurrent DKG sessions allowed</summary>
         public const int MAX_DKG_SESSIONS = 50;
+
+        /// <summary>
+        /// Max concurrent DKG sessions a single leader address may hold open. Without a per-leader
+        /// cap, any address can fill the global cap and block legitimate contract creation.
+        /// </summary>
+        public const int MAX_DKG_SESSIONS_PER_LEADER = 2;
         
         /// <summary>Maximum concurrent signing sessions allowed</summary>
         public const int MAX_SIGNING_SESSIONS = 50;
@@ -182,6 +188,16 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public const int MAX_COMMITMENT_DATA_LENGTH = 32768;
         
         public static ConcurrentDictionary<string, DKGSession> DKGSessions { get; } = new();
+
+        /// <summary>Number of open DKG sessions led by <paramref name="leaderAddress"/>.</summary>
+        public static int CountDkgSessionsForLeader(string? leaderAddress)
+        {
+            if (string.IsNullOrEmpty(leaderAddress)) return 0;
+            return DKGSessions.Values.Count(s => string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal));
+        }
+
+        /// <summary>Pure cap rule, testable without touching the storage.</summary>
+        public static bool LeaderMayOpenDkgSession(int openSessionsForLeader) => openSessionsForLeader < MAX_DKG_SESSIONS_PER_LEADER;
         public static ConcurrentDictionary<string, SigningSession> SigningSessions { get; } = new();
         
         /// <summary>

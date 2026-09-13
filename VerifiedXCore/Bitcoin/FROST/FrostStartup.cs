@@ -471,6 +471,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // Per-leader session cap: one address cannot exhaust the DKG session pool.
+                            var leaderOpenSessions = FrostSessionStorage.CountDkgSessionsForLeader(request.LeaderAddress);
+                            if (!FrostSessionStorage.LeaderMayOpenDkgSession(leaderOpenSessions))
+                            {
+                                LogUtility.Log($"[FROST] DKG start refused for leader {request.LeaderAddress}: {leaderOpenSessions} sessions already open (cap {FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER}).", "FrostStartup.DKGStart");
+                                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = $"Too many open DKG sessions for this leader (cap {FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER}). Finish or abandon them first."
+                                }));
+                                return;
+                            }
+
                             // FIND-024 Fix: Determine this validator's participant index (1-based)
                             // CRITICAL: Use sorted order to match BuildAddressToIdentifierMap
                             var myAddress = Globals.ValidatorAddress;
