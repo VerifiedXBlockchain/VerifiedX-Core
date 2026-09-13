@@ -2738,10 +2738,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (string.Equals(evidence.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return (true, "");
 
                 var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(evidence.BtcTxId);
-                if (lookup.Confirmations >= 1)
+                var verdict = ClassifyPriorTx(lookup.Confirmations);
+                if (verdict == PriorTxVerdict.Confirmed)
                     return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another");
-                if (lookup.Confirmations < 0)
-                    return (false, $"Could not determine the fate of previously signed transaction {evidence.BtcTxId}; refusing to sign another until it is known");
+                if (verdict == PriorTxVerdict.InMempool)
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is in the Bitcoin mempool (unconfirmed); refusing to sign another while it can still confirm");
+                // Unknown to every Electrum server: it may have been conflicted away. Prove it below by
+                // checking that none of its inputs is still spendable. (Electrum's unspent list hides
+                // outputs spent by a MEMPOOL tx, which is why an InMempool answer must refuse above.)
 
                 var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
                 if (string.IsNullOrEmpty(depositAddress))
@@ -2765,6 +2769,19 @@ namespace VerifiedXCore.Bitcoin.FROST
             {
                 return (false, $"Error checking previously signed transaction: {ex.Message}");
             }
+        }
+
+        internal enum PriorTxVerdict { Confirmed, InMempool, Unknown }
+
+        /// <summary>
+        /// Tri-state Electrum answer: >=1 confirmed; 0 = known to a server but unconfirmed (alive in
+        /// a mempool); null = no server knows the txid. Only Unknown may proceed to the outpoint check.
+        /// </summary>
+        internal static PriorTxVerdict ClassifyPriorTx(int? confirmations)
+        {
+            if (confirmations.HasValue && confirmations.Value >= 1) return PriorTxVerdict.Confirmed;
+            if (confirmations.HasValue && confirmations.Value == 0) return PriorTxVerdict.InMempool;
+            return PriorTxVerdict.Unknown;
         }
 
         private static bool IsLoopbackRequest(HttpContext context)
@@ -2815,9 +2832,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                         return true;
                     }
 
-                    txCheckDetail = lookup.Confirmations == 0
-                        ? $"txlookup=unconfirmed ({lookup.ServersTried} server(s): {lookup.Detail})"
-                        : $"txlookup=UNKNOWN ({lookup.ServersTried} server(s): {lookup.Detail})";
+                    if (lookup.Confirmations == 0)
+                    {
+                        // Known but unconfirmed: the tx is alive in a mempool. Its inputs are hidden from
+                        // Electrum's unspent list while it waits, so the outpoint check below would wrongly
+                        // conclude "conflicted away" and release the pin. Keep it.
+                        var aliveOutcome = $"kept: txlookup=unconfirmed/in-mempool ({lookup.ServersTried} server(s): {lookup.Detail})";
+                        VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, aliveOutcome);
+                        LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.Value.BtcTxId}) — {aliveOutcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
+                        return false;
+                    }
+                    txCheckDetail = $"txlookup=UNKNOWN ({lookup.ServersTried} server(s): {lookup.Detail})";
                 }
                 else
                 {
