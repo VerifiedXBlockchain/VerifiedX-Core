@@ -55,7 +55,8 @@ namespace VerifiedXCore.Bitcoin.Models
             if (IsConsumed(n)) return true;
             try
             {
-                if (VBTCBridgeBtcExitState.GetCollection().FindAll().Any(x => Normalize(x.BaseBurnTxHash) == n))
+                // A FAILED exit restored its locks and paid nothing: the burn is still redeemable.
+                if (VBTCBridgeBtcExitState.GetCollection().FindAll().Any(x => Normalize(x.BaseBurnTxHash) == n && !x.IsFailedRecord))
                     return true;
             }
             catch { }

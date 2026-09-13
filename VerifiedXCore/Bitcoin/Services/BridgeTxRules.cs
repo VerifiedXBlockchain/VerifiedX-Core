@@ -31,6 +31,40 @@ namespace VerifiedXCore.Bitcoin.Services
             return (true, "");
         }
 
+        /// <summary>
+        /// A FAIL may only "restore" allocations the exit actually reserved: each failed entry must
+        /// match a recorded plan entry by lock id and amount. Otherwise anyone could blacklist any
+        /// lock (BlacklistLock has no undo) with a fabricated FailedAllocations list.
+        /// </summary>
+        public static (bool Ok, string Reason) CheckFailAllocationsSubset(IEnumerable<Models.PoolUnlockAllocation>? failed, string? recordedPlanJson)
+        {
+            if (failed == null) return (false, "FailedAllocations missing.");
+            List<Models.PoolUnlockAllocation>? plan;
+            try { plan = string.IsNullOrWhiteSpace(recordedPlanJson) ? null : Newtonsoft.Json.JsonConvert.DeserializeObject<List<Models.PoolUnlockAllocation>>(recordedPlanJson); }
+            catch { plan = null; }
+            if (plan == null || plan.Count == 0) return (false, "Exit record has no recorded allocation plan; FAIL cannot be verified.");
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var f in failed)
+            {
+                if (f == null || string.IsNullOrWhiteSpace(f.LockId)) return (false, "FailedAllocations entry missing LockId.");
+                if (!seen.Add(f.LockId)) return (false, $"FailedAllocations lists lock {f.LockId} twice.");
+                var match = plan.FirstOrDefault(pl => string.Equals(pl.LockId, f.LockId, StringComparison.Ordinal));
+                if (match == null) return (false, $"FailedAllocations lock {f.LockId} is not part of this exit's plan.");
+                if (match.UnlockAmount != f.UnlockAmount) return (false, $"FailedAllocations amount for lock {f.LockId} does not match the plan.");
+            }
+            return seen.Count > 0 ? (true, "") : (false, "FailedAllocations is empty.");
+        }
+
+        /// <summary>64 hex chars, optional 0x.</summary>
+        public static bool IsBtcTxIdShape(string? txid)
+        {
+            if (string.IsNullOrWhiteSpace(txid)) return false;
+            var h = txid.Trim();
+            if (h.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) h = h.Substring(2);
+            return h.Length == 64 && h.All(Uri.IsHexDigit);
+        }
+
         /// <summary>Bridge unlock / exit transactions are broadcast by the elected handler caster only.</summary>
         public static (bool Ok, string Reason) CheckSubmitter(string? fromAddress, HashSet<string> committee)
         {

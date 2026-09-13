@@ -3511,7 +3511,16 @@ namespace VerifiedXCore.Services
                     if (!IsValidEvmTxHash32(baseBurnTxHash))
                         return (txResult, "BaseBurnTxHash must be a valid 32-byte hex transaction hash.");
 
-                    if (VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash) != null)
+                    // Duplicate burn: post-gate use the normalized, cross-path check (consumed registry,
+                    // non-FAILED exit records, finalized locks) so a case/0x variant of an already-used
+                    // burn cannot draw the locks a second time; a FAILED exit may be re-exited.
+                    var exitDupGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                    if (exitDupGateHeight >= Globals.BridgeIntraBlockGuardHeight)
+                    {
+                        if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(baseBurnTxHash))
+                            return (txResult, "Duplicate Base burn transaction for bridge exit to BTC.");
+                    }
+                    else if (VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash) != null)
                         return (txResult, "Duplicate Base burn transaction for bridge exit to BTC.");
 
                     var exitGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
@@ -3625,6 +3634,30 @@ namespace VerifiedXCore.Services
                     var st = VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash);
                     if (st == null || st.IsComplete)
                         return (txResult, "No pending bridge exit to BTC for this burn hash.");
+
+                    // Post-gate hardening: only the handler caster may close an exit, a COMPLETE must
+                    // name a real-looking Bitcoin txid, and a FAIL may only restore allocations the exit
+                    // actually reserved (BlacklistLock has no undo).
+                    var closeGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                    if (closeGateHeight >= Globals.BridgeIntraBlockGuardHeight)
+                    {
+                        var (subOk, subReason) = BridgeTxRules.CheckSubmitter(txRequest.FromAddress, BridgeCasterConsensus.GetCommitteeForHeight(closeGateHeight));
+                        if (!subOk) return (txResult, subReason);
+
+                        if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
+                        {
+                            if (!BridgeTxRules.IsBtcTxIdShape(jobj["BtcTxHash"]?.ToObject<string>()))
+                                return (txResult, "BtcTxHash must be a 32-byte hex transaction id.");
+                        }
+                        else
+                        {
+                            List<PoolUnlockAllocation>? failedList;
+                            try { failedList = jobj["FailedAllocations"]?.ToObject<List<PoolUnlockAllocation>>(); }
+                            catch { failedList = null; }
+                            var (failOk, failReason) = BridgeTxRules.CheckFailAllocationsSubset(failedList, st.AllocationsJson);
+                            if (!failOk) return (txResult, failReason);
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {

@@ -40,6 +40,38 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void FailAllocations_MustBeSubsetOfRecordedPlan()
+        {
+            var plan = Newtonsoft.Json.JsonConvert.SerializeObject(new[]
+            {
+                new VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation { LockId = "L1", SmartContractUID = "sc", UnlockAmount = 0.3M },
+                new VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation { LockId = "L2", SmartContractUID = "sc", UnlockAmount = 0.2M },
+            });
+            var ok = new[] { new VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation { LockId = "L2", UnlockAmount = 0.2M } };
+            Assert.True(BridgeTxRules.CheckFailAllocationsSubset(ok, plan).Ok);
+
+            var foreignLock = new[] { new VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation { LockId = "L9", UnlockAmount = 0.2M } };
+            Assert.False(BridgeTxRules.CheckFailAllocationsSubset(foreignLock, plan).Ok);
+
+            var wrongAmount = new[] { new VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation { LockId = "L1", UnlockAmount = 0.31M } };
+            Assert.False(BridgeTxRules.CheckFailAllocationsSubset(wrongAmount, plan).Ok);
+
+            Assert.False(BridgeTxRules.CheckFailAllocationsSubset(ok, null).Ok);          // no plan -> cannot verify
+            Assert.False(BridgeTxRules.CheckFailAllocationsSubset(ok, "not-json").Ok);
+            Assert.False(BridgeTxRules.CheckFailAllocationsSubset(new VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation[0], plan).Ok);
+        }
+
+        [Fact]
+        public void BtcTxIdShape()
+        {
+            Assert.True(BridgeTxRules.IsBtcTxIdShape(new string('a', 64)));
+            Assert.True(BridgeTxRules.IsBtcTxIdShape("0x" + new string('B', 64)));
+            Assert.False(BridgeTxRules.IsBtcTxIdShape("bogus"));
+            Assert.False(BridgeTxRules.IsBtcTxIdShape(new string('a', 63)));
+            Assert.False(BridgeTxRules.IsBtcTxIdShape(""));
+        }
+
+        [Fact]
         public void SubSatoshiDust_Refused()
         {
             // 1.000000009 truncates to 100_000_000 sats but is not an exact pair.

@@ -35,10 +35,37 @@ namespace VerifiedXCore.Bitcoin.Models
             return DbContext.DB_VBTCWithdrawalRequests.GetCollection<VBTCBridgeBtcExitState>(CollectionName);
         }
 
+        public const string FailedMarkerPrefix = "FAILED:";
+
+        /// <summary>True when the exit was closed by a FAIL tx (locks restored, no BTC paid).</summary>
+        public bool IsFailedRecord => !string.IsNullOrEmpty(BtcTxHash) && BtcTxHash.StartsWith(FailedMarkerPrefix, StringComparison.Ordinal);
+
+        /// <summary>Lowercase, no 0x — the identity of a Base tx hash regardless of how it was written.</summary>
+        public static string NormalizeBurn(string? hash)
+        {
+            var h = (hash ?? string.Empty).Trim().ToLowerInvariant();
+            if (h.StartsWith("0x", StringComparison.Ordinal)) h = h.Substring(2);
+            return h;
+        }
+
+        /// <summary>
+        /// Exit record for a burn, matched on the NORMALIZED hash. An exact-string match let a
+        /// case/0x variant of an already-used burn pass the duplicate check.
+        /// </summary>
         public static VBTCBridgeBtcExitState? GetByBurnHash(string baseBurnTxHash)
         {
-            if (string.IsNullOrWhiteSpace(baseBurnTxHash)) return null;
-            return GetCollection().FindOne(x => x.BaseBurnTxHash == baseBurnTxHash.Trim());
+            var n = NormalizeBurn(baseBurnTxHash);
+            if (n.Length == 0) return null;
+            try { return GetCollection().FindAll().FirstOrDefault(x => NormalizeBurn(x.BaseBurnTxHash) == n); }
+            catch { return null; }
+        }
+
+        /// <summary>Deletes a FAILED record for the burn so a re-exit can create a fresh one. Returns true if one was removed.</summary>
+        public static bool DeleteFailedRecord(string baseBurnTxHash)
+        {
+            var existing = GetByBurnHash(baseBurnTxHash);
+            if (existing == null || !existing.IsFailedRecord) return false;
+            try { return GetCollection().Delete(existing.BaseBurnTxHash); } catch { return false; }
         }
 
         /// <summary>

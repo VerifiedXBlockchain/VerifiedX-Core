@@ -154,6 +154,27 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ExitRecordLookup_IsNormalized_AndFailedRecordsDoNotConsumeTheBurn()
+        {
+            InsertExit(Burn, 0.5M, TwoContractPlan());
+
+            // Case / 0x variants resolve to the same record and are refused as duplicates.
+            Assert.NotNull(VBTCBridgeBtcExitState.GetByBurnHash(Burn.ToUpperInvariant()));
+            Assert.NotNull(VBTCBridgeBtcExitState.GetByBurnHash(Burn.Substring(2)));
+            Assert.False(VBTCBridgeBtcExitState.TryInsert(new VBTCBridgeBtcExitState { BaseBurnTxHash = Burn.ToUpperInvariant(), LockId = "L9", SmartContractUID = ContractA, Amount = 0.1M, AmountSats = 10_000_000, BtcDestination = "x", ExitTxHash = "e2" }));
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(Burn.ToUpperInvariant()));
+
+            // A FAILED exit restored its locks: the burn is redeemable again and the record is superseded.
+            var rec = VBTCBridgeBtcExitState.GetByBurnHash(Burn)!;
+            rec.IsComplete = true; rec.BtcTxHash = VBTCBridgeBtcExitState.FailedMarkerPrefix + "vfx-fail-tx";
+            Assert.True(VBTCBridgeBtcExitState.Update(rec));
+            Assert.True(rec.IsFailedRecord);
+            Assert.False(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(Burn));
+            Assert.True(VBTCBridgeBtcExitState.DeleteFailedRecord(Burn));
+            Assert.Null(VBTCBridgeBtcExitState.GetByBurnHash(Burn));
+        }
+
+        [Fact]
         public void ContractAllocationSats_UnparseablePlan_IsZero()
         {
             var rec = new VBTCBridgeBtcExitState { AmountSats = 50_000_000, AllocationsJson = "not-json", LockId = "L1" };

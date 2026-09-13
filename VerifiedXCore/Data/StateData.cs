@@ -3342,6 +3342,9 @@ namespace VerifiedXCore.Data
                     IsComplete = false,
                     AllocationsJson = JsonConvert.SerializeObject(allocations)
                 };
+                // A prior FAILED record for this burn (locks already restored) is superseded by the re-exit.
+                if (tx.Height >= Globals.BridgeIntraBlockGuardHeight)
+                    VBTCBridgeBtcExitState.DeleteFailedRecord(baseBurnTxHash.Trim());
                 VBTCBridgeBtcExitState.TryInsert(exitState);
 
                 SCLogUtility.Log(
@@ -3367,6 +3370,9 @@ namespace VerifiedXCore.Data
                 if (string.IsNullOrEmpty(baseBurnTxHash) || string.IsNullOrEmpty(btcTxHash))
                     return;
                 VBTCBridgeBtcExitState.MarkComplete(baseBurnTxHash.Trim(), btcTxHash.Trim());
+                // BTC left the pool for this burn: it is consumed for every bridge path from here on.
+                if (tx.Height >= Globals.BridgeIntraBlockGuardHeight)
+                    VBTCBridgeConsumedBurn.TryMarkConsumed(baseBurnTxHash, "BTC_EXIT_COMPLETE", tx.Hash, tx.Height);
                 SCLogUtility.Log($"ApplyVBTCBridgeExitToBTCComplete: burn={baseBurnTxHash}, btcTx={btcTxHash}", "StateData.ApplyVBTCBridgeExitToBTCComplete()");
             }
             catch (Exception ex)
