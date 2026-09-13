@@ -454,6 +454,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // SECURITY: never run a DKG for a contract that already has a vault key. A new
+                            // group key would overwrite the real one (locally and in peer backups) and
+                            // permanently lock the collateral.
+                            var (dkgOk, dkgReason) = FrostDkgGuard.CanStartDkg(request.SmartContractUID, Globals.ValidatorAddress);
+                            if (!dkgOk)
+                            {
+                                var dkgIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                                ErrorLogUtility.LogError($"FROST DKG start REFUSED from IP={dkgIp}, leader={request.LeaderAddress}, sc={request.SmartContractUID}: {dkgReason}", "FrostStartup.DKGStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = dkgReason
+                                }));
+                                return;
+                            }
+
                             // FIND-024 Fix: Determine this validator's participant index (1-based)
                             // CRITICAL: Use sorted order to match BuildAddressToIdentifierMap
                             var myAddress = Globals.ValidatorAddress;
@@ -2532,10 +2549,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 EncryptedBlob = encryptedBlob,
                                 PlaintextHash = plaintextHash ?? "",
                                 Version = version,
+                                GroupPublicKey = request["GroupPublicKey"]?.ToString() ?? "",
                                 StoredTimestamp = now
                             };
 
-                            FrostPeerKeyBackup.SaveBackup(backup);
+                            if (!FrostPeerKeyBackup.SaveBackup(backup))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Refusing to overwrite an existing backup for a different group key" }));
+                                return;
+                            }
 
                             // Compute hash of stored blob for verification by sender
                             var storedHash = Convert.ToHexString(

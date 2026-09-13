@@ -291,6 +291,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     EncryptedBlob = encryptedBlob,
                     PlaintextHash = plaintextHash,
                     Version = BACKUP_VERSION,
+                    GroupPublicKey = keyStore?.GroupPublicKey ?? "",
                     Timestamp = timestamp,
                     Signature = signature
                 });
@@ -490,6 +491,7 @@ namespace VerifiedXCore.Bitcoin.Services
                                 EncryptedBlob = encryptedBlob,
                                 PlaintextHash = plaintextHash,
                                 Version = BACKUP_VERSION,
+                                GroupPublicKey = keyStore?.GroupPublicKey ?? "",
                                 Timestamp = timestamp,
                                 Signature = signature
                             });

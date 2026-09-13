@@ -31,6 +31,10 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>Backup format version (default 1). Allows future schema changes.</summary>
         public int Version { get; set; } = 1;
 
+        /// <summary>Owner's FROST group public key for this contract (public). Guards against a
+        /// backup for a DIFFERENT group key silently replacing the real vault key's backup.</summary>
+        public string GroupPublicKey { get; set; } = string.Empty;
+
         /// <summary>Timestamp when this backup was received</summary>
         public long StoredTimestamp { get; set; }
 
@@ -45,7 +49,7 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>
         /// Save or update a peer's encrypted backup (upsert by OwnerAddress + SmartContractUID)
         /// </summary>
-        public static void SaveBackup(FrostPeerKeyBackup backup)
+        public static bool SaveBackup(FrostPeerKeyBackup backup)
         {
             try
             {
@@ -60,17 +64,44 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 }
                 else
                 {
+                    if (!CanReplace(existing, backup, out var refuseReason))
+                    {
+                        ErrorLogUtility.LogError($"[FROST Backup] REFUSED to overwrite backup for owner {backup.OwnerAddress}, contract {backup.SmartContractUID}: {refuseReason}",
+                            "FrostPeerKeyBackup.SaveBackup");
+                        return false;
+                    }
                     backup.Id = existing.Id;
                     db.UpdateSafe(backup);
                 }
 
                 LogUtility.Log($"[FROST Backup] Stored backup for owner {backup.OwnerAddress}, contract {backup.SmartContractUID}",
                     "FrostPeerKeyBackup.SaveBackup");
+                return true;
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Failed to save FROST peer backup: {ex.Message}", "FrostPeerKeyBackup.SaveBackup");
+                return false;
             }
+        }
+
+        /// <summary>
+        /// Pure replacement rule: a stored backup with a known group public key may only be replaced
+        /// by a backup for the SAME group public key.
+        /// </summary>
+        public static bool CanReplace(FrostPeerKeyBackup existing, FrostPeerKeyBackup incoming, out string reason)
+        {
+            reason = "";
+            if (existing == null) return true;
+            var existingGroup = existing.GroupPublicKey ?? "";
+            var incomingGroup = incoming?.GroupPublicKey ?? "";
+            if (!string.IsNullOrEmpty(existingGroup)
+                && !string.Equals(existingGroup, incomingGroup, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = $"existing group key {existingGroup} != incoming {incomingGroup}";
+                return false;
+            }
+            return true;
         }
 
         /// <summary>

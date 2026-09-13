@@ -50,15 +50,19 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         }
 
         /// <summary>
-        /// Save or update a validator's key package for a specific contract
+        /// Save or update a validator's key package for a specific contract.
+        /// SECURITY: an existing record with a DIFFERENT group public key is never overwritten —
+        /// that would discard the real vault key and lock the collateral forever. Only an
+        /// idempotent re-save of the SAME group key (metadata refresh, backup restore) updates.
+        /// Returns false when the save was refused.
         /// </summary>
-        public static void SaveKeyPackage(FrostValidatorKeyStore keyStore)
+        public static bool SaveKeyPackage(FrostValidatorKeyStore keyStore)
         {
             try
             {
                 var db = GetDb();
-                var existing = db.FindOne(x => 
-                    x.SmartContractUID == keyStore.SmartContractUID && 
+                var existing = db.FindOne(x =>
+                    x.SmartContractUID == keyStore.SmartContractUID &&
                     x.ValidatorAddress == keyStore.ValidatorAddress);
 
                 if (existing == null)
@@ -67,6 +71,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 }
                 else
                 {
+                    if (!CanReplace(existing, keyStore, out var refuseReason))
+                    {
+                        ErrorLogUtility.LogError($"[FROST KeyStore] REFUSED to overwrite key package for contract {keyStore.SmartContractUID}, validator {keyStore.ValidatorAddress}: {refuseReason}",
+                            "FrostValidatorKeyStore.SaveKeyPackage");
+                        return false;
+                    }
                     keyStore.Id = existing.Id;
                     db.UpdateSafe(keyStore);
                 }
@@ -95,11 +105,34 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                             "FrostValidatorKeyStore.SaveKeyPackage");
                     }
                 });
+
+                return true;
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Failed to save FROST key package: {ex.Message}", "FrostValidatorKeyStore.SaveKeyPackage");
+                return false;
             }
+        }
+
+        /// <summary>
+        /// Pure replacement rule: an existing record that carries key material with a non-empty
+        /// group public key may only be replaced by a record with the SAME group public key.
+        /// </summary>
+        public static bool CanReplace(FrostValidatorKeyStore existing, FrostValidatorKeyStore incoming, out string reason)
+        {
+            reason = "";
+            if (existing == null) return true;
+            var hasKey = !string.IsNullOrEmpty(existing.KeyPackage);
+            var existingGroup = existing.GroupPublicKey ?? "";
+            var incomingGroup = incoming?.GroupPublicKey ?? "";
+            if (hasKey && !string.IsNullOrEmpty(existingGroup)
+                && !string.Equals(existingGroup, incomingGroup, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = $"existing group key {existingGroup} != incoming {incomingGroup}";
+                return false;
+            }
+            return true;
         }
 
         /// <summary>
