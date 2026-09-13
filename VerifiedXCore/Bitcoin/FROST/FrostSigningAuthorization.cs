@@ -1,4 +1,5 @@
 using NBitcoin;
+using Newtonsoft.Json;
 using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
@@ -115,11 +116,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                 var wrh = request.WithdrawalRequestHash.Trim();
                 if (wrh.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
                 {
-                    var exit = ResolveBtcExit(wrh, request.SmartContractUID);
-                    if (exit == null) return (false, "No on-chain EXIT_TO_BTC record matches this bridge exit signing");
+                    var (exit, capSats, exitReason) = ResolveBtcExitForContract(wrh, request.SmartContractUID);
+                    if (exit == null) return (false, exitReason);
                     if (exit.IsComplete) return (false, "Bridge exit already completed");
                     destination = exit.BtcDestination;
-                    maxDestinationSats = exit.AmountSats > 0 ? exit.AmountSats : (long)(exit.Amount * 100_000_000M);
+                    // Cap at THIS contract's share of the exit, never the whole exit amount.
+                    maxDestinationSats = capSats;
                 }
                 else
                 {
@@ -210,20 +212,86 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
-        /// Bridge exit signings use a synthetic hash "btcexit_{burnHash[..16]}_{scUID[..8]}"
-        /// (see BurnExitConsensusService.ExecuteBtcExit). Match it to the consensus-recorded exit.
+        /// Bridge exit signings use a synthetic reference "btcexit_{burnHash[..16]}_{scUID[..8]}"
+        /// (see BurnExitConsensusService.ExecuteBtcExit). Resolve it to the consensus-recorded exit
+        /// AND bind it to the declared contract: the contract must be one the exit actually draws
+        /// on, and the signing is capped at that contract's own allocation. Without this, a leader
+        /// could point contract B's validators at contract A's pending exit and drain B's vault to
+        /// the exit destination.
         /// </summary>
-        private static VBTCBridgeBtcExitState? ResolveBtcExit(string syntheticHash, string scUID)
+        public static (VBTCBridgeBtcExitState? Exit, long CapSats, string Reason) ResolveBtcExitForContract(string syntheticHash, string scUID)
         {
+            if (string.IsNullOrWhiteSpace(scUID)) return (null, 0, "SmartContractUID required for bridge exit signing");
+            if (string.IsNullOrWhiteSpace(syntheticHash) || !syntheticHash.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
+                return (null, 0, "Not a bridge exit reference");
+
             var parts = syntheticHash.Substring(BtcExitPrefix.Length).Split('_');
-            if (parts.Length < 1 || string.IsNullOrWhiteSpace(parts[0])) return null;
+            if (parts.Length != 2 || string.IsNullOrWhiteSpace(parts[0]) || string.IsNullOrWhiteSpace(parts[1]))
+                return (null, 0, "Bridge exit reference must be btcexit_{burnPrefix}_{contractPrefix}");
+
             var burnPrefix = parts[0];
-            var scPrefix = parts.Length > 1 ? parts[1] : "";
-            if (!string.IsNullOrEmpty(scPrefix) && !scUID.StartsWith(scPrefix, StringComparison.Ordinal)) return null;
+            var scPrefix = parts[1];
+            if (!scUID.StartsWith(scPrefix, StringComparison.Ordinal))
+                return (null, 0, "Bridge exit reference contract prefix does not match the declared contract");
 
             var candidates = VBTCBridgeBtcExitState.FindByBurnHashPrefix(burnPrefix);
-            if (candidates.Count != 1) return null; // ambiguous or missing — refuse
-            return candidates[0];
+            if (candidates.Count == 0) return (null, 0, "No on-chain EXIT_TO_BTC record matches this bridge exit signing");
+            if (candidates.Count > 1) return (null, 0, "Ambiguous bridge exit reference (multiple exits share the burn prefix)");
+
+            var exit = candidates[0];
+            var cap = ContractAllocationSats(exit, scUID);
+            if (cap <= 0) return (null, 0, $"EXIT_TO_BTC record does not allocate anything from contract {scUID}");
+            return (exit, cap, "");
+        }
+
+        /// <summary>
+        /// How many sats of an exit are drawn from <paramref name="scUID"/>. Uses the allocation plan
+        /// recorded at apply time; for records written before that field existed, falls back to the
+        /// lock list (bounded by the locks' amounts for the contract and by the exit total).
+        /// Returns 0 when the contract is not part of the exit.
+        /// </summary>
+        public static long ContractAllocationSats(VBTCBridgeBtcExitState exit, string scUID)
+        {
+            if (exit == null || string.IsNullOrWhiteSpace(scUID)) return 0;
+            var exitSats = exit.AmountSats > 0 ? exit.AmountSats : (long)(exit.Amount * 100_000_000M);
+
+            if (!string.IsNullOrWhiteSpace(exit.AllocationsJson))
+            {
+                List<PoolUnlockAllocation>? allocs;
+                try { allocs = JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(exit.AllocationsJson); }
+                catch { return 0; }
+                if (allocs == null) return 0;
+
+                decimal sum = 0M;
+                foreach (var a in allocs)
+                {
+                    if (a == null || a.UnlockAmount <= 0M) continue;
+                    var allocContract = a.SmartContractUID;
+                    if (string.IsNullOrEmpty(allocContract) && !string.IsNullOrEmpty(a.LockId))
+                        allocContract = VBTCBridgeLockState.GetByLockId(a.LockId)?.SmartContractUID ?? "";
+                    if (string.Equals(allocContract, scUID, StringComparison.Ordinal))
+                        sum += a.UnlockAmount;
+                }
+                var sats = (long)(sum * 100_000_000M);
+                return Math.Min(sats, exitSats);
+            }
+
+            // Legacy record: derive from the lock list.
+            var lockIds = (exit.LockId ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim());
+            decimal lockSum = 0M;
+            var any = false;
+            foreach (var id in lockIds)
+            {
+                var rec = VBTCBridgeLockState.GetByLockId(id);
+                if (rec == null) continue;
+                if (string.Equals(rec.SmartContractUID, scUID, StringComparison.Ordinal))
+                {
+                    any = true;
+                    lockSum += rec.Amount;
+                }
+            }
+            if (!any) return 0;
+            return Math.Min((long)(lockSum * 100_000_000M), exitSats);
         }
 
         private static bool IsRegisteredValidator(string address)

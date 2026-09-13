@@ -18,6 +18,14 @@ namespace VerifiedXCore.Bitcoin.Models
         public string ExitTxHash { get; set; } = string.Empty;
         public long CreatedTimestamp { get; set; }
         public bool IsComplete { get; set; }
+
+        /// <summary>
+        /// Serialized <see cref="PoolUnlockAllocation"/> list recorded when the EXIT_TO_BTC was
+        /// applied: which locks (and therefore which contracts, and how much from each) this exit
+        /// draws on. FROST validators use it to cap a per-contract exit signing at that contract's
+        /// own allocation. Null on records written before this field existed.
+        /// </summary>
+        public string? AllocationsJson { get; set; }
         public string? BtcTxHash { get; set; }
 
         public const string CollectionName = "rsrv_vbtc_bridge_btc_exits";
@@ -41,11 +49,20 @@ namespace VerifiedXCore.Bitcoin.Models
         public static List<VBTCBridgeBtcExitState> FindByBurnHashPrefix(string burnHashPrefix)
         {
             if (string.IsNullOrWhiteSpace(burnHashPrefix)) return new List<VBTCBridgeBtcExitState>();
+            // Normalize both sides: strip an optional 0x so the caster's prefix and the stored
+            // hash agree regardless of which convention carried the 0x.
             var p = burnHashPrefix.Trim().ToLowerInvariant();
+            if (p.StartsWith("0x")) p = p.Substring(2);
+            if (p.Length == 0) return new List<VBTCBridgeBtcExitState>();
             try
             {
                 return GetCollection().FindAll()
-                    .Where(x => (x.BaseBurnTxHash ?? "").ToLowerInvariant().StartsWith(p))
+                    .Where(x =>
+                    {
+                        var h = (x.BaseBurnTxHash ?? "").ToLowerInvariant();
+                        if (h.StartsWith("0x")) h = h.Substring(2);
+                        return h.StartsWith(p);
+                    })
                     .ToList();
             }
             catch { return new List<VBTCBridgeBtcExitState>(); }

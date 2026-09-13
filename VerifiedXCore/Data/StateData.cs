@@ -3242,7 +3242,11 @@ namespace VerifiedXCore.Data
                         BtcDestination = btcDestination,
                         ExitTxHash = tx.Hash,
                         CreatedTimestamp = tx.Timestamp,
-                        IsComplete = false
+                        IsComplete = false,
+                        AllocationsJson = JsonConvert.SerializeObject(new List<PoolUnlockAllocation>
+                        {
+                            new PoolUnlockAllocation { LockId = lockId.Trim(), SmartContractUID = scUID, UnlockAmount = amount.Value }
+                        })
                     };
                     VBTCBridgeBtcExitState.TryInsert(st);
                     SCLogUtility.Log($"ApplyVBTCBridgeExitToBTC (legacy): burn={baseBurnTxHash}, lockId={lockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
@@ -3306,7 +3310,8 @@ namespace VerifiedXCore.Data
                     BtcDestination = btcDestination,
                     ExitTxHash = tx.Hash,
                     CreatedTimestamp = tx.Timestamp,
-                    IsComplete = false
+                    IsComplete = false,
+                    AllocationsJson = JsonConvert.SerializeObject(allocations)
                 };
                 VBTCBridgeBtcExitState.TryInsert(exitState);
 
