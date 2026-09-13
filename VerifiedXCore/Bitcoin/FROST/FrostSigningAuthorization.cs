@@ -142,15 +142,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                 catch (Exception ex) { return (false, $"Authorized destination invalid: {ex.Message}"); }
 
                 // ── 4. Outputs: destination (bounded) or change to the vault, nothing else ─────
-                long destinationSats = 0;
+                //      AND the vault's total cost (destination + miner fee) must fit the authorization.
+                long destinationSats = 0, changeSats = 0;
                 foreach (var o in tx.Outputs)
                 {
                     if (o.ScriptPubKey == destinationScript) destinationSats += o.Value.Satoshi;
-                    else if (o.ScriptPubKey == depositScript) continue;
+                    else if (o.ScriptPubKey == depositScript) changeSats += o.Value.Satoshi;
                     else return (false, "Transaction pays an output that is neither the authorized destination nor vault change");
                 }
-                if (destinationSats <= 0) return (false, "Transaction does not pay the authorized destination");
-                if (destinationSats > maxDestinationSats) return (false, "Transaction pays more than the authorized amount");
+                long inputSats = 0;
+                foreach (var so in spentOutputs) inputSats += so.Value.Satoshi;
+
+                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats);
+                if (!boundsOk) return (false, boundsReason);
 
                 // ── 5. Leader must be the owner, a registered validator, or a known caster ────
                 if (!leaderIsOwner && !IsRegisteredValidator(request.LeaderAddress) && !IsKnownCaster(request.LeaderAddress))
@@ -163,6 +167,30 @@ namespace VerifiedXCore.Bitcoin.FROST
                 ErrorLogUtility.LogError($"FrostSigningAuthorization error: {ex}", "FrostSigningAuthorization.Authorize");
                 return (false, $"Authorization error: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// The vault's total cost for a transaction is inputs minus change back to the vault, which
+        /// equals destination + miner fee. That WHOLE cost must fit inside the authorized amount.
+        /// Checking only the destination output would let a tiny authorized payout burn the entire
+        /// vault as fee (inputs = whole vault, 1-sat payout, no change).
+        /// </summary>
+        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats)
+        {
+            if (maxSats <= 0) return (false, "No authorized amount");
+            if (inputSats <= 0) return (false, "Transaction has no input value");
+            if (destinationSats <= 0) return (false, "Transaction does not pay the authorized destination");
+            if (changeSats < 0) return (false, "Negative change");
+
+            var fee = inputSats - destinationSats - changeSats;
+            if (fee < 0) return (false, "Transaction outputs exceed inputs");
+            if (destinationSats > maxSats) return (false, "Transaction pays more than the authorized amount");
+
+            var vaultCost = inputSats - changeSats; // destination + fee
+            if (vaultCost > maxSats)
+                return (false, $"Transaction spends {vaultCost} sats from the vault (destination {destinationSats} + fee {fee}) but only {maxSats} sats are authorized");
+
+            return (true, "");
         }
 
         /// <summary>
