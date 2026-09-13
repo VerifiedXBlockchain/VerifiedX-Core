@@ -25,9 +25,11 @@ namespace VerifiedXCore.Bitcoin.Services
             $"VFX_BRIDGE_BURN_V2|{baseBurnTxHash}|{burnType}|{amountSats}|{(destination ?? string.Empty).Trim()}|{timestamp}";
 
         /// <summary>
-        /// The caster set whose votes count for <paramref name="height"/>: the signed membership
-        /// record governing that height when the record era is active, otherwise the union of the
-        /// seed allowlist and the currently known caster set.
+        /// The caster set whose votes count for <paramref name="height"/>. This feeds CONSENSUS
+        /// validation, so it must be identical on every node: the signed, hash-chained membership
+        /// record governing that height, or — for heights the record era does not cover — the
+        /// hard-coded seed allowlist. The live BlockCasters / KnownCasters views are node-local and
+        /// mutable and must never decide block validity.
         /// </summary>
         public static HashSet<string> GetCommitteeForHeight(long height)
         {
@@ -38,16 +40,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch { }
 
-            var set = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var a in Globals.BootstrapCasterAddresses) set.Add(a);
-            foreach (var p in Globals.BlockCasters)
-                if (!string.IsNullOrEmpty(p.ValidatorAddress)) set.Add(p.ValidatorAddress);
-            lock (Globals.KnownCasters)
-            {
-                foreach (var k in Globals.KnownCasters)
-                    if (!string.IsNullOrEmpty(k.Address)) set.Add(k.Address);
-            }
-            return set;
+            return new HashSet<string>(Globals.BootstrapCasterAddresses, StringComparer.Ordinal);
         }
 
         public static int RequiredVotesFor(HashSet<string> committee) => Math.Max(2, committee.Count / 2 + 1);
