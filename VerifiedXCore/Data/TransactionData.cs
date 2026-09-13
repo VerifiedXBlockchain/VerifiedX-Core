@@ -563,6 +563,11 @@ namespace VerifiedXCore.Data
             var sizedMempoolList = MempoolSizeUtility.SizeMempoolDown(memPoolTxList);
 
             var approvedMemPoolList = new List<Transaction>();
+            // Bridge conflicts within the batch we are about to propose: the block-level guard
+            // (BridgeIntraBlockGuard in BlockValidatorService) rejects a block carrying two bridge
+            // txs that redeem the same burn or draw on the same lock, so an honest producer must not
+            // select such a pair in the first place.
+            var poolBridgeState = new VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.State();
             var queuedMempoolTxList = new List<Transaction>();
 
             queuedMempoolTxList = Globals.NetworkBlockQueue.Values.SelectMany(x => x.Transactions).ToList();
@@ -1062,7 +1067,15 @@ namespace VerifiedXCore.Data
                                                         await localTxDb.UpdateSafeAsync(localTx);
                                                     }
 
-                                                    approvedMemPoolList.Add(tx);
+                                                    var (bridgeBatchOk, bridgeBatchReason) = VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(tx, poolBridgeState);
+
+                                                    if (bridgeBatchOk)
+
+                                                        approvedMemPoolList.Add(tx);
+
+                                                    else
+
+                                                        LogUtility.Log($"[ProcessTxPool] Skipping bridge tx {tx.Hash} for this block: {bridgeBatchReason}", "TransactionData.ProcessTxPool()");
                                                 }
                                                 else
                                                 {
@@ -1073,7 +1086,11 @@ namespace VerifiedXCore.Data
                                             else if (tx.Nonce == expectedNonce)
                                             {
                                                 // Nonce is sequential - accept it
-                                                approvedMemPoolList.Add(tx);
+                                                var (bridgeBatchOk, bridgeBatchReason) = VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(tx, poolBridgeState);
+                                                if (bridgeBatchOk)
+                                                    approvedMemPoolList.Add(tx);
+                                                else
+                                                    LogUtility.Log($"[ProcessTxPool] Skipping bridge tx {tx.Hash} for this block: {bridgeBatchReason}", "TransactionData.ProcessTxPool()");
                                             }
                                             else
                                             {
@@ -1084,7 +1101,11 @@ namespace VerifiedXCore.Data
                                         }
                                         else
                                         {
-                                            approvedMemPoolList.Add(tx);
+                                            var (bridgeBatchOk, bridgeBatchReason) = VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(tx, poolBridgeState);
+                                            if (bridgeBatchOk)
+                                                approvedMemPoolList.Add(tx);
+                                            else
+                                                LogUtility.Log($"[ProcessTxPool] Skipping bridge tx {tx.Hash} for this block: {bridgeBatchReason}", "TransactionData.ProcessTxPool()");
                                         }
                                     }
                                     else
