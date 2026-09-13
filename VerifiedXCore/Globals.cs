@@ -194,6 +194,14 @@ namespace VerifiedXCore
         /// legacy behaviour applies so historical blocks stay valid.
         /// </summary>
         public static long BridgeIntraBlockGuardHeight = 999_999_999_999L;
+
+        /// <summary>
+        /// Base (vBTC.b) minting validator set = registered vBTC validators that are ALSO members of
+        /// the caster committee. vBTC validator registration is a free self-transaction gated only
+        /// by a wallet balance, so mirroring the raw registry onto the Base contract would let a
+        /// Sybil reach the 2/3 mint threshold. The caster committee is the accountable set.
+        /// </summary>
+        public static bool BaseValidatorSetCastersOnly = true;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds

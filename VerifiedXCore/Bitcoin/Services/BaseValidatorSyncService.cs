@@ -1,6 +1,7 @@
 using Nethereum.ABI;
 using Nethereum.Hex.HexConvertors.Extensions;
 using Nethereum.Web3;
+using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
 using VerifiedXCore.Utilities;
@@ -88,13 +89,41 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Builds the current (lower-cased Base address -> VFX address) map of registered public
-        /// VFX validators. This is the authoritative "should be on the Base contract" set.
+        /// Pure selection rule for the Base minting set: with <paramref name="castersOnly"/>, only
+        /// registered validators that are ALSO committee casters qualify (empty committee => empty
+        /// set, fail closed). Otherwise every registered public validator qualifies (legacy).
+        /// </summary>
+        public static List<VBTCValidator> SelectBaseValidatorSet(IEnumerable<VBTCValidator>? validators, HashSet<string>? committee, bool castersOnly)
+        {
+            var list = (validators ?? Enumerable.Empty<VBTCValidator>()).Where(v => v != null && !string.IsNullOrEmpty(v.ValidatorAddress)).ToList();
+            if (!castersOnly) return list;
+            if (committee == null || committee.Count == 0) return new List<VBTCValidator>();
+            return list.Where(v => committee.Contains(v.ValidatorAddress)).ToList();
+        }
+
+        /// <summary>The validators whose Base signatures the network relies on (sync + mint attestations).</summary>
+        public static List<VBTCValidator> SelectAttestingValidators()
+        {
+            var committee = BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0);
+            return SelectBaseValidatorSet(VBTCValidatorRegistry.GetPublicValidators(), committee, Globals.BaseValidatorSetCastersOnly);
+        }
+
+        /// <summary>Whether THIS node may issue Base-side signatures (mint attestations, validator updates).</summary>
+        public static bool IsLocalNodeEligibleAttester()
+        {
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress)) return false;
+            if (!Globals.BaseValidatorSetCastersOnly) return true;
+            return BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0).Contains(Globals.ValidatorAddress);
+        }
+
+        /// <summary>
+        /// Builds the current (lower-cased Base address -> VFX address) map of the validators that
+        /// SHOULD be on the Base contract (see <see cref="SelectAttestingValidators"/>).
         /// </summary>
         private static Dictionary<string, string> BuildVfxValidatorBaseAddressMap()
         {
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var val in VBTCValidatorRegistry.GetPublicValidators())
+            foreach (var val in SelectAttestingValidators())
             {
                 var baseAddr = val.BaseAddress;
                 if (string.IsNullOrEmpty(baseAddr) && !string.IsNullOrEmpty(val.FrostPublicKey))

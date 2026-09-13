@@ -185,7 +185,7 @@ namespace VerifiedXCore.Bitcoin.Services
             BridgeLockRecord record, long nonce, long chainId, string contractAddress, int requiredSigs)
         {
             var signatures = new Dictionary<string, string>();
-            var validators = VBTCValidatorRegistry.GetPublicValidators();
+            var validators = BaseValidatorSyncService.SelectAttestingValidators();
             if (validators == null || validators.Count == 0)
             {
                 LogUtility.Log("[UserBridgeMint] No active validators found.", "UserBridgeMintService");
@@ -202,7 +202,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     LogUtility.Log($"[UserBridgeMint] Retry round {attempt + 1} for attestations. Have {signatures.Count}/{requiredSigs}.", "UserBridgeMintService");
                     await Task.Delay(15_000);
                     // Refresh validator list
-                    validators = VBTCValidatorRegistry.GetPublicValidators();
+                    validators = BaseValidatorSyncService.SelectAttestingValidators();
                 }
 
                 foreach (var v in validators)

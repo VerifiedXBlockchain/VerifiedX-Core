@@ -47,6 +47,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Not a validator node"));
                 }
 
+                // SECURITY: mint attestations are issued only by the accountable Base validator set
+                // (caster committee members when BaseValidatorSetCastersOnly), not by any free registration.
+                if (!BaseValidatorSyncService.IsLocalNodeEligibleAttester())
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: This node is not in the Base minting validator set (caster committee). lockId={request.LockId}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, "Not a Base minting validator (caster committee)"));
+                }
+
                 LogUtility.Log($"[BridgeAttest] Processing attestation request: lockId={request.LockId}, evmDest={request.EvmDestination}, amountSats={request.AmountSats}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}", TAG);
 
                 var chainLock = VBTCBridgeLockState.GetByLockId(request.LockId);
@@ -149,7 +157,7 @@ namespace VerifiedXCore.Bitcoin.Services
             record.Status = BridgeLockStatus.AttestationPending;
             BridgeLockRecord.Save(record);
 
-            var validators = VBTCValidatorRegistry.GetPublicValidators();
+            var validators = BaseValidatorSyncService.SelectAttestingValidators();
             var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
 
             foreach (var v in validators)
