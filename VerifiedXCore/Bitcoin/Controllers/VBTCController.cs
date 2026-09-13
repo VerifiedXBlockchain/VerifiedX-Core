@@ -1689,6 +1689,21 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Cancellation has already been processed" });
                 }
 
+                // SECURITY: never approve cancelling a withdrawal this validator has already signed a
+                // Bitcoin transaction for (or that carries a pinned/signed tx). vBTC is burned only at
+                // completion, so approving here would let the requester keep the vBTC AND broadcast the BTC.
+                if (payload.Approve)
+                {
+                    var trackerSigned = Services.FrostWithdrawalSigningTracker.HasSignedTransaction(cancellation.SmartContractUID, cancellation.WithdrawalRequestHash);
+                    var localRow = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash);
+                    var (canApprove, refuseReason) = Services.CancellationVoteGuard.CanApprove(trackerSigned, localRow);
+                    if (!canApprove)
+                    {
+                        LogUtility.Log($"[VBTC V2] Cancellation approve vote REFUSED for {cancellation.WithdrawalRequestHash}: {refuseReason}", "VBTCController.VoteOnCancellation");
+                        return JsonConvert.SerializeObject(new { Success = false, Message = refuseReason });
+                    }
+                }
+
                 // Check if validator already voted
                 if (VBTCWithdrawalCancellation.HasValidatorVoted(payload.CancellationUID, payload.ValidatorAddress))
                 {

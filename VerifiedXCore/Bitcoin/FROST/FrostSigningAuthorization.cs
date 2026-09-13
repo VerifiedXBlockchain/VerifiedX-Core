@@ -126,13 +126,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                 else
                 {
                     var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh);
-                    if (wr == null) return (false, "Withdrawal request not found in consensus state");
-                    if (!string.Equals(wr.SmartContractUID, request.SmartContractUID, StringComparison.Ordinal))
-                        return (false, "Withdrawal request belongs to a different contract");
-                    if (wr.IsCompleted || wr.Status == VBTCWithdrawalStatus.Completed) return (false, "Withdrawal request already completed");
-                    if (wr.Status == VBTCWithdrawalStatus.Cancelled) return (false, "Withdrawal request was cancelled");
-                    if (string.IsNullOrWhiteSpace(wr.BTCDestination) || wr.Amount <= 0) return (false, "Withdrawal request has no destination/amount");
-                    destination = wr.BTCDestination;
+                    var (signable, signableReason) = IsWithdrawalSignable(wr, request.SmartContractUID);
+                    if (!signable) return (false, signableReason);
+                    destination = wr!.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
                     leaderIsOwner = string.Equals(wr.RequestorAddress, request.LeaderAddress, StringComparison.Ordinal);
                 }
@@ -167,6 +163,24 @@ namespace VerifiedXCore.Bitcoin.FROST
                 ErrorLogUtility.LogError($"FrostSigningAuthorization error: {ex}", "FrostSigningAuthorization.Authorize");
                 return (false, $"Authorization error: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// A withdrawal may be signed only while it is plainly open: not completed, not cancelled,
+        /// and with NO cancellation vote in progress. Signing during a pending cancellation is the
+        /// "sign, cancel, then broadcast" double-pay: vBTC is only burned at completion, so a held
+        /// signed transaction plus an approved cancellation pays the user twice.
+        /// </summary>
+        public static (bool Ok, string Reason) IsWithdrawalSignable(VBTCWithdrawalRequest? wr, string scUID)
+        {
+            if (wr == null) return (false, "Withdrawal request not found in consensus state");
+            if (!string.Equals(wr.SmartContractUID, scUID, StringComparison.Ordinal))
+                return (false, "Withdrawal request belongs to a different contract");
+            if (wr.IsCompleted || wr.Status == VBTCWithdrawalStatus.Completed) return (false, "Withdrawal request already completed");
+            if (wr.Status == VBTCWithdrawalStatus.Cancelled) return (false, "Withdrawal request was cancelled");
+            if (wr.Status == VBTCWithdrawalStatus.Cancellation_Requested) return (false, "Withdrawal request has a cancellation vote in progress; refusing to sign");
+            if (string.IsNullOrWhiteSpace(wr.BTCDestination) || wr.Amount <= 0) return (false, "Withdrawal request has no destination/amount");
+            return (true, "");
         }
 
         /// <summary>

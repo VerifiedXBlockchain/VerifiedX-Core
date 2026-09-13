@@ -405,6 +405,31 @@ namespace VerifiedXCore.Bitcoin.Services
             => $"{scUID}:{withdrawalRequestHash}";
 
         /// <summary>
+        /// True if this validator has produced a signature share for ANY input of a Bitcoin
+        /// transaction for the withdrawal, or holds the contract-level outpoint pin for it. Used to
+        /// refuse cancellation votes: a signed transaction can be broadcast at any time.
+        /// </summary>
+        public static bool HasSignedTransaction(string scUID, string withdrawalRequestHash)
+        {
+            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash)) return false;
+
+            if (_withdrawals.TryGetValue(BuildKey(scUID, withdrawalRequestHash), out var record))
+            {
+                lock (record.Lock)
+                {
+                    if (record.Inputs.Values.Any(i => i.State == SigningState.Signed))
+                        return true;
+                }
+            }
+
+            if (_contractPins.TryGetValue(scUID, out var pin)
+                && string.Equals(pin.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.Ordinal))
+                return true;
+
+            return false;
+        }
+
+        /// <summary>
         /// Per-withdrawal record: one sub-record per transaction input, plus the pinned sighash set.
         /// </summary>
         private class WithdrawalRecord
