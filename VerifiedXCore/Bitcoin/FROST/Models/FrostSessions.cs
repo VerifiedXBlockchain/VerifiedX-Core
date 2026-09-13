@@ -82,6 +82,52 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         // FROST native library state for this validator's participation
         public string? MyKeyPackage { get; set; }              // This validator's key package (loaded from persistent store)
         public string? NonceSecret { get; set; }               // Secret nonce from SignRound1Nonces (kept private)
+
+        private readonly object _nonceGate = new();
+
+        /// <summary>True once the secret nonce has been handed to the signer. A FROST nonce is single-use.</summary>
+        public bool NonceConsumed { get; private set; }
+
+        /// <summary>
+        /// Hands out the secret nonce EXACTLY ONCE and wipes it. Signing twice with the same nonce
+        /// against different commitment sets leaks this validator's long-term key share, so any
+        /// second request (replayed leader headers, coordinator retry, malicious peer) must fail.
+        /// </summary>
+        public bool TryConsumeNonceSecret(out string? nonceSecret)
+        {
+            lock (_nonceGate)
+            {
+                if (NonceConsumed || string.IsNullOrEmpty(NonceSecret))
+                {
+                    nonceSecret = null;
+                    return false;
+                }
+                nonceSecret = NonceSecret;
+                NonceSecret = null;
+                NonceConsumed = true;
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// The leader's posted nonce set must carry THIS validator's own round-1 commitment unchanged.
+        /// A leader that substitutes or drops our commitment is trying to make us sign over a
+        /// commitment set we never produced.
+        /// </summary>
+        public bool OwnCommitmentMatches(string myAddress, IDictionary<string, string>? postedNonces)
+        {
+            if (string.IsNullOrEmpty(myAddress) || postedNonces == null) return false;
+            if (!Round1Nonces.TryGetValue(myAddress, out var mine) || string.IsNullOrEmpty(mine)) return false;
+            if (!postedNonces.TryGetValue(myAddress, out var posted) || string.IsNullOrEmpty(posted)) return false;
+            if (string.Equals(posted, mine, StringComparison.Ordinal)) return true;
+            try
+            {
+                return Newtonsoft.Json.Linq.JToken.DeepEquals(
+                    Newtonsoft.Json.Linq.JToken.Parse(posted),
+                    Newtonsoft.Json.Linq.JToken.Parse(mine));
+            }
+            catch { return false; }
+        }
         
         /// <summary>
         /// Stored participant order from DKG key store. If populated, this is used instead of

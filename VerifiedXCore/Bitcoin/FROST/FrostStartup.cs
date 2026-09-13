@@ -2076,11 +2076,37 @@ namespace VerifiedXCore.Bitcoin.FROST
                         {
                             var body = await reader.ReadToEndAsync();
                             
-                            // FIND-024 Fix: Call FROST native library to generate signature share
-                            if (string.IsNullOrEmpty(session.MyKeyPackage) || string.IsNullOrEmpty(session.NonceSecret))
+                            var myAddr = Globals.ValidatorAddress ?? "";
+
+                            // SINGLE-SHOT: a signature share is produced at most once per session. If we
+                            // already produced one, return it (idempotent for coordinator retries) and
+                            // NEVER run the signer again — re-signing with the same nonce leaks our key share.
+                            if (session.Round2Shares.TryGetValue(myAddr, out var existingShare) && !string.IsNullOrEmpty(existingShare))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status200OK;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = true,
+                                    Message = "Signature share already generated (idempotent)",
+                                    SessionId = sessionId,
+                                    ShareGenerated = true,
+                                    SignatureShare = existingShare
+                                }, Formatting.Indented));
+                                return;
+                            }
+
+                            if (string.IsNullOrEmpty(session.MyKeyPackage))
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Key package or nonce secret not found" }));
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Key package not found" }));
+                                return;
+                            }
+
+                            if (session.NonceConsumed)
+                            {
+                                ErrorLogUtility.LogError($"FROST Sign Round 2 REFUSED for session {sessionId}: nonce already consumed (re-sign attempt).", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Nonce already consumed for this session; refusing to sign again" }));
                                 return;
                             }
 
@@ -2090,6 +2116,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // Unlike DKG Round 2, signing Round 2 expects ALL participants' nonces (including self).
                             var addressNonces = JsonConvert.DeserializeObject<Dictionary<string, string>>(body);
                             string remappedNoncesJson;
+
+                            // The posted nonce set must contain OUR round-1 commitment exactly as we produced it.
+                            if (!session.OwnCommitmentMatches(myAddr, addressNonces))
+                            {
+                                ErrorLogUtility.LogError($"FROST Sign Round 2 REFUSED for session {sessionId}: posted nonce set does not carry this validator's own commitment unchanged.", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Posted nonce set does not contain this validator's own commitment unchanged" }));
+                                return;
+                            }
 
                             if (addressNonces != null && addressNonces.Count > 0 && session.SignerAddresses != null && session.SignerAddresses.Count > 0)
                             {
@@ -2128,8 +2163,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST] WARNING: Sign Round 2 could not remap nonces - using raw body. SignerAddresses count: {session.SignerAddresses?.Count ?? 0}", "FrostStartup.SignRound2");
                             }
 
+                            // Consume the secret nonce atomically: it is wiped here and can never be used again,
+                            // even if share generation below fails (fail closed; the coordinator starts a new session).
+                            if (!session.TryConsumeNonceSecret(out var nonceSecretOnce) || string.IsNullOrEmpty(nonceSecretOnce))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Nonce already consumed for this session; refusing to sign again" }));
+                                return;
+                            }
+
                             var (signatureShare, sigShareError) = FrostNative.SignRound2Signature(
-                                session.MyKeyPackage, session.NonceSecret, remappedNoncesJson, session.MessageHash);
+                                session.MyKeyPackage, nonceSecretOnce, remappedNoncesJson, session.MessageHash);
 
                             if (sigShareError != FrostNative.SUCCESS || string.IsNullOrEmpty(signatureShare))
                             {
@@ -2140,7 +2184,6 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // Store this validator's signature share
-                            var myAddr = Globals.ValidatorAddress ?? "";
                             session.Round2Shares.TryAdd(myAddr, signatureShare);
 
                             // FIND-028: Record signing completed for withdrawal dedup tracking.
