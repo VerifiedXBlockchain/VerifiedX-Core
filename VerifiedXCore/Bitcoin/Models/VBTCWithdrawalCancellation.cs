@@ -50,6 +50,23 @@ namespace VerifiedXCore.Bitcoin.Models
             return null;
         }
 
+        /// <summary>
+        /// True when ANY unprocessed cancellation exists for the withdrawal. Cancellation records are
+        /// created by consensus (the cancel tx applies on every node), so this is the network-wide
+        /// signal that a cancellation vote is in progress — unlike the contract's local status field.
+        /// </summary>
+        public static bool HasPendingCancellation(string withdrawalRequestHash)
+        {
+            if (string.IsNullOrWhiteSpace(withdrawalRequestHash)) return false;
+            try
+            {
+                var db = GetDb();
+                if (db == null) return false;
+                return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash).Any(x => !x.IsProcessed);
+            }
+            catch { return false; }
+        }
+
         public static VBTCWithdrawalCancellation? GetCancellationByWithdrawalHash(string withdrawalRequestHash)
         {
             var cancellations = GetDb();
