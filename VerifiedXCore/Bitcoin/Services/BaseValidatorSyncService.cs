@@ -407,10 +407,25 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Signs a validator update message locally using this node's Base private key.
         /// Matches the Solidity keccak256(abi.encodePacked(action, address, vfxBlockHeight, adminNonce, chainid, contractAddress)).
         /// </summary>
+        /// <summary>Canonical target list for signing: trimmed, lower-cased, distinct, ordinal-sorted.</summary>
+        public static string[] CanonicalTargets(IEnumerable<string>? targets) =>
+            (targets ?? Enumerable.Empty<string>())
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Select(t => t.Trim().ToLowerInvariant())
+                .Distinct()
+                .OrderBy(t => t, StringComparer.Ordinal)
+                .ToArray();
+
         public static byte[]? SignValidatorUpdateLocally(string action, string[] targetAddresses, long vfxBlockHeight)
         {
             try
             {
+                // Every signer must hash the SAME bytes: the authorization step verified a normalized
+                // action and canonical target set, so sign exactly that, not the requester's raw label
+                // and order (which the contract would reject or which could yield many valid variants).
+                action = NormalizeAction(action);
+                targetAddresses = CanonicalTargets(targetAddresses);
+                if (targetAddresses.Length == 0) return null;
                 var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
                 if (account == null) return null;
 
