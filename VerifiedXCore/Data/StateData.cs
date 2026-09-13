@@ -3107,6 +3107,27 @@ namespace VerifiedXCore.Data
         /// available bridge locks FIFO. The TX data contains a pre-computed allocation plan
         /// (list of lockId + unlockAmount pairs) so all nodes produce identical state.
         /// </summary>
+        /// <summary>Credits a pool-unlock allocation to the destination on the lock's contract ledger.</summary>
+        private static void CreditPoolUnlock(SmartContractStateTrei scStateTreiRec, decimal amount, string vfxDestinationAddress)
+        {
+            var tknTxList = new List<SmartContractStateTreiTokenizationTX>
+            {
+                new SmartContractStateTreiTokenizationTX
+                {
+                    Amount = amount,
+                    FromAddress = "+",
+                    ToAddress = vfxDestinationAddress
+                }
+            };
+
+            if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+            else
+                scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
+
+            SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+        }
+
         private static void ApplyVBTCBridgePoolUnlock(Transaction tx)
         {
             try
@@ -3147,6 +3168,18 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
+                // Height-gated ordering fix (BridgeIntraBlockGuardHeight): consume the burn BEFORE
+                // crediting so a second unlock for the same burn in the same block credits nothing, and
+                // debit each lock BEFORE crediting so a failed debit (lock already drawn by an earlier tx)
+                // never leaves an uncovered credit. Pre-gate keeps the legacy order for history.
+                var strictOrder = tx.Height >= Globals.BridgeIntraBlockGuardHeight;
+
+                if (strictOrder && !VBTCBridgeConsumedBurn.TryMarkConsumed(exitBurnTxHash, "POOL_UNLOCK", tx.Hash, tx.Height))
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: burn {exitBurnTxHash} already consumed — refusing to credit (tx {tx.Hash})", "StateData.ApplyVBTCBridgePoolUnlock()");
+                    return;
+                }
+
                 // Process each allocation: partial-unlock each lock, credit each lock's contract
                 foreach (var alloc in allocations)
                 {
@@ -3159,7 +3192,6 @@ namespace VerifiedXCore.Data
 
                     long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
 
-                    // Credit the lock's original contract to the destination address
                     var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(rec.SmartContractUID);
                     if (scStateTreiRec == null)
                     {
@@ -3167,34 +3199,31 @@ namespace VerifiedXCore.Data
                         continue;
                     }
 
-                    var tknTxList = new List<SmartContractStateTreiTokenizationTX>
+                    if (strictOrder)
                     {
-                        new SmartContractStateTreiTokenizationTX
+                        // Debit first; credit only when the debit succeeded.
+                        if (!VBTCBridgeLockState.ApplyPartialUnlock(alloc.LockId, alloc.UnlockAmount, allocSats))
                         {
-                            Amount = alloc.UnlockAmount,
-                            FromAddress = "+",
-                            ToAddress = vfxDestinationAddress
+                            ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: lock {alloc.LockId} could not cover {alloc.UnlockAmount} — refusing to credit (tx {tx.Hash})", "StateData.ApplyVBTCBridgePoolUnlock()");
+                            continue;
                         }
-                    };
-
-                    if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
+                        CreditPoolUnlock(scStateTreiRec, alloc.UnlockAmount, vfxDestinationAddress);
+                    }
                     else
-                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-
-                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
-
-                    // Update partial unlock state
-                    if (!VBTCBridgeLockState.ApplyPartialUnlock(alloc.LockId, alloc.UnlockAmount, allocSats))
                     {
-                        ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: failed to apply partial unlock for lock {alloc.LockId}", "StateData.ApplyVBTCBridgePoolUnlock()");
+                        CreditPoolUnlock(scStateTreiRec, alloc.UnlockAmount, vfxDestinationAddress);
+                        if (!VBTCBridgeLockState.ApplyPartialUnlock(alloc.LockId, alloc.UnlockAmount, allocSats))
+                        {
+                            ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock: failed to apply partial unlock for lock {alloc.LockId}", "StateData.ApplyVBTCBridgePoolUnlock()");
+                        }
                     }
 
                     BridgeLockRecord.FinalizeFromChainUnlockIfPending(alloc.LockId);
                 }
 
-                // Burn hashes are single-use: record consumption so no later unlock can reuse it.
-                VBTCBridgeConsumedBurn.TryMarkConsumed(exitBurnTxHash, "POOL_UNLOCK", tx.Hash, tx.Height);
+                // Pre-gate: legacy position of the consumption mark (after credit).
+                if (!strictOrder)
+                    VBTCBridgeConsumedBurn.TryMarkConsumed(exitBurnTxHash, "POOL_UNLOCK", tx.Hash, tx.Height);
 
                 SCLogUtility.Log($"ApplyVBTCBridgePoolUnlock: totalAmount={totalAmount.Value} BTC, dest={vfxDestinationAddress}, allocations={allocations.Count}, exitBurn={exitBurnTxHash}",
                     "StateData.ApplyVBTCBridgePoolUnlock()");

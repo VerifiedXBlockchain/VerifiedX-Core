@@ -186,6 +186,14 @@ namespace VerifiedXCore
         /// historical blocks stay valid.
         /// </summary>
         public static long BridgeBurnBindingHeight = 999_999_999_999L;
+
+        /// <summary>
+        /// Bridge intra-block guard (security fix): at/after this height, a block may not contain two
+        /// bridge transactions that redeem the same Base burn or draw on the same lock, and
+        /// pool-unlock apply consumes the burn and debits each lock BEFORE crediting. Before it, the
+        /// legacy behaviour applies so historical blocks stay valid.
+        /// </summary>
+        public static long BridgeIntraBlockGuardHeight = 999_999_999_999L;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds

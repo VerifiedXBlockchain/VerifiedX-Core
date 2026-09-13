@@ -877,6 +877,7 @@ namespace VerifiedXCore.Services
                         // VBTC_V2_WITHDRAWAL_REQUESTs for the same contract in one block. Track the
                         // contracts seen here and reject the second (mirrors blockPrivateNullifierKeys).
                         var blockWithdrawalContracts = new HashSet<string>();
+                        var blockBridgeState = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -920,6 +921,15 @@ namespace VerifiedXCore.Services
                                             effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wScUID} within block.");
                                     }
                                     catch { }
+                                }
+
+                                // Bridge: one redemption per Base burn and one draw per lock within a block
+                                // (height-gated; see Globals.BridgeIntraBlockGuardHeight).
+                                if (effectiveTxResult.Item1 && block.Height >= Globals.BridgeIntraBlockGuardHeight
+                                    && Bitcoin.Services.BridgeIntraBlockGuard.AppliesTo(blkTransaction.TransactionType))
+                                {
+                                    var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(blkTransaction, blockBridgeState);
+                                    if (!bridgeOk) effectiveTxResult = (false, bridgeReason);
                                 }
 
                                 if(effectiveTxResult.Item1 == false)
@@ -1888,6 +1898,7 @@ namespace VerifiedXCore.Services
                 //validate transactions.
                 bool rejectBlock = false;
                 var blockPrivateNullifierKeys = new HashSet<string>();
+                var blockBridgeStateTask = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                 foreach (Transaction transaction in block.Transactions)
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
@@ -1898,6 +1909,12 @@ namespace VerifiedXCore.Services
                         {
                             if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(transaction, blockPrivateNullifierKeys, out var nulErr))
                                 effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
+                        }
+                        if (effectiveTxResult.Item1 && block.Height >= Globals.BridgeIntraBlockGuardHeight
+                            && Bitcoin.Services.BridgeIntraBlockGuard.AppliesTo(transaction.TransactionType))
+                        {
+                            var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(transaction, blockBridgeStateTask);
+                            if (!bridgeOk) effectiveTxResult = (false, bridgeReason);
                         }
                         rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                         if (rejectBlock)
