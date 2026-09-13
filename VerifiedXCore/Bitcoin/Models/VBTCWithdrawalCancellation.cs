@@ -55,14 +55,26 @@ namespace VerifiedXCore.Bitcoin.Models
         /// created by consensus (the cancel tx applies on every node), so this is the network-wide
         /// signal that a cancellation vote is in progress — unlike the contract's local status field.
         /// </summary>
-        public static bool HasPendingCancellation(string withdrawalRequestHash)
+        /// <summary>
+        /// A cancellation is only ever marked processed on approval; a rejected or stalled vote stays
+        /// unprocessed forever. Without a bound, one stalled cancellation would block signing for the
+        /// withdrawal permanently. A cancellation older than this no longer blocks signing.
+        /// </summary>
+        public const long PENDING_CANCELLATION_MAX_AGE_SECONDS = 86_400;
+
+        public static bool HasPendingCancellation(string withdrawalRequestHash) =>
+            HasPendingCancellation(withdrawalRequestHash, VerifiedXCore.Utilities.TimeUtil.GetTime());
+
+        public static bool HasPendingCancellation(string withdrawalRequestHash, long nowSeconds)
         {
             if (string.IsNullOrWhiteSpace(withdrawalRequestHash)) return false;
             try
             {
                 var db = GetDb();
                 if (db == null) return false;
-                return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash).Any(x => !x.IsProcessed);
+                var cutoff = nowSeconds - PENDING_CANCELLATION_MAX_AGE_SECONDS;
+                return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+                         .Any(x => !x.IsProcessed && x.RequestTime >= cutoff);
             }
             catch { return false; }
         }

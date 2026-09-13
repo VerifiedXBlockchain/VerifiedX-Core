@@ -22,7 +22,7 @@ namespace VerifiedXCore.Tests
             try
             {
                 var committee = BridgeCasterConsensus.GetCommitteeForHeight(123);
-                Assert.Equal(Globals.BootstrapCasterAddresses.OrderBy(x => x), committee.OrderBy(x => x));
+                Assert.Equal(BridgeCasterConsensus.SeedCommitteeForNetwork(Globals.IsTestNet).OrderBy(x => x), committee.OrderBy(x => x));
                 Assert.DoesNotContain("xLiveOnlyCaster", committee);
             }
             finally
@@ -30,6 +30,17 @@ namespace VerifiedXCore.Tests
                 var kept = Globals.BlockCasters.Where(p => p.ValidatorAddress != "xLiveOnlyCaster").ToList();
                 Globals.BlockCasters = new System.Collections.Concurrent.ConcurrentBag<Models.Peers>(kept);
             }
+        }
+
+        [Fact]
+        public void SeedFallback_IsNetworkSpecific()
+        {
+            var testnet = BridgeCasterConsensus.SeedCommitteeForNetwork(true);
+            var mainnet = BridgeCasterConsensus.SeedCommitteeForNetwork(false);
+            Assert.All(testnet, a => Assert.StartsWith("x", a));
+            Assert.All(mainnet, a => Assert.StartsWith("R", a));
+            Assert.Empty(testnet.Intersect(mainnet));
+            Assert.Equal(Globals.BootstrapCasterAddresses.Count, testnet.Count + mainnet.Count);
         }
 
         [Fact]

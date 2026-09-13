@@ -140,6 +140,24 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// less disruptive than the alternative escape hatch (restarting the validator, which
                 /// wipes every pin). Requires the explicit confirm flag.
                 /// </summary>
+                /// <summary>
+                /// POST /frost/evidence/clear/{scUID}/{withdrawalRequestHash} - operator escape hatch
+                /// (localhost only). Drops this validator's durable signed-share evidence for a
+                /// withdrawal / exit reference when a ceremony failed before aggregation (no broadcastable
+                /// tx exists) and the coordinator must rebuild a different transaction. Mirrors
+                /// /frost/pins/clear; never called automatically.
+                /// </summary>
+                endpoints.MapPost("/frost/evidence/clear/{scUID}/{withdrawalRequestHash}", async context =>
+                {
+                    if (!IsLoopbackRequest(context)) { await WriteForbiddenAsync(context); return; }
+                    var scUID = context.Request.RouteValues["scUID"] as string ?? "";
+                    var wrh = context.Request.RouteValues["withdrawalRequestHash"] as string ?? "";
+                    var removed = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Delete(scUID, wrh);
+                    LogUtility.Log($"[FROST] Operator cleared durable signed evidence for {scUID}/{wrh}: removed={removed}", "FrostStartup.EvidenceClear");
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Removed = removed }));
+                });
+
                 endpoints.MapPost("/frost/pins/clear/{scUID}", async context =>
                 {
                     if (!IsLoopbackRequest(context))
@@ -537,18 +555,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // Auto-store this validator's commitment
                             session.Round1Commitments.TryAdd(myAddress, commitment);
 
-                            // Only one DKG may be in flight per contract: two would finalize into two
-                            // different group keys and split the validators.
-                            if (FrostSessionStorage.HasInProgressDkgForContract(request.SmartContractUID, request.SessionId))
+                            // Only one DKG may be in flight per contract: two LEADERS racing would finalize
+                            // into two different group keys and split the validators. The same leader
+                            // restarting (the coordinator retries a start with a fresh session id when not
+                            // every validator answered) supersedes its own stale sessions instead.
+                            if (FrostSessionStorage.HasInProgressDkgForContractByOtherLeader(request.SmartContractUID, request.LeaderAddress, request.SessionId))
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
                                     Success = false,
-                                    Message = "A DKG session for this contract is already in progress"
+                                    Message = "A DKG session for this contract is already in progress under a different leader"
                                 }));
                                 return;
                             }
+                            var superseded = FrostSessionStorage.SupersedeOwnDkgSessions(request.SmartContractUID, request.LeaderAddress, request.SessionId);
+                            if (superseded > 0)
+                                LogUtility.Log($"[FROST] DKG start for {request.SmartContractUID}: leader {request.LeaderAddress} restarted; superseded {superseded} stale session(s).", "FrostStartup.DKGStart");
 
                             if (!FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
                             {

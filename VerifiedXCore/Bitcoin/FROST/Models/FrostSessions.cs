@@ -232,6 +232,38 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                                                && !string.Equals(s.SessionId, exceptSessionId, StringComparison.Ordinal));
         }
 
+        /// <summary>
+        /// True when another in-progress DKG for the contract was started by a DIFFERENT leader.
+        /// Two leaders racing one contract must be refused; a leader restarting its own ceremony
+        /// (the coordinator retries a start with a fresh session id) is handled by
+        /// <see cref="SupersedeOwnDkgSessions"/>.
+        /// </summary>
+        public static bool HasInProgressDkgForContractByOtherLeader(string? smartContractUID, string? leaderAddress, string? exceptSessionId)
+        {
+            if (string.IsNullOrEmpty(smartContractUID)) return false;
+            return DKGSessions.Values.Any(s => !s.IsCompleted
+                                               && string.Equals(s.SmartContractUID, smartContractUID, StringComparison.Ordinal)
+                                               && !string.Equals(s.SessionId, exceptSessionId, StringComparison.Ordinal)
+                                               && !string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal));
+        }
+
+        /// <summary>
+        /// Drops this leader's own earlier in-progress sessions for the contract (its start signature
+        /// has already been verified by the caller). Returns how many were removed.
+        /// </summary>
+        public static int SupersedeOwnDkgSessions(string? smartContractUID, string? leaderAddress, string? exceptSessionId)
+        {
+            if (string.IsNullOrEmpty(smartContractUID) || string.IsNullOrEmpty(leaderAddress)) return 0;
+            var stale = DKGSessions.Where(kv => !kv.Value.IsCompleted
+                                                && string.Equals(kv.Value.SmartContractUID, smartContractUID, StringComparison.Ordinal)
+                                                && string.Equals(kv.Value.LeaderAddress, leaderAddress, StringComparison.Ordinal)
+                                                && !string.Equals(kv.Key, exceptSessionId, StringComparison.Ordinal))
+                                   .Select(kv => kv.Key).ToList();
+            var removed = 0;
+            foreach (var key in stale) if (DKGSessions.TryRemove(key, out _)) removed++;
+            return removed;
+        }
+
         /// <summary>Pure cap rule, testable without touching the storage.</summary>
         public static bool LeaderMayOpenDkgSession(int openSessionsForLeader) => openSessionsForLeader < MAX_DKG_SESSIONS_PER_LEADER;
         public static ConcurrentDictionary<string, SigningSession> SigningSessions { get; } = new();

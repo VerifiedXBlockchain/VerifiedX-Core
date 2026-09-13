@@ -40,7 +40,18 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch { }
 
-            return new HashSet<string>(Globals.BootstrapCasterAddresses, StringComparer.Ordinal);
+            return SeedCommitteeForNetwork(Globals.IsTestNet);
+        }
+
+        /// <summary>
+        /// The hard-coded seed allowlist holds both networks' casters (mainnet addresses begin with
+        /// 'R', testnet with 'x'). The fallback committee must be THIS network's seeds only, or the
+        /// majority threshold would count casters that cannot exist on this chain.
+        /// </summary>
+        public static HashSet<string> SeedCommitteeForNetwork(bool isTestNet)
+        {
+            var prefix = isTestNet ? 'x' : 'R';
+            return new HashSet<string>(Globals.BootstrapCasterAddresses.Where(a => !string.IsNullOrEmpty(a) && a[0] == prefix), StringComparer.Ordinal);
         }
 
         public static int RequiredVotesFor(HashSet<string> committee) => Math.Max(2, committee.Count / 2 + 1);

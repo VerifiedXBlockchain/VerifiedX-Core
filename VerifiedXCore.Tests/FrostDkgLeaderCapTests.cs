@@ -81,6 +81,22 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void SameLeaderRestart_SupersedesOwnSession_OtherLeaderIsRefused()
+        {
+            var id = Guid.NewGuid().ToString();
+            _created.Add(id);
+            FrostSessionStorage.DKGSessions[id] = new DKGSession { SessionId = id, SmartContractUID = "sc-retry", LeaderAddress = "xOwner", ParticipantAddresses = new List<string>(), StartTimestamp = TimeUtil.GetTime() };
+
+            // A different leader racing the same contract is refused.
+            Assert.True(FrostSessionStorage.HasInProgressDkgForContractByOtherLeader("sc-retry", "xIntruder", "new-session"));
+            // The same leader retrying is not refused; its stale session is dropped.
+            Assert.False(FrostSessionStorage.HasInProgressDkgForContractByOtherLeader("sc-retry", "xOwner", "new-session"));
+            Assert.Equal(1, FrostSessionStorage.SupersedeOwnDkgSessions("sc-retry", "xOwner", "new-session"));
+            Assert.False(FrostSessionStorage.DKGSessions.ContainsKey(id));
+            Assert.Equal(0, FrostSessionStorage.SupersedeOwnDkgSessions("sc-retry", "xOwner", "new-session"));
+        }
+
+        [Fact]
         public void CapRule_AllowsBelowCap_RefusesAtCap()
         {
             Assert.True(FrostSessionStorage.LeaderMayOpenDkgSession(0));
