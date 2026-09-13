@@ -72,6 +72,13 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public long LeaderStartTimestamp { get; set; }
         /// <summary>Leader's start signature — round messages must replay it to prove leadership.</summary>
         public string? LeaderStartSignature { get; set; }
+        /// <summary>
+        /// Remote endpoint the start request came from. Round-2 / share / abort calls must come from
+        /// the same endpoint: the start signature is visible to every signer, so a peer could
+        /// otherwise replay it to consume our single-shot nonce over a bogus commitment set, or abort
+        /// the session outright.
+        /// </summary>
+        public string LeaderRemoteIp { get; set; } = "";
 
         /// <summary>Which transaction input this session signs (multi-input withdrawals; 0 = legacy).</summary>
         public int InputIndex { get; set; }

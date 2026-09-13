@@ -1901,6 +1901,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LeaderAddress = request.LeaderAddress,
                                 LeaderStartTimestamp = request.Timestamp,
                                 LeaderStartSignature = request.LeaderSignature,
+                                LeaderRemoteIp = FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress),
                                 WithdrawalRequestHash = request.WithdrawalRequestHash,  // FIND-028
                                 SignerAddresses = request.SignerAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
@@ -2372,6 +2373,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid abort signature" }));
+                                return;
+                            }
+
+                            // The start signature is known to every signer; only the endpoint that started
+                            // the session may abort it (a peer signer could otherwise kill every ceremony).
+                            if (!FrostSigningAuthorization.SameLeaderEndpoint(session.LeaderRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress)))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Abort must come from the endpoint that started the session" }));
                                 return;
                             }
 

@@ -260,8 +260,25 @@ namespace VerifiedXCore.Bitcoin.FROST
 
             var msg = $"{session.SessionId}.{leader}.{ts}";
             if (!VerifiedXCore.Services.SignatureService.VerifySignature(leader, msg, sig)) { reason = "Invalid leader signature"; return false; }
+            if (!SameLeaderEndpoint(session.LeaderRemoteIp, NormalizeRemoteIp(context.Connection.RemoteIpAddress)))
+            { reason = "Round message did not come from the endpoint that started the session"; return false; }
             return true;
         }
+
+        /// <summary>Canonical string form of a remote address (IPv4-mapped IPv6 collapsed); "" when unknown.</summary>
+        public static string NormalizeRemoteIp(System.Net.IPAddress? ip)
+        {
+            if (ip == null) return "";
+            try { return (ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip).ToString(); }
+            catch { return ip.ToString(); }
+        }
+
+        /// <summary>
+        /// Round/abort messages must come from the endpoint that started the session. Exact match on
+        /// the normalized address; two unknown endpoints (in-process test host) compare equal.
+        /// </summary>
+        public static bool SameLeaderEndpoint(string? recorded, string? current) =>
+            string.Equals(recorded ?? "", current ?? "", StringComparison.Ordinal);
 
         public static string? ResolveDepositAddressForContract(string scUID) => ResolveDepositAddress(scUID);
 
