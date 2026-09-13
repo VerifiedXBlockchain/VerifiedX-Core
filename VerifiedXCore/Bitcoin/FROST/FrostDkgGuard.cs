@@ -18,6 +18,9 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             if (string.IsNullOrWhiteSpace(smartContractUID)) return (false, "SmartContractUID required");
 
+            // 0. Chain state must be trustworthy before we can assert "no key exists on chain".
+            if (!Globals.IsChainSynced) return (false, "Chain not synced; cannot verify the contract has no vault key yet");
+
             // 1. This validator already holds a key package for the contract ID.
             if (!string.IsNullOrEmpty(myValidatorAddress))
             {

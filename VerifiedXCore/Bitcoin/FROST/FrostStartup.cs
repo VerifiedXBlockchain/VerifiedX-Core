@@ -537,6 +537,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // Auto-store this validator's commitment
                             session.Round1Commitments.TryAdd(myAddress, commitment);
 
+                            // Only one DKG may be in flight per contract: two would finalize into two
+                            // different group keys and split the validators.
+                            if (FrostSessionStorage.HasInProgressDkgForContract(request.SmartContractUID, request.SessionId))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "A DKG session for this contract is already in progress"
+                                }));
+                                return;
+                            }
+
                             if (!FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
@@ -1342,7 +1355,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                         if (!string.IsNullOrEmpty(myAddr))
                                         {
                                             var sortedR3Order = session.ParticipantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
-                                            FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
+                                            var dkgKeySaved = FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
                                             {
                                                 SmartContractUID = session.SmartContractUID,
                                                 ValidatorAddress = myAddr,
@@ -1352,6 +1365,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                                                 ParticipantOrderJson = JsonConvert.SerializeObject(sortedR3Order),
                                                 CreatedTimestamp = TimeUtil.GetTime()
                                             });
+                                            if (!dkgKeySaved)
+                                            {
+                                                // The key store refused (e.g. a different group key already exists for this contract) or
+                                                // failed. A ceremony whose key was not persisted must not report success.
+                                                session.IsCompleted = false;
+                                                ErrorLogUtility.LogError($"FROST DKG finalize: key package for {session.SmartContractUID} was NOT persisted; ceremony marked incomplete.", "FrostStartup.DKGFinalize");
+                                            }
                                         }
 
                                         LogUtility.Log($"[FROST] DKG ceremony completed with real crypto! Address: {session.TaprootAddress}", "FrostStartup.DKGRound3");
@@ -2835,7 +2855,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     session.Round3Verifications.TryAdd(myAddr, true);
 
                     // Persist key package for future signing, including the sorted participant order
-                    FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
+                    var dkgKeySaved = FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
                     {
                         SmartContractUID = session.SmartContractUID,
                         ValidatorAddress = myAddr,
@@ -2845,8 +2865,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                         ParticipantOrderJson = Newtonsoft.Json.JsonConvert.SerializeObject(sortedParticipantOrder),
                         CreatedTimestamp = TimeUtil.GetTime()
                     });
+                    if (!dkgKeySaved)
+                    {
+                        // The key store refused (e.g. a different group key already exists for this contract) or
+                        // failed. A ceremony whose key was not persisted must not report success.
+                        session.IsCompleted = false;
+                        ErrorLogUtility.LogError($"FROST DKG finalize: key package for {session.SmartContractUID} was NOT persisted; ceremony marked incomplete.", "FrostStartup.DKGFinalize");
+                    }
                 }
 
+                if (!session.IsCompleted) return false;
                 LogUtility.Log($"[FROST] DKG auto-finalized with real crypto! Address: {session.TaprootAddress}", "FrostStartup.TryFinalizeDKG");
                 return true;
             }

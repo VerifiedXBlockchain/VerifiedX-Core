@@ -667,8 +667,10 @@ namespace VerifiedXCore.Bitcoin.Services
                             CreatedTimestamp = TimeUtil.GetTime()
                         };
 
-                        FrostValidatorKeyStore.SaveKeyPackage(keyStoreRecord);
-                        restoredCount++;
+                        if (FrostValidatorKeyStore.SaveKeyPackage(keyStoreRecord))
+                            restoredCount++;
+                        else
+                            ErrorLogUtility.LogError($"[FROST Backup] Restore of {backup.SmartContractUID} was refused by the key store (different group key already present).", "FrostKeyBackupService.RecoverKeysFromPeers");
 
                         LogUtility.Log($"[FROST Backup] Restored key package for contract {backup.SmartContractUID}, GroupPubKey={plaintext.GroupPublicKey?.Substring(0, Math.Min(16, plaintext.GroupPublicKey?.Length ?? 0))}...",
                             "FrostKeyBackupService.RecoverKeysFromPeers");

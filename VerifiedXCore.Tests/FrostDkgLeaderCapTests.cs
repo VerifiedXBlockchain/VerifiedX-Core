@@ -66,6 +66,21 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void InProgressDkgForContract_DetectedUnlessCompletedOrSameSession()
+        {
+            var id = Guid.NewGuid().ToString();
+            _created.Add(id);
+            FrostSessionStorage.DKGSessions[id] = new DKGSession { SessionId = id, SmartContractUID = "sc-dup", LeaderAddress = "xA", ParticipantAddresses = new List<string>(), StartTimestamp = TimeUtil.GetTime() };
+
+            Assert.True(FrostSessionStorage.HasInProgressDkgForContract("sc-dup", exceptSessionId: "other-session"));
+            Assert.False(FrostSessionStorage.HasInProgressDkgForContract("sc-dup", exceptSessionId: id)); // same session re-checks itself
+            Assert.False(FrostSessionStorage.HasInProgressDkgForContract("sc-other", exceptSessionId: null));
+
+            FrostSessionStorage.DKGSessions[id].IsCompleted = true;
+            Assert.False(FrostSessionStorage.HasInProgressDkgForContract("sc-dup", exceptSessionId: null));
+        }
+
+        [Fact]
         public void CapRule_AllowsBelowCap_RefusesAtCap()
         {
             Assert.True(FrostSessionStorage.LeaderMayOpenDkgSession(0));

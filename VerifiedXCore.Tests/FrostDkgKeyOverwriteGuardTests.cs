@@ -20,6 +20,7 @@ namespace VerifiedXCore.Tests
     {
         private readonly string _tempRoot;
         private readonly string? _priorCustomPath;
+        private readonly bool _priorSynced;
         private const string Me = "xValidatorMe";
 
         public FrostDkgKeyOverwriteGuardTests()
@@ -28,14 +29,26 @@ namespace VerifiedXCore.Tests
             Directory.CreateDirectory(_tempRoot);
             _priorCustomPath = Globals.CustomPath;
             Globals.CustomPath = _tempRoot;
+            _priorSynced = Globals.IsChainSynced;
+            Globals.IsChainSynced = true;
             DbContext.Initialize();
         }
 
         public void Dispose()
         {
+            Globals.IsChainSynced = _priorSynced;
             try { DbContext.CloseDB(); } catch { }
             Globals.CustomPath = _priorCustomPath;
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        [Fact]
+        public void CanStartDkg_RefusedWhileChainNotSynced()
+        {
+            Globals.IsChainSynced = false;
+            var (ok, reason) = FrostDkgGuard.CanStartDkg("sc-any", Me);
+            Assert.False(ok);
+            Assert.Contains("not synced", reason);
         }
 
         private static FrostValidatorKeyStore Key(string sc, string group, string pkg = "keypkg") => new FrostValidatorKeyStore

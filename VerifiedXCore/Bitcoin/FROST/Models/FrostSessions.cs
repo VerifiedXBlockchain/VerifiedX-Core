@@ -212,6 +212,19 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                                                  && string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal));
         }
 
+        /// <summary>
+        /// True when another (not completed) DKG session already targets the same SmartContractUID.
+        /// Two concurrent DKGs for one contract would finalize into two different group keys and
+        /// split the validators; only one may be in flight.
+        /// </summary>
+        public static bool HasInProgressDkgForContract(string? smartContractUID, string? exceptSessionId)
+        {
+            if (string.IsNullOrEmpty(smartContractUID)) return false;
+            return DKGSessions.Values.Any(s => !s.IsCompleted
+                                               && string.Equals(s.SmartContractUID, smartContractUID, StringComparison.Ordinal)
+                                               && !string.Equals(s.SessionId, exceptSessionId, StringComparison.Ordinal));
+        }
+
         /// <summary>Pure cap rule, testable without touching the storage.</summary>
         public static bool LeaderMayOpenDkgSession(int openSessionsForLeader) => openSessionsForLeader < MAX_DKG_SESSIONS_PER_LEADER;
         public static ConcurrentDictionary<string, SigningSession> SigningSessions { get; } = new();
