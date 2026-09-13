@@ -321,7 +321,7 @@ namespace VerifiedXCore.Services
                         var startupDownload = Globals.BlocksDownloadSlim.CurrentCount == 0 ? true : false;
                         var stopwatch1 = new Stopwatch();
                         stopwatch1.Start();
-                        var result = await ValidateBlock(block, false, startupDownload, false, false, skipCasterCheck);
+                        var result = await ValidateBlock(block, false, startupDownload, false, false, skipCasterCheck, source: $"BlockDict:{ipAddress}");
                         stopwatch1.Stop();
                         if (!result && block.Height == Globals.LastBlock.Height + 1)
                         {
@@ -375,7 +375,7 @@ namespace VerifiedXCore.Services
                 try { ValidateBlocksSemaphore.Release(); } catch { }
             }
         }
-        public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false)
+        public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false, string? source = null)
         {
             // ═══════════════════════════════════════════════════════════════
             // RECOVERY GUARD: Silently drop ALL incoming blocks when a recovery
@@ -596,9 +596,20 @@ namespace VerifiedXCore.Services
                         // in ReceiveConfirmedBlock). A live block reaching here with no agreed hash is a
                         // block this caster never agreed to — committing it is how a caster ends up on
                         // its own branch. Downloads, recovery redownload, resync and bootstrap are exempt.
-                        LogUtility.Log(
-                            $"[ValidateBlock] CASTER-HASH-PENDING: refusing live commit of block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} — no caster-agreed hash for this height yet.",
-                            "BlockValidatorService");
+                        // PENDING-GATE diagnostics (Sep 2026): the refusal line now names the delivery path,
+                        // the producer, our round state for the height and how many attestations we hold —
+                        // the facts that were missing when the bootstrap-node stall was analysed.
+                        var pendingRoundInfo = "none";
+                        if (Globals.CasterRoundDict.TryGetValue(block.Height, out var pendingRound) && pendingRound != null)
+                            pendingRoundInfo = $"validator={pendingRound.Validator ?? "-"} attempts={pendingRound.RoundAttempts} hasBlock={pendingRound.Block != null}";
+                        var pendingAttestations = 0;
+                        try { pendingAttestations = ConsensusAttestationStore.GetForHeight(block.Height).Count; } catch { }
+                        var pendingMsg =
+                            $"[ValidateBlock] CASTER-HASH-PENDING: refusing live commit of block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} " +
+                            $"producer={block.Validator} prev={block.PrevHash?[..Math.Min(16, block.PrevHash?.Length ?? 0)]} source={source ?? "unknown"} " +
+                            $"round[{pendingRoundInfo}] storedAttestations={pendingAttestations} — no caster-agreed hash for this height yet.";
+                        LogUtility.Log(pendingMsg, "BlockValidatorService");
+                        CasterLogUtility.Log(pendingMsg, "PENDING-GATE");
                         RecordCasterHashPending(block.Height, Environment.TickCount64);
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-casterHashPending");
                         return result;

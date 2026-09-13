@@ -231,6 +231,12 @@ namespace VerifiedXCore.P2P
                         
                         if (currentHeight >= nextHeight)
                         {
+                            // GOSSIP-GATE (Sep 2026): on a caster, a live tip+1 block from the general hub must pass
+                            // the same agreed-hash / majority-attestation rule as message 7 before it is staged.
+                            if (currentHeight == nextHeight
+                                && !await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"P2PHub.ReceiveBlock:{IP}"))
+                                return false;
+
                             // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
                             BlockDownloadService.BlockDict.AddOrUpdate(
                                 currentHeight,

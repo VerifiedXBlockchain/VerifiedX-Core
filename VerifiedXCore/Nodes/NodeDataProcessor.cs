@@ -57,6 +57,14 @@ namespace VerifiedXCore.Nodes
                             }
                             else
                             {
+                                // GOSSIP-GATE (Sep 2026): on a caster, a live tip+1 block from P2P gossip must pass
+                                // the same agreed-hash / majority-attestation rule as a message-7 delivery. Without
+                                // it the block reached ValidateBlock's caster gate with no registered hash and was
+                                // refused with CASTER-HASH-PENDING.
+                                if (nextHeight == currentHeight
+                                    && !await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"P2PGossip:{ipAddress}"))
+                                    return;
+
                                 // HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
                                 BlockDownloadService.BlockDict.AddOrUpdate(
                                     currentHeight,

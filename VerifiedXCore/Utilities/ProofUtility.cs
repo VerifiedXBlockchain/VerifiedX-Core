@@ -16,9 +16,16 @@ namespace VerifiedXCore.Utilities
         private static List<Proof>? _allProofsCache;
 
         /// <summary>HEIGHT-GATE: Maximum number of blocks a validator can be behind chain tip
-        /// and still be eligible for proof generation and winner selection. Validators further
-        /// behind are still syncing and cannot produce blocks at the current height.</summary>
-        public const int HEIGHT_GATE_MAX_BEHIND = 5;
+        /// and still be eligible for proof generation and winner selection.
+        /// Sep 2026: lowered from 5 to 0. A producer that is even one block behind cannot craft
+        /// tip+1 (its block would extend the wrong parent), and the bootstrap-node stall was a
+        /// winner at behind=2 that passed this gate and then "returned no block" for three rounds.
+        /// The cached height can be up to HEIGHT_CACHE_TTL_SECONDS stale, so
+        /// <see cref="IsValidatorAtHeight"/> re-queries live before rejecting on a cached value.</summary>
+        public const int HEIGHT_GATE_MAX_BEHIND = 0;
+
+        /// <summary>Pure gate decision (tested): at the tip or ahead passes; any lag fails.</summary>
+        internal static bool IsWithinHeightGate(long chainTip, long peerHeight) => (chainTip - peerHeight) <= HEIGHT_GATE_MAX_BEHIND;
 
         /// <summary>HEIGHT-GATE: How long (in seconds) to cache a validator's reported height
         /// before re-checking via HTTP. Short TTL ensures we detect when validators finish syncing.</summary>
@@ -665,15 +672,24 @@ namespace VerifiedXCore.Utilities
         /// make redundant HTTP calls.
         /// </summary>
         public static async Task<long> CheckValidatorHeightAsync(string validatorAddress, string cleanIP)
+            => (await CheckValidatorHeightDetailedAsync(validatorAddress, cleanIP)).height;
+
+        /// <summary>
+        /// Same as <see cref="CheckValidatorHeightAsync"/> but also reports whether the value came
+        /// from the cache, and can bypass the cache. The gate uses this to re-query live before
+        /// rejecting a candidate on a cached height that may be several blocks stale.
+        /// </summary>
+        public static async Task<(long height, bool fromCache)> CheckValidatorHeightDetailedAsync(string validatorAddress, string cleanIP, bool forceRefresh = false)
         {
             // Check cache first
             var now = TimeUtil.GetTime();
-            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var nv)
+            if (!forceRefresh
+                && Globals.NetworkValidators.TryGetValue(validatorAddress, out var nv)
                 && nv.LastHeightCheckTime > 0
                 && (now - nv.LastHeightCheckTime) < HEIGHT_CACHE_TTL_SECONDS
                 && nv.LastKnownHeight > 0)
             {
-                return nv.LastKnownHeight;
+                return (nv.LastKnownHeight, true);
             }
 
             try
@@ -694,7 +710,7 @@ namespace VerifiedXCore.Utilities
                             nvUpdate.LastKnownHeight = peerHeight;
                             nvUpdate.LastHeightCheckTime = now;
                         }
-                        return peerHeight;
+                        return (peerHeight, false);
                     }
                 }
             }
@@ -703,7 +719,7 @@ namespace VerifiedXCore.Utilities
                 // Timeout or network error — can't determine height
             }
 
-            return -1;
+            return (-1, false);
         }
 
         /// <summary>
@@ -714,7 +730,7 @@ namespace VerifiedXCore.Utilities
         /// </summary>
         public static async Task<bool> IsValidatorAtHeight(string validatorAddress, string cleanIP, long chainTip)
         {
-            var peerHeight = await CheckValidatorHeightAsync(validatorAddress, cleanIP);
+            var (peerHeight, fromCache) = await CheckValidatorHeightDetailedAsync(validatorAddress, cleanIP);
             if (peerHeight < 0)
             {
                 // Can't determine height — fail open so we don't break consensus for older nodes
@@ -726,7 +742,23 @@ namespace VerifiedXCore.Utilities
             }
 
             var behind = chainTip - peerHeight;
-            if (behind > HEIGHT_GATE_MAX_BEHIND)
+            if (!IsWithinHeightGate(chainTip, peerHeight) && fromCache)
+            {
+                // The cached height can be up to HEIGHT_CACHE_TTL_SECONDS (several blocks) old.
+                // Re-query live once before rejecting so a healthy validator is not skipped on
+                // stale data; only a confirmed lag rejects.
+                var (liveHeight, _) = await CheckValidatorHeightDetailedAsync(validatorAddress, cleanIP, forceRefresh: true);
+                if (liveHeight >= 0)
+                {
+                    CasterLogUtility.Log(
+                        $"HeightGate: cached height {peerHeight} for {validatorAddress} looked behind tip {chainTip}; live recheck says {liveHeight}.",
+                        "HEIGHTGATE");
+                    peerHeight = liveHeight;
+                    behind = chainTip - peerHeight;
+                }
+            }
+
+            if (!IsWithinHeightGate(chainTip, peerHeight))
             {
                 CasterLogUtility.Log(
                     $"HeightGate: REJECT {validatorAddress} at {cleanIP} — peerHeight={peerHeight} chainTip={chainTip} behind={behind} (max={HEIGHT_GATE_MAX_BEHIND}). Validator still syncing.",
@@ -892,6 +924,14 @@ namespace VerifiedXCore.Utilities
                         {
                             return (true, null);
                         }
+                        // VERIFY-REASON (Sep 2026): a candidate that fails VerifyBlock is silently skipped and the
+                        // next candidate becomes our vote. Record the status so a split vote (2 casters skip a
+                        // winner, 3 accept it) is explainable from the caster log.
+                        CasterLogUtility.Log($"VerifyBlock REJECT: candidate {winningProof.Address} at {cleanIP} returned HTTP {(int)response.StatusCode} for height {nextBlock} — candidate skipped.", "VERIFY");
+                    }
+                    else
+                    {
+                        CasterLogUtility.Log($"VerifyBlock NO-RESPONSE: candidate {winningProof.Address} at {cleanIP} for height {nextBlock} — candidate skipped.", "VERIFY");
                     }
                 }
                 catch (Exception ex)
@@ -918,17 +958,29 @@ namespace VerifiedXCore.Utilities
                     var cleanIP = ip.Replace("::ffff:", "");
 
                     // FIX C: Version gate for block-crafting validators too.
+                    // FETCH-REASON (Sep 2026): every false return below is logged — "returned no block"
+                    // alone could not distinguish a timeout from a producer that has no block to serve.
                     try
                     {
                         var versionUri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";
                         var versionResp = await client.GetAsync(versionUri).WaitAsync(TimeSpan.FromMilliseconds(1500));
                         if (versionResp == null || !versionResp.IsSuccessStatusCode)
+                        {
+                            CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — GetWalletVersion returned {(versionResp == null ? "no response" : ((int)versionResp.StatusCode).ToString())}.", "BLOCKFETCH");
                             return (false, null);
+                        }
                         var peerVersion = await versionResp.Content.ReadAsStringAsync();
                         if (string.IsNullOrEmpty(peerVersion) || !IsMajorVersionCurrent(peerVersion))
+                        {
+                            CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — version '{peerVersion}' outdated.", "BLOCKFETCH");
                             return (false, null);
+                        }
                     }
-                    catch { return (false, null); }
+                    catch (Exception vex)
+                    {
+                        CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — version check failed: {vex.GetType().Name} {vex.Message}", "BLOCKFETCH");
+                        return (false, null);
+                    }
 
                     var uri = $"http://{cleanIP}:{Globals.ValAPIPort}/valapi/validator/VerifyBlock/{nextBlock}/aaa";
                     var response = await client.GetAsync(uri).WaitAsync(new TimeSpan(0, 0, 2));
@@ -938,20 +990,32 @@ namespace VerifiedXCore.Utilities
                         if (response.IsSuccessStatusCode)
                         {
                             var blockJson = await response.Content.ReadAsStringAsync();
-                            if (blockJson == null)
+                            if (string.IsNullOrWhiteSpace(blockJson) || blockJson == "0")
+                            {
+                                CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} returned HTTP 200 with an empty body (producer has no block staged for this height).", "BLOCKFETCH");
                                 return (false, null);
+                            }
 
                             var block = JsonConvert.DeserializeObject<Block>(blockJson);
 
                             if (block == null)
+                            {
+                                CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} body did not deserialize to a block ({blockJson.Length} chars).", "BLOCKFETCH");
                                 return (false, null);
+                            }
 
                             return (true, block);
                         }
+                        CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} returned HTTP {(int)response.StatusCode}.", "BLOCKFETCH");
+                    }
+                    else
+                    {
+                        CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} gave no response.", "BLOCKFETCH");
                     }
                 }
                 catch (Exception ex)
                 {
+                    CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {ip} — VerifyBlock {nextBlock} threw {ex.GetType().Name}: {ex.Message}", "BLOCKFETCH");
                 }
             }
 

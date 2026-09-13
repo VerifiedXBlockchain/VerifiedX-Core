@@ -60,6 +60,19 @@ namespace VerifiedXCore.Services
             return RequiredAttestations(AttestorSetForHeight(height).Count);
         }
 
+        /// <summary>STRICT: true only when a certificate is required at this height, is present, and
+        /// carries a valid M-of-N caster quorum. "Not required" is NOT a pass here. Used where the
+        /// block's own certificate is the sole basis for adopting it (majority-block adoption in the
+        /// caster block-fetch fallback).</summary>
+        public static bool HasValidCertificate(Block? block)
+        {
+            if (block?.ConsensusCertificate == null)
+                return false;
+            if (block.Height < Globals.CertEnforceHeight || !ConsensusCertificateRules.SupportsConsensusCertificate(block.Version))
+                return false;
+            return VerifyOrNotRequired(block);
+        }
+
         /// <summary>True if certificate is not required, or present and valid (M-of-N caster ECDSA on §12.1 payload).</summary>
         public static bool VerifyOrNotRequired(Block block)
         {

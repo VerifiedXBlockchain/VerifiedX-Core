@@ -391,6 +391,12 @@ namespace VerifiedXCore.P2P
                         // HAL-066 Fix: Add block to competing blocks list
                         if (currentHeight >= nextHeight)
                         {
+                            // GOSSIP-GATE (Sep 2026): a live tip+1 block pushed to the caster hub must pass the
+                            // same agreed-hash / majority-attestation rule as message 7 before it is staged.
+                            if (currentHeight == nextHeight
+                                && !await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"CasterHub.ReceiveBlockVal:{IP}"))
+                                return false;
+
                             BlockDownloadService.BlockDict.AddOrUpdate(
                                 currentHeight,
                                 new List<(Block, string)> { (nextBlock, IP) },

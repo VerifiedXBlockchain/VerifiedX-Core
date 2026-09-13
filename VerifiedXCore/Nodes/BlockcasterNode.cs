@@ -1850,8 +1850,44 @@ namespace VerifiedXCore.Nodes
 
                                                             break;
                                                         }
+                                                        else if (block != null && IsAdoptableMajorityBlock(block, finalizedWinner.BlockHeight, Globals.LastBlock.Hash, terminalWinner, ConsensusCertificateVerifier.HasValidCertificate))
+                                                        {
+                                                            // MAJORITY-ADOPT (Sep 2026): the peer casters have ALREADY committed a
+                                                            // block at this height from a different producer, and it carries a valid
+                                                            // quorum certificate. The agreed winner could not serve (bootstrap incident:
+                                                            // winner two blocks behind the tip). Adopting the certified majority block
+                                                            // is the same trust basis as the attested message-7 accept — refusing it
+                                                            // here is what left this caster three rounds behind the network.
+                                                            failedToReachConsensus = false;
+                                                            blockFound = true;
+
+                                                            round = Globals.CasterRoundDict.GetOrAdd(block.Height, new CasterRound { BlockHeight = block.Height });
+                                                            var compareRound = round;
+                                                            round.Block = block;
+                                                            round.Validator = block.Validator;
+                                                            Globals.CasterRoundDict.TryUpdate(finalizedWinner.BlockHeight, round, compareRound);
+
+                                                            CasterRoundAudit.AddStep($"Adopted certified majority block from caster {caster.PeerIP} (producer {block.Validator}; agreed winner {terminalWinner} could not serve). Height: {block.Height} (staged; commit after hash agreement).", true);
+                                                            CasterLogUtility.Log(
+                                                                $"MAJORITY-ADOPT: caster {caster.PeerIP} returned certified block {block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} at height {block.Height} " +
+                                                                $"produced by {block.Validator} (agreed winner {terminalWinner} could not serve). Adopting.",
+                                                                "BLOCKFETCH");
+                                                            break;
+                                                        }
                                                         else
                                                         {
+                                                            if (block != null)
+                                                            {
+                                                                // FALLBACK-DISCARD log: this is the moment a caster holds a block for the
+                                                                // height and throws it away — record exactly why so the next stall is diagnosable.
+                                                                var prevMatches = block.PrevHash == Globals.LastBlock.Hash;
+                                                                var certOk = ConsensusCertificateVerifier.HasValidCertificate(block);
+                                                                CasterLogUtility.Log(
+                                                                    $"FALLBACK-DISCARD: caster {caster.PeerIP} returned block h={block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} " +
+                                                                    $"by {block.Validator} (agreed winner {terminalWinner}, expected height {finalizedWinner.BlockHeight}) — not adoptable: prevHashMatchesTip={prevMatches} validCert={certOk}. Discarding.",
+                                                                    "BLOCKFETCH");
+                                                                block = null;
+                                                            }
                                                             failedToReachConsensus = true;
                                                         }
                                                     }
@@ -1868,8 +1904,13 @@ namespace VerifiedXCore.Nodes
 
                                     CasterLogUtility.Log($"BlockFetch done: {swb.ElapsedMilliseconds}ms, found={blockFound}, failed={failedToReachConsensus}", "BLOCKFETCH");
 
+                                    // MAJORITY-ADOPT: a block found with a different producer than the agreed winner means
+                                    // the winner could NOT serve — that still counts as a fetch failure against the winner
+                                    // (so it gets excluded like on every other caster) even though this round proceeds.
+                                    var adoptedMajorityBlock = blockFound && block != null && !string.IsNullOrEmpty(terminalWinner) && block.Validator != terminalWinner;
+
                                     // WINNER-SKIP: Track block-fetch failures per winner address at this height
-                                    if (!blockFound && !string.IsNullOrEmpty(terminalWinner))
+                                    if ((!blockFound || adoptedMajorityBlock) && !string.IsNullOrEmpty(terminalWinner))
                                     {
                                         _winnerFetchFailures.AddOrUpdate(
                                             terminalWinner,
@@ -1922,6 +1963,14 @@ namespace VerifiedXCore.Nodes
                                             if (_winnerFetchFailures.TryGetValue(key, out var val) && val.height < Height)
                                                 _winnerFetchFailures.TryRemove(key, out _);
                                         }
+                                    }
+
+                                    if (adoptedMajorityBlock && block != null)
+                                    {
+                                        // From here on the round proceeds with the block's real producer (round record,
+                                        // certificate attach, commit layout all key off terminalWinner).
+                                        CasterLogUtility.Log($"MAJORITY-ADOPT: round winner switched {terminalWinner} → {block.Validator} for height {Height} (agreed winner could not serve).", "BLOCKFETCH");
+                                        terminalWinner = block.Validator;
                                     }
 
                                     // CASTER-SYNC-FIX: Block hash agreement phase — verify all casters have the same block
@@ -2137,7 +2186,7 @@ namespace VerifiedXCore.Nodes
                                 var correctBlock = JsonConvert.DeserializeObject<Block>(json);
                                 if (correctBlock != null && correctBlock.Hash == majority.Key)
                                 {
-                                    var result = await BlockValidatorService.ValidateBlock(correctBlock, true, false, false, true);
+                                    var result = await BlockValidatorService.ValidateBlock(correctBlock, true, false, false, true, source: $"BlockHashSync:{sourceIP}");
                     if (result)
                                     {
                                         CasterLogUtility.Log($"BlockHashSync: Applied majority block. New hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}", "HASHSYNC");
@@ -2310,7 +2359,7 @@ namespace VerifiedXCore.Nodes
                                             }
                                         }
 
-                                        var result = await BlockValidatorService.ValidateBlock(block, true, false, false, true);
+                                        var result = await BlockValidatorService.ValidateBlock(block, true, false, false, true, source: $"HeightSync:{bestPeerIP}");
                                         if (result)
                                         {
                                             ConsoleWriterService.OutputValCaster($"[HeightSync] Applied block {h}.");
@@ -3290,10 +3339,12 @@ namespace VerifiedXCore.Nodes
                         if (!attested)
                         {
                             ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round REJECT: height {nextBlock.Height} — no agreement after {spin.ElapsedMilliseconds}ms spin and no majority attestation quorum. Round retry will resolve.");
+                            CasterLogUtility.Log($"MSG7 case4 REJECT: h={nextBlock.Height} hash={nextBlock.Hash?[..Math.Min(16, nextBlock.Hash?.Length ?? 0)]} by {nextBlock.Validator} from {senderIp} — no agreed hash after {spin.ElapsedMilliseconds}ms spin, no attestation quorum.", "MSG7");
                             Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
                             return;
                         }
                         ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round accept (attested): height {nextBlock.Height} — majority caster attestations verified.");
+                        CasterLogUtility.Log($"MSG7 case4 ACCEPT (attested): h={nextBlock.Height} hash={nextBlock.Hash?[..Math.Min(16, nextBlock.Hash?.Length ?? 0)]} by {nextBlock.Validator} from {senderIp} after {spin.ElapsedMilliseconds}ms spin.", "MSG7");
                         // SPLIT-GUARD: publish the attested hash so ValidateBlock's caster gate (which now
                         // refuses a live commit with NO agreed hash) sees this as the agreed block.
                         RegisterPendingCasterBlockHash(nextBlock.Height, nextBlock.Hash);
@@ -3309,10 +3360,12 @@ namespace VerifiedXCore.Nodes
                     if (!attested)
                     {
                         ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round REJECT: height {nextBlock.Height} — no majority attestation quorum for peer broadcast. Reconcile will resolve.");
+                        CasterLogUtility.Log($"MSG7 case3 REJECT: h={nextBlock.Height} hash={nextBlock.Hash?[..Math.Min(16, nextBlock.Hash?.Length ?? 0)]} by {nextBlock.Validator} from {senderIp} — no round entry, no attestation quorum.", "MSG7");
                         Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
                         return;
                     }
                     ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round accept (attested): height {nextBlock.Height} — majority caster attestations verified.");
+                    CasterLogUtility.Log($"MSG7 case3 ACCEPT (attested): h={nextBlock.Height} hash={nextBlock.Hash?[..Math.Min(16, nextBlock.Hash?.Length ?? 0)]} by {nextBlock.Validator} from {senderIp}.", "MSG7");
                     // SPLIT-GUARD: see mid-round accept above.
                     RegisterPendingCasterBlockHash(nextBlock.Height, nextBlock.Hash);
                 }
@@ -3321,6 +3374,7 @@ namespace VerifiedXCore.Nodes
                 if (!string.IsNullOrEmpty(agreedHashForGate) && nextBlock.Hash != agreedHashForGate)
                 {
                     ConsoleWriterService.OutputValCaster($"[Consensus Gate] Block at height {nextBlock.Height} hash mismatch — expected {agreedHashForGate[..Math.Min(12, agreedHashForGate.Length)]}… got {nextBlock.Hash?[..Math.Min(12, nextBlock.Hash?.Length ?? 0)]}…");
+                    CasterLogUtility.Log($"MSG7 case2 REJECT (hash mismatch): h={nextBlock.Height} got {nextBlock.Hash?[..Math.Min(16, nextBlock.Hash?.Length ?? 0)]} by {nextBlock.Validator} from {senderIp}, agreed {agreedHashForGate[..Math.Min(16, agreedHashForGate.Length)]}.", "MSG7");
                     Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
                     return;
                 }
@@ -3337,7 +3391,12 @@ namespace VerifiedXCore.Nodes
                 // before validation (the verifier still enforces the quorum).
                 await ConsensusCertificateHelper.TryCompleteCertificateAsync(nextBlock);
 
-                var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true);
+                var result = await BlockValidatorService.ValidateBlock(nextBlock, true, false, false, true, source: $"Message7:{senderIp}");
+                CasterLogUtility.Log(
+                    $"MSG7 validate: h={nextBlock.Height} hash={nextBlock.Hash?[..Math.Min(16, nextBlock.Hash?.Length ?? 0)]} by {nextBlock.Validator} from {senderIp} " +
+                    $"agreedHash={(string.IsNullOrEmpty(agreedHashForGate) ? "none" : agreedHashForGate[..Math.Min(16, agreedHashForGate.Length)])} → " +
+                    (result ? "COMMITTED" : $"REJECTED {BlockDiagnostics.MostRecentRollbackTag()}"),
+                    "MSG7");
                 if (result)
                 {
                     // DESYNC-FIX: Update last block accepted timestamp for desync recovery tracking
@@ -4194,6 +4253,65 @@ namespace VerifiedXCore.Nodes
         private static void ClearPendingCasterBlockHash(long height)
         {
             Globals.CasterApprovedBlockHashDict.TryRemove(height, out _);
+        }
+
+        /// <summary>
+        /// MAJORITY-ADOPT decision (pure, tested): a block returned by a peer caster for the round's
+        /// height that was produced by someone OTHER than the agreed winner is adoptable only when it
+        /// extends our tip and carries a valid quorum certificate. Same-producer blocks are the
+        /// normal path and are handled by the caller.
+        /// </summary>
+        internal static bool IsAdoptableMajorityBlock(Block? candidate, long expectedHeight, string? tipHash, string? agreedWinner, Func<Block, bool> hasValidCertificate)
+        {
+            if (candidate == null || candidate.Height != expectedHeight)
+                return false;
+            if (string.IsNullOrEmpty(candidate.Hash) || string.IsNullOrEmpty(candidate.Validator))
+                return false;
+            if (candidate.Validator == agreedWinner)
+                return false;
+            if (string.IsNullOrEmpty(tipHash) || candidate.PrevHash != tipHash)
+                return false;
+            return hasValidCertificate(candidate);
+        }
+
+        /// <summary>
+        /// GOSSIP-GATE (Sep 2026): admission rule for a LIVE tip+1 block that reaches a caster by any
+        /// path other than message 7 (P2P "blk" gossip, the caster hub's ReceiveBlockVal). Those paths
+        /// used to drop the block straight into BlockDict → ValidateBlocks, where the caster gate refused
+        /// it with CASTER-HASH-PENDING because nothing had registered a hash. Applies the same rule as
+        /// message-7 cases 1–4: an existing agreed hash must match, otherwise a majority attestation
+        /// quorum for this exact block is required, and on success the hash is registered so the
+        /// validator gate sees it as agreed. Non-casters and non-live heights are always admitted
+        /// (the download / gap paths own those).
+        /// </summary>
+        internal static async Task<bool> TryAdmitLiveBlockAsCasterAsync(Block? block, string source)
+        {
+            if (block == null || !Globals.IsBlockCaster)
+                return true;
+            var tip = Globals.LastBlock.Height;
+            if (block.Height != tip + 1)
+                return true;
+
+            var shortHash = block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)];
+            if (Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var agreed) && !string.IsNullOrEmpty(agreed))
+            {
+                var matches = string.Equals(agreed, block.Hash, StringComparison.Ordinal);
+                if (!matches)
+                    CasterLogUtility.Log($"GOSSIP-GATE REJECT (hash mismatch): h={block.Height} hash={shortHash} by {block.Validator} from {source} — agreed hash is {agreed[..Math.Min(16, agreed.Length)]}.", "GOSSIP-GATE");
+                return matches;
+            }
+
+            var hasRoundEntry = Globals.CasterRoundDict.ContainsKey(block.Height);
+            var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(block.Height, block.Hash, block.Validator, block.PrevHash);
+            if (attested)
+            {
+                RegisterPendingCasterBlockHash(block.Height, block.Hash);
+                CasterLogUtility.Log($"GOSSIP-GATE ADMIT (attested): h={block.Height} hash={shortHash} by {block.Validator} from {source} — majority attestations verified; hash registered. roundEntry={hasRoundEntry}.", "GOSSIP-GATE");
+                return true;
+            }
+
+            CasterLogUtility.Log($"GOSSIP-GATE REFUSE: h={block.Height} hash={shortHash} by {block.Validator} from {source} — no agreed hash and no majority attestation quorum. roundEntry={hasRoundEntry}. Our round / download path will resolve.", "GOSSIP-GATE");
+            return false;
         }
 
         /// <summary>
