@@ -75,7 +75,9 @@ namespace VerifiedXCore.Utilities
                     {
                         if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                         {
-                            var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads);
+                            // Historical block context: pass the height so bridge validation uses the
+                            // block's gate and never consults the live Base RPC for an old block.
+                            var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, blockHeight: block.Height);
                             rejectBlock = txResult.Item1 == false ? rejectBlock = true : false;
                         }
                         else
