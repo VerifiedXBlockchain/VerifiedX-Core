@@ -210,6 +210,13 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// Checking only the destination output would let a tiny authorized payout burn the entire
         /// vault as fee (inputs = whole vault, 1-sat payout, no change).
         /// </summary>
+        /// <summary>
+        /// Bitcoin dust limit for a P2TR change output. The transaction builder folds sub-dust change
+        /// into the fee, so a legitimate withdrawal whose vault UTXOs exceed the amount by less than
+        /// dust has vault cost = amount + that remainder. Allow exactly that much slack and no more.
+        /// </summary>
+        public const long DUST_TOLERANCE_SATS = 546;
+
         public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats)
         {
             if (maxSats <= 0) return (false, "No authorized amount");
@@ -222,7 +229,7 @@ namespace VerifiedXCore.Bitcoin.FROST
             if (destinationSats > maxSats) return (false, "Transaction pays more than the authorized amount");
 
             var vaultCost = inputSats - changeSats; // destination + fee
-            if (vaultCost > maxSats)
+            if (vaultCost > maxSats + DUST_TOLERANCE_SATS)
                 return (false, $"Transaction spends {vaultCost} sats from the vault (destination {destinationSats} + fee {fee}) but only {maxSats} sats are authorized");
 
             return (true, "");

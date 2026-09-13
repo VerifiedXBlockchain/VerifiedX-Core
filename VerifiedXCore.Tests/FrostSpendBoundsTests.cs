@@ -44,10 +44,24 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void FeeSlightlyOverAuthorization_Refused()
         {
-            // destination 0.009 + fee 0.0011 = 0.0101 > 0.01 authorized
+            // destination 0.009 + fee 0.0011 = 0.0101 > 0.01 authorized (well past dust slack)
             var (ok, _) = FrostSigningAuthorization.CheckSpendBounds(
                 inputSats: 2 * Btc, destinationSats: 900_000, changeSats: 2 * Btc - 1_010_000, maxSats: 1_000_000);
             Assert.False(ok);
+        }
+
+        [Fact]
+        public void SubDustRemainderFoldedIntoFee_Accepted_ButOneSatPastDust_Refused()
+        {
+            // Vault UTXO exceeds the amount by 500 sats (< dust): builder drops the change output,
+            // remainder goes to fee, vault cost = amount + 500. Legitimate; must be accepted.
+            var (ok, _) = FrostSigningAuthorization.CheckSpendBounds(
+                inputSats: 1_000_500, destinationSats: 999_000, changeSats: 0, maxSats: 1_000_000);
+            Assert.True(ok);
+
+            // Exactly at the dust limit is accepted; one sat beyond is refused.
+            Assert.True(FrostSigningAuthorization.CheckSpendBounds(1_000_000 + FrostSigningAuthorization.DUST_TOLERANCE_SATS, 999_000, 0, 1_000_000).Ok);
+            Assert.False(FrostSigningAuthorization.CheckSpendBounds(1_000_000 + FrostSigningAuthorization.DUST_TOLERANCE_SATS + 1, 999_000, 0, 1_000_000).Ok);
         }
 
         [Fact]
@@ -93,8 +107,8 @@ namespace VerifiedXCore.Tests
             Assert.True(ok); // vault cost = 1_000_000 exactly
 
             var (ok2, _) = FrostSigningAuthorization.CheckSpendBounds(
-                inputSats: 10 * Btc, destinationSats: 500_000, changeSats: 10 * Btc - 1_000_001, maxSats: 1_000_000);
-            Assert.False(ok2); // one sat over
+                inputSats: 10 * Btc, destinationSats: 500_000, changeSats: 10 * Btc - 1_000_000 - FrostSigningAuthorization.DUST_TOLERANCE_SATS - 1, maxSats: 1_000_000);
+            Assert.False(ok2); // one sat past the dust slack
         }
     }
 }
