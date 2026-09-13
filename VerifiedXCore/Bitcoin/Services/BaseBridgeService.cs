@@ -244,8 +244,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
                     if (r == null) { lastErr = "receipt not found"; continue; }
                     if (r.Status?.Value != 1) return (false, "Base transaction did not succeed");
-                    if (!string.Equals(r.To, ContractAddress, StringComparison.OrdinalIgnoreCase))
-                        return (false, "Base transaction was not sent to the bridge contract");
+                    // Key on the EMITTING address, not receipt.to: a burn made through a smart-contract
+                    // wallet (e.g. a Safe) has a different `to` but its logs still come from the bridge.
+                    if (!ReceiptHasLogFromContract(r))
+                        return (false, "Base transaction emitted no event from the bridge contract");
                     return (true, "");
                 }
                 catch (Exception ex) { lastErr = ex.Message; }
@@ -273,8 +275,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     var r = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(h);
                     if (r == null) { lastErr = "receipt not found"; continue; }
                     if (r.Status?.Value != 1) return (false, null, "Base transaction did not succeed");
-                    if (!string.Equals(r.To, ContractAddress, StringComparison.OrdinalIgnoreCase))
-                        return (false, null, "Base transaction was not sent to the bridge contract");
+                    // No receipt.to check: the event decoders below filter on the emitting log address,
+                    // which is what proves the burn came from the bridge contract (smart-contract
+                    // wallets call it indirectly).
 
                     BurnEventInfo? info = null;
                     int matches = 0;
@@ -308,6 +311,23 @@ namespace VerifiedXCore.Bitcoin.Services
                 catch (Exception ex) { lastErr = ex.Message; }
             }
             return (false, null, $"Could not read Base receipt: {lastErr}");
+        }
+
+        /// <summary>True when at least one log in the receipt was emitted by the bridge contract.</summary>
+        public static bool ReceiptHasLogFromContract(Nethereum.RPC.Eth.DTOs.TransactionReceipt r)
+        {
+            try
+            {
+                if (r?.Logs == null) return false;
+                foreach (var log in r.Logs)
+                {
+                    var addr = log?["address"]?.ToString();
+                    if (!string.IsNullOrEmpty(addr) && string.Equals(addr, ContractAddress, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         /// <summary>Best-effort: confirms a Base tx receipt exists and succeeded (legacy, pre-gate).</summary>

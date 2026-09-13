@@ -3321,7 +3321,9 @@ namespace VerifiedXCore.Services
                             return (txResult, $"Caster consensus votes rejected for VBTCb unlock: {votesReason}");
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(exitBurnTxHash))
                             return (txResult, "Exit burn transaction has already been consumed.");
-                        if (BaseBridgeService.IsBridgeConfigured)
+                        // Admission-time only: block validation relies on the committee-bound votes above
+                        // (deterministic); a live RPC answer must never decide block validity.
+                        if (BridgeBurnEvidencePolicy.ShouldQueryBase(blockHeight, BaseBridgeService.IsBridgeConfigured))
                         {
                             var (rcptOk, rcptReason) = await BaseBridgeService.HasSuccessfulReceiptToContractAsync(exitBurnTxHash.Trim());
                             if (!rcptOk)
@@ -3429,7 +3431,9 @@ namespace VerifiedXCore.Services
                         if (!allocOk)
                             return (txResult, $"Bridge pool unlock allocations invalid: {allocReason}");
 
-                        if (BaseBridgeService.IsBridgeConfigured)
+                        // Admission-time only: block validation relies on the committee-bound votes above
+                        // (deterministic); a live RPC answer must never decide block validity.
+                        if (BridgeBurnEvidencePolicy.ShouldQueryBase(blockHeight, BaseBridgeService.IsBridgeConfigured))
                         {
                             var (evOk, ev, evReason) = await BaseBridgeService.TryGetBurnEventAsync(poolBurnHash, vfxExit: true);
                             if (!evOk || ev == null)
@@ -3529,7 +3533,9 @@ namespace VerifiedXCore.Services
                                 return (txResult, $"Bridge exit to BTC allocations invalid: {allocReason}");
                         }
 
-                        if (BaseBridgeService.IsBridgeConfigured)
+                        // Admission-time only: block validation relies on the committee-bound votes above
+                        // (deterministic); a live RPC answer must never decide block validity.
+                        if (BridgeBurnEvidencePolicy.ShouldQueryBase(blockHeight, BaseBridgeService.IsBridgeConfigured))
                         {
                             var (evOk, ev, evReason) = await BaseBridgeService.TryGetBurnEventAsync(exitBurnHash, vfxExit: false);
                             if (!evOk || ev == null)
