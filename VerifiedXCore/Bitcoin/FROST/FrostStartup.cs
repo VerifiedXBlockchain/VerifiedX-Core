@@ -1723,21 +1723,62 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // FIND-024 Fix: Load this validator's key package and generate nonces
                             var myAddr = Globals.ValidatorAddress;
 
-                            // Try direct SCUID lookup first
-                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(request.SmartContractUID, myAddr);
+                            // The contract's on-chain vault key. Any key package we use or relabel for this
+                            // contract MUST carry this group key; otherwise a leader could steer us onto a
+                            // junk DKG's key (or another contract's key) via the leader-supplied CeremonyId.
+                            var expectedGroupKey = FrostDkgGuard.ResolveOnChainGroupPublicKey(request.SmartContractUID);
+                            if (string.IsNullOrWhiteSpace(expectedGroupKey))
+                            {
+                                ErrorLogUtility.LogError($"FROST sign/start REFUSED for SC={request.SmartContractUID}: contract vault key could not be resolved from chain state.", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Contract vault key could not be resolved from chain state" }));
+                                return;
+                            }
 
-                            // If CeremonyId was provided and direct lookup failed, try ceremony ID
+                            // 1. Direct SCUID lookup — but only if it IS the vault key (a shadowing record is ignored).
+                            var keyStore = FrostValidatorKeyStore.GetKeyPackage(request.SmartContractUID, myAddr);
+                            if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage)
+                                && !FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey))
+                            {
+                                ErrorLogUtility.LogError($"FROST sign/start: record labelled SC={request.SmartContractUID} carries group key {keyStore.GroupPublicKey} but the vault key is {expectedGroupKey}; ignoring it.", "FrostStartup.SignStart");
+                                keyStore = null;
+                            }
+
+                            // 2. Authoritative fallback: the record whose group key IS the vault key (stored under
+                            //    its ceremony id until first use). Relabel it to the real SCUID.
+                            if (keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
+                            {
+                                keyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(expectedGroupKey, myAddr);
+                                if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage)
+                                    && !string.Equals(keyStore.SmartContractUID, request.SmartContractUID, StringComparison.Ordinal))
+                                {
+                                    LogUtility.Log($"[FROST] Key found via vault group key for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
+                                        "FrostStartup.SignStart");
+                                    if (FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID))
+                                        keyStore.SmartContractUID = request.SmartContractUID;
+                                }
+                            }
+
+                            // 3. Leader-supplied CeremonyId — accepted ONLY if that record carries the vault key.
                             if ((keyStore == null || string.IsNullOrEmpty(keyStore.KeyPackage))
                                 && !string.IsNullOrEmpty(request.CeremonyId))
                             {
                                 keyStore = FrostValidatorKeyStore.GetKeyPackage(request.CeremonyId, myAddr);
                                 if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage))
                                 {
-                                    // Auto-fix: update the key store record to use the real SCUID
-                                    LogUtility.Log($"[FROST] Key found via CeremonyId fallback for SC={request.SmartContractUID} (was {request.CeremonyId}). Auto-updating.",
-                                        "FrostStartup.SignStart");
-                                    FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID);
-                                    keyStore.SmartContractUID = request.SmartContractUID;
+                                    if (!FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey))
+                                    {
+                                        ErrorLogUtility.LogError($"FROST sign/start: CeremonyId fallback key for SC={request.SmartContractUID} has group key {keyStore.GroupPublicKey} but the vault key is {expectedGroupKey}; refusing to relabel or use it.",
+                                            "FrostStartup.SignStart");
+                                        keyStore = null;
+                                    }
+                                    else
+                                    {
+                                        LogUtility.Log($"[FROST] Key found via CeremonyId fallback for SC={request.SmartContractUID} (was {request.CeremonyId}). Auto-updating.",
+                                            "FrostStartup.SignStart");
+                                        if (FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID))
+                                            keyStore.SmartContractUID = request.SmartContractUID;
+                                    }
                                 }
                             }
 
@@ -1748,13 +1789,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 if (vbtcContract != null && !string.IsNullOrEmpty(vbtcContract.FrostGroupPublicKey))
                                 {
                                     keyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
-                                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage))
+                                    if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage)
+                                        && FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey))
                                     {
                                         // Auto-fix: update the key store record to use the real SCUID
                                         LogUtility.Log($"[FROST] Key found via GroupPublicKey fallback for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
                                             "FrostStartup.SignStart");
-                                        FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID);
-                                        keyStore.SmartContractUID = request.SmartContractUID;
+                                        if (FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID))
+                                            keyStore.SmartContractUID = request.SmartContractUID;
+                                    }
+                                    else
+                                    {
+                                        keyStore = null;
                                     }
                                 }
                             }
@@ -1766,6 +1812,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 {
                                     Success = false,
                                     Message = "No FROST key package found for this contract. DKG may not have completed."
+                                }));
+                                return;
+                            }
+
+                            // Final gate: whichever path produced the key, it must be THIS contract's vault key.
+                            if (!FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey))
+                            {
+                                ErrorLogUtility.LogError($"FROST sign/start REFUSED for SC={request.SmartContractUID}: key package group key {keyStore.GroupPublicKey} != contract vault key {expectedGroupKey}.",
+                                    "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = "Key package does not belong to this contract's vault"
                                 }));
                                 return;
                             }

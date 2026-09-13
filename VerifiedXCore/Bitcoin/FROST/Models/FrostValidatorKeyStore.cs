@@ -195,7 +195,7 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>
         /// Update the SmartContractUID on a key store record (used to fix ceremonyId → real SCUID).
         /// </summary>
-        public static void UpdateSmartContractUID(long recordId, string newSmartContractUID)
+        public static bool UpdateSmartContractUID(long recordId, string newSmartContractUID)
         {
             try
             {
@@ -203,6 +203,14 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 var record = db.FindById(recordId);
                 if (record != null)
                 {
+                    // Never relabel onto a contract that already has a record with a DIFFERENT group key.
+                    var collision = db.FindOne(x => x.SmartContractUID == newSmartContractUID && x.ValidatorAddress == record.ValidatorAddress && x.Id != record.Id);
+                    if (collision != null && !CanReplace(collision, record, out var why))
+                    {
+                        ErrorLogUtility.LogError($"[FROST KeyStore] REFUSED to relabel record {recordId} onto {newSmartContractUID}: {why}", "FrostValidatorKeyStore.UpdateSmartContractUID");
+                        return false;
+                    }
+
                     var oldUID = record.SmartContractUID;
                     record.SmartContractUID = newSmartContractUID;
                     db.UpdateSafe(record);
@@ -230,11 +238,14 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                                 "FrostValidatorKeyStore.UpdateSmartContractUID");
                         }
                     });
+                    return true;
                 }
+                return false;
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Failed to update FROST key store SCUID: {ex.Message}", "FrostValidatorKeyStore.UpdateSmartContractUID");
+                return false;
             }
         }
 

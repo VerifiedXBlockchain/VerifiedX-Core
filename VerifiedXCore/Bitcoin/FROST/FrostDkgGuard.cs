@@ -35,6 +35,20 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
+        /// A key package may be used (or relabelled) for a contract only if its group public key IS
+        /// the contract's on-chain vault key. A record carrying a different group key is some other
+        /// DKG's output (e.g. an attacker-led junk ceremony) and must never be attached to the
+        /// contract. Fail closed: if either side is unknown the key cannot be proven to be the vault
+        /// key, so it is refused (every DKG finalize records the group key; every deployed vBTC V2
+        /// contract carries its group key on chain).
+        /// </summary>
+        public static bool KeyPackageMatchesContract(string? keyPackageGroupKey, string? contractGroupKey)
+        {
+            if (string.IsNullOrWhiteSpace(contractGroupKey) || string.IsNullOrWhiteSpace(keyPackageGroupKey)) return false;
+            return string.Equals(keyPackageGroupKey.Trim(), contractGroupKey.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
         /// Group public key for a contract from the local contract record or the state trei
         /// (TokenizationV2 feature). Empty when the contract does not exist yet.
         /// </summary>
