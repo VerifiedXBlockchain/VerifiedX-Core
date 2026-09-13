@@ -51,7 +51,13 @@ namespace VerifiedXCore.Bitcoin.Services
             public string BtcWithdrawalsJson { get; set; } = "";
             /// <summary>Serialized PoolUnlockAllocation list — the original allocations reserved by EXIT_TO_BTC.</summary>
             public string AllocationsJson { get; set; } = "";
+            /// <summary>Unix seconds before which no new consensus round is attempted (backoff after a transient failure).</summary>
+            public long NextAttemptAt { get; set; }
         }
+
+        /// <summary>Backoff after the burn could not be verified on Base (RPC unreachable).</summary>
+        private const int EVIDENCE_RETRY_BACKOFF_SECONDS = 300;
+        private static long _lastNoRpcLogAt;
 
         public class BurnAlert
         {
@@ -182,8 +188,21 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Process pending burns that haven't entered consensus yet.</summary>
         private static async Task ProcessPendingBurns()
         {
+            if (!BaseBridgeService.IsEnabled)
+            {
+                // Cannot verify burns on Base: do not propose, do not vote. Log once a minute, not per burn per tick.
+                var t = TimeUtil.GetTime();
+                if (t - _lastNoRpcLogAt >= 60 && _processedBurns.Values.Any(r => r.Status == BurnExitStatus.Pending))
+                {
+                    _lastNoRpcLogAt = t;
+                    LogUtility.Log("[BurnExitConsensus] Base bridge RPC/contract not configured on this caster; burn consensus is skipped until it is.", "BurnExitConsensusService");
+                }
+                return;
+            }
+
+            var now = TimeUtil.GetTime();
             var pendingBurns = _processedBurns.Values
-                .Where(r => r.Status == BurnExitStatus.Pending && Globals.IsBlockCaster)
+                .Where(r => r.Status == BurnExitStatus.Pending && Globals.IsBlockCaster && r.NextAttemptAt <= now)
                 .ToList();
 
             foreach (var burn in pendingBurns)
@@ -290,6 +309,29 @@ namespace VerifiedXCore.Bitcoin.Services
 
             record.Status = BurnExitStatus.InConsensus;
 
+            // Step 0: SECURITY / LIVENESS — verify the burn on Base ourselves BEFORE proposing or voting.
+            // The alert is peer-supplied; our vote must commit only to what the chain actually burned,
+            // and a caster that cannot verify must never be elected handler (it could not execute).
+            var (evidenceOk, evidenceTransient, evidenceReason, evidence) = await VerifyBurnEvidenceAsync(record);
+            if (!evidenceOk)
+            {
+                if (evidence != null)
+                {
+                    // The burn EXISTS on Base but the record (built from a peer's alert) disagrees on
+                    // amount/destination. The chain is authoritative: correct the record and continue,
+                    // so a bad alert cannot grief a legitimate exit into permanent failure.
+                    LogUtility.Log($"[BurnExitConsensus] Correcting record for {baseBurnTxHash} from chain evidence ({evidenceReason})", "BurnExitConsensusService");
+                    ApplyEvidenceCorrection(record, evidence);
+                }
+                else
+                {
+                    LogUtility.Log($"[BurnExitConsensus] NOT participating for {baseBurnTxHash}: {evidenceReason}", "BurnExitConsensusService");
+                    record.Status = evidenceTransient ? BurnExitStatus.Pending : BurnExitStatus.Failed;
+                    if (evidenceTransient) record.NextAttemptAt = TimeUtil.GetTime() + EVIDENCE_RETRY_BACKOFF_SECONDS;
+                    return;
+                }
+            }
+
             // Step 1: Generate deterministic proposal hash and sign the proposal
             var proposalHash = BridgeCasterConsensus.ComputeProposalHash(Globals.ValidatorAddress, baseBurnTxHash);
             var proposalTimestamp = TimeUtil.GetTime();
@@ -336,16 +378,6 @@ namespace VerifiedXCore.Bitcoin.Services
 
             LogUtility.Log($"[BurnExitConsensus] Winner for {baseBurnTxHash}: {winner.ProposerCasterAddress} ({allProposals.Count} proposals)", "BurnExitConsensusService");
 
-            // Step 4b: SECURITY — verify the burn on Base ourselves before signing anything. The
-            // alert is peer-supplied; our vote must commit only to what the chain actually burned.
-            var (evidenceOk, evidenceTransient, evidenceReason) = await VerifyBurnEvidenceAsync(record);
-            if (!evidenceOk)
-            {
-                LogUtility.Log($"[BurnExitConsensus] NOT confirming {baseBurnTxHash}: {evidenceReason}", "BurnExitConsensusService");
-                record.Status = evidenceTransient ? BurnExitStatus.Pending : BurnExitStatus.Failed;
-                _proposals.TryRemove(baseBurnTxHash, out _);
-                return;
-            }
 
             // Step 5: Broadcast confirmation (sign the vote so TryVerifyVotes can validate it)
             var burnType = BurnTypeString(record.ExitType);
@@ -1125,10 +1157,19 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Returns Transient=true when the answer could not be obtained (retry later) rather than a
         /// definitive mismatch.
         /// </summary>
-        private static async Task<(bool Ok, bool Transient, string Reason)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)
+        /// <summary>Overwrite the record's amount and destination with what Base actually burned.</summary>
+        public static void ApplyEvidenceCorrection(ProcessedBurnRecord record, BaseBridgeService.BurnEventInfo? evidence)
         {
-            if (!BaseBridgeService.IsBridgeConfigured)
-                return (false, true, "Base bridge RPC not configured on this caster; cannot verify the burn, refusing to vote");
+            if (record == null || evidence == null) return;
+            record.Amount = (decimal)evidence.AmountSats / 100_000_000M;
+            if (record.ExitType == BurnExitType.VfxPoolUnlock) record.VfxDestinationAddress = evidence.Destination ?? "";
+            else record.BtcDestination = evidence.Destination ?? "";
+        }
+
+        private static async Task<(bool Ok, bool Transient, string Reason, BaseBridgeService.BurnEventInfo? Evidence)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)
+        {
+            if (!BaseBridgeService.IsEnabled)
+                return (false, true, "Base bridge RPC/contract not configured on this caster; cannot verify the burn", null);
 
             var expectedSats = (long)(record.Amount * 100_000_000M);
             var expectedDest = record.ExitType == BurnExitType.VfxPoolUnlock ? record.VfxDestinationAddress : record.BtcDestination;
@@ -1136,13 +1177,15 @@ namespace VerifiedXCore.Bitcoin.Services
             var (ok, info, reason) = await BaseBridgeService.TryGetBurnEventAsync(record.BaseBurnTxHash, vfxExit: record.ExitType == BurnExitType.VfxPoolUnlock);
             if (!ok)
             {
+                // Only an RPC that could not answer is transient. "No matching event" / "did not succeed"
+                // are answers: the alert pointed at something that is not a burn of this type.
                 var transient = reason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
                                 || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0;
-                return (false, transient, $"burn evidence unavailable: {reason}");
+                return (false, transient, $"burn evidence unavailable: {reason}", null);
             }
 
             var (matches, mismatch) = BridgeCasterConsensus.BurnEvidenceMatches(info, expectedSats, expectedDest);
-            return matches ? (true, false, "") : (false, false, $"burn evidence mismatch: {mismatch}");
+            return matches ? (true, false, "", info) : (false, false, $"burn evidence mismatch: {mismatch}", info);
         }
 
         private static string SignMessageWithValidatorKey(string message)
