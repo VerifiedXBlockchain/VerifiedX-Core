@@ -40,10 +40,14 @@ namespace VerifiedXCore.Bitcoin.Services
         /// owner/contract/timestamp let a replayed request (within the freshness window) swap in a
         /// garbage blob and overwrite the honest backup on every peer.
         /// </summary>
-        public static string BuildStoreSignMessage(string ownerAddress, string smartContractUID, long timestamp, string encryptedBlob)
+        public static string BuildStoreSignMessage(string ownerAddress, string smartContractUID, long timestamp,
+            int version, string? groupPublicKey, string? plaintextHash, string encryptedBlob)
         {
+            // Every field the peer stores is covered: an on-path change to GroupPublicKey (which
+            // gates future overwrites), PlaintextHash (which gates the check-skip) or Version would
+            // otherwise ride on a valid signature.
             var blobHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(encryptedBlob ?? string.Empty))).ToLowerInvariant();
-            return $"{ownerAddress}.{smartContractUID}.{timestamp}.{blobHash}";
+            return $"{ownerAddress}.{smartContractUID}.{timestamp}.{version}.{(groupPublicKey ?? string.Empty).Trim().ToLowerInvariant()}.{(plaintextHash ?? string.Empty).Trim().ToLowerInvariant()}.{blobHash}";
         }
 
         #region Encryption / Decryption
@@ -286,7 +290,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Sign the backup request
                 var timestamp = TimeUtil.GetTime();
-                var signMessage = BuildStoreSignMessage(validatorAddress, smartContractUID, timestamp, encryptedBlob);
+                var signMessage = BuildStoreSignMessage(validatorAddress, smartContractUID, timestamp, BACKUP_VERSION, keyStore?.GroupPublicKey, plaintextHash, encryptedBlob);
                 var signature = VerifiedXCore.Services.SignatureService.AddressSignature(validatorAddress, signMessage);
                 if (signature == "ERROR")
                 {
@@ -453,7 +457,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Sign backup request once (reused for all peers)
                 var timestamp = TimeUtil.GetTime();
-                var signMessage = BuildStoreSignMessage(validatorAddress, smartContractUID, timestamp, encryptedBlob);
+                var signMessage = BuildStoreSignMessage(validatorAddress, smartContractUID, timestamp, BACKUP_VERSION, keyStore?.GroupPublicKey, plaintextHash, encryptedBlob);
                 var signature = VerifiedXCore.Services.SignatureService.AddressSignature(validatorAddress, signMessage);
                 if (signature == "ERROR") return (0, 0, validators.Count);
 
