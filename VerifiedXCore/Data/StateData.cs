@@ -3107,6 +3107,27 @@ namespace VerifiedXCore.Data
         /// available bridge locks FIFO. The TX data contains a pre-computed allocation plan
         /// (list of lockId + unlockAmount pairs) so all nodes produce identical state.
         /// </summary>
+        /// <summary>
+        /// Writes one tokenization ledger row for a withdrawal: a negative amount is a debit from
+        /// <paramref name="address"/> ("-" sink: escrow at REQUEST, or the legacy burn at COMPLETE);
+        /// a positive amount is a credit back to <paramref name="address"/> ("+" source: refund on an
+        /// approved cancellation). Consensus-critical — runs on ALL nodes.
+        /// </summary>
+        private static bool WriteWithdrawalLedgerRow(string scUID, string address, decimal signedAmount)
+        {
+            var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+            if (scStateTreiRec == null || signedAmount == 0M) return false;
+            var row = signedAmount < 0M
+                ? new SmartContractStateTreiTokenizationTX { Amount = signedAmount, FromAddress = address, ToAddress = "-" }
+                : new SmartContractStateTreiTokenizationTX { Amount = signedAmount, FromAddress = "+", ToAddress = address };
+            if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
+                scStateTreiRec.SCStateTreiTokenizationTXes.Add(row);
+            else
+                scStateTreiRec.SCStateTreiTokenizationTXes = new List<SmartContractStateTreiTokenizationTX> { row };
+            SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+            return true;
+        }
+
         /// <summary>Credits a pool-unlock allocation to the destination on the lock's contract ledger.</summary>
         private static void CreditPoolUnlock(SmartContractStateTrei scStateTreiRec, decimal amount, string vfxDestinationAddress)
         {
@@ -3508,6 +3529,15 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
+                // ESCROW (gated): debit the requester NOW. vBTC used to be burned only at COMPLETE, so a
+                // holder could receive the BTC, never complete, keep the vBTC and repeat after expiry.
+                // Refunded only by an approved cancellation — never by expiry.
+                if (VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
+                {
+                    if (!WriteWithdrawalLedgerRow(scUID, requesterAddress, -amount.Value))
+                        ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal: escrow debit could not be written for {scUID} (contract state missing)", "StateData.RequestVBTCV2Withdrawal()");
+                }
+
                 // Also update contract-level tracking for backward compatibility (local DB only — informational)
                 // Remote nodes won't have VBTCContractV2 locally, so this is conditional.
                 var contract = VBTCContractV2.GetContract(scUID);
@@ -3625,31 +3655,12 @@ namespace VerifiedXCore.Data
                     VBTCContractV2.UpdateContract(contract);
                 }
 
-                // CRITICAL: Burn the withdrawn tokens in state trei (CONSENSUS-CRITICAL — must run on ALL nodes)
-                // FIND-002 FIX: Use storedAmount (from request record), NOT tx.Data.Amount
-                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                if (scStateTreiRec != null)
+                // CONSENSUS-CRITICAL — must run on ALL nodes. Escrowed requests (mined at/after
+                // WithdrawalEscrowHeight) were debited at REQUEST; COMPLETE only finalizes them. Legacy
+                // requests are burned here, using the STORED amount (FIND-002), never tx.Data.
+                if (!VBTCWithdrawalRequest.EscrowAppliesTo(withdrawalRequest.RequestBlockHeight))
                 {
-                    List<SmartContractStateTreiTokenizationTX> tknTxList = new List<SmartContractStateTreiTokenizationTX>
-                    {
-                        new SmartContractStateTreiTokenizationTX
-                        {
-                            Amount = storedAmount * -1.0M,  // Negative amount = burn (USING STORED AMOUNT)
-                            FromAddress = withdrawalRequest.RequestorAddress,  // FIND-002 FIX: Burn from requester's balance
-                            ToAddress = "-"  // "-" indicates burn/withdrawal
-                        }
-                    };
-
-                    if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
-                    {
-                        scStateTreiRec.SCStateTreiTokenizationTXes.AddRange(tknTxList);
-                    }
-                    else
-                    {
-                        scStateTreiRec.SCStateTreiTokenizationTXes = tknTxList;
-                    }
-
-                    SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
+                    WriteWithdrawalLedgerRow(scUID, withdrawalRequest.RequestorAddress, storedAmount * -1.0M);
                 }
 
                 SCLogUtility.Log($"CompleteVBTCV2Withdrawal completed: SCUID={scUID}, Requester={withdrawalRequest.RequestorAddress}, BTCTxHash={btcTxHash}, Amount={storedAmount} BTC, TxHash={tx.Hash}", 
@@ -3840,6 +3851,11 @@ namespace VerifiedXCore.Data
                                     withdrawalRequest.Status = VBTCWithdrawalStatus.Cancelled;
                                     withdrawalRequest.IsCompleted = true;
                                     VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+
+                                    // Escrowed request: give the debited amount back (approved cancellation is
+                                    // the ONLY path that returns escrow; expiry never does).
+                                    if (VBTCWithdrawalRequest.EscrowAppliesTo(withdrawalRequest.RequestBlockHeight))
+                                        WriteWithdrawalLedgerRow(cancellation.SmartContractUID, withdrawalRequest.RequestorAddress, withdrawalRequest.Amount);
                                 }
                             }
 

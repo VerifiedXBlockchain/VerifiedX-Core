@@ -269,6 +269,14 @@ namespace VerifiedXCore.Bitcoin.Models
             return GetIncompleteWithdrawalAmount(address, scUID, Globals.LastBlock?.Height ?? 0, TimeUtil.GetTime());
         }
 
+        /// <summary>
+        /// True when the request was mined at/after <see cref="Globals.WithdrawalEscrowHeight"/>: its
+        /// amount was debited from the requester's ledger at REQUEST apply, so COMPLETE must not burn
+        /// again and pending-balance helpers must not subtract it a second time.
+        /// </summary>
+        public static bool EscrowAppliesTo(long requestBlockHeight) =>
+            requestBlockHeight > 0 && requestBlockHeight >= Globals.WithdrawalEscrowHeight;
+
         public static decimal GetIncompleteWithdrawalAmount(string address, string scUID, long currentHeight, long currentTime)
         {
             var vwrDb = GetVBTCWithdrawalRequestDb();
@@ -284,6 +292,8 @@ namespace VerifiedXCore.Bitcoin.Models
                             !x.IsCompleted)
                 .ToList()
                 .Where(x => IsStillBlocking(x, currentHeight, currentTime))
+                // Escrowed requests are already reflected as ledger debits.
+                .Where(x => !EscrowAppliesTo(x.RequestBlockHeight))
                 .ToList();
 
             if (incompleteWithdrawals.Any())

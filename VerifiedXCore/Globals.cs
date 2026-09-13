@@ -196,6 +196,15 @@ namespace VerifiedXCore
         public static long BridgeIntraBlockGuardHeight = 999_999_999_999L;
 
         /// <summary>
+        /// Withdrawal escrow (security fix): at/after this height a vBTC withdrawal REQUEST debits the
+        /// requester's ledger immediately (escrow); COMPLETE only finalizes (no second burn) and an
+        /// approved cancellation refunds. Before it, the legacy burn-at-completion applies. Without
+        /// escrow a holder could receive the BTC, never complete, keep the vBTC and repeat after the
+        /// request expired — draining a shared contract's vault.
+        /// </summary>
+        public static long WithdrawalEscrowHeight = 999_999_999_999L;
+
+        /// <summary>
         /// Base (vBTC.b) minting validator set = registered vBTC validators that are ALSO members of
         /// the caster committee. vBTC validator registration is a free self-transaction gated only
         /// by a wallet balance, so mirroring the raw registry onto the Base contract would let a

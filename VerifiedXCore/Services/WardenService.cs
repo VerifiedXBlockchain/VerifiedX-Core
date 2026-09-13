@@ -42,6 +42,7 @@ namespace VerifiedXCore.Services
                 Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
+                Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
             }
             else
             {
@@ -57,6 +58,7 @@ namespace VerifiedXCore.Services
                 Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
+                Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
             }
 
             Config.Config.EstablishConfigFile();
