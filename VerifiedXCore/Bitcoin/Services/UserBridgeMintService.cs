@@ -188,7 +188,17 @@ namespace VerifiedXCore.Bitcoin.Services
             var validators = BaseValidatorSyncService.SelectAttestingValidators();
             if (validators == null || validators.Count == 0)
             {
-                LogUtility.Log("[UserBridgeMint] No active validators found.", "UserBridgeMintService");
+                LogUtility.Log("[UserBridgeMint] No eligible attesting validators (registered vBTC validators that are committee casters). Minting cannot proceed.", "UserBridgeMintService");
+                return signatures;
+            }
+
+            // Fail fast with a clear diagnosis instead of three rounds of futile HTTP: the Base
+            // contract's requiredMintSignatures is derived from ITS validator count. If fewer attesters
+            // than that are eligible here, the on-chain validator set is out of sync with the caster
+            // committee and must be reconciled before minting can succeed.
+            if (validators.Count < requiredSigs)
+            {
+                ErrorLogUtility.LogError($"[UserBridgeMint] Only {validators.Count} eligible attester(s) but the Base contract requires {requiredSigs} signatures. The on-chain validator set must be reconciled with the caster committee (BaseValidatorSetCastersOnly).", "UserBridgeMintService");
                 return signatures;
             }
 
