@@ -128,8 +128,8 @@ namespace VerifiedXCore
             Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
-            Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
+            Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
+            Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
 
             //Perform network time sync
             _ = NetworkTimeService.Run();

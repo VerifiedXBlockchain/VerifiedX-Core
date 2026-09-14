@@ -25,7 +25,7 @@ namespace VerifiedXCore
 
         /// <summary>vBTC privacy TXs (shield/unshield/private transfer) are rejected at consensus once
         /// LastBlock.Height exceeds this. Sentinel 999999999999 = rule inactive. Per-network values set in Program.cs.</summary>
-        public static long VbtcPrivacyDisableHeight { get; set; } = 999_999_999_999L;
+        public static long VbtcPrivacyDisableHeight { get; set; } = 7_296_200L;
 
         /// <summary>Circuit amounts use 10^8 fixed-point, matching VFX's 8 decimal places.</summary>
         public const long PrivacyAmountScalingFactor = 100_000_000L;

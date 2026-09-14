@@ -35,14 +35,14 @@ namespace VerifiedXCore.Services
                 Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
                 Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
                 Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
-                Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 999_999_999_999L /* TODO set testnet disable height */ : 7_281_000L;
+                Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
-                Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
+                Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
+                Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
             }
             else
             {
@@ -51,14 +51,14 @@ namespace VerifiedXCore.Services
                 Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
                 Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
                 Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
-                Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 999_999_999_999L /* TODO set testnet disable height */ : 7_281_000L;
+                Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1L : 7_281_000L;
                 Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
-                Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 999_999_999_999L /* TODO set mainnet activation height (coordinated deploy with the bridge security fixes) */;
+                Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
+                Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
             }
 
             Config.Config.EstablishConfigFile();
