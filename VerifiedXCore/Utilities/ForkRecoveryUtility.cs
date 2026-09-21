@@ -253,6 +253,39 @@ namespace VerifiedXCore.Utilities
                     // Give peers a moment to reconnect after unbanning
                     await Task.Delay(2000);
 
+                    // SOURCE-POLICY (Sep 2026, testnet 975,533): never re-download from peers that hold
+                    // the very hash we just rolled back — that is how this path fetched its own block
+                    // straight back ("recovery did not change chain state") three times and gave up.
+                    // Survey the peers, quarantine the ones agreeing with the discarded hash, and pin
+                    // the ones that disagree as the only sources. If NOBODY disagrees this is not a
+                    // fork we can cross (we may well be the majority) — say so, and download from
+                    // anyone so the rolled-back tip is at least restored.
+                    try
+                    {
+                        var verdict = await ForkDetectionService.ProbeMajorityAsync(preRollbackHeight, preRollbackHash ?? "");
+                        if (verdict.IsMinority && verdict.MajorityPeers.Count > 0)
+                        {
+                            RecoverySourcePolicy.Set(verdict.MajorityPeers, verdict.AgreeingPeers);
+                            await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
+                            LogUtility.Log(
+                                $"[{caller}] FORK-RECOVERY: source policy — {verdict.MajorityPeers.Count} peer(s) hold {verdict.MajorityHash?[..Math.Min(16, verdict.MajorityHash?.Length ?? 0)]} at h={preRollbackHeight} " +
+                                $"(decided by {verdict.DecidedBy}: {verdict.Differing}/{verdict.Responders}); {verdict.AgreeingPeers.Count} peer(s) holding our discarded hash are quarantined.",
+                                $"{caller}.ForkRecovery");
+                        }
+                        else
+                        {
+                            LogUtility.Log(
+                                $"[{caller}] FORK-RECOVERY: no peer majority disagrees with the discarded hash {preRollbackHash?[..Math.Min(16, preRollbackHash?.Length ?? 0)]} at h={preRollbackHeight} " +
+                                $"({verdict.Responders} responder(s), {verdict.Differing} differing). This is NOT a crossable fork — we are likely the majority; the incoming block is the orphan. " +
+                                $"Re-downloading from any peer to restore the tip.",
+                                $"{caller}.ForkRecovery");
+                        }
+                    }
+                    catch (Exception probeEx)
+                    {
+                        LogUtility.Log($"[{caller}] FORK-RECOVERY: source survey failed ({probeEx.Message}); downloading without a source policy.", $"{caller}.ForkRecovery");
+                    }
+
                     // Step 3: Download the correct blocks from peers
                     // CRITICAL FIX: We must temporarily clear IsResyncing and set the download
                     // phase flag so that ValidateBlock() allows the downloaded blocks through.
@@ -286,6 +319,7 @@ namespace VerifiedXCore.Utilities
                         // Restore IsResyncing and clear download phase flag
                         _isInDownloadPhase = false;
                         Globals.IsResyncing = true; // Re-set until the outer finally restores it
+                        RecoverySourcePolicy.Clear(); // SOURCE-POLICY: never leak into normal sync
                     }
 
                     // Step 4: Reset stuck tracking

@@ -388,6 +388,10 @@ namespace VerifiedXCore.Nodes
                     catch (Exception ex) { CasterLogUtility.Log($"HEAL error: {ex.Message}", "CasterFlow"); }
                 }
 
+                // WATCHDOG: height-delta stall detector — the only signal a silently-failing round
+                // cannot reset. Escalation re-kicks heal + the fork check on its own cadence.
+                await ChainProgressWatchdog.TickAsync("MonitorCasters");
+
                 // EVICTION-AWARE: Periodic check — if we think we're a caster but no peer
                 // caster lists us, we were evicted (e.g., after a network blip where peers
                 // replaced us). This catches bootstrap casters that reconnect and accidentally
@@ -1552,7 +1556,7 @@ namespace VerifiedXCore.Nodes
                         // Wave 3: in the record era the committee size governs the quorum instead.
                         var (_, proofCommitteeCount) = GetQuorumCasters(Height);
                         var effectiveCasterCount = Math.Max(proofCommitteeCount, 1);
-                        var requiredProofs = Math.Max(2, effectiveCasterCount / 2 + 1); // majority quorum
+                        var requiredProofs = ConsensusQuorum.Required(effectiveCasterCount); // ONE-QUORUM: same M as every other gate
                         CasterLogUtility.Log($"[PHASE] PROOF-EXCHANGE entering at +{roundSw.ElapsedMilliseconds}ms, need {requiredProofs}/{casterList.Count} proofs, have {Globals.CasterProofDict.Count()} (self-injected)", "PHASE");
                         var swProofCollectionTime = Stopwatch.StartNew();
                         while (swProofCollectionTime.ElapsedMilliseconds <= PROOF_COLLECTION_TIME)
@@ -3631,12 +3635,16 @@ namespace VerifiedXCore.Nodes
         {
             var bag = Globals.BlockCasters.ToList();
             var committee = CasterMembershipStore.GetCommitteeForHeight(height);
+            // ONE-QUORUM (Sep 2026): the denominator comes from ConsensusQuorum so every gate — this
+            // one, attestations, readiness — sees the identical N. Legacy era counts DISTINCT
+            // addresses (phantom duplicate entries must not inflate the quorum).
+            var denominator = ConsensusQuorum.DenominatorForHeight(height);
             if (committee == null)
-                return (bag, LegacyQuorumDenominator(bag.Count));
+                return (bag, denominator);
             var filtered = bag
                 .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress) && committee.Contains(c.ValidatorAddress!))
                 .ToList();
-            return (filtered, committee.Count);
+            return (filtered, denominator);
         }
 
         /// <summary>
@@ -3674,7 +3682,7 @@ namespace VerifiedXCore.Nodes
                     return true;
                 }
 
-                var requiredReady = Math.Max(2, committeeCount / 2 + 1); // supermajority of the committee
+                var requiredReady = ConsensusQuorum.Required(committeeCount); // ONE-QUORUM: majority of the committee
                 int readyCount = 1; // count ourselves
                 int matchingHeightCount = 1; // count ourselves
 
@@ -3754,7 +3762,7 @@ namespace VerifiedXCore.Nodes
             if (committeeCount <= 1)
                 return myChosenWinner; // Only one caster, no agreement needed
 
-            var requiredAgreement = Math.Max(2, committeeCount / 2 + 1);
+            var requiredAgreement = ConsensusQuorum.Required(committeeCount); // ONE-QUORUM
 
             // DETERMINISTIC-CONSENSUS: Check for deadlock safety net
             if (_winnerAgreementFailHeight == height)
@@ -3956,7 +3964,7 @@ namespace VerifiedXCore.Nodes
             if (committeeCount <= 1)
                 return myCommitment.ProofAddressesSorted; // single caster — trivially in agreement
 
-            var requiredAgreement = Math.Max(2, committeeCount / 2 + 1);
+            var requiredAgreement = ConsensusQuorum.Required(committeeCount); // ONE-QUORUM
 
             var commitsForHeight = Globals.CasterProofSetCommitDict
                 .GetOrAdd(height, _ => new ConcurrentDictionary<string, Models.ProofSetCommitment>());
@@ -4421,6 +4429,21 @@ namespace VerifiedXCore.Nodes
                 Interlocked.Exchange(ref _desyncReconcileAttempts, 0);
             }
 
+            // COMMIT-VERIFY (Sep 2026, testnet 975,533): the resets below used to run unconditionally.
+            // For 16 hours every round agreed on a block that ValidateBlock then silently rejected
+            // (PREVHASH mismatch) — and because the counters were cleared anyway, STALL-HEAL never
+            // fired and the caster log read as 16 hours of clean commits. Only a commit that actually
+            // advanced the tip may clear the failure state; anything else is a round failure.
+            if (Globals.LastBlock.Height < currentHeight)
+            {
+                CasterLogUtility.Log(
+                    $"COMMIT-FAILED: h={currentHeight} agreed and staged but NOT adopted — tip still {Globals.LastBlock.Height} " +
+                    $"hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}. Failure counters stay armed.",
+                    "ROUND");
+                ProofUtility.TrackRoundFailure(currentHeight);
+                return;
+            }
+
             _consecutiveBlockHashAgreementFailures = 0;
             _consecutiveMajorityBlockFetchFailures = 0;
             // STALL-HEAL: Reset stall tracking on successful block commit
@@ -4587,7 +4610,8 @@ namespace VerifiedXCore.Nodes
             // New multi-caster attempt for this height — drop any stale pending hash from a prior failed round.
             ClearPendingCasterBlockHash(height);
 
-            var requiredAgreement = Math.Max(2, committeeCount / 2 + 1);
+            // ONE-QUORUM: identical to the attestation requirement for this height, by construction.
+            var requiredAgreement = ConsensusQuorum.Required(committeeCount);
             var myHash = block.Hash;
             int agreementCount = 1; // count ourselves
             string? majorityHash = null;

@@ -46,19 +46,13 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Wave 4: single source of truth for how many attestations a block at this height needs.
-        /// Bootstrap: majority of the AGREED seeds, floored at 2 — the first post-restart blocks
-        /// carry ≥2 seed attestations instead of none. Normal: majority of the committee.
+        /// How many attestations a block at this height needs. ONE-QUORUM (Sep 2026): delegates to
+        /// <see cref="ConsensusQuorum.RequiredForHeight"/> — the same number block-hash agreement
+        /// uses. The former bootstrap branch (majority of the agreed seeds, floored at 2) is gone:
+        /// only seeds evaluated it, so seeds and validators could approve DIFFERENT blocks at one
+        /// height, which is how testnet 975,533 forked. Bootstrap seeds now meet the same majority.
         /// </summary>
-        public static int RequiredAttestationsForHeight(long height)
-        {
-            if (Globals.IsBootstrapMode)
-                return Math.Max(2, BootstrapCoordinationService.AgreedSeedCount / 2 + 1);
-            var operational = OperationalBlockCasterCount(height);
-            if (operational > 0)
-                return RequiredAttestations(operational);
-            return RequiredAttestations(AttestorSetForHeight(height).Count);
-        }
+        public static int RequiredAttestationsForHeight(long height) => ConsensusQuorum.RequiredForHeight(height);
 
         /// <summary>STRICT: true only when a certificate is required at this height, is present, and
         /// carries a valid M-of-N caster quorum. "Not required" is NOT a pass here. Used where the

@@ -615,6 +615,12 @@ namespace VerifiedXCore
 
         public static ConcurrentDictionary<string, HubCallerContext> P2PPeerDict = new ConcurrentDictionary<string, HubCallerContext>();
         public static ConcurrentDictionary<string, HubCallerContext> P2PValDict = new ConcurrentDictionary<string, HubCallerContext>();
+        /// <summary>HUB-SPLIT (Sep 2026): the /blockcaster hub's own connection registry. It used to share
+        /// <see cref="P2PValDict"/> with the /validator hub, keyed by IP only — every caster is also a
+        /// validator, so whichever hub connected second aborted the first, and the loser's disconnect
+        /// handler then erased the winner's entry. A mutual-eviction loop: ~12,500 consecutive caster
+        /// handshake failures over a week on testnet, invisible because rejections logged nothing.</summary>
+        public static ConcurrentDictionary<string, HubCallerContext> P2PCasterDict = new ConcurrentDictionary<string, HubCallerContext>();
         public static ConcurrentDictionary<string, HubCallerContext> BeaconPeerDict = new ConcurrentDictionary<string, HubCallerContext>();        
         public static ConcurrentDictionary<string, MessageLock> MessageLocks = new ConcurrentDictionary<string, MessageLock>();
         public static ConcurrentDictionary<string, int> TxRebroadcastDict = new ConcurrentDictionary<string, int>();

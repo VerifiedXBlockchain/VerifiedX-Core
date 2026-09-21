@@ -25,6 +25,12 @@ namespace VerifiedXCore.Models
         /// Used for maturity gating — prevents premature caster promotion of freshly-connected nodes.</summary>
         public long FirstSeenAtHeight { get; set; }
 
+        /// <summary>SELF-HEAL (Sep 2026): unix seconds this validator was first added. The maturity gate
+        /// accepts <see cref="FirstSeenAtHeight"/> OR this — a height-only gate can never be satisfied on
+        /// a halted chain (Δ stays 0), which locked promotion out for the whole testnet 975,533 outage.
+        /// Preserved across reconnects like FirstSeenAtHeight. 0 = unknown (height rule only).</summary>
+        public long FirstSeenAt { get; set; }
+
         /// <summary>Last block height reported by this validator via GetBlockHeight HTTP call.
         /// Used by the height gate to exclude still-syncing validators from proof generation
         /// and winner selection. Updated by VerifyWinnerAvailability and proof generation.</summary>
@@ -391,10 +397,12 @@ namespace VerifiedXCore.Models
                             $"Validator {validator.Address} FirstSeenAtHeight reset: was {existing.FirstSeenAtHeight} (delta={staleDelta}), now={currentTip}",
                             "NetworkValidator.UpsertTrustedOnDirectConnect");
                         validator.FirstSeenAtHeight = currentTip;
+                        validator.FirstSeenAt = currentTime;
                     }
                     else
                     {
                         validator.FirstSeenAtHeight = existing.FirstSeenAtHeight;
+                        validator.FirstSeenAt = existing.FirstSeenAt > 0 ? existing.FirstSeenAt : currentTime;
                     }
                 }
                 else if (validator.FirstSeenAtHeight == 0)
@@ -404,6 +412,9 @@ namespace VerifiedXCore.Models
             {
                 validator.FirstSeenAtHeight = currentTip;
             }
+            // Wall-clock first-seen starts now unless preserved above.
+            if (validator.FirstSeenAt == 0)
+                validator.FirstSeenAt = currentTime;
 
             // Upsert into the trusted registry.
             Globals.NetworkValidators[validator.Address] = validator;

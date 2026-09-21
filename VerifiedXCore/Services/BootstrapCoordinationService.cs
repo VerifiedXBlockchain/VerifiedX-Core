@@ -52,6 +52,9 @@ namespace VerifiedXCore.Services
         /// <summary>Wave 6: IPs of the other agreeing seeds (for genesis signature collection).</summary>
         private static List<(string Address, string Ip)> _agreedSeedPeers = new();
 
+        /// <summary>BOOTSTRAP-RESET: the agreeing seeds, for reset-record signature collection.</summary>
+        public static IReadOnlyList<(string Address, string Ip)> AgreedSeedPeers => _agreedSeedPeers;
+
         public static void Start()
         {
             if (_running) return;
@@ -134,6 +137,11 @@ namespace VerifiedXCore.Services
                     // (idempotent: deterministic record, same-hash re-sign allowed).
                     if (AgreedSeedCount >= 2 && CasterMembershipStore.GetCurrent() == null && AgreedHeight >= 0)
                         await TryCreateGenesisAsync();
+
+                    // BOOTSTRAP-RESET (Sep 2026): with a record present whose quorum the seeds cannot
+                    // meet, survey the network and — only on proof of a stall — supersede it with the
+                    // seed set. Undecidable cases escalate to the operator instead. See the service.
+                    await BootstrapResetService.TickAsync();
 
                     var tipAge = TimeUtil.GetTime() - (Globals.LastBlock?.Timestamp ?? 0);
                     var tipAdvancing = tipAge < HealthyTipAgeSeconds;

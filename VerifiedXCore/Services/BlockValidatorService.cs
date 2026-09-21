@@ -763,37 +763,34 @@ namespace VerifiedXCore.Services
                             _prevHashMismatchCount = 0;
                             _prevHashMismatchHeight = -1;
 
-                            // Fire-and-forget recovery — must release the semaphore first so the recovery
-                            // can re-enter ValidateBlock after rollback + download.
-                            // We do this on a background task because we're inside the ValidateBlockSemaphore.
+                            // FORK-ROUTE (Sep 2026, testnet 975,533): this used to fire the naive
+                            // ForkRecoveryUtility.RecoverAsync — roll back ONE block and blindly
+                            // re-download from whichever peers answer. Two problems, both observed:
+                            //  (1) it assumes WE are the minority. On Sep 20 the majority of casters
+                            //      held OUR hash and the incoming block was the orphan; rolling back was
+                            //      wrong, and the re-download simply fetched our own block back
+                            //      ("recovery did not change chain state") until it declared EXHAUSTED.
+                            //  (2) while it spins it holds IsRecoveryInProgress, which locks out
+                            //      ForkDetectionService — the resolver that actually surveys peers, finds
+                            //      the divergence and downloads only from the majority.
+                            // Route to the verdict-driven resolver instead. If the survey says the majority
+                            // holds our hash, it correctly does nothing and the orphan stays rejected.
                             _ = Task.Run(async () =>
                             {
                                 try
                                 {
                                     // Small delay to let the semaphore release in the finally block
                                     await Task.Delay(100);
-                                    var recovered = await ForkRecoveryUtility.RecoverAsync(
-                                        Globals.LastBlock.Height,
-                                        "BlockValidatorService.PREVHASH-MISMATCH");
-                                    if (recovered)
-                                    {
-                                        LogUtility.Log(
-                                            $"[ValidateBlock] FORK-RECOVERY-SUCCESS: Recovered from minority fork. " +
-                                            $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
-                                            "BlockValidatorService");
-                                    }
-                                    else
-                                    {
-                                        LogUtility.Log(
-                                            $"[ValidateBlock] FORK-RECOVERY-PARTIAL: Recovery returned false. " +
-                                            $"Tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
-                                            "BlockValidatorService");
-                                    }
+                                    await ForkDetectionService.CheckAsync("BlockValidatorService.PREVHASH-MISMATCH");
+                                    LogUtility.Log(
+                                        $"[ValidateBlock] FORK-ROUTE: verdict-driven check ran — state={ForkDetectionService.SyncState}/{ForkDetectionService.ForkStatusText} " +
+                                        $"tip h={Globals.LastBlock.Height} {Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
+                                        "BlockValidatorService");
                                 }
                                 catch (Exception ex)
                                 {
                                     LogUtility.Log(
-                                        $"[ValidateBlock] FORK-RECOVERY-ERROR: {ex.Message}",
+                                        $"[ValidateBlock] FORK-ROUTE-ERROR: {ex.Message}",
                                         "BlockValidatorService");
                                 }
                             });

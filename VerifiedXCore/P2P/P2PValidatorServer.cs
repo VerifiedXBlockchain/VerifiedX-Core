@@ -334,7 +334,10 @@ namespace VerifiedXCore.P2P
             var peerIP = GetIP(Context);
             //var netVal = Globals.NetworkValidators.Where(x => x.Value.IPAddress == peerIP).FirstOrDefault();
 
-            Globals.P2PValDict.TryRemove(peerIP, out _);
+            // HUB-SPLIT: only drop our registration if it is still THIS connection — a newer
+            // connection from the same IP must not be erased by a stale one closing.
+            if (Globals.P2PValDict.TryGetValue(peerIP, out var mine) && mine.ConnectionId == Context.ConnectionId)
+                Globals.P2PValDict.TryRemove(peerIP, out _);
             Context?.Abort();
 
             await base.OnDisconnectedAsync(ex);
@@ -1466,14 +1469,26 @@ namespace VerifiedXCore.P2P
 
         #region End on Connect
 
+        // HANDSHAKE-VISIBILITY (Sep 2026): one rejection log per IP per interval, always on.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _rejectLogLast = new();
+        private const int REJECT_LOG_INTERVAL_SECONDS = 60;
+
+        private static bool ShouldLogReject(string ipAddress)
+        {
+            var now = Environment.TickCount64 / 1000;
+            var last = _rejectLogLast.GetOrAdd(ipAddress ?? "", 0);
+            if (now - last < REJECT_LOG_INTERVAL_SECONDS) return false;
+            _rejectLogLast[ipAddress ?? ""] = now;
+            return true;
+        }
+
         private async Task EndOnConnect(string ipAddress, string adjMessage, string logMessage)
         {
             await SendValMessageSingle("9999", adjMessage);
-            if (Globals.OptionalLogging == true)
-            {
-                LogUtility.Log(logMessage, "Validator Connection");
-                LogUtility.Log($"IP: {ipAddress} ", "Validator Connection");
-            }
+            // HANDSHAKE-VISIBILITY (Sep 2026): rejections used to be silent unless OptionalLogging
+            // was on. Always log, throttled per IP, so a failing handshake is diagnosable server-side.
+            if (Globals.OptionalLogging == true || ShouldLogReject(ipAddress))
+                LogUtility.Log($"HANDSHAKE-REJECT [validator] {ipAddress}: {logMessage}", "Validator Connection");
 
             Context?.Abort();
         }

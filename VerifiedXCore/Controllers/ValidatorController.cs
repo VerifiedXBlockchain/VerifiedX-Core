@@ -1329,6 +1329,63 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
+        /// BOOTSTRAP-RESET (Sep 2026), LOCALHOST ONLY: the operator's answer to the one question the
+        /// node cannot decide — a stalled chain whose committee majority does not answer the survey
+        /// (dead, or partitioned and producing elsewhere?). Arms the next survey window on THIS seed
+        /// to treat CommitteeUnreachable as Stalled. PeerAhead, HashDisagreement and InsufficientReach
+        /// still veto; the other seeds still co-sign only under their own stale-tip rule. Run on any
+        /// one seed after confirming the silent nodes are actually down.
+        /// </summary>
+        [HttpGet]
+        [Route("BootstrapResetForce")]
+        public ActionResult<string> BootstrapResetForce()
+        {
+            var remoteIp = HttpContext.Connection.RemoteIpAddress;
+            var mapped = remoteIp != null && remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
+            if (mapped == null || !System.Net.IPAddress.IsLoopback(mapped))
+                return Unauthorized(JsonConvert.SerializeObject(new { Success = false, Message = "BootstrapResetForce is localhost-only." }));
+            if (!Globals.IsLocalBootstrapCaster)
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Not a bootstrap seed — the reset is proposed by seeds only." }));
+
+            BootstrapResetService.ForceNextReset();
+            return Ok(JsonConvert.SerializeObject(new
+            {
+                Success = true,
+                ForceArmed = BootstrapResetService.ForceArmed,
+                ForceWindowSeconds = BootstrapResetService.ForceWindowSeconds,
+                BootstrapState = BootstrapCoordinationService.State.ToString(),
+                TipAgeSeconds = CasterMembershipStore.TipAgeSeconds(),
+                MinStallSeconds = CasterMembershipStore.BootstrapResetMinStallSeconds,
+                Note = "Next survey window may propose a seed-set committee reset if no peer is ahead and all reachable nodes agree on our tip hash."
+            }));
+        }
+
+        /// <summary>BOOTSTRAP-RESET: read-only progress of the survey ladder (any caller).</summary>
+        [HttpGet]
+        [Route("BootstrapResetStatus")]
+        public ActionResult<string> BootstrapResetStatus()
+        {
+            var head = CasterMembershipStore.GetCurrent();
+            return Ok(JsonConvert.SerializeObject(new
+            {
+                IsSeed = Globals.IsLocalBootstrapCaster,
+                BootstrapState = BootstrapCoordinationService.State.ToString(),
+                TipHeight = Globals.LastBlock?.Height ?? -1L,
+                TipAgeSeconds = CasterMembershipStore.TipAgeSeconds(),
+                MinStallSeconds = CasterMembershipStore.BootstrapResetMinStallSeconds,
+                RecordSeq = head?.RecordSeq ?? -1L,
+                CommitteeSize = head?.Casters.Count ?? 0,
+                CommitteeQuorum = head != null ? ConsensusQuorum.Required(head.Casters.Count) : 0,
+                ConsecutiveStalledSurveys = BootstrapResetService.Consecutive,
+                RequiredConsecutiveSurveys = BootstrapResetService.RequiredConsecutiveSurveys,
+                LastVerdict = BootstrapResetService.LastVerdict,
+                LastDetail = BootstrapResetService.LastDetail,
+                ForceArmed = BootstrapResetService.ForceArmed,
+                WatchdogStalledSeconds = ChainProgressWatchdog.StalledSeconds
+            }));
+        }
+
+        /// <summary>
         /// Wave 3: a proposer requests our signature on a candidate rotation record. We sign only
         /// if it derives correctly from OUR head, we are in the previous set, and we have not
         /// signed a different record at that seq (equivocation guard).

@@ -22,6 +22,26 @@ namespace VerifiedXCore.Services
         /// <summary>Minimum number of blocks a validator must be in NetworkValidators before caster promotion.</summary>
         public const int MaturityBlocks = 10;
 
+        /// <summary>SELF-HEAL (Sep 2026): wall-clock alternative to <see cref="MaturityBlocks"/>.</summary>
+        public const int MaturitySeconds = 300;
+
+        /// <summary>
+        /// SELF-HEAL (Sep 2026, testnet 975,533): a candidate is mature after <see cref="MaturityBlocks"/>
+        /// blocks OR <see cref="MaturitySeconds"/> of wall clock, whichever comes first. The old
+        /// height-only rule can never be satisfied while the chain is halted (Δheight stays 0/10
+        /// forever), so the pool could not be refilled precisely when it needed to be. Unknown
+        /// first-seen (0) is treated as mature, matching the previous behaviour. Pure.
+        /// </summary>
+        public static bool IsMatureCandidate(Models.NetworkValidator v, long currentHeight, long nowUnix, out string detail)
+        {
+            var heightDelta = v.FirstSeenAtHeight > 0 ? currentHeight - v.FirstSeenAtHeight : -1;
+            var secondsDelta = v.FirstSeenAt > 0 ? nowUnix - v.FirstSeenAt : -1;
+            var byHeight = v.FirstSeenAtHeight <= 0 || heightDelta >= MaturityBlocks;
+            var byClock = v.FirstSeenAt > 0 && secondsDelta >= MaturitySeconds;
+            detail = $"{heightDelta}/{MaturityBlocks} blocks, {secondsDelta}/{MaturitySeconds}s";
+            return byHeight || byClock;
+        }
+
         private static long _lastEvaluationHeight = long.MinValue;
         private static long _lastRefreshAtHeight = -1;
 
@@ -127,6 +147,7 @@ namespace VerifiedXCore.Services
                             LastSeen = now,
                             CheckFailCount = 0,
                             FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0,
+                            FirstSeenAt = now,
                             FirstAdvertised = now,
                         };
                         Globals.NetworkValidators[newCaster.ValidatorAddress] = newNv;
@@ -385,14 +406,15 @@ namespace VerifiedXCore.Services
 
                     // Maturity gate: don't promote validators that just connected.
                     // They need time to sync their own NetworkValidators pool.
-                    if (v.FirstSeenAtHeight > 0 && currentHeight - v.FirstSeenAtHeight < MaturityBlocks)
+                    // SELF-HEAL: height OR wall-clock — a halted chain must still be able to promote.
+                    if (!IsMatureCandidate(v, currentHeight, TimeUtil.GetTime(), out var maturityDetail))
                     {
-                        CasterLogUtility.Log($"  <<  maturity=FAIL ({currentHeight - v.FirstSeenAtHeight}/{MaturityBlocks})", "CasterFlow");
+                        CasterLogUtility.Log($"  <<  maturity=FAIL ({maturityDetail})", "CasterFlow");
                         ConsoleWriterService.OutputValCaster(
-                            $"[CasterDiscovery] Candidate {v.Address} not mature enough (seen at height {v.FirstSeenAtHeight}, current {currentHeight}, need {MaturityBlocks} blocks). Skipping.");
+                            $"[CasterDiscovery] Candidate {v.Address} not mature enough ({maturityDetail}). Skipping.");
                         continue;
                     }
-                    CasterLogUtility.Log($"     maturity=PASS", "CasterFlow");
+                    CasterLogUtility.Log($"     maturity=PASS ({maturityDetail})", "CasterFlow");
 
                     if (!PortUtility.IsPortOpen(ip, Globals.ValAPIPort))
                     {
@@ -1649,11 +1671,11 @@ namespace VerifiedXCore.Services
                     return response;
                 }
 
-                // Maturity gate
+                // Maturity gate (SELF-HEAL: height OR wall-clock, same rule as EvalTick)
                 var currentHeight = Globals.LastBlock?.Height ?? 0;
-                if (validator.FirstSeenAtHeight > 0 && currentHeight - validator.FirstSeenAtHeight < MaturityBlocks)
+                if (!IsMatureCandidate(validator, currentHeight, TimeUtil.GetTime(), out var maturityDetail))
                 {
-                    response.Reason = $"Maturity {currentHeight - validator.FirstSeenAtHeight}/{MaturityBlocks}";
+                    response.Reason = $"Maturity {maturityDetail}";
                     return response;
                 }
 

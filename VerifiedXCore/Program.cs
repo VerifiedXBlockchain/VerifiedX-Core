@@ -1136,6 +1136,10 @@ namespace VerifiedXCore
                     // operator playbook. Guards + single-flight live inside CheckAsync.
                     _ = ForkDetectionService.CheckAsync("Program.BlockHeightCheck");
 
+                    // WATCHDOG (Sep 2026): height-delta stall alarm on every role — the one signal
+                    // a silently-failing consensus round cannot reset.
+                    _ = ChainProgressWatchdog.TickAsync("Program.BlockHeightCheck");
+
                     var MaxHeight = P2PClient.MaxHeight();
                     foreach (var node in Globals.Nodes.Values)
                     {

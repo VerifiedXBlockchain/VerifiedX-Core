@@ -34,7 +34,22 @@ namespace VerifiedXCore.Services
             /// (see <see cref="ComputeCasterSetHash(CasterMembershipRecord)"/>). Empty on markers
             /// written before the fix.</summary>
             public string SetHash { get; set; } = "";
+            /// <summary>ROTATION-LIVENESS (Sep 2026): unix seconds the mark was written. Lets a mark
+            /// whose rotation never landed expire (see <see cref="SignedMarkExpirySeconds"/>). 0 on
+            /// markers written before the fix — those never expire (age unknown).</summary>
+            public long SignedAt { get; set; }
         }
+
+        /// <summary>A signed-seq mark for a set that was never appended is an aborted proposal, not an
+        /// equivocation risk, once it is this old and the head is still below its seq.</summary>
+        public const long SignedMarkExpirySeconds = 600;
+
+        /// <summary>BOOTSTRAP-RESET (Sep 2026): ChangeType of a record that supersedes a stale committee
+        /// with the hardcoded seed set. Signed by a seed majority instead of the previous set, and
+        /// accepted by a node ONLY while its own tip is at least <see cref="BootstrapResetMinStallSeconds"/>
+        /// old — so a node on a moving chain can never adopt one. See BootstrapResetService.</summary>
+        public const string BootstrapResetChangeType = "BootstrapReset";
+        public const long BootstrapResetMinStallSeconds = 1800;
 
         /// <summary>
         /// ROTATION-LIVENESS (Sep 2026): rotation records are built per proposer, and the record
@@ -363,8 +378,19 @@ namespace VerifiedXCore.Services
             { reason = "effective height not advancing"; return false; }
             if (candidate.Casters == null || candidate.Casters.Count < MinCommitteeSize)
             { reason = $"caster set below minimum {MinCommitteeSize}"; return false; }
+            // COMMITTEE-CAP (Sep 2026, testnet 975,533): the live pool holds at most MaxCasters, so a
+            // committee larger than that has a quorum that can NEVER be met from a full pool — seq 15
+            // wrote 6 members against a 5-slot pool, quorum 4, and one restart later only 3 were live.
+            // A record like that is an unrecoverable state by construction; refuse it at write time.
+            if (candidate.Casters.Count > CasterDiscoveryService.MaxCasters)
+            { reason = $"caster set {candidate.Casters.Count} exceeds pool cap {CasterDiscoveryService.MaxCasters}"; return false; }
             if (ComputeRecordHash(candidate) != candidate.RecordHash)
             { reason = "recordHash mismatch"; return false; }
+
+            // BOOTSTRAP-RESET: a seed-majority-signed supersession — different signer rule, and
+            // only acceptable while OUR tip is provably stale (see ValidateBootstrapReset).
+            if (string.Equals(candidate.ChangeType, BootstrapResetChangeType, StringComparison.Ordinal))
+                return ValidateBootstrapReset(candidate, TipAgeSeconds(), out reason);
 
             var prevSet = prev.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
             var need = prevSet.Count / 2 + 1;
@@ -379,6 +405,56 @@ namespace VerifiedXCore.Services
             }
             if (validSigners.Count < need)
             { reason = $"signatures {validSigners.Count}/{need} from previous set"; return false; }
+
+            return true;
+        }
+
+        /// <summary>Seconds since our tip's timestamp; long.MaxValue with no tip (cold start counts as stale).</summary>
+        public static long TipAgeSeconds()
+        {
+            var tip = Globals.LastBlock;
+            if (tip == null || tip.Height < 0) return long.MaxValue;
+            return Math.Max(0, TimeUtil.GetTime() - tip.Timestamp);
+        }
+
+        /// <summary>
+        /// BOOTSTRAP-RESET (Sep 2026, testnet 975,533): validity of a record that replaces a committee
+        /// whose quorum can no longer be met with the hardcoded seed set. Pure given the tip age.
+        ///  • caster set must be exactly the hardcoded seeds (same trust root as genesis);
+        ///  • ≥ <see cref="GenesisMinSeedSignatures"/> valid signatures from the seed allowlist — the
+        ///    previous set's majority is, by definition, the thing that cannot be reached;
+        ///  • <paramref name="tipAgeSeconds"/> ≥ <see cref="BootstrapResetMinStallSeconds"/>: every node
+        ///    judges this from its OWN tip, so a node whose chain is moving rejects the reset. That is
+        ///    the property that keeps a reset from ever being adopted by a producing partition.
+        /// The proposer-side survey (NetworkStallSurvey) decides whether to ATTEMPT one; this decides
+        /// whether to ACCEPT one.
+        /// </summary>
+        public static bool ValidateBootstrapReset(CasterMembershipRecord candidate, long tipAgeSeconds, out string reason)
+        {
+            reason = "";
+            if (tipAgeSeconds < BootstrapResetMinStallSeconds)
+            { reason = $"bootstrap reset refused — our tip is only {tipAgeSeconds}s old (need ≥{BootstrapResetMinStallSeconds}s); chain is not stalled here"; return false; }
+
+            var expectedSeeds = SeedNodeService.GetBootstrapSeedPeers()
+                .Select(p => p.ValidatorAddress)
+                .Where(a => !string.IsNullOrEmpty(a))
+                .ToHashSet(StringComparer.Ordinal);
+            var candidateSet = (candidate.Casters ?? new List<CasterInfo>())
+                .Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
+            if (expectedSeeds.Count == 0 || !expectedSeeds.SetEquals(candidateSet))
+            { reason = "bootstrap reset caster set is not the hardcoded seed list"; return false; }
+
+            var payload = CanonicalPayload(candidate);
+            var seedSigners = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
+            {
+                if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
+                if (!Globals.BootstrapCasterAddresses.Contains(sig.SignerAddress)) continue;
+                if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
+                seedSigners.Add(sig.SignerAddress);
+            }
+            if (seedSigners.Count < GenesisMinSeedSignatures)
+            { reason = $"bootstrap reset signatures {seedSigners.Count}/{GenesisMinSeedSignatures} from seeds"; return false; }
 
             return true;
         }
@@ -474,7 +550,7 @@ namespace VerifiedXCore.Services
                 switch (EvaluateSignedMarker(existing, recordHash, setHash))
                 {
                     case SignedMarkDecision.Insert:
-                        col.Insert(seq, new SignedSeqMarker { Id = seq, RecordHash = recordHash, SetHash = setHash });
+                        col.Insert(seq, new SignedSeqMarker { Id = seq, RecordHash = recordHash, SetHash = setHash, SignedAt = NowUnix() });
                         return true;
                     case SignedMarkDecision.Idempotent:
                         return true;
@@ -491,9 +567,62 @@ namespace VerifiedXCore.Services
                         col.Update(seq, existing);
                         return true;
                     default:
+                        // ROTATION-LIVENESS (Sep 2026): a mark for a DIFFERENT set at this seq refuses
+                        // us. But if nothing was ever appended at this seq and the mark is old, it is
+                        // an aborted proposal, not an equivocation risk — release it for the new set.
+                        if (existing != null && IsStaleAbortedMark(existing, seq))
+                        {
+                            CasterLogUtility.Log(
+                                $"MEMBERSHIP: signed-seq marker at seq {seq} expired — its rotation never appended in {SignedMarkExpirySeconds}s; releasing for a new caster set.",
+                                "MEMBERSHIP");
+                            existing.RecordHash = recordHash;
+                            existing.SetHash = setHash;
+                            existing.SignedAt = NowUnix();
+                            col.Update(seq, existing);
+                            return true;
+                        }
                         return false;
                 }
             }
+        }
+
+        /// <summary>
+        /// ROTATION-LIVENESS (Sep 2026): the proposer of an ABORTED rotation releases its own mark.
+        /// Safe because only the proposer collects signatures for its candidate — once it gives up,
+        /// that record can never be appended by anyone. Only removes a mark for the same set, and
+        /// only while the head is still below <paramref name="seq"/> (nothing landed there).
+        /// </summary>
+        public static void ReleaseSignedMark(long seq, string setHash)
+        {
+            lock (Mut)
+            {
+                var col = MarkerCollection();
+                if (col == null) return;
+                var existing = col.FindById(seq);
+                if (existing == null) return;
+                if (!string.Equals(existing.SetHash, setHash, StringComparison.Ordinal)) return;
+                var head = GetCurrent();
+                if (head != null && head.RecordSeq >= seq) return;
+                col.Delete(seq);
+            }
+        }
+
+        private static long NowUnix() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        /// <summary>Pure decision: the mark's rotation never landed (head below seq) and it is past
+        /// <see cref="SignedMarkExpirySeconds"/>. Legacy marks with no timestamp never expire.</summary>
+        internal static bool IsStaleAbortedMark(SignedSeqMarker existing, long seq)
+        {
+            var head = GetCurrent();
+            if (head != null && head.RecordSeq >= seq) return false;
+            return IsStaleAbortedMark(existing, seq, headSeq: head?.RecordSeq ?? -1, nowUnix: NowUnix());
+        }
+
+        internal static bool IsStaleAbortedMark(SignedSeqMarker existing, long seq, long headSeq, long nowUnix)
+        {
+            if (headSeq >= seq) return false;
+            if (existing.SignedAt <= 0) return false;
+            return nowUnix - existing.SignedAt >= SignedMarkExpirySeconds;
         }
 
         /// <summary>Test/diagnostic support: clears the in-memory head cache (persisted data untouched).</summary>

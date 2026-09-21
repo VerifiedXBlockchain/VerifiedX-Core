@@ -1759,6 +1759,9 @@ namespace VerifiedXCore.Services
                     // Wave 5: hash-based fork detection for validators (previously height-only).
                     _ = ForkDetectionService.CheckAsync("ValidatorService.BlockHeightCheck");
 
+                    // WATCHDOG (Sep 2026): height-delta stall alarm — see ChainProgressWatchdog.
+                    _ = ChainProgressWatchdog.TickAsync("ValidatorService.BlockHeightCheck");
+
                     //Removing for now, but might be needed for validators
                     //if(Globals.BlockCasterNodes.Any())
                     //{

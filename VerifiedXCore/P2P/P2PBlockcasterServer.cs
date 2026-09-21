@@ -134,9 +134,10 @@ namespace VerifiedXCore.P2P
                     return;
                 }
 
-                Globals.P2PValDict.TryAdd(peerIP, Context);
+                // HUB-SPLIT (Sep 2026): own registry — see Globals.P2PCasterDict.
+                Globals.P2PCasterDict.TryAdd(peerIP, Context);
 
-                if (Globals.P2PValDict.TryGetValue(peerIP, out var context) && context.ConnectionId != Context.ConnectionId)
+                if (Globals.P2PCasterDict.TryGetValue(peerIP, out var context) && context.ConnectionId != Context.ConnectionId)
                 {
                     context.Abort();
                 }
@@ -301,21 +302,37 @@ namespace VerifiedXCore.P2P
             var peerIP = GetIP(Context);
             //var netVal = Globals.NetworkValidators.Where(x => x.Value.IPAddress == peerIP).FirstOrDefault();
 
-            Globals.P2PValDict.TryRemove(peerIP, out _);
+            // HUB-SPLIT: only drop OUR registration, and only if it is still this connection —
+            // a newer connection from the same IP must not be erased by a stale one closing.
+            if (Globals.P2PCasterDict.TryGetValue(peerIP, out var mine) && mine.ConnectionId == Context.ConnectionId)
+                Globals.P2PCasterDict.TryRemove(peerIP, out _);
             Globals.FortisPool.TryRemoveFromKey1(peerIP, out _);
             Context?.Abort();
 
             await base.OnDisconnectedAsync(ex);
         }
 
+        // HANDSHAKE-VISIBILITY (Sep 2026): one rejection log per IP per interval, always on.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _rejectLogLast = new();
+        private const int REJECT_LOG_INTERVAL_SECONDS = 60;
+
+        private static bool ShouldLogReject(string ipAddress)
+        {
+            var now = Environment.TickCount64 / 1000;
+            var last = _rejectLogLast.GetOrAdd(ipAddress ?? "", 0);
+            if (now - last < REJECT_LOG_INTERVAL_SECONDS) return false;
+            _rejectLogLast[ipAddress ?? ""] = now;
+            return true;
+        }
+
         private async Task EndOnConnect(string ipAddress, string adjMessage, string logMessage)
         {
             //await SendCasterMessageSingle("9999", adjMessage);
-            if (Globals.OptionalLogging == true)
-            {
-                LogUtility.Log(logMessage, "Validator Connection");
-                LogUtility.Log($"IP: {ipAddress} ", "Validator Connection");
-            }
+            // HANDSHAKE-VISIBILITY (Sep 2026): this used to log only under OptionalLogging, so a week
+            // of aborted caster handshakes (the shared-dictionary collision) left NO trace on the
+            // server — the client only ever saw "response ended prematurely". Always log, throttled.
+            if (Globals.OptionalLogging == true || ShouldLogReject(ipAddress))
+                LogUtility.Log($"HANDSHAKE-REJECT [blockcaster] {ipAddress}: {logMessage}", "Validator Connection");
 
             Context?.Abort();
         }

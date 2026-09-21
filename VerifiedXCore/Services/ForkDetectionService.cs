@@ -401,6 +401,19 @@ namespace VerifiedXCore.Services
                 .ToHashSet();
 
         /// <summary>
+        /// SOURCE-POLICY (Sep 2026): one-shot majority survey for a height — who holds what hash,
+        /// and is <paramref name="ourHash"/> the minority. Used by ForkRecoveryUtility.RecoverAsync
+        /// so a rollback never re-downloads from peers holding the hash it just discarded. Same
+        /// probe set and majority rule as <see cref="CheckAsync"/>; no state is touched.
+        /// </summary>
+        public static async Task<ForkResolutionUtility.MajorityVerdict> ProbeMajorityAsync(long height, string ourHash)
+        {
+            var peers = SelectProbePeers();
+            var results = await ProbeAsync(peers, height);
+            return ForkResolutionUtility.ComputeMajority(results, ourHash ?? "");
+        }
+
+        /// <summary>
         /// STALL-RESOLVE: every known peer, casters first, capped at MAX_PROBE_PEERS. The old
         /// cap of 8 could be filled entirely by fellow stranded peers.
         /// </summary>

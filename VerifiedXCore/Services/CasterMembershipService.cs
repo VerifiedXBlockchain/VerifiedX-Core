@@ -113,6 +113,12 @@ namespace VerifiedXCore.Services
                 if (candidate.Signatures.Count < need)
                 {
                     CasterLogUtility.Log($"MEMBERSHIP: rotation ABORTED — {candidate.Signatures.Count}/{need} signatures for seq {candidate.RecordSeq} ({changeType} {changedAddress}).", "MEMBERSHIP");
+                    // ROTATION-LIVENESS (Sep 2026): we are the proposer and we gave up, so this
+                    // candidate can never be appended by anyone — release our own signed-seq mark
+                    // so the NEXT proposal at this seq (possibly a different set) is not refused as
+                    // an equivocation. Testnet 975,533: an aborted 3/4 demotion at seq 16 left a
+                    // mark that then refused every promotion at seq 16 for the rest of the outage.
+                    CasterMembershipStore.ReleaseSignedMark(candidate.RecordSeq, CasterMembershipStore.ComputeCasterSetHash(candidate));
                     return false;
                 }
 
@@ -218,7 +224,7 @@ namespace VerifiedXCore.Services
         /// record members that answer heartbeats for <see cref="RequiredHealProbeStreak"/>
         /// consecutive monitor ticks. Never removes entries and never touches self (PingCasters and
         /// eviction-awareness own those decisions). No-ops in the legacy era (bag = quorum basis
-        /// there) and in bootstrap mode. Returns the number of casters re-added.
+        /// there) and on a true cold start (no tip). Returns the number of casters re-added.
         /// </summary>
         internal static async Task<int> TryHealBlockCastersFromRecordAsync(
             CasterMembershipRecord? record = null,
@@ -228,8 +234,13 @@ namespace VerifiedXCore.Services
             if (record == null)
                 return 0;
 
-            if (Globals.IsBootstrapMode)
-                return 0;
+            // SELF-HEAL (Sep 2026, testnet 975,533): this used to no-op in bootstrap mode. Bootstrap
+            // mode is ENTERED because the tip went stale — i.e. exactly when the pool most needs
+            // refilling — so the guard turned a recoverable outage into a 16h deadlock: heal ran
+            // 26,982 times before bootstrap engaged and zero times after, while the 3 live casters
+            // could never reach the 4-of-6 quorum. Heal is add-only, every member comes from the
+            // signed record, and each is reachability-probed for a streak before re-add — there is
+            // no state in which running it is unsafe, so it has no mode guard at all.
 
             var bagAddrs = Globals.BlockCasters.ToList()
                 .Where(p => !string.IsNullOrEmpty(p.ValidatorAddress))
@@ -330,6 +341,10 @@ namespace VerifiedXCore.Services
 
             var candidate = request.Candidate;
 
+            // BOOTSTRAP-RESET: seed-majority supersession of a stale committee — its own rule.
+            if (string.Equals(candidate.ChangeType, CasterMembershipStore.BootstrapResetChangeType, StringComparison.Ordinal))
+                return HandleBootstrapResetSignRequest(request, head);
+
             // Structural derivation checks (signature-quorum check deliberately excluded here).
             if (candidate.RecordSeq != head.RecordSeq + 1) return null;
             if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
@@ -367,6 +382,50 @@ namespace VerifiedXCore.Services
             if (sig == "ERROR") return null;
 
             CasterLogUtility.Log($"MEMBERSHIP: signed rotation seq={candidate.RecordSeq} ({candidate.ChangeType} {candidate.ChangedAddress}) for proposer {request.ProposerAddress}.", "MEMBERSHIP");
+            return new RecordSignature { SignerAddress = Globals.ValidatorAddress, Signature = sig };
+        }
+
+        /// <summary>
+        /// BOOTSTRAP-RESET (Sep 2026): co-sign a supersession record. We sign only as a hardcoded
+        /// seed, only inside an active seed agreement, only while OUR tip is stale enough
+        /// (BootstrapResetMinStallSeconds — a seed whose chain is moving refuses), and only for a
+        /// record that derives from OUR head with the exact seed set. Membership in the previous
+        /// set is deliberately NOT required: the previous set is the thing that cannot be reached.
+        /// </summary>
+        private static RecordSignature? HandleBootstrapResetSignRequest(MembershipSignRequest request, CasterMembershipRecord head)
+        {
+            var candidate = request.Candidate!;
+            if (!Globals.IsLocalBootstrapCaster || string.IsNullOrEmpty(Globals.ValidatorAddress))
+                return null;
+            if (BootstrapCoordinationService.State != BootstrapCoordinationService.BootstrapState.Agreed)
+                return null;
+            if (candidate.RecordSeq != head.RecordSeq + 1) return null;
+            if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
+            if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
+            if (CasterMembershipStore.ComputeRecordHash(candidate) != candidate.RecordHash) return null;
+
+            // Same set + stale-tip rule the append path enforces (signatures are checked at append).
+            var tipAge = CasterMembershipStore.TipAgeSeconds();
+            if (tipAge < CasterMembershipStore.BootstrapResetMinStallSeconds)
+            {
+                CasterLogUtility.Log($"MEMBERSHIP: REFUSED bootstrap-reset co-sign — our tip is {tipAge}s old, chain not stalled here. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                return null;
+            }
+            var expectedSeeds = SeedNodeService.GetBootstrapSeedPeers().Select(p => p.ValidatorAddress).Where(a => !string.IsNullOrEmpty(a)).ToHashSet(StringComparer.Ordinal);
+            var candSet = (candidate.Casters ?? new List<CasterInfo>()).Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
+            if (expectedSeeds.Count == 0 || !expectedSeeds.SetEquals(candSet)) return null;
+
+            var account = AccountData.GetLocalValidator();
+            if (account?.GetPrivKey == null) return null;
+            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
+            {
+                CasterLogUtility.Log($"MEMBERSHIP: REFUSED bootstrap-reset double-sign at seq {candidate.RecordSeq}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                return null;
+            }
+            var payload = CasterMembershipStore.CanonicalPayload(candidate);
+            var sig = SignatureService.CreateSignature(payload, account.GetPrivKey, account.PublicKey);
+            if (sig == "ERROR") return null;
+            CasterLogUtility.Log($"MEMBERSHIP: co-signed BOOTSTRAP-RESET seq={candidate.RecordSeq} (tip {tipAge}s stale) for proposer {request.ProposerAddress}.", "MEMBERSHIP");
             return new RecordSignature { SignerAddress = Globals.ValidatorAddress, Signature = sig };
         }
 
