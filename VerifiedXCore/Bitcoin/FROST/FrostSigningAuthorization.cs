@@ -133,8 +133,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 }
                 else
                 {
-                    var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh);
-                    var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellation(wrh);
+                    // Contract-scoped: a multi-contract withdrawal opens one row per vault under
+                    // one REQUEST hash, and this ceremony signs exactly one vault's transaction.
+                    // The hash alone would return an arbitrary sibling (wrong amount cap, and
+                    // IsWithdrawalSignable would reject on the contract mismatch), and a
+                    // cancellation filed against another vault's share would block this one.
+                    var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, request.SmartContractUID);
+                    var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellation(
+                        wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), request.SmartContractUID);
                     var (signable, signableReason) = IsWithdrawalSignable(wr, request.SmartContractUID, pendingCancellation);
                     if (!signable) return (false, signableReason);
                     destination = wr!.BTCDestination;

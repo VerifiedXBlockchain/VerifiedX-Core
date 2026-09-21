@@ -1723,7 +1723,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                                 // Verify the withdrawal request exists in local DB and is not completed
                                 var withdrawalReq = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest
-                                    .GetByTransactionHash(request.WithdrawalRequestHash);
+                                    .GetByTransactionHash(request.WithdrawalRequestHash, request.SmartContractUID);
                                 if (withdrawalReq != null && withdrawalReq.IsCompleted)
                                 {
                                     LogUtility.Log($"[FROST Dedup] BLOCKED: Withdrawal already completed on-chain: {request.WithdrawalRequestHash}",

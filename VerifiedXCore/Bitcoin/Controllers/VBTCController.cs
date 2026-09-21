@@ -1551,6 +1551,95 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// Request a withdrawal of a TOTAL vBTC amount to one Bitcoin address, auto-allocated
+        /// across every contract the requestor holds a balance on. One VFX transaction opens the
+        /// whole withdrawal; each allocated contract is then paid out by its own Bitcoin
+        /// transaction (see CompleteWithdrawalMulti), so the requestor pays one miner fee per
+        /// contract used and the payout can settle partially.
+        /// </summary>
+        /// <param name="payload">Withdrawal request details (SmartContractUID is ignored)</param>
+        /// <returns>The request hash plus the per-contract allocation the request opened</returns>
+        [HttpPost("RequestWithdrawalMulti")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> RequestWithdrawalMulti([FromBody] VBTCWithdrawalPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.RequestorAddress) || string.IsNullOrEmpty(payload.BTCAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                if (payload.Amount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Amount must be greater than zero" });
+
+                if (payload.FeeRate <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
+
+                var (success, result, allocations) = await Services.VBTCService.RequestWithdrawalMulti(
+                    payload.RequestorAddress,
+                    payload.BTCAddress,
+                    payload.Amount,
+                    payload.FeeRate
+                );
+
+                if (!success)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result });
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "vBTC V2 multi-contract withdrawal request created successfully",
+                    RequestHash = result,
+                    TotalAmount = payload.Amount,
+                    Destination = payload.BTCAddress,
+                    FeeRate = payload.FeeRate,
+                    Allocations = allocations,
+                    BitcoinTransactions = allocations?.Count ?? 0,
+                    Status = "Requested"
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Complete every outstanding share of a withdrawal request: one FROST ceremony, one
+        /// Bitcoin transaction and one WITHDRAWAL_COMPLETE per contract. Shares are independent —
+        /// a share that fails leaves the others paid and can simply be retried by calling this
+        /// again. Works for single-contract requests too (one share).
+        /// </summary>
+        [HttpPost("CompleteWithdrawalMulti")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> CompleteWithdrawalMulti([FromBody] VBTCWithdrawalCompleteMultiPayload payload)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "WithdrawalRequestHash is required" });
+
+                var (allSucceeded, results) = await Services.VBTCService.CompleteWithdrawalMulti(payload.WithdrawalRequestHash);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = allSucceeded,
+                    Message = allSucceeded
+                        ? "All withdrawal shares completed"
+                        : $"{results.Count(r => r.Success)}/{results.Count} withdrawal share(s) completed; retry to finish the rest",
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    Results = results
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
         /// Complete withdrawal by coordinating FROST MPC signing and broadcasting Bitcoin transaction.
         /// Unified MPC: Any VFX wallet owner can coordinate directly — no delegation needed.
         /// </summary>
@@ -1695,7 +1784,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (payload.Approve)
                 {
                     var trackerSigned = Services.FrostWithdrawalSigningTracker.HasSignedTransaction(cancellation.SmartContractUID, cancellation.WithdrawalRequestHash);
-                    var localRow = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash);
+                    var localRow = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash, cancellation.SmartContractUID);
                     var (canApprove, refuseReason) = Services.CancellationVoteGuard.CanApprove(trackerSigned, localRow);
                     if (!canApprove)
                     {
@@ -1932,8 +2021,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "WithdrawalRequestHash is required" });
 
-                // Look up withdrawal request to return details for confirmation
-                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash);
+                // Look up withdrawal request to return details for confirmation. Contract-scoped:
+                // a multi-contract request has one row per vault under this hash, and this prepares
+                // the ceremony for one of them.
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash, payload.SmartContractUID);
                 decimal amount = 0;
                 string btcDestination = "";
                 int feeRate = 10;
@@ -2382,6 +2473,145 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// Build an unsigned MULTI-CONTRACT VBTC_V2_TRANSFER
+        /// (Data.Function "TransferVBTCMultiV2()") for offline signing — the raw counterpart of
+        /// TransferVBTCMulti, for wallets that hold their own keys. No local account or private key
+        /// is needed: the wallet signs the returned Hash and submits it through the existing
+        /// SendRawTransferVBTCTx.
+        ///
+        /// Supply Inputs explicitly (recommended: the wallet knows its own holdings, and the
+        /// per-contract preflight here reads the STATE TREI, so it works for contracts this node
+        /// holds no local record of). Omit Inputs to let the node auto-allocate, which can only see
+        /// contracts in its LOCAL table.
+        /// Reserve (xRBX) senders are not supported — the reserve deferred-apply lifecycle is keyed
+        /// on the single-contract shape, and consensus rejects reserve multi senders.
+        /// </summary>
+        [HttpPost("GetRawTransferVBTCMultiData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawTransferVBTCMultiData([FromBody] VBTCTransferMultiRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.FromAddress) || string.IsNullOrEmpty(payload.ToAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FromAddress and ToAddress are required" });
+
+                if (payload.FromAddress.StartsWith("xRBX"))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Reserve accounts cannot use multi-contract vBTC transfers. Send from a single contract instead." });
+
+                if (payload.TotalAmount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "TotalAmount must be greater than zero" });
+
+                if (payload.TotalAmount != Math.Round(payload.TotalAmount, 8))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "TotalAmount cannot have more than 8 decimal places" });
+
+                var toAddress = payload.ToAddress.ToAddressNormalize();
+
+                if (toAddress.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Multi-contract vBTC transfers cannot send to a shielded address." });
+
+                // Caller-supplied allocation (preflighted against the state trei) or node-side plan.
+                List<VBTCV2MultiTransferInput> allocations;
+                if (payload.Inputs != null && payload.Inputs.Any())
+                {
+                    var (allocOk, allocError) = await Services.VBTCService.ValidateTransferAllocations(
+                        payload.FromAddress, payload.Inputs, payload.TotalAmount);
+                    if (!allocOk)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = allocError });
+
+                    allocations = payload.Inputs;
+                }
+                else
+                {
+                    var (planOk, planError, planned) = await Services.VBTCService.BuildTransferAllocationPlan(
+                        payload.FromAddress, payload.TotalAmount);
+                    if (!planOk)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = planError });
+
+                    allocations = planned;
+                }
+
+                var nextHeight = (Globals.LastBlock?.Height ?? 0) + 1;
+
+                // One contract covers it — emit the SINGLE shape. Identical on-chain result, and it
+                // stays valid below the multi activation height.
+                string txData;
+                bool isMultiShape;
+                if (allocations.Count == 1)
+                {
+                    isMultiShape = false;
+                    txData = JsonConvert.SerializeObject(new
+                    {
+                        Function = "TransferVBTCV2()",
+                        ContractUID = allocations[0].SCUID,
+                        FromAddress = payload.FromAddress,
+                        ToAddress = toAddress,
+                        Amount = allocations[0].Amount
+                    });
+                }
+                else
+                {
+                    if (nextHeight < Globals.V2TransferMultiHeight)
+                        return JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = $"Multi-contract vBTC transfers are not active on this network yet (activates at block {Globals.V2TransferMultiHeight}, current {Globals.LastBlock?.Height ?? 0}). Send from a single contract instead.",
+                            ActivationHeight = Globals.V2TransferMultiHeight,
+                            CurrentHeight = Globals.LastBlock?.Height ?? 0
+                        });
+
+                    if (allocations.Count > Services.VBTCService.MaxMultiTransferInputs)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Transfer would require {allocations.Count} contract inputs (max {Services.VBTCService.MaxMultiTransferInputs}). Send a smaller amount or consolidate first." });
+
+                    isMultiShape = true;
+                    txData = Services.VBTCService.BuildMultiTransferTxData(
+                        payload.FromAddress, toAddress, payload.TotalAmount, allocations);
+                }
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.FromAddress,
+                    ToAddress = toAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.FromAddress),
+                    TransactionType = TransactionType.VBTC_V2_TRANSFER,
+                    Data = txData
+                };
+
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    ToAddress = tx.ToAddress,
+                    Amount = tx.Amount,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Function = isMultiShape ? Services.VBTCService.MultiTransferFunction : "TransferVBTCV2()",
+                    IsMultiContract = isMultiShape,
+                    Allocations = allocations,
+                    TotalAmount = payload.TotalAmount,
+                    Message = "Sign the Hash field with your private key (ECDSA secp256k1, UTF-8 encoded hash string) and submit via SendRawTransferVBTCTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
         /// Submit a pre-signed VBTC_V2_TRANSFER transaction.
         /// </summary>
         [HttpPost("SendRawTransferVBTCTx")]
@@ -2524,6 +2754,196 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Nonce = tx.Nonce,
                     TransactionType = tx.TransactionType.ToString(),
                     Message = "Sign the Hash field and submit via SendRawRequestWithdrawalTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Build an unsigned MULTI-CONTRACT VBTC_V2_WITHDRAWAL_REQUEST
+        /// (Data.Function "VBTCWithdrawalRequestMultiV2()") for offline signing — the raw
+        /// counterpart of RequestWithdrawalMulti, for wallets that hold their own keys.
+        /// No local account or private key is needed: the wallet signs the returned Hash and
+        /// submits it through the existing SendRawRequestWithdrawalTx.
+        ///
+        /// Supply Inputs explicitly (recommended: the wallet knows its own holdings, and the
+        /// per-contract preflight here reads the STATE TREI, so it works for contracts this node
+        /// holds no local record of). Omit Inputs to let the node auto-allocate, which can only
+        /// see contracts in its LOCAL table.
+        /// </summary>
+        [HttpPost("GetRawRequestWithdrawalMultiTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawRequestWithdrawalMultiTxData([FromBody] VBTCWithdrawalMultiRawPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+
+                if (string.IsNullOrEmpty(payload.RequestorAddress) || string.IsNullOrEmpty(payload.BTCAddress))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "RequestorAddress and BTCAddress are required" });
+
+                if (payload.RequestorAddress.StartsWith("xRBX"))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first." });
+
+                if (payload.TotalAmount <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "TotalAmount must be greater than zero" });
+
+                if (payload.TotalAmount != Math.Round(payload.TotalAmount, 8))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "TotalAmount cannot have more than 8 decimal places" });
+
+                if (payload.FeeRate <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "FeeRate must be greater than zero" });
+
+                // Caller-supplied allocation (preflighted against the state trei) or node-side plan.
+                List<VBTCV2MultiWithdrawalInput> allocations;
+                if (payload.Inputs != null && payload.Inputs.Any())
+                {
+                    var (allocOk, allocError) = await Services.VBTCService.ValidateWithdrawalAllocations(
+                        payload.RequestorAddress, payload.Inputs, payload.TotalAmount);
+                    if (!allocOk)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = allocError });
+
+                    allocations = payload.Inputs;
+                }
+                else
+                {
+                    var (planOk, planError, planned) = await Services.VBTCService.BuildWithdrawalAllocationPlan(
+                        payload.RequestorAddress, payload.TotalAmount);
+                    if (!planOk)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = planError });
+
+                    allocations = planned;
+                }
+
+                var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
+
+                // One vault covers it — emit the SINGLE shape; identical on-chain result for one
+                // contract.
+                string txData;
+                bool isMultiShape;
+                if (allocations.Count == 1)
+                {
+                    isMultiShape = false;
+                    txData = JsonConvert.SerializeObject(new
+                    {
+                        Function = "VBTCWithdrawalRequest()",
+                        ContractUID = allocations[0].SCUID,
+                        RequestorAddress = payload.RequestorAddress,
+                        BTCAddress = btcAddress,
+                        Amount = allocations[0].Amount,
+                        FeeRate = payload.FeeRate,
+                        UniqueId = !string.IsNullOrEmpty(payload.UniqueId) ? payload.UniqueId : null
+                    });
+                }
+                else
+                {
+                    if (allocations.Count > Services.VBTCService.MaxMultiWithdrawalInputs)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Withdrawal would require {allocations.Count} contract inputs (max {Services.VBTCService.MaxMultiWithdrawalInputs}). Withdraw a smaller amount or consolidate first." });
+
+                    isMultiShape = true;
+                    txData = Services.VBTCService.BuildMultiWithdrawalTxData(
+                        payload.RequestorAddress, btcAddress, payload.TotalAmount, payload.FeeRate, allocations, payload.UniqueId);
+                }
+
+                var tx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = payload.RequestorAddress,
+                    ToAddress = payload.RequestorAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(payload.RequestorAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                    Data = txData
+                };
+
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    Function = isMultiShape ? Services.VBTCService.MultiWithdrawalFunction : "VBTCWithdrawalRequest()",
+                    IsMultiContract = isMultiShape,
+                    Allocations = allocations,
+                    // Each allocated vault is paid out by its OWN Bitcoin transaction, so FeeRate is
+                    // charged once per entry here — surfaced so the wallet can show the real cost.
+                    BitcoinTransactions = allocations.Count,
+                    TotalAmount = payload.TotalAmount,
+                    Destination = btcAddress,
+                    Message = "Sign the Hash field and submit via SendRawRequestWithdrawalTx. Once mined, complete EACH contract in Allocations via PrepareCompleteWithdrawalRaw/ExecuteCompleteWithdrawalRaw (or list them with GetWithdrawalRequestShares)."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// The per-contract shares a (possibly multi-contract) withdrawal REQUEST opened, with each
+        /// share's completion state. A multi request mints one row per vault under a single REQUEST
+        /// tx hash, and each is signed and paid out separately — this is how an offline wallet
+        /// discovers which SmartContractUIDs to drive through
+        /// PrepareCompleteWithdrawalRaw/ExecuteCompleteWithdrawalRaw, and which still remain.
+        /// Rows appear once the REQUEST is MINED.
+        /// </summary>
+        [HttpGet("GetWithdrawalRequestShares/{withdrawalRequestHash}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public string GetWithdrawalRequestShares(string withdrawalRequestHash)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(withdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "WithdrawalRequestHash is required" });
+
+                var rows = VBTCWithdrawalRequest.GetAllByTransactionHash(withdrawalRequestHash);
+                if (!rows.Any())
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"No withdrawal shares found for {withdrawalRequestHash}. The REQUEST transaction may not be mined yet.",
+                        WithdrawalRequestHash = withdrawalRequestHash,
+                        Shares = Array.Empty<object>()
+                    });
+
+                var shares = rows.Select(r => new
+                {
+                    r.SmartContractUID,
+                    r.Amount,
+                    r.BTCDestination,
+                    r.FeeRate,
+                    r.IsCompleted,
+                    Status = r.Status.ToString(),
+                    r.BTCTxHash,
+                    r.RequestBlockHeight,
+                    r.LastSigningFailureCode,
+                    HasPinnedBuild = !string.IsNullOrEmpty(r.PinnedCoinsJson)
+                }).ToList();
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    WithdrawalRequestHash = withdrawalRequestHash,
+                    RequestorAddress = rows[0].RequestorAddress,
+                    IsMultiContract = rows.Count > 1,
+                    TotalAmount = rows.Sum(r => r.Amount),
+                    ShareCount = rows.Count,
+                    CompletedCount = rows.Count(r => r.IsCompleted),
+                    AllComplete = rows.All(r => r.IsCompleted),
+                    Shares = shares
                 });
             }
             catch (Exception ex)
@@ -2712,8 +3132,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
-                // Verify the withdrawal request exists and belongs to this user
-                var existingRequest = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash);
+                // Verify the withdrawal request exists and belongs to this user (contract-scoped:
+                // each vault's share of a multi-contract withdrawal cancels independently)
+                var existingRequest = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash, payload.SmartContractUID);
                 if (existingRequest == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Withdrawal request not found: {payload.WithdrawalRequestHash}" });
 
@@ -4611,6 +5032,26 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public decimal Amount { get; set; }
     }
 
+    /// <summary>
+    /// Payload for GetRawTransferVBTCMultiData — the offline-signing counterpart of
+    /// TransferVBTCMulti. No SmartContractUID: the contracts come from <see cref="Inputs"/>, or are
+    /// chosen by the node when Inputs is omitted.
+    /// </summary>
+    public class VBTCTransferMultiRawPayload
+    {
+        /// <summary>The sending VFX address; it signs the returned Hash offline.</summary>
+        public string FromAddress { get; set; }
+        public string ToAddress { get; set; }
+        /// <summary>Total vBTC to send — must equal the sum of Inputs when Inputs is supplied.</summary>
+        public decimal TotalAmount { get; set; }
+        /// <summary>
+        /// Explicit per-contract allocation. Recommended for wallets holding their own keys: it is
+        /// preflighted against the state trei, so it works for contracts this node has no local
+        /// record of. Omit to let the node allocate from its local contract table.
+        /// </summary>
+        public List<VBTCV2MultiTransferInput>? Inputs { get; set; }
+    }
+
     public class VBTCTransferMultiPayload
     {
         public string FromAddress { get; set; }
@@ -4620,6 +5061,39 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// contracts (largest available balance first) into one transaction.
         /// </summary>
         public decimal TotalAmount { get; set; }
+    }
+
+    /// <summary>
+    /// Payload for GetRawRequestWithdrawalMultiTxData — the offline-signing counterpart of
+    /// RequestWithdrawalMulti. No SmartContractUID: the vaults come from <see cref="Inputs"/>, or
+    /// are chosen by the node when Inputs is omitted.
+    /// </summary>
+    public class VBTCWithdrawalMultiRawPayload
+    {
+        /// <summary>The VFX address requesting the withdrawal; it signs the returned Hash offline.</summary>
+        public string RequestorAddress { get; set; }
+        public string BTCAddress { get; set; }
+        /// <summary>Total vBTC to withdraw — must equal the sum of Inputs when Inputs is supplied.</summary>
+        public decimal TotalAmount { get; set; }
+        /// <summary>Bitcoin fee rate (sats/vB), charged once PER allocated contract.</summary>
+        public int FeeRate { get; set; }
+        /// <summary>
+        /// Explicit per-contract allocation. Recommended for wallets holding their own keys: it is
+        /// preflighted against the state trei, so it works for contracts this node has no local
+        /// record of. Omit to let the node allocate from its local contract table.
+        /// </summary>
+        public List<VBTCV2MultiWithdrawalInput>? Inputs { get; set; }
+        /// <summary>
+        /// Optional client-generated unique id, carried into tx.Data so a RequestWithdrawalRaw
+        /// pre-registration row is updated at mine time instead of duplicated.
+        /// </summary>
+        public string? UniqueId { get; set; }
+    }
+
+    /// <summary>Payload for CompleteWithdrawalMulti — the REQUEST tx hash identifies every share.</summary>
+    public class VBTCWithdrawalCompleteMultiPayload
+    {
+        public string WithdrawalRequestHash { get; set; }
     }
 
     public class VBTCWithdrawalPayload

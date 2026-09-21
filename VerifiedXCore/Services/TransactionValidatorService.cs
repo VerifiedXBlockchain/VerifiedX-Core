@@ -27,6 +27,158 @@ namespace VerifiedXCore.Services
         /// as a replay-guard result rather than a state-trie problem.</summary>
         public const string TX_ALREADY_SENT_REASON = "This transactions has already been sent.";
 
+        /// <summary>
+        /// Consensus validation for a vBTC V2 multi-contract withdrawal request
+        /// (Function "VBTCWithdrawalRequestMultiV2()"). Semantics are exactly those of N single
+        /// withdrawal requests: per-contract existence, the per-contract active-request gate, the
+        /// per-requestor repeat cooldown and the identical owner/non-owner balance formula — the
+        /// only thing shared across inputs is the requester, the destination and the fee rate.
+        /// </summary>
+        private static async Task<(bool Ok, string Reason)> ValidateVbtcV2MultiWithdrawalRequest(
+            Transaction txRequest, JObject jobj, long? blockHeight, bool blockDownloads, bool blockVerify)
+        {
+            var requesterAddress = txRequest.FromAddress;
+
+            // Reserve-held vBTC is locked: its only exit is a V2 transfer back to a normal VFX
+            // address — same rule as the single shape.
+            if (requesterAddress.StartsWith("xRBX"))
+                return (false, "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first.");
+
+            // Hybrid hygiene: post-gate a multi TX must not also carry the single shape, so it can
+            // never be interpreted two ways.
+            if (jobj["ContractUID"] != null)
+                return (false, "Multi-contract vBTC withdrawal must not contain a top-level ContractUID.");
+            if (jobj["Amount"] != null)
+                return (false, "Multi-contract vBTC withdrawal must not contain a top-level Amount; use TotalAmount and Inputs.");
+
+            var btcAddress = jobj["BTCAddress"]?.ToObject<string>();
+            var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+            var totalAmount = jobj["TotalAmount"]?.ToObject<decimal?>();
+            var inputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiWithdrawalInput>>();
+
+            if (string.IsNullOrEmpty(btcAddress) || !feeRate.HasValue)
+                return (false, "Missing required fields for multi-contract vBTC withdrawal (BTCAddress, FeeRate).");
+
+            if (feeRate.Value <= 0)
+                return (false, "FeeRate must be greater than zero for multi-contract vBTC withdrawal.");
+
+            if (inputs == null || !inputs.Any())
+                return (false, "Inputs cannot be empty for multi-contract vBTC withdrawal.");
+
+            if (inputs.Count > Bitcoin.Services.VBTCService.MaxMultiWithdrawalInputs)
+                return (false, $"Multi-contract vBTC withdrawal exceeds the maximum of {Bitcoin.Services.VBTCService.MaxMultiWithdrawalInputs} inputs.");
+
+            // Duplicate SCUIDs would let each input pass an individual balance check while jointly
+            // overspending the contract — and would mint two rows the per-contract gate can't tell
+            // apart.
+            if (inputs.Select(x => x.SCUID).Distinct().Count() != inputs.Count)
+                return (false, "Multi-contract vBTC withdrawal inputs must reference distinct contracts.");
+
+            decimal inputSum = 0M;
+            foreach (var input in inputs)
+            {
+                if (string.IsNullOrEmpty(input.SCUID))
+                    return (false, "Input SCUID cannot be null for multi-contract vBTC withdrawal.");
+                if (input.Amount <= 0)
+                    return (false, "Input amounts must be greater than zero for multi-contract vBTC withdrawal.");
+                if (input.Amount != Math.Round(input.Amount, 8))
+                    return (false, "Input amounts cannot have more than 8 decimal places for multi-contract vBTC withdrawal.");
+                inputSum += input.Amount;
+            }
+
+            if (!totalAmount.HasValue || totalAmount.Value != inputSum)
+                return (false, "TotalAmount must equal the sum of input amounts for multi-contract vBTC withdrawal.");
+
+            var gateHeight = blockHeight ?? Globals.LastBlock?.Height ?? 0;
+
+            // Per-CONTRACT mempool guard (same-block defense), MEMPOOL ADMISSION ONLY: mempool
+            // contents are per-node, so a node still holding a losing duplicate must never reject a
+            // block its peers accepted. Determinism post-mine comes from HasActiveContractRequest.
+            HashSet<string> pendingContracts = new HashSet<string>(StringComparer.Ordinal);
+            if (!blockVerify && !blockDownloads)
+            {
+                var mempool = TransactionData.GetPool();
+                var pendingWithdrawals = mempool.Query().Where(x =>
+                    x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
+                    x.Hash != txRequest.Hash
+                ).ToList();
+
+                foreach (var existingTx in pendingWithdrawals)
+                {
+                    foreach (var (pendingScUid, _) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(existingTx))
+                        pendingContracts.Add(pendingScUid);
+                }
+            }
+
+            foreach (var input in inputs)
+            {
+                var scState = SmartContractStateTrei.GetSmartContractState(input.SCUID);
+                if (scState == null)
+                    return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
+
+                // S3C §0: per-CONTRACT active-withdrawal gate. includeLocalOnlyRows: false —
+                // consensus must not read rows that exist on this node only (fork vector).
+                if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, gateHeight, includeLocalOnlyRows: false))
+                    return (false, $"A withdrawal is already in progress for contract {input.SCUID}; try again once it completes.");
+
+                if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, input.SCUID, gateHeight))
+                    return (false, $"Requestor {requesterAddress} has a recently expired incomplete withdrawal on contract {input.SCUID} and is in the repeat-request cooldown ({VBTCWithdrawalRequest.REPEAT_REQUEST_COOLDOWN_BLOCKS} blocks).");
+
+                if (pendingContracts.Contains(input.SCUID))
+                    return (false, $"A withdrawal request for contract {input.SCUID} is already pending in the mempool.");
+
+                // Balance: identical formula to the single shape, per input contract.
+                bool isRequesterOwner = requesterAddress == scState.OwnerAddress;
+                decimal ledgerBalance = 0M;
+
+                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                {
+                    var ledgerRows = scState.SCStateTreiTokenizationTXes
+                        .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
+                        .ToList();
+                    if (ledgerRows.Any())
+                        ledgerBalance = ledgerRows.Sum(x => x.Amount);
+                }
+
+                decimal totalBalance = ledgerBalance;
+                if (isRequesterOwner)
+                {
+                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress, gateHeight);
+
+                    decimal depositBalance = 0M;
+                    if (!blockDownloads && !blockVerify)
+                    {
+                        var depositAddr = Bitcoin.Services.VBTCService.ResolveDepositAddress(scState, null);
+                        if (!string.IsNullOrEmpty(depositAddr))
+                        {
+                            try
+                            {
+                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                if (elxClient != null)
+                                {
+                                    var bal = await elxClient.GetBalance(depositAddr, false);
+                                    depositBalance = bal.Confirmed / 100_000_000M;
+                                }
+                            }
+                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
+                        }
+                    }
+
+                    totalBalance = depositBalance + ledgerBalance;
+                }
+
+                if (totalBalance < input.Amount)
+                {
+                    // Owner branch at block verification trusts the crafter's ElectrumX check —
+                    // same rule as the single shape.
+                    if (!(isRequesterOwner && blockVerify))
+                        return (false, $"Insufficient vBTC balance for withdrawal input {input.SCUID}. Available: {totalBalance}, Requested: {input.Amount}");
+                }
+            }
+
+            return (true, string.Empty);
+        }
+
         public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null)
         {
             bool txResult = false;
@@ -2900,146 +3052,184 @@ namespace VerifiedXCore.Services
                     try
                     {
                         var jobj = JObject.Parse(txData);
-                        var scUID = jobj["ContractUID"]?.ToObject<string>();
-                        var btcAddress = jobj["BTCAddress"]?.ToObject<string>();
-                        var amount = jobj["Amount"]?.ToObject<decimal?>();
-                        var feeRate = jobj["FeeRate"]?.ToObject<int?>();
 
-                        // FIND-002 FIX: Use tx.FromAddress as the requester (IGNORE tx.Data.OwnerAddress)
-                        var requesterAddress = txRequest.FromAddress;
-
-                        // Reserve-held vBTC is locked: its only exit is a V2 transfer back to a
-                        // normal VFX address. BTC withdrawals from a reserve address are denied.
-                        if (requesterAddress.StartsWith("xRBX"))
-                            return (txResult, "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first.");
-
-                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) ||
-                            !amount.HasValue || !feeRate.HasValue)
-                            return (txResult, "Missing required fields for withdrawal request (ContractUID, BTCAddress, Amount, FeeRate).");
-
-                        // Validate contract exists via state trei (available on ALL nodes, not just local)
-                        var scState = SmartContractStateTrei.GetSmartContractState(scUID);
-                        if (scState == null)
-                            return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
-
-                        // S3C §0: per-CONTRACT active-withdrawal gate (was per-user) — rejects if
-                        // the contract already has a mined active request (anti-grief expiry inside).
-                        // includeLocalOnlyRows: false — consensus must not read rows that exist on
-                        // this node only (fork vector; activates at V2WithdrawalExpiryFixHeight).
-                        if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, Globals.LastBlock?.Height ?? 0, includeLocalOnlyRows: false))
-                            return (txResult, $"A withdrawal is already in progress for contract {scUID}; try again once it completes.");
-
-                        // Anti-griefing (V2WithdrawalExpiryFixHeight): a requestor whose previous
-                        // request on this contract expired incomplete sits out a cooldown before
-                        // requesting again — otherwise one address can relock a shared contract
-                        // every 360 blocks indefinitely.
-                        if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, Globals.LastBlock?.Height ?? 0))
-                            return (txResult, $"Requestor {requesterAddress} has a recently expired incomplete withdrawal on contract {scUID} and is in the repeat-request cooldown ({VBTCWithdrawalRequest.REPEAT_REQUEST_COOLDOWN_BLOCKS} blocks).");
-
-                        // S3C §0: per-CONTRACT mempool guard (same-block defense) — reject if ANY
-                        // withdrawal request for this contract, from any requester, is already pending.
-                        var mempool = TransactionData.GetPool();
-                        var pendingWithdrawals = mempool.Query().Where(x =>
-                            x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
-                            x.Hash != txRequest.Hash
-                        ).ToList();
-
-                        foreach (var existingTx in pendingWithdrawals)
+                        // vBTC V2 multi-contract withdrawal request: ONE TX opening a withdrawal
+                        // across N contracts (Inputs array) to a single Bitcoin destination, each
+                        // paid out later by its own Bitcoin transaction. Dispatch keys on Function
+                        // alone, on BOTH validation (here) and state apply (StateData) — NOT
+                        // height-gated, by decision: the fleet is upgraded together, so the first
+                        // mined multi request is simply a hard requirement that every node runs a
+                        // binary that knows this Function (an older binary rejects the shape with
+                        // the single-shape "Missing required fields" error and forks).
+                        var vbtcWdFunction = jobj["Function"]?.ToObject<string>();
+                        if (vbtcWdFunction == Bitcoin.Services.VBTCService.MultiWithdrawalFunction)
                         {
-                            try
-                            {
-                                var existingData = JObject.Parse(existingTx.Data);
-                                var existingScUID = existingData["ContractUID"]?.ToObject<string>();
-                                if (existingScUID == scUID)
-                                {
-                                    return (txResult, $"A withdrawal request for contract {scUID} is already pending in the mempool.");
-                                }
-                            }
-                            catch { }
-                        }
-
-                        // Validate balance for requesterAddress (tx.FromAddress) — reuse scState from above
-                        if (scState != null)
-                        {
-                            bool isRequesterOwner = requesterAddress == scState.OwnerAddress;
-                            decimal ledgerBalance = 0M;
-
-                            if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                            {
-                                var transactions = scState.SCStateTreiTokenizationTXes
-                                    .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
-                                    .ToList();
-
-                                if (transactions.Any())
-                                {
-                                    ledgerBalance = transactions.Sum(x => x.Amount);
-                                }
-                            }
-
-                            decimal totalBalance = ledgerBalance;
-                            if (isRequesterOwner)
-                            {
-                                // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
-                                // bridge locks stay debited; only withdrawal burns (already reflected in the
-                                // ElectrumX deposit balance) are cancelled out.
-                                ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
-
-                                // Get deposit address from state trei contract data (available on ALL nodes)
-                                decimal depositBalance = 0M;
-                                string wdDepositAddr = null;
-                                var scMainWd = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
-                                if (scMainWd?.Features != null)
-                                {
-                                    var tknzV2Wd = scMainWd.Features
-                                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                                        .Select(x => x.FeatureFeatures).FirstOrDefault();
-                                    if (tknzV2Wd != null)
-                                        wdDepositAddr = ((TokenizationV2Feature)tknzV2Wd).DepositAddress;
-                                }
-
-                                if (!string.IsNullOrEmpty(wdDepositAddr))
-                                {
-                                    // Skip live ElectrumX during block verification too (matches the
-                                    // transfer/bridge sites): the owner-shortfall check below is bypassed
-                                    // under blockVerify regardless of the queried value, so the query was
-                                    // pure nondeterministic network I/O at block acceptance time.
-                                    if (!blockDownloads && !blockVerify)
-                                    {
-                                        try
-                                        {
-                                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
-                                            if (elxClient != null)
-                                            {
-                                                var bal = await elxClient.GetBalance(wdDepositAddr, false);
-                                                depositBalance = bal.Confirmed / 100_000_000M;
-                                            }
-                                        }
-                                        catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
-                                    }
-                                }
-                                totalBalance = depositBalance + ledgerBalance;
-                            }
-
-                            if (totalBalance < amount.Value)
-                            {
-                                // During block verification, skip deposit balance check for the owner.
-                                // The block crafter already verified via ElectrumX during mempool admission.
-                                // Deposit balance is external Bitcoin chain state — if ElectrumX is temporarily
-                                // unavailable during block validation, we trust the crafter's prior verification.
-                                // This matches the v1 TransferCoin() pattern where owner balance is not checked.
-                                if (isRequesterOwner && blockVerify)
-                                {
-                                    // Trust the block crafter's ElectrumX verification
-                                }
-                                else
-                                {
-                                    return (txResult, $"Insufficient vBTC balance. Available: {totalBalance}, Requested: {amount.Value}");
-                                }
-                            }
+                            var (multiOk, multiReason) = await ValidateVbtcV2MultiWithdrawalRequest(
+                                txRequest, jobj, blockHeight, blockDownloads, blockVerify);
+                            if (!multiOk)
+                                return (txResult, multiReason);
                         }
                         else
                         {
-                            return (txResult, $"No vBTC state found for contract {scUID}.");
+                            var scUID = jobj["ContractUID"]?.ToObject<string>();
+                            var btcAddress = jobj["BTCAddress"]?.ToObject<string>();
+                            var amount = jobj["Amount"]?.ToObject<decimal?>();
+                            var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+
+                            // FIND-002 FIX: Use tx.FromAddress as the requester (IGNORE tx.Data.OwnerAddress)
+                            var requesterAddress = txRequest.FromAddress;
+
+                            // Reserve-held vBTC is locked: its only exit is a V2 transfer back to a
+                            // normal VFX address. BTC withdrawals from a reserve address are denied.
+                            if (requesterAddress.StartsWith("xRBX"))
+                                return (txResult, "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first.");
+
+                            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) ||
+                                !amount.HasValue || !feeRate.HasValue)
+                                return (txResult, "Missing required fields for withdrawal request (ContractUID, BTCAddress, Amount, FeeRate).");
+
+                            // Validate contract exists via state trei (available on ALL nodes, not just local)
+                            var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                            if (scState == null)
+                                return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+
+                            // S3C §0: per-CONTRACT active-withdrawal gate (was per-user) — rejects if
+                            // the contract already has a mined active request (anti-grief expiry inside).
+                            // includeLocalOnlyRows: false — consensus must not read rows that exist on
+                            // this node only (fork vector; activates at V2WithdrawalExpiryFixHeight).
+                            if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, Globals.LastBlock?.Height ?? 0, includeLocalOnlyRows: false))
+                                return (txResult, $"A withdrawal is already in progress for contract {scUID}; try again once it completes.");
+
+                            // Anti-griefing (V2WithdrawalExpiryFixHeight): a requestor whose previous
+                            // request on this contract expired incomplete sits out a cooldown before
+                            // requesting again — otherwise one address can relock a shared contract
+                            // every 360 blocks indefinitely.
+                            if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, Globals.LastBlock?.Height ?? 0))
+                                return (txResult, $"Requestor {requesterAddress} has a recently expired incomplete withdrawal on contract {scUID} and is in the repeat-request cooldown ({VBTCWithdrawalRequest.REPEAT_REQUEST_COOLDOWN_BLOCKS} blocks).");
+
+                            // S3C §0: per-CONTRACT mempool guard (same-block defense) — reject if ANY
+                            // withdrawal request for this contract, from any requester, is already pending.
+                            var mempool = TransactionData.GetPool();
+                            var pendingWithdrawals = mempool.Query().Where(x =>
+                                x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
+                                x.Hash != txRequest.Hash
+                            ).ToList();
+
+                            foreach (var existingTx in pendingWithdrawals)
+                            {
+                                try
+                                {
+                                    var existingData = JObject.Parse(existingTx.Data);
+                                    var existingScUID = existingData["ContractUID"]?.ToObject<string>();
+                                    if (existingScUID == scUID)
+                                    {
+                                        return (txResult, $"A withdrawal request for contract {scUID} is already pending in the mempool.");
+                                    }
+                                }
+                                catch { }
+                            }
+
+                            // A pending MULTI request carries no top-level ContractUID, so the loop
+                            // above cannot see the vaults it already claims. MEMPOOL ADMISSION ONLY
+                            // (never at block verify/download): mempool contents are per-node, and a
+                            // node holding the losing duplicate must not reject a block its peers
+                            // accepted. Post-mine determinism comes from HasActiveContractRequest and
+                            // the block-scoped guard in BlockValidatorService.
+                            if (!blockVerify && !blockDownloads)
+                            {
+                                foreach (var existingTx in pendingWithdrawals)
+                                {
+                                    foreach (var (pendingScUid, _) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(existingTx))
+                                    {
+                                        if (pendingScUid == scUID)
+                                            return (txResult, $"A withdrawal request for contract {scUID} is already pending in the mempool.");
+                                    }
+                                }
+                            }
+
+                            // Validate balance for requesterAddress (tx.FromAddress) — reuse scState from above
+                            if (scState != null)
+                            {
+                                bool isRequesterOwner = requesterAddress == scState.OwnerAddress;
+                                decimal ledgerBalance = 0M;
+
+                                if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
+                                {
+                                    var transactions = scState.SCStateTreiTokenizationTXes
+                                        .Where(x => x.FromAddress == requesterAddress || x.ToAddress == requesterAddress)
+                                        .ToList();
+
+                                    if (transactions.Any())
+                                    {
+                                        ledgerBalance = transactions.Sum(x => x.Amount);
+                                    }
+                                }
+
+                                decimal totalBalance = ledgerBalance;
+                                if (isRequesterOwner)
+                                {
+                                    // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
+                                    // bridge locks stay debited; only withdrawal burns (already reflected in the
+                                    // ElectrumX deposit balance) are cancelled out.
+                                    ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
+
+                                    // Get deposit address from state trei contract data (available on ALL nodes)
+                                    decimal depositBalance = 0M;
+                                    string wdDepositAddr = null;
+                                    var scMainWd = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                                    if (scMainWd?.Features != null)
+                                    {
+                                        var tknzV2Wd = scMainWd.Features
+                                            .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                                            .Select(x => x.FeatureFeatures).FirstOrDefault();
+                                        if (tknzV2Wd != null)
+                                            wdDepositAddr = ((TokenizationV2Feature)tknzV2Wd).DepositAddress;
+                                    }
+
+                                    if (!string.IsNullOrEmpty(wdDepositAddr))
+                                    {
+                                        // Skip live ElectrumX during block verification too (matches the
+                                        // transfer/bridge sites): the owner-shortfall check below is bypassed
+                                        // under blockVerify regardless of the queried value, so the query was
+                                        // pure nondeterministic network I/O at block acceptance time.
+                                        if (!blockDownloads && !blockVerify)
+                                        {
+                                            try
+                                            {
+                                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
+                                                if (elxClient != null)
+                                                {
+                                                    var bal = await elxClient.GetBalance(wdDepositAddr, false);
+                                                    depositBalance = bal.Confirmed / 100_000_000M;
+                                                }
+                                            }
+                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
+                                        }
+                                    }
+                                    totalBalance = depositBalance + ledgerBalance;
+                                }
+
+                                if (totalBalance < amount.Value)
+                                {
+                                    // During block verification, skip deposit balance check for the owner.
+                                    // The block crafter already verified via ElectrumX during mempool admission.
+                                    // Deposit balance is external Bitcoin chain state — if ElectrumX is temporarily
+                                    // unavailable during block validation, we trust the crafter's prior verification.
+                                    // This matches the v1 TransferCoin() pattern where owner balance is not checked.
+                                    if (isRequesterOwner && blockVerify)
+                                    {
+                                        // Trust the block crafter's ElectrumX verification
+                                    }
+                                    else
+                                    {
+                                        return (txResult, $"Insufficient vBTC balance. Available: {totalBalance}, Requested: {amount.Value}");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                return (txResult, $"No vBTC state found for contract {scUID}.");
+                            }
                         }
                     }
                     catch (Exception ex)
@@ -3081,7 +3271,9 @@ namespace VerifiedXCore.Services
                         // NOTE: VBTCWithdrawalRequest is a LOCAL DB record — only the wallet node that created
                         // the withdrawal request has it. Remote nodes validating this TX via mempool won't have it.
                         // When not found, fall back to lightweight validation (contract + BTC hash already checked).
-                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                        // Contract-scoped: a multi-contract request mints one row per contract
+                        // under this hash, and this COMPLETE finalizes its own contract's row.
+                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                         if (withdrawalRequest != null)
                         {
                             // Full validation path (local node has the request record)

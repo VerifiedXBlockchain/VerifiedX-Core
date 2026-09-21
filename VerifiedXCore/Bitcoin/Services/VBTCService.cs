@@ -653,6 +653,168 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Greedy allocation of a total transfer across the sender's spendable contracts: largest
+        /// available first (deterministic tie-break on SCUID) so the TX uses the fewest inputs.
+        /// Availability matches the single-transfer preflight, minus incomplete withdrawals and any
+        /// outflows already pending in the local mempool, so we never craft a TX our own overspend
+        /// guards would reject.
+        ///
+        /// Candidate discovery reads the LOCAL VBTCContractV2 table, so it only sees contracts this
+        /// node knows about. Callers serving a REMOTE signer (the raw/offline endpoints) should let
+        /// the wallet supply its own Inputs and validate them with
+        /// <see cref="ValidateTransferAllocations"/>, which reads the state trei and therefore works
+        /// for any contract on any node.
+        /// </summary>
+        public static async Task<(bool Ok, string Error, List<VBTCV2MultiTransferInput> Allocations)> BuildTransferAllocationPlan(
+            string fromAddress, decimal totalAmount)
+        {
+            var allocations = new List<VBTCV2MultiTransferInput>();
+            // Allocate greedily across spendable contracts: largest available first so the TX
+            // uses the fewest inputs (deterministic tie-break on SCUID). Availability matches
+            // the single-transfer preflight, minus incomplete withdrawals and any outflows
+            // already pending in the local mempool so we never craft a TX our own
+            // overspend guards would reject.
+            var pendingByContract = new Dictionary<string, decimal>();
+            try
+            {
+                var pool = TransactionData.GetPool();
+                var pendingTxs = pool.Find(x => x.FromAddress == fromAddress && x.TransactionType == TransactionType.VBTC_V2_TRANSFER).ToList();
+                foreach (var ptx in pendingTxs)
+                {
+                    foreach (var (scUid, amt) in GetVbtcV2TransferOutflows(ptx))
+                    {
+                        pendingByContract.TryGetValue(scUid, out var cur);
+                        pendingByContract[scUid] = cur + amt;
+                    }
+                }
+            }
+            catch { }
+
+            var candidates = new List<(string ScUid, decimal Available)>();
+            var contracts = VBTCContractV2.GetAllContracts();
+            if (contracts != null)
+            {
+                foreach (var contract in contracts)
+                {
+                    var scUid = contract.SmartContractUID;
+                    if (string.IsNullOrEmpty(scUid) || candidates.Any(c => c.ScUid == scUid))
+                        continue;
+
+                    var balResult = await TryGetAvailableTransparentVbtcBalance(scUid, fromAddress);
+                    if (!balResult.success)
+                        continue;
+
+                    var available = balResult.availableBalance;
+                    available -= VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(fromAddress, scUid);
+                    if (pendingByContract.TryGetValue(scUid, out var pendingOut))
+                        available -= pendingOut;
+
+                    available = Math.Round(available, 8);
+                    if (available > 0)
+                        candidates.Add((scUid, available));
+                }
+            }
+
+            if (!candidates.Any())
+                return (false, "No spendable vBTC balance found for this address.", allocations);
+
+            candidates = candidates
+                .OrderByDescending(c => c.Available)
+                .ThenBy(c => c.ScUid, StringComparer.Ordinal)
+                .ToList();
+
+            allocations = new List<VBTCV2MultiTransferInput>();
+            var remaining = totalAmount;
+            foreach (var candidate in candidates)
+            {
+                if (remaining <= 0)
+                    break;
+
+                var useAmount = Math.Round(Math.Min(remaining, candidate.Available), 8);
+                if (useAmount < 0.00000001M)
+                    continue;
+
+                allocations.Add(new VBTCV2MultiTransferInput { SCUID = candidate.ScUid, Amount = useAmount });
+                remaining -= useAmount;
+            }
+
+            if (remaining > 0)
+            {
+                var totalAvailable = candidates.Sum(c => c.Available);
+                return (false, $"Insufficient combined vBTC balance. Available: {totalAvailable}, Requested: {totalAmount}", allocations);
+            }
+            return (true, string.Empty, allocations);
+        }
+
+        /// <summary>
+        /// Preflight for CALLER-SUPPLIED transfer allocations (the raw/offline flow, where the
+        /// remote wallet knows its own holdings and this node may hold no local record of those
+        /// contracts). Mirrors the consensus rules in TransactionValidatorService so the wallet
+        /// learns the problem before it signs, and reads balances from the STATE TREI — available on
+        /// every node, unlike the local contract table <see cref="BuildTransferAllocationPlan"/>
+        /// enumerates.
+        /// </summary>
+        public static async Task<(bool Ok, string Error)> ValidateTransferAllocations(
+            string fromAddress, List<VBTCV2MultiTransferInput>? inputs, decimal totalAmount)
+        {
+            if (inputs == null || !inputs.Any())
+                return (false, "Inputs cannot be empty for multi-contract vBTC transfer.");
+
+            if (inputs.Count > MaxMultiTransferInputs)
+                return (false, $"Multi-contract vBTC transfer exceeds the maximum of {MaxMultiTransferInputs} inputs.");
+
+            if (inputs.Select(x => x.SCUID).Distinct().Count() != inputs.Count)
+                return (false, "Multi-contract vBTC transfer inputs must reference distinct contracts.");
+
+            decimal sum = 0M;
+            foreach (var input in inputs)
+            {
+                if (string.IsNullOrEmpty(input.SCUID))
+                    return (false, "Input SCUID cannot be null for multi-contract vBTC transfer.");
+                if (input.Amount <= 0)
+                    return (false, "Input amounts must be greater than zero for multi-contract vBTC transfer.");
+                if (input.Amount != Math.Round(input.Amount, 8))
+                    return (false, "Input amounts cannot have more than 8 decimal places for multi-contract vBTC transfer.");
+                sum += input.Amount;
+            }
+
+            if (totalAmount != sum)
+                return (false, "TotalAmount must equal the sum of input amounts for multi-contract vBTC transfer.");
+
+            foreach (var input in inputs)
+            {
+                if (SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
+                    return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
+
+                var balResult = await TryGetAvailableTransparentVbtcBalance(input.SCUID, fromAddress);
+                if (!balResult.success)
+                    return (false, balResult.error ?? $"Balance lookup failed for contract {input.SCUID}.");
+
+                var available = balResult.availableBalance - VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(fromAddress, input.SCUID);
+                if (available < input.Amount)
+                    return (false, $"Insufficient vBTC balance for transfer input {input.SCUID}. Available: {available}, Requested: {input.Amount}");
+            }
+
+            return (true, string.Empty);
+        }
+
+        /// <summary>
+        /// The signed Data payload of a multi-contract TRANSFER. Shared by the local wallet path and
+        /// the raw/offline builder so both produce the identical on-chain shape — if these ever
+        /// diverge, an offline-signed TX validates differently from a locally signed one.
+        /// </summary>
+        public static string BuildMultiTransferTxData(
+            string fromAddress, string toAddress, decimal totalAmount, List<VBTCV2MultiTransferInput> allocations)
+            => JsonConvert.SerializeObject(new
+            {
+                Function = MultiTransferFunction,
+                FromAddress = fromAddress,
+                ToAddress = toAddress,
+                TotalAmount = totalAmount,
+                Inputs = allocations
+            });
+
+        /// <summary>
         /// Transfer a total vBTC V2 amount to one recipient, auto-allocated across every contract
         /// the sender holds spendable balance on, as ONE transaction (one nonce, one fee).
         /// Falls back to the plain single-contract path when one contract covers the amount.
@@ -678,80 +840,10 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 toAddress = toAddress.ToAddressNormalize();
 
-                // Allocate greedily across spendable contracts: largest available first so the TX
-                // uses the fewest inputs (deterministic tie-break on SCUID). Availability matches
-                // the single-transfer preflight, minus incomplete withdrawals and any outflows
-                // already pending in the local mempool so we never craft a TX our own
-                // overspend guards would reject.
-                var pendingByContract = new Dictionary<string, decimal>();
-                try
-                {
-                    var pool = TransactionData.GetPool();
-                    var pendingTxs = pool.Find(x => x.FromAddress == fromAddress && x.TransactionType == TransactionType.VBTC_V2_TRANSFER).ToList();
-                    foreach (var ptx in pendingTxs)
-                    {
-                        foreach (var (scUid, amt) in GetVbtcV2TransferOutflows(ptx))
-                        {
-                            pendingByContract.TryGetValue(scUid, out var cur);
-                            pendingByContract[scUid] = cur + amt;
-                        }
-                    }
-                }
-                catch { }
+                var (planOk, planError, allocations) = await BuildTransferAllocationPlan(fromAddress, totalAmount);
+                if (!planOk)
+                    return (false, planError, null);
 
-                var candidates = new List<(string ScUid, decimal Available)>();
-                var contracts = VBTCContractV2.GetAllContracts();
-                if (contracts != null)
-                {
-                    foreach (var contract in contracts)
-                    {
-                        var scUid = contract.SmartContractUID;
-                        if (string.IsNullOrEmpty(scUid) || candidates.Any(c => c.ScUid == scUid))
-                            continue;
-
-                        var balResult = await TryGetAvailableTransparentVbtcBalance(scUid, fromAddress);
-                        if (!balResult.success)
-                            continue;
-
-                        var available = balResult.availableBalance;
-                        available -= VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(fromAddress, scUid);
-                        if (pendingByContract.TryGetValue(scUid, out var pendingOut))
-                            available -= pendingOut;
-
-                        available = Math.Round(available, 8);
-                        if (available > 0)
-                            candidates.Add((scUid, available));
-                    }
-                }
-
-                if (!candidates.Any())
-                    return (false, "No spendable vBTC balance found for this address.", null);
-
-                candidates = candidates
-                    .OrderByDescending(c => c.Available)
-                    .ThenBy(c => c.ScUid, StringComparer.Ordinal)
-                    .ToList();
-
-                var allocations = new List<VBTCV2MultiTransferInput>();
-                var remaining = totalAmount;
-                foreach (var candidate in candidates)
-                {
-                    if (remaining <= 0)
-                        break;
-
-                    var useAmount = Math.Round(Math.Min(remaining, candidate.Available), 8);
-                    if (useAmount < 0.00000001M)
-                        continue;
-
-                    allocations.Add(new VBTCV2MultiTransferInput { SCUID = candidate.ScUid, Amount = useAmount });
-                    remaining -= useAmount;
-                }
-
-                if (remaining > 0)
-                {
-                    var totalAvailable = candidates.Sum(c => c.Available);
-                    return (false, $"Insufficient combined vBTC balance. Available: {totalAvailable}, Requested: {totalAmount}", null);
-                }
 
                 if (allocations.Count == 1)
                 {
@@ -767,14 +859,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (allocations.Count > MaxMultiTransferInputs)
                     return (false, $"Transfer would require {allocations.Count} contract inputs (max {MaxMultiTransferInputs}). Send a smaller amount or consolidate first.", null);
 
-                var txData = JsonConvert.SerializeObject(new
-                {
-                    Function = MultiTransferFunction,
-                    FromAddress = fromAddress,
-                    ToAddress = toAddress,
-                    TotalAmount = totalAmount,
-                    Inputs = allocations
-                });
+                var txData = BuildMultiTransferTxData(fromAddress, toAddress, totalAmount, allocations);
 
                 var tokenTx = new Transaction
                 {
@@ -946,6 +1031,428 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Data.Function marker for a vBTC V2 multi-contract withdrawal request. Distinct from the
+        /// single-shape "VBTCWithdrawalRequest()" so the two can never collide.
+        /// </summary>
+        public const string MultiWithdrawalFunction = "VBTCWithdrawalRequestMultiV2()";
+
+        /// <summary>
+        /// Consensus cap on Inputs entries in one multi-contract withdrawal request. Lower than the
+        /// transfer cap on purpose: every input is a separate FROST ceremony AND a separate Bitcoin
+        /// transaction with its own miner fee, so a wide fan-out is expensive for the user and slow
+        /// to settle. The 30kb TX size cap also bounds it, but an explicit count is deterministic.
+        /// </summary>
+        public const int MaxMultiWithdrawalInputs = 10;
+
+        /// <summary>
+        /// Per-contract vBTC outflows of a committed/candidate VBTC_V2_WITHDRAWAL_REQUEST, for the
+        /// per-contract mempool conflict guard and local availability math: multi-shaped Data
+        /// (multi Function, no top-level ContractUID) yields one entry per input; anything else
+        /// yields the single-shape (ContractUID, Amount) pair. A hybrid Data (multi Function PLUS
+        /// top-level ContractUID) deliberately parses as single — that matches how pre-gate nodes
+        /// validate/apply it, and post-gate the validator rejects the hybrid shape outright.
+        /// Empty list on parse failure. Mirrors <see cref="GetVbtcV2TransferOutflows"/>.
+        /// </summary>
+        public static List<(string ScUid, decimal Amount)> GetVbtcV2WithdrawalOutflows(Transaction tx)
+        {
+            var outflows = new List<(string, decimal)>();
+            try
+            {
+                if (tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST || string.IsNullOrEmpty(tx.Data))
+                    return outflows;
+
+                var jobj = JObject.Parse(tx.Data);
+                var function = jobj["Function"]?.ToObject<string>();
+                var scUID = jobj["ContractUID"]?.ToObject<string>();
+
+                if (function == MultiWithdrawalFunction && string.IsNullOrEmpty(scUID))
+                {
+                    var inputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiWithdrawalInput>>();
+                    if (inputs != null)
+                    {
+                        foreach (var input in inputs)
+                        {
+                            if (!string.IsNullOrEmpty(input.SCUID) && input.Amount > 0)
+                                outflows.Add((input.SCUID, input.Amount));
+                        }
+                    }
+                    return outflows;
+                }
+
+                var amount = jobj["Amount"]?.ToObject<decimal?>();
+                if (!string.IsNullOrEmpty(scUID) && amount.HasValue && amount.Value > 0)
+                    outflows.Add((scUID, amount.Value));
+            }
+            catch { }
+            return outflows;
+        }
+
+        /// <summary>
+        /// Request withdrawal of a total vBTC amount to ONE Bitcoin address, auto-allocated across
+        /// every contract the requestor holds spendable balance on, as a single VFX transaction
+        /// (one nonce, one VFX fee). Falls back to the plain single-contract path when one contract
+        /// covers the amount.
+        ///
+        /// Each allocated contract is a separate Bitcoin vault, so completion later pays out one
+        /// Bitcoin transaction per contract (see <see cref="CompleteWithdrawalMulti"/>) — the user
+        /// pays N miner fees and the payout can settle partially. That is the deliberate trade for
+        /// keeping one vault per Bitcoin transaction, which FROST authorization requires.
+        /// Reserve (xRBX) requestors are not supported — consensus denies them withdrawals outright.
+        /// </summary>
+        public static async Task<(bool Success, string Result, List<VBTCV2MultiWithdrawalInput>? Allocations)> RequestWithdrawalMulti(
+            string requestorAddress, string btcAddress, decimal totalAmount, int feeRate)
+        {
+            try
+            {
+                if (requestorAddress.StartsWith("xRBX"))
+                    return (false, "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first.", null);
+
+                if (totalAmount <= 0)
+                    return (false, "Amount must be greater than zero.", null);
+
+                if (totalAmount != Math.Round(totalAmount, 8))
+                    return (false, "Amount cannot have more than 8 decimal places.", null);
+
+                if (feeRate <= 0)
+                    return (false, "Fee rate must be greater than zero.", null);
+
+                var account = AccountData.GetSingleAccount(requestorAddress);
+                if (account == null)
+                    return (false, $"Account not found: {requestorAddress}", null);
+
+                btcAddress = btcAddress.ToBTCAddressNormalize();
+
+                var currentHeight = Globals.LastBlock?.Height ?? 0;
+
+                var (planOk, planError, allocations) = await BuildWithdrawalAllocationPlan(requestorAddress, totalAmount);
+                if (!planOk)
+                    return (false, planError, null);
+
+                if (allocations.Count == 1)
+                {
+                    // One vault covers it — use the plain single-contract path (keeps the on-chain
+                    // shape simple).
+                    var singleResult = await RequestWithdrawal(allocations[0].SCUID, requestorAddress, btcAddress, totalAmount, feeRate);
+                    return (singleResult.Item1, singleResult.Item2, allocations);
+                }
+
+                if (allocations.Count > MaxMultiWithdrawalInputs)
+                    return (false, $"Withdrawal would require {allocations.Count} contract inputs (max {MaxMultiWithdrawalInputs}). Withdraw a smaller amount or consolidate first.", null);
+
+                var txData = BuildMultiWithdrawalTxData(requestorAddress, btcAddress, totalAmount, feeRate, allocations);
+
+                var withdrawalTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = requestorAddress,
+                    ToAddress = requestorAddress,
+                    Amount = 0.0M,
+                    Fee = 0.0M,
+                    Nonce = AccountStateTrei.GetNextNonce(requestorAddress),
+                    TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                    Data = txData
+                };
+
+                withdrawalTx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(withdrawalTx);
+                withdrawalTx.Build();
+
+                var privateKey = account.GetPrivKey;
+                var publicKey = account.PublicKey;
+                if (privateKey == null)
+                    return (false, $"Private key was null for account {requestorAddress}", null);
+
+                var signature = VerifiedXCore.Services.SignatureService.CreateSignature(withdrawalTx.Hash, privateKey, publicKey);
+                if (signature == "ERROR")
+                    return (false, "TX Signature Failed.", null);
+
+                withdrawalTx.Signature = signature;
+
+                var result = await TransactionValidatorService.VerifyTX(withdrawalTx);
+                if (result.Item1)
+                {
+                    await TransactionData.AddTxToWallet(withdrawalTx, true);
+                    await AccountData.UpdateLocalBalance(requestorAddress, withdrawalTx.Fee + withdrawalTx.Amount);
+                    await TransactionData.AddToPool(withdrawalTx);
+                    await P2PClient.SendTXMempool(withdrawalTx);
+
+                    SCLogUtility.Log($"vBTC V2 Multi Withdrawal Request TX Success. Inputs: {allocations.Count}, TxHash: {withdrawalTx.Hash}", "VBTCService.RequestWithdrawalMulti()");
+                    return (true, withdrawalTx.Hash, allocations);
+                }
+
+                SCLogUtility.Log($"vBTC V2 Multi Withdrawal Request TX Verify Failed: {result.Item2}", "VBTCService.RequestWithdrawalMulti()");
+                return (false, $"TX Verify Failed: {result.Item2}", null);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Multi Withdrawal Request Error: {ex.Message}", "VBTCService.RequestWithdrawalMulti()");
+                return (false, $"Error: {ex.Message}", null);
+            }
+        }
+
+        /// <summary>
+        /// Greedy allocation of a total withdrawal across the contracts this address can actually
+        /// withdraw from right now: largest available balance first (deterministic tie-break on
+        /// SCUID) so the withdrawal uses the fewest vaults — and therefore the fewest Bitcoin
+        /// transactions and miner fees. Contracts consensus would reject the requestor on (an
+        /// active request on the contract, the repeat-request cooldown, a request already pending
+        /// in our mempool) are skipped, so the crafted TX is never one our own validators refuse.
+        ///
+        /// Candidate discovery reads the LOCAL VBTCContractV2 table, so this only sees contracts
+        /// this node knows about. Callers serving a remote signer (the raw/offline endpoints)
+        /// should let that wallet supply its own Inputs and validate them with
+        /// <see cref="ValidateWithdrawalAllocations"/>, which reads the state trei and therefore
+        /// works for any contract on any node.
+        /// </summary>
+        public static async Task<(bool Ok, string Error, List<VBTCV2MultiWithdrawalInput> Allocations)> BuildWithdrawalAllocationPlan(
+            string requestorAddress, decimal totalAmount)
+        {
+            var allocations = new List<VBTCV2MultiWithdrawalInput>();
+            var currentHeight = Globals.LastBlock?.Height ?? 0;
+
+            var pendingContracts = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                var pool = TransactionData.GetPool();
+                foreach (var ptx in pool.Find(x => x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST).ToList())
+                {
+                    foreach (var (scUid, _) in GetVbtcV2WithdrawalOutflows(ptx))
+                        pendingContracts.Add(scUid);
+                }
+            }
+            catch { }
+
+            var candidates = new List<(string ScUid, decimal Available)>();
+            var contracts = VBTCContractV2.GetAllContracts();
+            if (contracts != null)
+            {
+                foreach (var contract in contracts)
+                {
+                    var scUid = contract.SmartContractUID;
+                    if (string.IsNullOrEmpty(scUid) || candidates.Any(c => c.ScUid == scUid))
+                        continue;
+
+                    if (pendingContracts.Contains(scUid))
+                        continue;
+                    if (VBTCWithdrawalRequest.HasActiveContractRequest(scUid, currentHeight, includeLocalOnlyRows: true))
+                        continue;
+                    if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requestorAddress, scUid, currentHeight))
+                        continue;
+
+                    var balResult = await TryGetAvailableTransparentVbtcBalance(scUid, requestorAddress);
+                    if (!balResult.success)
+                        continue;
+
+                    var available = Math.Round(balResult.availableBalance, 8);
+                    if (available > 0)
+                        candidates.Add((scUid, available));
+                }
+            }
+
+            if (!candidates.Any())
+                return (false, "No spendable vBTC balance found for this address.", allocations);
+
+            candidates = candidates
+                .OrderByDescending(c => c.Available)
+                .ThenBy(c => c.ScUid, StringComparer.Ordinal)
+                .ToList();
+
+            var remaining = totalAmount;
+            foreach (var candidate in candidates)
+            {
+                if (remaining <= 0)
+                    break;
+
+                var useAmount = Math.Round(Math.Min(remaining, candidate.Available), 8);
+                if (useAmount < 0.00000001M)
+                    continue;
+
+                allocations.Add(new VBTCV2MultiWithdrawalInput { SCUID = candidate.ScUid, Amount = useAmount });
+                remaining -= useAmount;
+            }
+
+            if (remaining > 0)
+            {
+                var totalAvailable = candidates.Sum(c => c.Available);
+                return (false, $"Insufficient combined vBTC balance. Available: {totalAvailable}, Requested: {totalAmount}", allocations);
+            }
+
+            return (true, string.Empty, allocations);
+        }
+
+        /// <summary>
+        /// Preflight for CALLER-SUPPLIED allocations (the raw/offline flow, where the remote wallet
+        /// knows its own holdings and this node may hold no local record of those contracts). Mirrors
+        /// the consensus rules in TransactionValidatorService so the wallet learns the problem before
+        /// it signs, and reads balances from the STATE TREI — available on every node, unlike the
+        /// local contract table <see cref="BuildWithdrawalAllocationPlan"/> enumerates.
+        /// </summary>
+        public static async Task<(bool Ok, string Error)> ValidateWithdrawalAllocations(
+            string requestorAddress, List<VBTCV2MultiWithdrawalInput>? inputs, decimal totalAmount)
+        {
+            if (inputs == null || !inputs.Any())
+                return (false, "Inputs cannot be empty for multi-contract vBTC withdrawal.");
+
+            if (inputs.Count > MaxMultiWithdrawalInputs)
+                return (false, $"Multi-contract vBTC withdrawal exceeds the maximum of {MaxMultiWithdrawalInputs} inputs.");
+
+            if (inputs.Select(x => x.SCUID).Distinct().Count() != inputs.Count)
+                return (false, "Multi-contract vBTC withdrawal inputs must reference distinct contracts.");
+
+            decimal sum = 0M;
+            foreach (var input in inputs)
+            {
+                if (string.IsNullOrEmpty(input.SCUID))
+                    return (false, "Input SCUID cannot be null for multi-contract vBTC withdrawal.");
+                if (input.Amount <= 0)
+                    return (false, "Input amounts must be greater than zero for multi-contract vBTC withdrawal.");
+                if (input.Amount != Math.Round(input.Amount, 8))
+                    return (false, "Input amounts cannot have more than 8 decimal places for multi-contract vBTC withdrawal.");
+                sum += input.Amount;
+            }
+
+            if (totalAmount != sum)
+                return (false, "TotalAmount must equal the sum of input amounts for multi-contract vBTC withdrawal.");
+
+            var currentHeight = Globals.LastBlock?.Height ?? 0;
+
+            foreach (var input in inputs)
+            {
+                if (SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
+                    return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
+
+                if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, currentHeight, includeLocalOnlyRows: false))
+                    return (false, $"A withdrawal is already in progress for contract {input.SCUID}; try again once it completes.");
+
+                if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requestorAddress, input.SCUID, currentHeight))
+                    return (false, $"Requestor {requestorAddress} is in the repeat-request cooldown for contract {input.SCUID}.");
+
+                var balResult = await TryGetAvailableTransparentVbtcBalance(input.SCUID, requestorAddress);
+                if (!balResult.success)
+                    return (false, balResult.error ?? $"Balance lookup failed for contract {input.SCUID}.");
+
+                if (balResult.availableBalance < input.Amount)
+                    return (false, $"Insufficient vBTC balance for withdrawal input {input.SCUID}. Available: {balResult.availableBalance}, Requested: {input.Amount}");
+            }
+
+            return (true, string.Empty);
+        }
+
+        /// <summary>
+        /// The signed Data payload of a multi-contract withdrawal REQUEST. Shared by the local
+        /// wallet path and the raw/offline builder so both produce the identical on-chain shape —
+        /// if these ever diverge, an offline-signed TX validates differently from a locally signed
+        /// one. UniqueId is carried so a RequestWithdrawalRaw pre-registration row is UPDATED at
+        /// mine time rather than duplicated; validators ignore fields they do not know.
+        /// </summary>
+        public static string BuildMultiWithdrawalTxData(
+            string requestorAddress, string btcAddress, decimal totalAmount, int feeRate,
+            List<VBTCV2MultiWithdrawalInput> allocations, string? uniqueId = null)
+            => JsonConvert.SerializeObject(new
+            {
+                Function = MultiWithdrawalFunction,
+                RequestorAddress = requestorAddress,
+                BTCAddress = btcAddress,
+                TotalAmount = totalAmount,
+                FeeRate = feeRate,
+                Inputs = allocations,
+                UniqueId = !string.IsNullOrEmpty(uniqueId) ? uniqueId : null
+            });
+
+        /// <summary>Per-contract outcome of a multi-contract withdrawal completion.</summary>
+        public class MultiWithdrawalCompletionResult
+        {
+            public string SmartContractUID { get; set; } = "";
+            public decimal Amount { get; set; }
+            public bool Success { get; set; }
+            public string? VFXTxHash { get; set; }
+            public string? BTCTxHash { get; set; }
+            public string? ErrorMessage { get; set; }
+            /// <summary>True when the contract's share was already completed before this call.</summary>
+            public bool AlreadyComplete { get; set; }
+        }
+
+        /// <summary>
+        /// Complete every outstanding share of a (possibly multi-contract) withdrawal request: for
+        /// each contract row minted by the REQUEST tx, run its own FROST ceremony, broadcast its own
+        /// Bitcoin transaction and mine its own VBTC_V2_WITHDRAWAL_COMPLETE.
+        ///
+        /// Deliberately NOT all-or-nothing, mirroring the bridge BTC-exit executor: one vault's
+        /// ceremony failing (unreachable validators, Electrum blip, thin UTXO set) must not strand
+        /// the vaults that can pay. Failed shares stay open and are simply retried by calling this
+        /// again — each share is independently pinned, so a retry re-signs the identical Bitcoin
+        /// transaction rather than racing a second one.
+        /// </summary>
+        public static async Task<(bool AllSucceeded, List<MultiWithdrawalCompletionResult> Results)> CompleteWithdrawalMulti(
+            string withdrawalRequestHash)
+        {
+            var results = new List<MultiWithdrawalCompletionResult>();
+
+            var rows = VBTCWithdrawalRequest.GetAllByTransactionHash(withdrawalRequestHash);
+            if (!rows.Any())
+            {
+                results.Add(new MultiWithdrawalCompletionResult
+                {
+                    Success = false,
+                    ErrorMessage = $"Withdrawal request not found for hash: {withdrawalRequestHash}"
+                });
+                return (false, results);
+            }
+
+            foreach (var row in rows)
+            {
+                if (row.IsCompleted)
+                {
+                    results.Add(new MultiWithdrawalCompletionResult
+                    {
+                        SmartContractUID = row.SmartContractUID,
+                        Amount = row.Amount,
+                        Success = true,
+                        AlreadyComplete = true,
+                        BTCTxHash = row.BTCTxHash
+                    });
+                    continue;
+                }
+
+                try
+                {
+                    var (success, vfxTxHash, btcTxHash, error, _) = await CompleteWithdrawal(row.SmartContractUID, withdrawalRequestHash);
+
+                    results.Add(new MultiWithdrawalCompletionResult
+                    {
+                        SmartContractUID = row.SmartContractUID,
+                        Amount = row.Amount,
+                        Success = success,
+                        VFXTxHash = success ? vfxTxHash : null,
+                        BTCTxHash = success ? btcTxHash : null,
+                        ErrorMessage = success ? null : error
+                    });
+
+                    if (!success)
+                    {
+                        SCLogUtility.Log($"Multi withdrawal share failed for contract {row.SmartContractUID} of request {withdrawalRequestHash}: {error}. Other shares continue; retry this one by calling CompleteWithdrawalMulti again.",
+                            "VBTCService.CompleteWithdrawalMulti()");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    results.Add(new MultiWithdrawalCompletionResult
+                    {
+                        SmartContractUID = row.SmartContractUID,
+                        Amount = row.Amount,
+                        Success = false,
+                        ErrorMessage = $"Error: {ex.Message}"
+                    });
+                }
+            }
+
+            var allSucceeded = results.All(r => r.Success);
+            SCLogUtility.Log($"Multi withdrawal completion for {withdrawalRequestHash}: {results.Count(r => r.Success)}/{results.Count} share(s) paid.",
+                "VBTCService.CompleteWithdrawalMulti()");
+
+            return (allSucceeded, results);
+        }
+
+        /// <summary>
         /// Complete withdrawal by coordinating FROST signing and broadcasting Bitcoin transaction
         /// </summary>
         /// <param name="scUID">Smart contract UID</param>
@@ -1036,7 +1543,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 // VBTCWithdrawalRequest is a local DB record — remote validators may not have it if
                 // StateData hasn't saved it yet or if the TX was processed differently on that node.
                 // When the local lookup fails, fall back to delegated params passed from the requesting node.
-                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                // Contract-scoped: a multi-contract REQUEST mints one row per input under this same
+                // hash, and this call completes exactly ONE of them (its own Bitcoin transaction).
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                 var isTransientRequest = withdrawalRequest == null; // synthesized rows have no DB home for pinned-build persistence
                 if (withdrawalRequest == null)
                 {
@@ -1272,7 +1781,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     preSignedAuth: preSignedAuth,
                     pinnedUnsignedTxHex: pinnedUnsignedTxHex,
                     pinnedCoins: pinnedCoins,
-                    persistPinnedBuild: isTransientRequest ? null : (hex, coins) => PersistPinnedBuild(withdrawalRequestHash, hex, coins),
+                    persistPinnedBuild: isTransientRequest ? null : (hex, coins) => PersistPinnedBuild(withdrawalRequestHash, scUID, hex, coins),
                     preferredOutpoints: preferredOutpoints
                 );
 
@@ -1282,7 +1791,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                     // Local-only observability: record what/when/why the last signing attempt failed
                     // on the stored request. Never touches IsCompleted/Status=Completed semantics.
-                    RecordSigningFailureOnRequest(withdrawalRequestHash, btcResult.Ceremony);
+                    RecordSigningFailureOnRequest(withdrawalRequestHash, scUID, btcResult.Ceremony);
 
                     return (false, string.Empty, string.Empty, $"Bitcoin transaction failed: {btcResult.ErrorMessage}", btcResult.Ceremony);
                 }
@@ -1294,7 +1803,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Persist the signed BTC txid on the stored request (local-only). If the caller dies
                 // between signing and completion, this is the only durable pointer to the outstanding
                 // signed transaction — a future watcher can use it to detect an out-of-band broadcast.
-                PersistSignedBtcTxId(withdrawalRequestHash, btcTxHash);
+                PersistSignedBtcTxId(withdrawalRequestHash, scUID, btcTxHash);
 
                 // signOnly mode: Return the signed TX hex without broadcasting or creating VFX TX.
                 // The caller (wallet node) will handle broadcast and VFX completion TX.
@@ -1408,11 +1917,11 @@ namespace VerifiedXCore.Bitcoin.Services
         /// signing failure's code/session/time. Purely informational for UIs and support — never
         /// touches IsCompleted or completion Status values (those are consensus-adjacent).
         /// </summary>
-        private static void RecordSigningFailureOnRequest(string withdrawalRequestHash, FROST.Models.FrostCeremonyOutcome? ceremony)
+        private static void RecordSigningFailureOnRequest(string withdrawalRequestHash, string scUID, FROST.Models.FrostCeremonyOutcome? ceremony)
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                 if (storedRequest == null)
                     return;
 
@@ -1471,11 +1980,11 @@ namespace VerifiedXCore.Bitcoin.Services
         /// validators, so any retry re-signs the identical sighashes instead of rebuilding.
         /// Written BEFORE the first announce; local-only, never consensus-read.
         /// </summary>
-        private static void PersistPinnedBuild(string withdrawalRequestHash, string unsignedTxHex, List<PinnedWithdrawalCoin> coins)
+        private static void PersistPinnedBuild(string withdrawalRequestHash, string scUID, string unsignedTxHex, List<PinnedWithdrawalCoin> coins)
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                 if (storedRequest == null)
                     return;
 
@@ -1493,14 +2002,14 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Local-only: persist the signed BTC txid on the stored request so a signed-but-unbroadcast
         /// transaction remains traceable if the caller (e.g. a web wallet) dies before completing.
         /// </summary>
-        private static void PersistSignedBtcTxId(string withdrawalRequestHash, string btcTxHash)
+        private static void PersistSignedBtcTxId(string withdrawalRequestHash, string scUID, string btcTxHash)
         {
             try
             {
                 if (string.IsNullOrEmpty(btcTxHash))
                     return;
 
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                 if (storedRequest == null)
                     return;
 
@@ -1533,8 +2042,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, $"Account not found: {requestorAddress}");
                 }
 
-                // Verify the withdrawal request exists and belongs to this user
-                var existingRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                // Verify the withdrawal request exists and belongs to this user. Contract-scoped:
+                // a multi-contract request has one row per contract under this hash, and a cancel
+                // targets exactly one of them.
+                var existingRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                 if (existingRequest == null)
                 {
                     SCLogUtility.Log($"Withdrawal request not found: {withdrawalRequestHash}", "VBTCService.CancelWithdrawal()");

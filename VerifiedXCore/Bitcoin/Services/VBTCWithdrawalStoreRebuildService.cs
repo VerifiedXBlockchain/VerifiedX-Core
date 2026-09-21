@@ -210,7 +210,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// blocks below the COMPLETE's height, reconstruct the row, and return it so completion
         /// (including the burn) can proceed exactly as on healthy nodes.
         /// </summary>
-        public static VBTCWithdrawalRequest? TryRecoverRequestRowFromChain(string requestTxHash, long anchorHeight)
+        public static VBTCWithdrawalRequest? TryRecoverRequestRowFromChain(string requestTxHash, long anchorHeight, string? scUID = null)
         {
             try
             {
@@ -231,14 +231,20 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST || tx.Hash != requestTxHash)
                             continue;
 
-                        if (!TryBuildRequestRow(tx, out var row) || row == null)
+                        // A multi-contract REQUEST yields one row per input; all are restored so
+                        // the node converges fully, and the caller's contract row is returned.
+                        if (!TryBuildRequestRows(tx, out var rows) || rows == null || rows.Count == 0)
                             return null;
 
-                        if (!VBTCWithdrawalRequest.Save(row, update: true))
+                        var savedAny = false;
+                        foreach (var row in rows)
+                            savedAny |= VBTCWithdrawalRequest.Save(row, update: true);
+
+                        if (!savedAny)
                             return null;
 
-                        LogUtility.Log($"Recovered missing withdrawal request row {requestTxHash} from chain (height {block.Height}).", "VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain()");
-                        return VBTCWithdrawalRequest.GetByTransactionHash(requestTxHash);
+                        LogUtility.Log($"Recovered {rows.Count} missing withdrawal request row(s) for {requestTxHash} from chain (height {block.Height}).", "VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain()");
+                        return VBTCWithdrawalRequest.GetByTransactionHash(requestTxHash, scUID);
                     }
                 }
 
@@ -260,10 +266,87 @@ namespace VerifiedXCore.Bitcoin.Services
         public static bool TryBuildRequestRow(Transaction tx, out VBTCWithdrawalRequest? row)
         {
             row = null;
+            if (!TryBuildRequestRows(tx, out var rows) || rows == null || rows.Count == 0)
+                return false;
+
+            row = rows[0];
+            return true;
+        }
+
+        /// <summary>
+        /// Every row a mined REQUEST tx produces: one for the single shape, one per input for the
+        /// multi shape (Function "VBTCWithdrawalRequestMultiV2()"), dispatched on Function alone
+        /// exactly as StateData does.
+        /// Keep in sync with StateData.RequestVBTCV2Withdrawal / RequestVBTCV2WithdrawalMulti —
+        /// this is the consensus-visible shape of mined request rows.
+        /// </summary>
+        public static bool TryBuildRequestRows(Transaction tx, out List<VBTCWithdrawalRequest>? rows)
+        {
+            rows = null;
             if (string.IsNullOrEmpty(tx.Data))
                 return false;
 
-            var jobj = JObject.Parse(tx.Data);
+            var jobjMulti = JObject.Parse(tx.Data);
+            if (jobjMulti["Function"]?.ToObject<string?>() == VBTCService.MultiWithdrawalFunction)
+            {
+                return TryBuildMultiRequestRows(tx, jobjMulti, out rows);
+            }
+
+            if (!TryBuildSingleRequestRow(tx, jobjMulti, out var single) || single == null)
+                return false;
+
+            rows = new List<VBTCWithdrawalRequest> { single };
+            return true;
+        }
+
+        private static bool TryBuildMultiRequestRows(Transaction tx, JObject jobj, out List<VBTCWithdrawalRequest>? rows)
+        {
+            rows = null;
+
+            var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
+            var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+            var uniqueId = jobj["UniqueId"]?.ToObject<string?>() ?? tx.Hash;
+            var originalRequestTime = jobj["OriginalRequestTime"]?.ToObject<long?>() ?? tx.Timestamp;
+            var originalSignature = jobj["OriginalSignature"]?.ToObject<string?>() ?? "";
+            var inputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiWithdrawalInput>?>();
+
+            if (string.IsNullOrEmpty(btcAddress) || !feeRate.HasValue || inputs == null || inputs.Count == 0)
+                return false;
+
+            var built = new List<VBTCWithdrawalRequest>();
+            foreach (var input in inputs)
+            {
+                if (string.IsNullOrEmpty(input.SCUID) || input.Amount <= 0)
+                    continue;
+
+                built.Add(new VBTCWithdrawalRequest
+                {
+                    RequestorAddress = tx.FromAddress,
+                    SmartContractUID = input.SCUID,
+                    Amount = input.Amount,
+                    BTCDestination = btcAddress,
+                    FeeRate = feeRate.Value,
+                    OriginalUniqueId = uniqueId,
+                    OriginalRequestTime = originalRequestTime,
+                    OriginalSignature = originalSignature,
+                    Timestamp = tx.Timestamp,
+                    TransactionHash = tx.Hash,
+                    Status = VBTCWithdrawalStatus.Requested,
+                    IsCompleted = false,
+                    RequestBlockHeight = tx.Height
+                });
+            }
+
+            if (built.Count == 0)
+                return false;
+
+            rows = built;
+            return true;
+        }
+
+        private static bool TryBuildSingleRequestRow(Transaction tx, JObject jobj, out VBTCWithdrawalRequest? row)
+        {
+            row = null;
             var scUID = jobj["ContractUID"]?.ToObject<string?>();
             var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
             var amount = jobj["Amount"]?.ToObject<decimal?>();
@@ -278,7 +361,7 @@ namespace VerifiedXCore.Bitcoin.Services
             row = new VBTCWithdrawalRequest
             {
                 RequestorAddress = tx.FromAddress,
-                SmartContractUID = scUID,
+                SmartContractUID = scUID!,
                 Amount = amount.Value,
                 BTCDestination = btcAddress,
                 FeeRate = feeRate.Value,
@@ -296,35 +379,42 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static void ReplayRequest(Transaction tx, RebuildResult result)
         {
-            if (VBTCWithdrawalRequest.GetByTransactionHash(tx.Hash) != null)
-            {
-                result.RequestsAlreadyPresent++;
-                return;
-            }
-
-            if (!TryBuildRequestRow(tx, out var row) || row == null)
+            if (!TryBuildRequestRows(tx, out var rows) || rows == null || rows.Count == 0)
             {
                 result.Skipped++;
                 return;
             }
 
-            // update:true matches live processing — it upgrades an API node's local
-            // pre-registration row (same composite key, empty TransactionHash, no pins yet).
-            if (VBTCWithdrawalRequest.Save(row, update: true))
-                result.RequestsInserted++;
-            else
-                result.Errors++;
+            // Per contract, not per TX: a multi-contract request may be half-present after a
+            // partial store loss, so each missing row is restored on its own.
+            foreach (var row in rows)
+            {
+                if (VBTCWithdrawalRequest.GetByTransactionHash(tx.Hash, row.SmartContractUID) != null)
+                {
+                    result.RequestsAlreadyPresent++;
+                    continue;
+                }
+
+                // update:true matches live processing — it upgrades an API node's local
+                // pre-registration row (same composite key, empty TransactionHash, no pins yet).
+                if (VBTCWithdrawalRequest.Save(row, update: true))
+                    result.RequestsInserted++;
+                else
+                    result.Errors++;
+            }
         }
 
         private static void ReplayComplete(Transaction tx, RebuildResult result)
         {
             if (string.IsNullOrEmpty(tx.Data)) { result.Skipped++; return; }
             var jobj = JObject.Parse(tx.Data);
+            var completeScUID = jobj["ContractUID"]?.ToObject<string?>();
             var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
             var btcTxHash = jobj["BTCTransactionHash"]?.ToObject<string?>();
             if (string.IsNullOrEmpty(withdrawalRequestHash) || string.IsNullOrEmpty(btcTxHash)) { result.Skipped++; return; }
 
-            var row = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+            // Contract-scoped: one COMPLETE finalizes one contract's share of the request.
+            var row = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, completeScUID);
             if (row == null)
             {
                 // REQUEST replays before COMPLETE in the same ascending scan; a miss means the
@@ -358,10 +448,10 @@ namespace VerifiedXCore.Bitcoin.Services
             var failureProof = jobj["FailureProof"]?.ToObject<string?>() ?? "";
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash)) { result.Skipped++; return; }
 
-            var row = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+            var row = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
             if (row == null || row.RequestorAddress != tx.FromAddress || row.IsCompleted) { result.Skipped++; return; }
 
-            if (VBTCWithdrawalCancellation.GetCancellationByWithdrawalHash(withdrawalRequestHash) != null) { result.Skipped++; return; }
+            if (VBTCWithdrawalCancellation.GetCancellationByWithdrawalHash(withdrawalRequestHash, scUID) != null) { result.Skipped++; return; }
 
             VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
             {
@@ -416,7 +506,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 VBTCWithdrawalCancellation.MarkAsProcessed(cancellationUID, true);
 
-                var row = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash);
+                var row = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash, cancellation.SmartContractUID);
                 // Mirror of the completed-guard in StateData.VoteOnVBTCV2Cancellation: a burn-backed
                 // Completed row must never flip to Cancelled.
                 if (row != null && !(row.IsCompleted && row.Status == VBTCWithdrawalStatus.Completed))

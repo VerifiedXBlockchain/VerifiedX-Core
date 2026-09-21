@@ -500,7 +500,17 @@ namespace VerifiedXCore.Data
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
                         {
-                            RequestVBTCV2Withdrawal(tx);
+                            // Multi-contract withdrawal dispatch keys on Function alone — NOT
+                            // height-gated (deliberate; see the validator branch). Every node must
+                            // run a binary that knows this Function before the first multi request
+                            // is mined; an older binary rejects the shape and forks.
+                            string? vbtcWdFn = null;
+                            try { vbtcWdFn = JObject.Parse(tx.Data)["Function"]?.ToObject<string?>(); } catch { }
+
+                            if (vbtcWdFn == Bitcoin.Services.VBTCService.MultiWithdrawalFunction)
+                                RequestVBTCV2WithdrawalMulti(tx);
+                            else
+                                RequestVBTCV2Withdrawal(tx);
                         }
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
@@ -3561,6 +3571,101 @@ namespace VerifiedXCore.Data
             }
         }
 
+        /// <summary>
+        /// vBTC V2 multi-contract withdrawal REQUEST apply (Function "VBTCWithdrawalRequestMultiV2()",
+        /// height-gated at the dispatch site): mints one <see cref="VBTCWithdrawalRequest"/> row per
+        /// input contract, ALL sharing this REQUEST tx hash, and writes the same per-contract escrow
+        /// debit a single request writes. Every downstream per-contract rule (the active-request
+        /// gate, the repeat cooldown, the owner add-back, cancellation, FROST authorization) then
+        /// sees exactly what N single requests would have produced — the only difference is that the
+        /// rows share a hash, which is why every per-contract reader looks rows up by
+        /// (hash, contract) rather than hash alone.
+        /// Each row is later paid out by its OWN Bitcoin transaction and finalized by its OWN
+        /// single-shape WITHDRAWAL_COMPLETE.
+        /// CONSENSUS SAFETY: the requester is tx.FromAddress (bound to the signer) — never an
+        /// address embedded in tx.Data.
+        /// </summary>
+        private static void RequestVBTCV2WithdrawalMulti(Transaction tx)
+        {
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
+                var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+                var uniqueId = jobj["UniqueId"]?.ToObject<string?>() ?? tx.Hash;
+                var originalRequestTime = jobj["OriginalRequestTime"]?.ToObject<long?>() ?? tx.Timestamp;
+                var originalSignature = jobj["OriginalSignature"]?.ToObject<string?>() ?? "";
+                var inputs = jobj["Inputs"]?.ToObject<List<Bitcoin.Models.VBTCV2MultiWithdrawalInput>?>();
+
+                var requesterAddress = tx.FromAddress;
+
+                if (string.IsNullOrEmpty(btcAddress) || !feeRate.HasValue || inputs == null || !inputs.Any())
+                {
+                    ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti failed: Missing required fields. TX: {tx.Hash}", "StateData.RequestVBTCV2WithdrawalMulti()");
+                    return;
+                }
+
+                foreach (var input in inputs)
+                {
+                    if (string.IsNullOrEmpty(input.SCUID) || input.Amount <= 0)
+                    {
+                        ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti skipped invalid input. SCUID: {input.SCUID}, Amount: {input.Amount}. TX: {tx.Hash}", "StateData.RequestVBTCV2WithdrawalMulti()");
+                        continue;
+                    }
+
+                    var withdrawalRequest = new VBTCWithdrawalRequest
+                    {
+                        RequestorAddress = requesterAddress, // BOUND to tx.FromAddress
+                        SmartContractUID = input.SCUID,
+                        Amount = input.Amount,
+                        BTCDestination = btcAddress,
+                        FeeRate = feeRate.Value,
+                        OriginalUniqueId = uniqueId,
+                        OriginalRequestTime = originalRequestTime,
+                        OriginalSignature = originalSignature,
+                        Timestamp = tx.Timestamp,
+                        TransactionHash = tx.Hash,
+                        Status = VBTCWithdrawalStatus.Requested,
+                        IsCompleted = false,
+                        RequestBlockHeight = tx.Height
+                    };
+
+                    if (!VBTCWithdrawalRequest.Save(withdrawalRequest, update: true))
+                    {
+                        ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti failed: Could not save withdrawal request for {input.SCUID}. TX: {tx.Hash}", "StateData.RequestVBTCV2WithdrawalMulti()");
+                        continue;
+                    }
+
+                    // ESCROW (gated): identical rule to the single shape, applied per contract.
+                    if (VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
+                    {
+                        if (!WriteWithdrawalLedgerRow(input.SCUID, requesterAddress, -input.Amount))
+                            ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti: escrow debit could not be written for {input.SCUID} (contract state missing)", "StateData.RequestVBTCV2WithdrawalMulti()");
+                    }
+
+                    // Local-only informational contract tracking (remote nodes have no local record).
+                    var contract = VBTCContractV2.GetContract(input.SCUID);
+                    if (contract != null)
+                    {
+                        contract.WithdrawalStatus = VBTCWithdrawalStatus.Requested;
+                        contract.ActiveWithdrawalRequestHash = tx.Hash;
+                        contract.ActiveWithdrawalAmount = input.Amount;
+                        contract.ActiveWithdrawalBTCDestination = btcAddress;
+                        contract.ActiveWithdrawalFeeRate = feeRate.Value;
+                        contract.ActiveWithdrawalRequestTime = tx.Timestamp;
+                        VBTCContractV2.UpdateContract(contract);
+                    }
+                }
+
+                SCLogUtility.Log($"RequestVBTCV2WithdrawalMulti completed: Inputs={inputs.Count}, Requester={requesterAddress}, Destination={btcAddress}, TxHash={tx.Hash}",
+                    "StateData.RequestVBTCV2WithdrawalMulti()");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti error: {ex.Message}", "StateData.RequestVBTCV2WithdrawalMulti()");
+            }
+        }
+
         private static void CompleteVBTCV2Withdrawal(Transaction tx)
         {
             try
@@ -3578,8 +3683,10 @@ namespace VerifiedXCore.Data
                 }
 
                 // FIND-002 FIX: Look up the withdrawal request by transaction hash
-                // This ensures we use the stored request data, not untrusted tx.Data
-                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                // This ensures we use the stored request data, not untrusted tx.Data.
+                // Contract-scoped: a multi-contract REQUEST mints one row per input under one hash,
+                // and this COMPLETE finalizes exactly the row for its own ContractUID.
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                 if (withdrawalRequest == null)
                 {
                     // Store-divergence recovery: the request row is chain-derived (the REQUEST tx is
@@ -3587,7 +3694,7 @@ namespace VerifiedXCore.Data
                     // Databases folder that arrived by file copy. Bailing here would silently skip
                     // the consensus burn row below and permanently fork this node's state trei from
                     // every healthy node. Reconstruct the row from the mined REQUEST tx and proceed.
-                    withdrawalRequest = Bitcoin.Services.VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(withdrawalRequestHash, tx.Height);
+                    withdrawalRequest = Bitcoin.Services.VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(withdrawalRequestHash, tx.Height, scUID);
                     if (withdrawalRequest == null)
                     {
                         ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal failed: Withdrawal request not found for hash - {withdrawalRequestHash} (chain recovery also failed — run POST /frost/withdrawals/rebuild)", "StateData.CompleteVBTCV2Withdrawal()");
@@ -3692,8 +3799,9 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
-                // Look up the withdrawal request
-                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                // Look up the withdrawal request. Contract-scoped: each contract's share of a
+                // multi-contract withdrawal is cancelled independently.
+                var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                 if (withdrawalRequest == null)
                 {
                     ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal failed: Withdrawal request not found - {withdrawalRequestHash}", "StateData.CancelVBTCV2Withdrawal()");
@@ -3715,10 +3823,10 @@ namespace VerifiedXCore.Data
                 }
 
                 // Check for duplicate cancellation
-                var existingCancellation = VBTCWithdrawalCancellation.GetCancellationByWithdrawalHash(withdrawalRequestHash);
+                var existingCancellation = VBTCWithdrawalCancellation.GetCancellationByWithdrawalHash(withdrawalRequestHash, scUID);
                 if (existingCancellation != null)
                 {
-                    ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal failed: Cancellation already exists for withdrawal - {withdrawalRequestHash}", "StateData.CancelVBTCV2Withdrawal()");
+                    ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal failed: Cancellation already exists for withdrawal - {withdrawalRequestHash} on contract {scUID}", "StateData.CancelVBTCV2Withdrawal()");
                     return;
                 }
 
@@ -3832,7 +3940,7 @@ namespace VerifiedXCore.Data
                             VBTCWithdrawalCancellation.MarkAsProcessed(cancellationUID, true);
 
                             // Cancel the original withdrawal request (unlock funds)
-                            var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash);
+                            var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash, cancellation.SmartContractUID);
                             if (withdrawalRequest != null)
                             {
                                 // At/after V2WithdrawalOwnerAddBackFixHeight: never flip a burn-backed

@@ -65,7 +65,18 @@ namespace VerifiedXCore.Bitcoin.Models
         public static bool HasPendingCancellation(string withdrawalRequestHash) =>
             HasPendingCancellation(withdrawalRequestHash, VerifiedXCore.Utilities.TimeUtil.GetTime());
 
-        public static bool HasPendingCancellation(string withdrawalRequestHash, long nowSeconds)
+        public static bool HasPendingCancellation(string withdrawalRequestHash, long nowSeconds) =>
+            HasPendingCancellation(withdrawalRequestHash, nowSeconds, null);
+
+        /// <summary>
+        /// Contract-scoped pending-cancellation check. A multi-contract withdrawal opens one row
+        /// per contract under a single REQUEST tx hash, and each is cancelled independently — so a
+        /// cancellation filed against contract A must not block FROST signing for contract B's
+        /// share. Callers acting on one contract pass <paramref name="scUID"/>; passing null keeps
+        /// the whole-request behavior (unchanged for single-contract withdrawals, whose only
+        /// cancellation row is that contract's).
+        /// </summary>
+        public static bool HasPendingCancellation(string withdrawalRequestHash, long nowSeconds, string? scUID)
         {
             if (string.IsNullOrWhiteSpace(withdrawalRequestHash)) return false;
             try
@@ -74,24 +85,29 @@ namespace VerifiedXCore.Bitcoin.Models
                 if (db == null) return false;
                 var cutoff = nowSeconds - PENDING_CANCELLATION_MAX_AGE_SECONDS;
                 return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+                         .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
                          .Any(x => !x.IsProcessed && x.RequestTime >= cutoff);
             }
             catch { return false; }
         }
 
-        public static VBTCWithdrawalCancellation? GetCancellationByWithdrawalHash(string withdrawalRequestHash)
+        public static VBTCWithdrawalCancellation? GetCancellationByWithdrawalHash(string withdrawalRequestHash) =>
+            GetCancellationByWithdrawalHash(withdrawalRequestHash, null);
+
+        /// <summary>
+        /// Contract-scoped duplicate-cancellation lookup. Same reason as
+        /// <see cref="HasPendingCancellation(string, long, string?)"/>: cancelling one contract's
+        /// share of a multi-contract withdrawal must not read as "already cancelled" for its
+        /// siblings.
+        /// </summary>
+        public static VBTCWithdrawalCancellation? GetCancellationByWithdrawalHash(string withdrawalRequestHash, string? scUID)
         {
             var cancellations = GetDb();
-            if (cancellations != null)
-            {
-                var cancellation = cancellations.FindOne(x => x.WithdrawalRequestHash == withdrawalRequestHash);
-                if (cancellation != null)
-                {
-                    return cancellation;
-                }
-            }
+            if (cancellations == null)
+                return null;
 
-            return null;
+            return cancellations.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+                .FirstOrDefault(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID);
         }
 
         public static List<VBTCWithdrawalCancellation>? GetAllCancellations()

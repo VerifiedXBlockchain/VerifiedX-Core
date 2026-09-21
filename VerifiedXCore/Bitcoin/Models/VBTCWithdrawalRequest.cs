@@ -374,10 +374,14 @@ namespace VerifiedXCore.Bitcoin.Models
 
             VBTCWithdrawalRequest? existingRequest = null;
             
-            // FIND-002: First try to find by TransactionHash (for multi-user tracking updates)
+            // FIND-002: First try to find by TransactionHash (for multi-user tracking updates).
+            // Multi-contract withdrawals mint one row PER CONTRACT under a single REQUEST tx hash,
+            // so the hash alone no longer identifies a row — the contract must match too. For a
+            // single-contract request (one row per hash) this is identical to the old lookup.
             if (!string.IsNullOrEmpty(request.TransactionHash))
             {
-                existingRequest = vwrDb.FindOne(x => x.TransactionHash == request.TransactionHash);
+                existingRequest = vwrDb.FindOne(x => x.TransactionHash == request.TransactionHash &&
+                                                     x.SmartContractUID == request.SmartContractUID);
             }
             
             // FIND-005: If not found by TxHash, try composite key (for raw withdrawal flow)
@@ -477,6 +481,18 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         public static VBTCWithdrawalRequest? GetByTransactionHash(string txHash)
         {
+            return GetByTransactionHash(txHash, null);
+        }
+
+        /// <summary>
+        /// Contract-scoped lookup. A multi-contract withdrawal REQUEST mints one row per input
+        /// contract, all sharing the REQUEST tx hash, so every per-contract caller (completion,
+        /// cancellation, FROST authorization, pin persistence) MUST pass the contract it is acting
+        /// on — the hash alone would return an arbitrary sibling row. With scUID null, or on a
+        /// single-contract request, this is the historical first-match behavior.
+        /// </summary>
+        public static VBTCWithdrawalRequest? GetByTransactionHash(string txHash, string? scUID)
+        {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
             {
@@ -484,11 +500,35 @@ namespace VerifiedXCore.Bitcoin.Models
                 return null;
             }
 
-            var request = vwrDb.Query()
+            var rows = vwrDb.Query()
                 .Where(x => x.TransactionHash == txHash)
-                .FirstOrDefault();
+                .ToList();
 
-            return request;
+            if (!string.IsNullOrEmpty(scUID))
+                return rows.FirstOrDefault(x => x.SmartContractUID == scUID);
+
+            return rows.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Every row minted by one REQUEST tx: a single row for a single-contract request, one row
+        /// per input contract for a multi-contract request. Ordered by SmartContractUID so
+        /// iteration (completion fan-out, status reporting) is deterministic.
+        /// </summary>
+        public static List<VBTCWithdrawalRequest> GetAllByTransactionHash(string txHash)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+            {
+                ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.GetAllByTransactionHash()");
+                return new List<VBTCWithdrawalRequest>();
+            }
+
+            return vwrDb.Query()
+                .Where(x => x.TransactionHash == txHash)
+                .ToList()
+                .OrderBy(x => x.SmartContractUID, StringComparer.Ordinal)
+                .ToList();
         }
         #endregion
 

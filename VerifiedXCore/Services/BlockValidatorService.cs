@@ -922,8 +922,26 @@ namespace VerifiedXCore.Services
                                     try
                                     {
                                         var wScUID = JObject.Parse(blkTransaction.Data)["ContractUID"]?.ToObject<string>();
-                                        if (!string.IsNullOrEmpty(wScUID) && !blockWithdrawalContracts.Add(wScUID))
-                                            effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wScUID} within block.");
+                                        if (!string.IsNullOrEmpty(wScUID))
+                                        {
+                                            if (!blockWithdrawalContracts.Add(wScUID))
+                                                effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wScUID} within block.");
+                                        }
+                                        else
+                                        {
+                                            // Multi-contract request: no top-level ContractUID, so the
+                                            // serialization must register EVERY input contract — otherwise
+                                            // two multi requests drawing on the same vault could share a
+                                            // block and both open, defeating the per-contract gate.
+                                            foreach (var (wMultiScUid, _) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(blkTransaction))
+                                            {
+                                                if (!blockWithdrawalContracts.Add(wMultiScUid))
+                                                {
+                                                    effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wMultiScUid} within block.");
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
                                     catch { }
                                 }

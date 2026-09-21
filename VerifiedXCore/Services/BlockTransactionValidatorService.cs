@@ -763,88 +763,167 @@ namespace VerifiedXCore.Services
                     {
                         // Parse transaction data
                         var jobj = JObject.Parse(tx.Data);
-                        var scUID = jobj["ContractUID"]?.ToObject<string?>();
-                        var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
-                        var amount = jobj["Amount"]?.ToObject<decimal?>();
-                        var feeRate = jobj["FeeRate"]?.ToObject<int?>();
 
-                        // FIND-002 FIX: Use tx.FromAddress as the requester, NOT tx.Data.OwnerAddress
-                        var requesterAddress = tx.FromAddress;
-
-                        if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) || 
-                            !amount.HasValue || !feeRate.HasValue)
+                        // Multi-contract withdrawal request variant (Function
+                        // "VBTCWithdrawalRequestMultiV2()"): the same post-consensus wallet
+                        // bookkeeping as the single shape, applied per input contract. Each input is
+                        // paid out later by its own Bitcoin transaction and finalized by its own
+                        // single-shape WITHDRAWAL_COMPLETE.
+                        if (jobj["Function"]?.ToObject<string?>() == Bitcoin.Services.VBTCService.MultiWithdrawalFunction)
                         {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Missing required fields", 
+                            var multiRequester = tx.FromAddress;
+                            var multiBtcAddress = jobj["BTCAddress"]?.ToObject<string?>();
+                            var multiFeeRate = jobj["FeeRate"]?.ToObject<int?>();
+                            var multiInputs = jobj["Inputs"]?.ToObject<List<VBTCV2MultiWithdrawalInput>?>();
+
+                            if (string.IsNullOrEmpty(multiBtcAddress) || !multiFeeRate.HasValue ||
+                                multiInputs == null || !multiInputs.Any())
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validation failed: Missing required fields",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdataMultiInvalid = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdataMultiInvalid.InsertSafe(tx);
+                                return;
+                            }
+
+                            foreach (var input in multiInputs)
+                            {
+                                if (string.IsNullOrEmpty(input.SCUID) || SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validation failed: Contract not found in state trei - {input.SCUID}",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdataMultiInvalid = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdataMultiInvalid.InsertSafe(tx);
+                                    return;
+                                }
+
+                                // Per-contract gates, measured against the block's own height so
+                                // replay stays deterministic (NOT the chain tip).
+                                if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, blockHeight, includeLocalOnlyRows: false))
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validation failed: contract {input.SCUID} already has an active withdrawal",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdataMultiInvalid = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdataMultiInvalid.InsertSafe(tx);
+                                    return;
+                                }
+
+                                if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(multiRequester, input.SCUID, blockHeight))
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validation failed: requestor {multiRequester} in repeat-request cooldown for contract {input.SCUID}",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdataMultiInvalid = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdataMultiInvalid.InsertSafe(tx);
+                                    return;
+                                }
+
+                                var multiBalCheck = await Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(input.SCUID, multiRequester, blockHeight);
+                                if (!multiBalCheck.success || multiBalCheck.availableBalance < input.Amount)
+                                {
+                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validation failed: Insufficient balance on {input.SCUID}. Requester: {multiRequester}, Available: {multiBalCheck.availableBalance}, Requested: {input.Amount}",
+                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                    var txdataMultiInvalid = TransactionData.GetAll();
+                                    tx.TransactionStatus = TransactionStatus.Invalid;
+                                    txdataMultiInvalid.InsertSafe(tx);
+                                    return;
+                                }
+                            }
+
+                            var txdataMultiSuccess = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Success;
+                            txdataMultiSuccess.InsertSafe(tx);
+
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validated successfully. Requester: {multiRequester}, Inputs: {multiInputs.Count}, Destination: {multiBtcAddress}",
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
                             return;
                         }
 
-                        // Validate contract exists via state trei (available on ALL nodes)
-                        var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
-                        if (scStateTrei == null)
-                        {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Contract not found in state trei - {scUID}", 
+                            var scUID = jobj["ContractUID"]?.ToObject<string?>();
+                            var btcAddress = jobj["BTCAddress"]?.ToObject<string?>();
+                            var amount = jobj["Amount"]?.ToObject<decimal?>();
+                            var feeRate = jobj["FeeRate"]?.ToObject<int?>();
+
+                            // FIND-002 FIX: Use tx.FromAddress as the requester, NOT tx.Data.OwnerAddress
+                            var requesterAddress = tx.FromAddress;
+
+                            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(btcAddress) || 
+                                !amount.HasValue || !feeRate.HasValue)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Missing required fields", 
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+
+                            // Validate contract exists via state trei (available on ALL nodes)
+                            var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
+                            if (scStateTrei == null)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Contract not found in state trei - {scUID}", 
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+
+                            // S3C §0: per-CONTRACT active-withdrawal gate (was per-user). Measure
+                            // expiry against the block's own height so the rule stays deterministic
+                            // under block replay/sync (NOT the chain tip).
+                            // includeLocalOnlyRows: false — consensus must not read rows that exist on
+                            // this node only (fork vector; activates at V2WithdrawalExpiryFixHeight).
+                            if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, blockHeight, includeLocalOnlyRows: false))
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: contract {scUID} already has an active withdrawal",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+
+                            // Anti-griefing (V2WithdrawalExpiryFixHeight): repeat-request cooldown after an
+                            // expired-incomplete request by the same requestor. Deterministic: mined
+                            // RequestBlockHeight + the block's own height.
+                            if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, blockHeight))
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: requestor {requesterAddress} in repeat-request cooldown for contract {scUID}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+
+                            // FIND-002 FIX: Validate balance for requesterAddress (tx.FromAddress), not ownerAddress.
+                            // Post-consensus local wallet bookkeeping only — uses the same formula as request
+                            // creation and consensus validation (owner branch = live deposit balance + full
+                            // ledger + completed-withdrawal add-back) so a mined, consensus-valid owner
+                            // request is not stamped Invalid in the local wallet tx list.
+                            var balCheck = await Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(scUID, requesterAddress, blockHeight);
+                            if (!balCheck.success || balCheck.availableBalance < amount.Value)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Insufficient balance. Requester: {requesterAddress}, Available: {balCheck.availableBalance}, Requested: {amount.Value}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+
+                            // Mark as success and insert
+                            var txdataSuccess = TransactionData.GetAll();
+                            tx.TransactionStatus = TransactionStatus.Success;
+                            txdataSuccess.InsertSafe(tx);
+
+                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validated successfully. Requester: {requesterAddress}, Amount: {amount.Value} BTC, Destination: {btcAddress}, SCUID: {scUID}", 
                                 "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
-                        }
-
-                        // S3C §0: per-CONTRACT active-withdrawal gate (was per-user). Measure
-                        // expiry against the block's own height so the rule stays deterministic
-                        // under block replay/sync (NOT the chain tip).
-                        // includeLocalOnlyRows: false — consensus must not read rows that exist on
-                        // this node only (fork vector; activates at V2WithdrawalExpiryFixHeight).
-                        if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, blockHeight, includeLocalOnlyRows: false))
-                        {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: contract {scUID} already has an active withdrawal",
-                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
-                        }
-
-                        // Anti-griefing (V2WithdrawalExpiryFixHeight): repeat-request cooldown after an
-                        // expired-incomplete request by the same requestor. Deterministic: mined
-                        // RequestBlockHeight + the block's own height.
-                        if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, blockHeight))
-                        {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: requestor {requesterAddress} in repeat-request cooldown for contract {scUID}",
-                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
-                        }
-
-                        // FIND-002 FIX: Validate balance for requesterAddress (tx.FromAddress), not ownerAddress.
-                        // Post-consensus local wallet bookkeeping only — uses the same formula as request
-                        // creation and consensus validation (owner branch = live deposit balance + full
-                        // ledger + completed-withdrawal add-back) so a mined, consensus-valid owner
-                        // request is not stamped Invalid in the local wallet tx list.
-                        var balCheck = await Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(scUID, requesterAddress, blockHeight);
-                        if (!balCheck.success || balCheck.availableBalance < amount.Value)
-                        {
-                            SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Insufficient balance. Requester: {requesterAddress}, Available: {balCheck.availableBalance}, Requested: {amount.Value}",
-                                "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                            var txdata = TransactionData.GetAll();
-                            tx.TransactionStatus = TransactionStatus.Invalid;
-                            txdata.InsertSafe(tx);
-                            return;
-                        }
-
-                        // Mark as success and insert
-                        var txdataSuccess = TransactionData.GetAll();
-                        tx.TransactionStatus = TransactionStatus.Success;
-                        txdataSuccess.InsertSafe(tx);
-
-                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validated successfully. Requester: {requesterAddress}, Amount: {amount.Value} BTC, Destination: {btcAddress}, SCUID: {scUID}", 
-                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                     }
                     catch (Exception ex)
                     {
@@ -893,7 +972,9 @@ namespace VerifiedXCore.Services
                         // NOTE: VBTCWithdrawalRequest is a LOCAL DB record — only the wallet node that created
                         // the withdrawal request has it. Remote nodes processing this block won't have it.
                         // When not found, fall back to lightweight validation (contract + BTC hash checked below).
-                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                        // Contract-scoped: a multi-contract request mints one row per contract
+                        // under this hash, and this COMPLETE finalizes its own contract's row.
+                        var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                         if (withdrawalRequest != null)
                         {
                             // Full validation path (local node has the request record)
@@ -981,7 +1062,7 @@ namespace VerifiedXCore.Services
                         }
                         else
                         {
-                            var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash);
+                            var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
                             if (withdrawalRequest == null)
                             {
                                 SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL validation failed: Withdrawal request not found - {withdrawalRequestHash}",
