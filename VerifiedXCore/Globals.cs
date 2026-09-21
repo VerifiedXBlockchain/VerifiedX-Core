@@ -105,8 +105,7 @@ namespace VerifiedXCore
         public static DateTime? APIUnlockTime = null;
         public static DateTime? ExplorerValDataLastSend = null;
 
-
-        public const int ValidatorRequiredRBX = 50_000;
+        public const int    ValidatorRequiredRBX = 5_000;
         public const decimal ADNRRequiredRBX = 5.0M;
         public const decimal ADNRTransferRequiredRBX = 1.0M;
         public const decimal ADNRDeleteRequiredRBX = 0.0M;
