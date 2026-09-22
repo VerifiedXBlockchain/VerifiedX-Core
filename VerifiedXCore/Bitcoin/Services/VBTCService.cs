@@ -898,7 +898,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, "Multi-contract vBTC transfers are not active on this network yet. Send from a single contract instead.", null);
 
                 if (allocations.Count > MaxMultiTransferInputs)
-                    return (false, $"Transfer would require {allocations.Count} contract inputs (max {MaxMultiTransferInputs}). Send a smaller amount or consolidate first.", null);
+                    return (false, $"Transfer would require {allocations.Count} contract inputs (max {MaxMultiTransferInputs}). Send a smaller amount or split it across several transactions.", null);
 
                 var txData = BuildMultiTransferTxData(fromAddress, toAddress, totalAmount, allocations);
 
@@ -1178,7 +1178,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
 
                 if (allocations.Count > MaxMultiWithdrawalInputs)
-                    return (false, $"Withdrawal would require {allocations.Count} contract inputs (max {MaxMultiWithdrawalInputs}). Withdraw a smaller amount or consolidate first.", null);
+                    return (false, $"Withdrawal would require {allocations.Count} contract inputs (max {MaxMultiWithdrawalInputs}). Withdraw a smaller amount or split it across several requests.", null);
 
                 var txData = BuildMultiWithdrawalTxData(requestorAddress, btcAddress, totalAmount, feeRate, allocations);
 

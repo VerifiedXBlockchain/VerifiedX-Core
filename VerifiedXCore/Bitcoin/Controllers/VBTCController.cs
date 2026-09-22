@@ -2563,7 +2563,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         });
 
                     if (allocations.Count > Services.VBTCService.MaxMultiTransferInputs)
-                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Transfer would require {allocations.Count} contract inputs (max {Services.VBTCService.MaxMultiTransferInputs}). Send a smaller amount or consolidate first." });
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Transfer would require {allocations.Count} contract inputs (max {Services.VBTCService.MaxMultiTransferInputs}). Send a smaller amount or split it across several transactions." });
 
                     isMultiShape = true;
                     txData = Services.VBTCService.BuildMultiTransferTxData(
@@ -2604,6 +2604,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Nonce = tx.Nonce,
                     ServerNextNonce = serverNextNonce,
                     TransactionType = tx.TransactionType.ToString(),
+                    // Verbatim signed content so an HSM can recompute Hash (double SHA-256, second
+                    // pass over the hex text) and refuse to sign on mismatch, instead of signing blind.
+                    Data = tx.Data,
+                    HashPreimage = tx.GetHashPreimage(),
                     Function = isMultiShape ? Services.VBTCService.MultiTransferFunction : "TransferVBTCV2()",
                     IsMultiContract = isMultiShape,
                     Allocations = allocations,
@@ -2629,7 +2633,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
 
-                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                if (!_pendingRawVbtcTxs.TryGetValue(body.Hash, out var pendingTx))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawTransferVBTCData first." });
 
                 pendingTx.Signature = body.Signature;
@@ -2637,6 +2641,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
                 if (!valid)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                // Claim the build only now that it is known-good. Removing it BEFORE verification
+                // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
+                // corrected retry got a misleading "No pending transaction found". The atomic remove
+                // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
                 // Reserve (xRBX) senders have no AccountData row — dispatch through the reserve
                 // path so local fee bookkeeping hits the ReserveAccount balance instead.
@@ -2848,7 +2859,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 else
                 {
                     if (allocations.Count > Services.VBTCService.MaxMultiWithdrawalInputs)
-                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Withdrawal would require {allocations.Count} contract inputs (max {Services.VBTCService.MaxMultiWithdrawalInputs}). Withdraw a smaller amount or consolidate first." });
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Withdrawal would require {allocations.Count} contract inputs (max {Services.VBTCService.MaxMultiWithdrawalInputs}). Withdraw a smaller amount or split it across several requests." });
 
                     isMultiShape = true;
                     txData = Services.VBTCService.BuildMultiWithdrawalTxData(
@@ -2881,6 +2892,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Fee = tx.Fee,
                     Nonce = tx.Nonce,
                     TransactionType = tx.TransactionType.ToString(),
+                    // Verbatim signed content so an HSM can recompute Hash before signing (see the
+                    // multi-transfer builder).
+                    Data = tx.Data,
+                    HashPreimage = tx.GetHashPreimage(),
                     Function = isMultiShape ? Services.VBTCService.MultiWithdrawalFunction : "VBTCWithdrawalRequest()",
                     IsMultiContract = isMultiShape,
                     Allocations = allocations,
@@ -2970,7 +2985,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
 
-                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                if (!_pendingRawVbtcTxs.TryGetValue(body.Hash, out var pendingTx))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawRequestWithdrawalTxData first." });
 
                 if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
@@ -2981,6 +2996,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
                 if (!valid)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                // Claim the build only now that it is known-good. Removing it BEFORE verification
+                // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
+                // corrected retry got a misleading "No pending transaction found". The atomic remove
+                // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
                 await TransactionData.AddTxToWallet(pendingTx, true);
                 await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
@@ -3093,7 +3115,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
 
-                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                if (!_pendingRawVbtcTxs.TryGetValue(body.Hash, out var pendingTx))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawCompleteWithdrawalTxData first." });
 
                 if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
@@ -3104,6 +3126,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
                 if (!valid)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                // Claim the build only now that it is known-good. Removing it BEFORE verification
+                // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
+                // corrected retry got a misleading "No pending transaction found". The atomic remove
+                // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
                 await TransactionData.AddTxToWallet(pendingTx, true);
                 await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
@@ -3205,7 +3234,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
 
-                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                if (!_pendingRawVbtcTxs.TryGetValue(body.Hash, out var pendingTx))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawCancelWithdrawalTxData first." });
 
                 if (pendingTx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
@@ -3216,6 +3245,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
                 if (!valid)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                // Claim the build only now that it is known-good. Removing it BEFORE verification
+                // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
+                // corrected retry got a misleading "No pending transaction found". The atomic remove
+                // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
                 await TransactionData.AddTxToWallet(pendingTx, true);
                 await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
@@ -3608,7 +3644,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
 
-                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out var pendingTx))
+                if (!_pendingRawVbtcTxs.TryGetValue(body.Hash, out var pendingTx))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}." });
 
                 pendingTx.Signature = body.Signature;
@@ -3616,6 +3652,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
                 if (!valid)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                // Claim the build only now that it is known-good. Removing it BEFORE verification
+                // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
+                // corrected retry got a misleading "No pending transaction found". The atomic remove
+                // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
                 await TransactionData.AddTxToWallet(pendingTx, true);
                 await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
