@@ -2570,6 +2570,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         payload.FromAddress, toAddress, payload.TotalAmount, allocations);
                 }
 
+                var serverNextNonce = AccountStateTrei.GetNextNonce(payload.FromAddress);
+                var (nonceOk, nonce, nonceError) = Services.VBTCService.ResolveRawNonce(serverNextNonce, payload.Nonce);
+                if (!nonceOk)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = nonceError, ServerNextNonce = serverNextNonce });
+
                 var tx = new Transaction
                 {
                     Timestamp = TimeUtil.GetTime(),
@@ -2577,7 +2582,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     ToAddress = toAddress,
                     Amount = 0.0M,
                     Fee = 0.0M,
-                    Nonce = AccountStateTrei.GetNextNonce(payload.FromAddress),
+                    Nonce = nonce,
                     TransactionType = TransactionType.VBTC_V2_TRANSFER,
                     Data = txData
                 };
@@ -2597,6 +2602,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Amount = tx.Amount,
                     Fee = tx.Fee,
                     Nonce = tx.Nonce,
+                    ServerNextNonce = serverNextNonce,
                     TransactionType = tx.TransactionType.ToString(),
                     Function = isMultiShape ? Services.VBTCService.MultiTransferFunction : "TransferVBTCV2()",
                     IsMultiContract = isMultiShape,
@@ -5050,6 +5056,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// record of. Omit to let the node allocate from its local contract table.
         /// </summary>
         public List<VBTCV2MultiTransferInput>? Inputs { get; set; }
+        /// <summary>
+        /// Optional nonce override for callers running their own per-address counter. Omit to use
+        /// the node's mempool-aware next nonce (safe for sequential build→submit). Required when
+        /// building several TXs before submitting any — they would otherwise share a nonce. Must
+        /// not be below the node's next nonce; the response echoes both.
+        /// </summary>
+        public long? Nonce { get; set; }
     }
 
     public class VBTCTransferMultiPayload

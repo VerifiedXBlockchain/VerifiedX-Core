@@ -415,6 +415,81 @@ namespace VerifiedXCore.Tests
             Assert.False(await TransactionData.DoubleSpendReplayCheck(okMulti));
         }
 
+        // ── Raw-path preflight: caller-supplied Inputs see pending mempool outflows ──────────
+
+        /// <summary>An explicit-Inputs preflight must subtract what the sender already has
+        /// unmined in the mempool — otherwise a wallet is handed a signable TX that the
+        /// double-spend guard rejects on submit.</summary>
+        [Fact]
+        public async Task ValidateAllocations_SubtractsPendingMempoolOutflows()
+        {
+            SeedContract("rawpend:1", "xSomeOwner", ("+", Sender, 0.5M));
+
+            var (okBefore, _) = await VBTCService.ValidateTransferAllocations(
+                Sender, new List<VBTCV2MultiTransferInput> { new() { SCUID = "rawpend:1", Amount = 0.2M } }, 0.2M);
+            Assert.True(okBefore);
+
+            // 0.4 of the 0.5 is now committed in an unmined single transfer.
+            TransactionData.GetPool().InsertSafe(BuildTx(JsonConvert.SerializeObject(new
+            {
+                Function = "TransferVBTCV2()",
+                ContractUID = "rawpend:1",
+                FromAddress = Sender,
+                ToAddress = Recipient,
+                Amount = 0.4M,
+            })));
+
+            var (okAfter, message) = await VBTCService.ValidateTransferAllocations(
+                Sender, new List<VBTCV2MultiTransferInput> { new() { SCUID = "rawpend:1", Amount = 0.2M } }, 0.2M);
+            Assert.False(okAfter);
+            Assert.Contains("Insufficient vBTC balance for transfer input rawpend:1", message);
+            Assert.Contains("already pending in mempool", message);
+
+            // What's actually left (0.1) still clears.
+            var (okRemainder, _) = await VBTCService.ValidateTransferAllocations(
+                Sender, new List<VBTCV2MultiTransferInput> { new() { SCUID = "rawpend:1", Amount = 0.1M } }, 0.1M);
+            Assert.True(okRemainder);
+        }
+
+        [Fact]
+        public void PendingOutflows_JointlyAccountsSingleAndMultiPerContract()
+        {
+            TransactionData.GetPool().InsertSafe(BuildTx(JsonConvert.SerializeObject(new
+            {
+                Function = "TransferVBTCV2()",
+                ContractUID = "rawpend:2",
+                FromAddress = Sender,
+                ToAddress = Recipient,
+                Amount = 0.3M,
+            })));
+            TransactionData.GetPool().InsertSafe(BuildTx(MultiData(0.5M, new[] { ("rawpend:2", 0.2M), ("rawpend:3", 0.3M) })));
+
+            var pending = VBTCService.GetPendingVbtcTransferOutflowsByContract(Sender);
+
+            Assert.Equal(0.5M, pending["rawpend:2"]);
+            Assert.Equal(0.3M, pending["rawpend:3"]);
+            Assert.False(pending.ContainsKey("rawpend:404"));
+        }
+
+        // ── Raw-path nonce override ──────────────────────────────────────────────────────────
+
+        [Theory]
+        [InlineData(7, null, true, 7)]   // omitted → server's next
+        [InlineData(7, 7, true, 7)]      // equal → accepted
+        [InlineData(7, 9, true, 9)]      // gap above → accepted (chain decides at submit)
+        [InlineData(7, 6, false, 7)]     // below → refused, server's next reported back
+        public void ResolveRawNonce_Rules(long serverNext, long? requested, bool expectOk, long expectNonce)
+        {
+            var (ok, nonce, error) = VBTCService.ResolveRawNonce(serverNext, requested);
+
+            Assert.Equal(expectOk, ok);
+            Assert.Equal(expectNonce, nonce);
+            if (!expectOk)
+                Assert.Contains("below the next valid nonce", error);
+            else
+                Assert.Equal(string.Empty, error);
+        }
+
         // ── Live local-record prune on full consumption ──────────────────────────────────────
 
         [Fact]

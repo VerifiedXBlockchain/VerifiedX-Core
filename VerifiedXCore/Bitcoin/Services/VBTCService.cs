@@ -653,6 +653,53 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Per-contract vBTC this sender already has committed in UNMINED transfers sitting in the
+        /// local mempool. Both preflights (node-side plan and caller-supplied Inputs) subtract this
+        /// so a wallet is never handed a signable TX that the mempool double-spend guard will
+        /// reject on submit — the chain is safe either way, but an exchange firing a second multi
+        /// before the first mines would otherwise read that rejection as a bug.
+        /// </summary>
+        public static Dictionary<string, decimal> GetPendingVbtcTransferOutflowsByContract(string fromAddress)
+        {
+            var pendingByContract = new Dictionary<string, decimal>();
+            try
+            {
+                var pool = TransactionData.GetPool();
+                var pendingTxs = pool.Find(x => x.FromAddress == fromAddress && x.TransactionType == TransactionType.VBTC_V2_TRANSFER).ToList();
+                foreach (var ptx in pendingTxs)
+                {
+                    foreach (var (scUid, amt) in GetVbtcV2TransferOutflows(ptx))
+                    {
+                        pendingByContract.TryGetValue(scUid, out var cur);
+                        pendingByContract[scUid] = cur + amt;
+                    }
+                }
+            }
+            catch { }
+            return pendingByContract;
+        }
+
+        /// <summary>
+        /// Nonce for a raw (offline-signed) TX. The node's <c>GetNextNonce</c> is mempool-aware, so
+        /// sequential build→submit→build is safe on its own; but two builds issued BEFORE either is
+        /// submitted both receive the same nonce, and an exchange pipeline will do exactly that. A
+        /// caller may therefore supply its own counter. It must not be BELOW the server's next
+        /// nonce (that TX could never mine); a gap above it is allowed — whether the chain accepts
+        /// an out-of-order nonce at submit is the chain's rule, not this preflight's.
+        /// Pure so the rule is unit-testable.
+        /// </summary>
+        public static (bool Ok, long Nonce, string Error) ResolveRawNonce(long serverNextNonce, long? requestedNonce)
+        {
+            if (!requestedNonce.HasValue)
+                return (true, serverNextNonce, string.Empty);
+
+            if (requestedNonce.Value < serverNextNonce)
+                return (false, serverNextNonce, $"Nonce {requestedNonce.Value} is below the next valid nonce for this address ({serverNextNonce}); a lower nonce can never mine.");
+
+            return (true, requestedNonce.Value, string.Empty);
+        }
+
+        /// <summary>
         /// Greedy allocation of a total transfer across the sender's spendable contracts: largest
         /// available first (deterministic tie-break on SCUID) so the TX uses the fewest inputs.
         /// Availability matches the single-transfer preflight, minus incomplete withdrawals and any
@@ -674,21 +721,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // the single-transfer preflight, minus incomplete withdrawals and any outflows
             // already pending in the local mempool so we never craft a TX our own
             // overspend guards would reject.
-            var pendingByContract = new Dictionary<string, decimal>();
-            try
-            {
-                var pool = TransactionData.GetPool();
-                var pendingTxs = pool.Find(x => x.FromAddress == fromAddress && x.TransactionType == TransactionType.VBTC_V2_TRANSFER).ToList();
-                foreach (var ptx in pendingTxs)
-                {
-                    foreach (var (scUid, amt) in GetVbtcV2TransferOutflows(ptx))
-                    {
-                        pendingByContract.TryGetValue(scUid, out var cur);
-                        pendingByContract[scUid] = cur + amt;
-                    }
-                }
-            }
-            catch { }
+            var pendingByContract = GetPendingVbtcTransferOutflowsByContract(fromAddress);
 
             var candidates = new List<(string ScUid, decimal Available)>();
             var contracts = VBTCContractV2.GetAllContracts();
@@ -781,6 +814,10 @@ namespace VerifiedXCore.Bitcoin.Services
             if (totalAmount != sum)
                 return (false, "TotalAmount must equal the sum of input amounts for multi-contract vBTC transfer.");
 
+            // Same availability the node-side plan uses: state balance, minus incomplete
+            // withdrawals, minus what this sender already has pending in the local mempool.
+            var pendingByContract = GetPendingVbtcTransferOutflowsByContract(fromAddress);
+
             foreach (var input in inputs)
             {
                 if (SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
@@ -791,8 +828,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, balResult.error ?? $"Balance lookup failed for contract {input.SCUID}.");
 
                 var available = balResult.availableBalance - VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(fromAddress, input.SCUID);
+                if (pendingByContract.TryGetValue(input.SCUID, out var pendingOut))
+                    available -= pendingOut;
+
                 if (available < input.Amount)
-                    return (false, $"Insufficient vBTC balance for transfer input {input.SCUID}. Available: {available}, Requested: {input.Amount}");
+                    return (false, $"Insufficient vBTC balance for transfer input {input.SCUID}. Available: {available}, Requested: {input.Amount}"
+                        + (pendingOut > 0 ? $" ({pendingOut} already pending in mempool)" : string.Empty));
             }
 
             return (true, string.Empty);
