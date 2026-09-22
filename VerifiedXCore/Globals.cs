@@ -253,7 +253,7 @@ namespace VerifiedXCore
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
         public static int MajorVer = 7;
-        public static int MinorVer = 1;
+        public static int MinorVer = 2;
         public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
