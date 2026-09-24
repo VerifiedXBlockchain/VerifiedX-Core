@@ -34,11 +34,15 @@ namespace VerifiedXCore.Services
         public static string FormatProofV1(long blockHeight, string prevHash, string address, uint vrfNumber)
             => $"VFX_PROOF_V1|{blockHeight}|{NormalizeHash(prevHash)}|{address}|{vrfNumber}";
 
-        /// <summary>VX-08: one caster's winner vote for a height. Excluded addresses sorted ordinal.</summary>
-        public static string FormatWinnerVoteV1(long blockHeight, string voterAddress, string winnerAddress, IEnumerable<string>? excludedAddresses)
+        /// <summary>
+        /// VX-08: one caster's winner vote for a height. Excluded addresses sorted ordinal. <paramref name="sequence"/>
+        /// is the voter's increasing vote counter (casters re-vote on retries within a height; only a newer
+        /// signed vote from the same voter replaces an older one).
+        /// </summary>
+        public static string FormatWinnerVoteV1(long blockHeight, string voterAddress, string winnerAddress, IEnumerable<string>? excludedAddresses, long sequence)
         {
             var excluded = excludedAddresses == null ? "" : string.Join(",", excludedAddresses.Where(a => !string.IsNullOrEmpty(a)).OrderBy(a => a, StringComparer.Ordinal));
-            return $"VFX_WINVOTE_V1|{blockHeight}|{voterAddress}|{winnerAddress}|{excluded}";
+            return $"VFX_WINVOTE_V1|{blockHeight}|{voterAddress}|{winnerAddress}|{excluded}|{sequence}";
         }
 
         /// <summary>VX-16: one caster's proof-set commitment for a height.</summary>

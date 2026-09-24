@@ -3769,6 +3769,11 @@ namespace VerifiedXCore.Nodes
 
             var requiredAgreement = ConsensusQuorum.Required(committeeCount); // ONE-QUORUM
 
+            // VX-08: only committee members' signed votes count — relayed or first-hand.
+            var committeeVoters = new HashSet<string>(casters.Where(c => !string.IsNullOrEmpty(c.ValidatorAddress)).Select(c => c.ValidatorAddress!), StringComparer.Ordinal);
+            committeeVoters.Add(Globals.ValidatorAddress);
+            bool IsCommitteeVoter(string a) => committeeVoters.Contains(a);
+
             // DETERMINISTIC-CONSENSUS: Check for deadlock safety net
             if (_winnerAgreementFailHeight == height)
             {
@@ -3781,7 +3786,7 @@ namespace VerifiedXCore.Nodes
                     // Deadlock detected! Use deterministic tiebreaker: sort all known votes lexicographically
                     // and pick the lowest winner address. All casters will converge on the same choice.
                     var allVotes = Globals.CasterWinnerVoteDict.TryGetValue(height, out var existingVotes)
-                        ? existingVotes.Values.Distinct().OrderBy(v => v, StringComparer.Ordinal).ToList()
+                        ? existingVotes.Where(kv => IsCommitteeVoter(kv.Key)).Select(kv => kv.Value).Distinct().OrderBy(v => v, StringComparer.Ordinal).ToList()
                         : new List<string> { myChosenWinner };
                     var tiebreakWinner = allVotes.FirstOrDefault() ?? myChosenWinner;
                     CasterLogUtility.Log(
@@ -3799,9 +3804,10 @@ namespace VerifiedXCore.Nodes
                 _winnerAgreementFailCount = 1;
             }
 
-            // Store our own vote
+            // Store our own vote — signed (VX-08), so peers can verify it and relay it verifiably.
+            var myVote = WinnerVoteStore.CreateOwn(height, myChosenWinner);
+            WinnerVoteStore.TryRecord(myVote, IsCommitteeVoter);
             var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(height, _ => new ConcurrentDictionary<string, string>());
-            votesForHeight[Globals.ValidatorAddress] = myChosenWinner;
 
             // Also store in CasterRoundDict so the endpoint can read it
             if (Globals.CasterRoundDict.TryGetValue(height, out var currentRound) && currentRound != null)
@@ -3829,7 +3835,9 @@ namespace VerifiedXCore.Nodes
                                 BlockHeight = height,
                                 VoterAddress = Globals.ValidatorAddress,
                                 WinnerAddress = myChosenWinner,
-                                ExcludedAddresses = new List<string>() // DETERMINISTIC-CONSENSUS: No local exclusions (removed WINNER-SKIP)
+                                ExcludedAddresses = myVote.ExcludedAddresses, // DETERMINISTIC-CONSENSUS: No local exclusions (removed WINNER-SKIP)
+                                Sequence = myVote.Sequence,
+                                Signature = myVote.Signature,
                             };
                             using var content = new StringContent(
                                 JsonConvert.SerializeObject(voteReq),
@@ -3841,13 +3849,16 @@ namespace VerifiedXCore.Nodes
                                 var body = await resp.Content.ReadAsStringAsync();
                                 if (!string.IsNullOrEmpty(body) && body != "0")
                                 {
-                                    var voteResp = JsonConvert.DeserializeAnonymousType(body, new { BlockHeight = 0L, Votes = new Dictionary<string, string>() });
-                                    if (voteResp?.Votes != null)
+                                    var voteResp = JsonConvert.DeserializeAnonymousType(body, new { BlockHeight = 0L, SignedVotes = new List<SignedWinnerVote>() });
+                                    if (voteResp?.SignedVotes != null)
                                     {
-                                        // Merge remote votes into our local dict
-                                        foreach (var kv in voteResp.Votes)
+                                        // VX-08: merge only votes for THIS round that carry their voter's
+                                        // signature from a committee member (the peer's own and any it relays).
+                                        // The unsigned voter→winner map used to be merged as-is.
+                                        foreach (var v in voteResp.SignedVotes)
                                         {
-                                            votesForHeight.TryAdd(kv.Key, kv.Value);
+                                            if (v != null && v.BlockHeight == height)
+                                                WinnerVoteStore.TryRecord(v, IsCommitteeVoter);
                                         }
                                     }
                                 }
@@ -3859,8 +3870,8 @@ namespace VerifiedXCore.Nodes
 
                 await Task.WhenAll(peerTasks);
 
-                // Check for supermajority agreement
-                var voteGroups = votesForHeight.Values
+                // Check for supermajority agreement (committee voters only — VX-08)
+                var voteGroups = votesForHeight.Where(kv => IsCommitteeVoter(kv.Key)).Select(kv => kv.Value)
                     .GroupBy(v => v)
                     .OrderByDescending(g => g.Count())
                     .ToList();
@@ -3898,6 +3909,7 @@ namespace VerifiedXCore.Nodes
             var oldKeys = Globals.CasterWinnerVoteDict.Keys.Where(k => k < height - 10).ToList();
             foreach (var k in oldKeys)
                 Globals.CasterWinnerVoteDict.TryRemove(k, out _);
+            WinnerVoteStore.PruneBelow(height - 10);
 
             // DETERMINISTIC-CONSENSUS: Cleanup old excluded address entries
             var oldExclKeys = Globals.CasterExcludedAddressDict.Keys.Where(k => k < height - 10).ToList();

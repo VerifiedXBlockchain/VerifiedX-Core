@@ -27,6 +27,16 @@ namespace VerifiedXCore.Models
         public string WinnerAddress { get; set; } = "";
         /// <summary>DETERMINISTIC-CONSENSUS: Addresses this voter excluded (failed liveness) so peers can apply the same exclusions.</summary>
         public List<string> ExcludedAddresses { get; set; } = new();
+        /// <summary>VX-08: the voter's increasing vote counter (see SignedWinnerVote.Sequence).</summary>
+        public long Sequence { get; set; }
+        /// <summary>VX-08: voter's signature over ConsensusMessageFormatter.FormatWinnerVoteV1.</summary>
+        public string Signature { get; set; } = "";
+
+        public Services.SignedWinnerVote ToSignedVote() => new Services.SignedWinnerVote
+        {
+            BlockHeight = BlockHeight, VoterAddress = VoterAddress, WinnerAddress = WinnerAddress,
+            ExcludedAddresses = ExcludedAddresses ?? new(), Sequence = Sequence, Signature = Signature,
+        };
     }
 
     /// <summary>

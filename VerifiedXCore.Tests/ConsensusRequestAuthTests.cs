@@ -53,7 +53,7 @@ namespace VerifiedXCore.Tests
         {
             var a = NewKey();
             var b = NewKey();
-            var msg = ConsensusMessageFormatter.FormatWinnerVoteV1(10, a.Address, "xWinner", new[] { "z", "a" });
+            var msg = ConsensusMessageFormatter.FormatWinnerVoteV1(10, a.Address, "xWinner", new[] { "z", "a" }, 1);
             var sig = SignatureService.CreateSignature(msg, a.Key, a.Pub);
 
             Assert.True(ConsensusRequestAuth.VerifySigner(a.Address, msg, sig));
@@ -84,7 +84,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void WinnerVoteFormat_IsOrderIndependentForExclusions() =>
             Assert.Equal(
-                ConsensusMessageFormatter.FormatWinnerVoteV1(5, "v", "w", new[] { "b", "a" }),
-                ConsensusMessageFormatter.FormatWinnerVoteV1(5, "v", "w", new[] { "a", "b" }));
+                ConsensusMessageFormatter.FormatWinnerVoteV1(5, "v", "w", new[] { "b", "a" }, 7),
+                ConsensusMessageFormatter.FormatWinnerVoteV1(5, "v", "w", new[] { "a", "b" }, 7));
     }
 }

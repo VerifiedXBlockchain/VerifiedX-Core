@@ -762,36 +762,31 @@ namespace VerifiedXCore.Controllers
                 if (req == null || req.BlockHeight <= 0 || string.IsNullOrEmpty(req.VoterAddress) || string.IsNullOrEmpty(req.WinnerAddress))
                     return BadRequest("0");
 
-                // Only accept votes from known casters
-                var casterList = Globals.BlockCasters.ToList();
-                if (!casterList.Any(c => c.ValidatorAddress == req.VoterAddress))
+                var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+                if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                    return Unauthorized();
+
+                // VX-08: only the round in progress (was: any height, so future rounds could be pre-seeded).
+                if (!ConsensusRequestAuth.IsHeightInWindow(req.BlockHeight, Globals.LastBlock.Height))
                     return BadRequest("0");
 
-                // Store the incoming vote
-                var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(req.BlockHeight, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, string>());
-                votesForHeight[req.VoterAddress] = req.WinnerAddress;
+                // VX-08: the vote must be signed by its voter, who must be a caster. It is stored through
+                // WinnerVoteStore — a caster's vote can only be replaced by a newer vote signed by that caster
+                // (it used to be overwritten by indexer from any request naming a public caster address).
+                if (WinnerVoteStore.TryRecord(req.ToSignedVote(), IsCasterParticipantAddress) == WinnerVoteRecordResult.Invalid)
+                    return BadRequest("0");
 
-                // DETERMINISTIC-CONSENSUS: Store excluded addresses from this voter
-                if (req.ExcludedAddresses != null && req.ExcludedAddresses.Any())
-                {
-                    var excludedForHeight = Globals.CasterExcludedAddressDict.GetOrAdd(req.BlockHeight, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, List<string>>());
-                    excludedForHeight[req.VoterAddress] = req.ExcludedAddresses;
-                }
-
-                // Also ensure our own vote is present (if we have one from CasterRoundDict)
-                if (!string.IsNullOrEmpty(Globals.ValidatorAddress) && !votesForHeight.ContainsKey(Globals.ValidatorAddress))
+                // Also ensure our own vote is present (if we have one from CasterRoundDict) — signed.
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress) &&
+                    !WinnerVoteStore.GetSigned(req.BlockHeight).Any(v => v.VoterAddress == Globals.ValidatorAddress))
                 {
                     if (Globals.CasterRoundDict.TryGetValue(req.BlockHeight, out var round) && round?.Proof != null)
-                    {
-                        votesForHeight[Globals.ValidatorAddress] = round.Proof.Address;
-                    }
+                        WinnerVoteStore.TryRecord(WinnerVoteStore.CreateOwn(req.BlockHeight, round.Proof.Address), IsCasterParticipantAddress);
                 }
 
-                // Return all votes for this height (include excluded addresses)
-                var allExcluded = Globals.CasterExcludedAddressDict.TryGetValue(req.BlockHeight, out var exDict)
-                    ? exDict.ToDictionary(kv => kv.Key, kv => kv.Value)
-                    : new Dictionary<string, List<string>>();
-                var result = new { BlockHeight = req.BlockHeight, Votes = votesForHeight.ToDictionary(kv => kv.Key, kv => kv.Value), ExcludedAddresses = allExcluded };
+                // Return every vote held for this height WITH its signature, so the caller can verify
+                // each one (including votes this node relays from other casters).
+                var result = new { BlockHeight = req.BlockHeight, SignedVotes = WinnerVoteStore.GetSigned(req.BlockHeight) };
                 return Ok(JsonConvert.SerializeObject(result));
             }
             catch { return BadRequest("0"); }
