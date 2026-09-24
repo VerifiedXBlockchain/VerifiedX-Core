@@ -523,7 +523,7 @@ namespace VerifiedXCore.Controllers
 
             var newAddressInfo = new[]
             {
-                new { Address = account.Address, PrivateKey = account.GetKey}
+                new { Address = account.Address, PrivateKey = KeyParsing.CanonicalKeyHexFromStored(account.GetKey) } // VX-11: portable 64-digit form
             };
 
             LogUtility.Log("New Address Created: " + account.Address, "V1Controller.GetNewAddress()");
@@ -868,8 +868,10 @@ namespace VerifiedXCore.Controllers
         /// <param name="id"></param>
         /// <param name="scan"></param>
         /// <returns></returns>
+        /// <param name="legacy">VX-11: force the pre-fix derivation (for a key imported into an older wallet whose
+        /// address has no on-chain history yet). A legacy address WITH history is restored automatically.</param>
         [HttpGet("ImportPrivateKey/{id}/{scan?}")]
-        public async Task<string> ImportPrivateKey(string id, bool scan = false)
+        public async Task<string> ImportPrivateKey(string id, bool scan = false, [FromQuery] bool legacy = false)
         {
             //use Id to get specific commands
             var output = "Command not recognized."; // this will only display if command not recognized.
@@ -877,7 +879,7 @@ namespace VerifiedXCore.Controllers
             {
                 if(Globals.EncryptPassword.Length > 0)
                 {
-                    var account = await AccountData.RestoreAccount(id, scan);
+                    var account = await AccountData.RestoreAccount(id, scan, legacy: legacy);
 
                     if (account == null)
                     {
@@ -899,7 +901,7 @@ namespace VerifiedXCore.Controllers
             }
             else
             {
-                var account = await AccountData.RestoreAccount(id, scan);
+                var account = await AccountData.RestoreAccount(id, scan, legacy: legacy);
 
                 if (account == null)
                 {
@@ -1294,16 +1296,16 @@ namespace VerifiedXCore.Controllers
         /// <param name="message"></param>
         /// <returns></returns>
         [HttpGet("CreateSignatureFromPrivateKey/{privKey}/{**message}")]
-        public async Task<string> CreateSignatureFromPrivateKey(string privKey, string message)
+        public async Task<string> CreateSignatureFromPrivateKey(string privKey, string message, [FromQuery] bool legacy = false)
         {
             string output;
 
             try
             {
                 message = message.Replace("%2F", "/");
-                var account = await AccountData.RestoreAccount(privKey, false, true);
+                var account = await AccountData.RestoreAccount(privKey, false, true, legacy: legacy);
 
-                if (account == null)
+                if (account == null || string.IsNullOrEmpty(account.Address))
                     return "Failed to use Private Key.";
 
                 var signature = SignatureService.CreateSignature(message, account.GetPrivKey, account.PublicKey);

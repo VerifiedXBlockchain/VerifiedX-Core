@@ -22,6 +22,13 @@ namespace VerifiedXCore.Models
         /// This is where a private key is stored. Do not use this to get the private key. Instead use GetKey.
         /// </summary>
         public string PrivateKey { get; set; }
+
+        /// <summary>
+        /// VX-11 (transient, never stored): set by AccountData.RestoreAccount when the legacy address an older
+        /// wallet derived from the same key was restored alongside this one.
+        /// </summary>
+        [LiteDB.BsonIgnore]
+        public string? AlsoRestoredLegacyAddress { get; set; }
         public string PublicKey { set; get; }
         public string Address { get; set; }
         public string? ADNR { get; set; }
@@ -47,9 +54,9 @@ namespace VerifiedXCore.Models
             return account;
         }
 
-        public async static Task<Account> Restore(string privKey, bool rescanForTx = false)
+        public async static Task<Account> Restore(string privKey, bool rescanForTx = false, bool legacy = false)
         {
-            Account account = await AccountData.RestoreAccount(privKey, rescanForTx);
+            Account account = await AccountData.RestoreAccount(privKey, rescanForTx, legacy: legacy);
             return account;
         }
         public static async Task AddAdnrToAccount(string address, string name)

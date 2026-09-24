@@ -379,8 +379,10 @@ namespace VerifiedXCore.Models
                     PrivateKey privateKey = new PrivateKey();
                     if(!string.IsNullOrEmpty(privKey) )
                     {
-                        var privateKeyMod = privKey.Replace(" ", ""); //remove any accidental spaces
-                        BigInteger b1 = BigInteger.Parse(privateKeyMod, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
+                        // VX-11: externally supplied key — unsigned parse + range check (the signed parse
+                        // read a leading 8-f as negative and created a different account).
+                        if (!KeyParsing.TryParseExternalPrivateKeyHex(privKey, out var b1, out var keyError))
+                            throw new ArgumentException(keyError);
                         privateKey = new PrivateKey("secp256k1", b1);
                     }
                     var privKeySecretHex = privateKey.secret.ToString("x");
@@ -551,7 +553,7 @@ namespace VerifiedXCore.Models
         #endregion
 
         # region RestoreReserveAccount(string privKey, string recoveryKey, string password, bool storeRecoveryKey = false, bool rescanForTx = false)
-        public static async Task<ReserveAccountInfo> RestoreReserveAccount(string privKey, string recoveryKey, string password, bool storeRecoveryKey = false, bool rescanForTx = false, bool onlyRestoreRecovery = false)
+        public static async Task<ReserveAccountInfo> RestoreReserveAccount(string privKey, string recoveryKey, string password, bool storeRecoveryKey = false, bool rescanForTx = false, bool onlyRestoreRecovery = false, bool legacy = false)
         {
             ReserveAccount rAccount = new ReserveAccount();
             Account account = new Account();
@@ -559,16 +561,18 @@ namespace VerifiedXCore.Models
 
             try
             {
+                // VX-11: raw keys typed by the user. Correct unsigned parse by default; the pre-fix derivation when
+                // forced, or when only its address has on-chain history (key used in an older wallet).
                 //Reserve Account - xRBX...
-                var privateKeyMod = privKey.Replace(" ", ""); //remove any accidental spaces
-                BigInteger b1 = BigInteger.Parse(privateKeyMod, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
+                if (!KeyParsing.TryParseImportedKey(privKey, legacy, AccountData.HasOnChainFootprint, out var b1, out _, out var reserveKeyError))
+                    throw new ArgumentException(reserveKeyError);
                 PrivateKey privateKey = new PrivateKey("secp256k1", b1);
                 var privKeySecretHex = privateKey.secret.ToString("x");
                 var pubKey = privateKey.publicKey();
 
                 //Regular Account - R...
-                var recoveryKeyMod = recoveryKey.Replace(" ", "");//remove any accidental spaces
-                BigInteger b2 = BigInteger.Parse(recoveryKeyMod, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
+                if (!KeyParsing.TryParseImportedKey(recoveryKey, legacy, AccountData.HasOnChainFootprint, out var b2, out _, out var recoveryKeyError))
+                    throw new ArgumentException(recoveryKeyError);
                 PrivateKey recPrivateKey = new PrivateKey("secp256k1", b2);
                 var recPrivateKeySecretHex = recPrivateKey.secret.ToString("x");
                 var recPubKey = recPrivateKey.publicKey();
@@ -1183,15 +1187,20 @@ namespace VerifiedXCore.Models
             var restoreCode = recoveryPhrase.ToStringFromBase64().Split("//");
             var recoveryKey = restoreCode[1];
 
-            var recoveryAccount = await AccountData.RestoreAccount(recoveryKey, false, true);
-
-            if(recoveryAccount == null)
-                return (null, $"Could not restore recovery account for signature.");
-
             var stateRec = StateData.GetSpecificAccountStateTrei(account.Address);
 
             if (stateRec == null)
                 return (null, $"Could not find a state trei record for this reserve account.");
+
+            // VX-11: a restore code holds the key exactly as this wallet stored it, which the pre-fix parse always
+            // reproduces; use it, and fall back to the corrected parse — whichever matches the recorded recovery
+            // account.
+            var recoveryAccount = await AccountData.RestoreAccountLegacy(recoveryKey, false, true);
+            if (recoveryAccount?.Address != stateRec.RecoveryAccount)
+                recoveryAccount = await AccountData.RestoreAccount(recoveryKey, false, true);
+
+            if(recoveryAccount == null || string.IsNullOrEmpty(recoveryAccount.Address))
+                return (null, $"Could not restore recovery account for signature.");
 
             if(stateRec.RecoveryAccount != recoveryAccount.Address)
                 return (null, $"Recovery account does not match the restores recovery account.");
