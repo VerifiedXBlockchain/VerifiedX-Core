@@ -1209,7 +1209,8 @@ namespace VerifiedXCore.P2P
 
                         if (activeValJson != null && activeValJson != "0")
                         {
-                            var activeVals = JsonConvert.DeserializeObject<List<NetworkValidator>>(activeValJson.ToDecompress().ToStringFromBase64());
+                            // VX-20: bounded (the reply was decompressed without limit).
+                            var activeVals = JsonConvert.DeserializeObject<List<NetworkValidator>>(activeValJson.ToDecompress(P2PClient.MaxRemoteDecompressedBytes).ToStringFromBase64());
                             if (activeVals != null)
                             {
                                 var peerDB = Peers.GetAll();
@@ -1304,6 +1305,12 @@ namespace VerifiedXCore.P2P
                                 LogUtility.Log($"Completed processing validator advertisements from peer {advertisingPeerIP}: added={addedCount}, failed={failedCount}, skipped={skippedCount}, NetworkValidators.Count={Globals.NetworkValidators.Count}, BlockCasters.Count={Globals.BlockCasters.Count}", "RequestActiveValidators");
                             }
                         }
+                    }
+                    catch (InvalidDataException ex)
+                    {
+                        // VX-20: a reply that expands past the bound is a peer offence.
+                        ErrorLogUtility.LogError($"Active validator list from {validator.NodeIP} rejected: {ex.Message}", "RequestActiveValidators");
+                        BanService.BanPeer(validator.NodeIP, "Oversized compressed validator list", "RequestActiveValidators");
                     }
                     catch (Exception ex)
                     {

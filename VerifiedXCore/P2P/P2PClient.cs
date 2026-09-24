@@ -601,6 +601,16 @@ namespace VerifiedXCore.P2P
 
         #region Get Block V2
 
+        /// <summary>
+        /// VX-20: most a peer's compressed reply (block span, active-validator list) may expand to. Spans are capped at
+        /// 1 MB of blocks by the sender (BlockDownloadService.MaxBlockRequestBuffer); 8 MB leaves room for growth.
+        /// </summary>
+        public const int MaxRemoteDecompressedBytes = 8 * 1024 * 1024;
+
+        /// <summary>VX-20: decodes a SendBlockList reply; throws InvalidDataException when it expands past the bound.</summary>
+        public static List<Block>? DecodeBlockSpan(string blockSpan) =>
+            JsonConvert.DeserializeObject<List<Block>>(blockSpan.ToDecompress(MaxRemoteDecompressedBytes));
+
         public static async Task<List<Block>?> GetBlockList((long, long) heightSpan, NodeInfo node) //base example
         {
             var startTime = DateTime.Now;
@@ -614,8 +624,8 @@ namespace VerifiedXCore.P2P
                 {
                     if(blockSpan != "0")
                     {
-                        var blockSpanDecompressed = blockSpan.ToDecompress();
-                        var blockSpanList = JsonConvert.DeserializeObject<List<Block>>(blockSpanDecompressed);
+                        // VX-20: bounded (it decompressed without limit, so a small reply could allocate gigabytes).
+                        var blockSpanList = DecodeBlockSpan(blockSpan);
                         if(blockSpanList?.Count > 0)
                         {
                             return blockSpanList;
@@ -627,9 +637,21 @@ namespace VerifiedXCore.P2P
                     }
                 }
             }
-            catch(Exception ex)
+            catch (InvalidDataException ex)
             {
-                
+                // VX-20: a reply that expands past the bound is a peer offence, not a transient error.
+                ErrorLogUtility.LogError($"Block span from {node?.NodeIP} rejected: {ex.Message}", "P2PClient.GetBlockList()");
+                if (!string.IsNullOrEmpty(node?.NodeIP))
+                    BanService.BanPeer(node.NodeIP, "Oversized compressed block span", "P2PClient.GetBlockList()");
+            }
+            catch (OutOfMemoryException)
+            {
+                throw; // VX-20: never swallowed
+            }
+            catch (Exception ex)
+            {
+                // VX-20: this catch was empty, so failures (including allocation failures) vanished.
+                ErrorLogUtility.LogError($"Block span from {node?.NodeIP} failed: {ex.Message}", "P2PClient.GetBlockList()");
             }
             finally
             {

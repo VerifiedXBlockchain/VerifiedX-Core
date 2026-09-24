@@ -16,19 +16,20 @@ namespace VerifiedXCore.Utilities
 			}
 		}
 
+		/// <summary>
+		/// VX-20 (adjacent): smart contract code arrives inside transactions and is decompressed by every node during
+		/// validation (deploy binding, state updates). It was unbounded, so one transaction carrying a GZip bomb could
+		/// exhaust memory on every validator. The bound is deliberately generous (contract source is text, far smaller)
+		/// and identical on every node, so a rejection is deterministic.
+		/// </summary>
+		public const int MaxDecompressedContractBytes = 64 * 1024 * 1024;
+
 		public static byte[] Decompress(byte[] bytes)
 		{
 			using (var memoryStream = new MemoryStream(bytes))
+			using (var decompressStream = new GZipStream(memoryStream, CompressionMode.Decompress))
 			{
-
-				using (var outputStream = new MemoryStream())
-				{
-					using (var decompressStream = new GZipStream(memoryStream, CompressionMode.Decompress))
-					{
-						decompressStream.CopyTo(outputStream);
-					}
-					return outputStream.ToArray();
-				}
+				return VerifiedXCore.Extensions.GenericExtensions.ReadBounded(decompressStream, MaxDecompressedContractBytes);
 			}
 		}
 
