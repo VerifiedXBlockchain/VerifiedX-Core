@@ -63,7 +63,7 @@ namespace VerifiedXCore.Tests
         /// <summary>Actions that use or return local private-key material, or change key state. Must never be listed.</summary>
         public static readonly string[] MustBeDeniedWhileLocked =
         {
-            "V1.GetNewAddress", "V1.ImportPrivateKey", "V1.GetMother", "V1.GetEncryptedPassword", "V1.GetHDWallet",
+            "V1.GetNewAddress", "V1.ImportPrivateKey", "V1.GetMother", "V1.GetHDWallet",
             "V1.GetRestoreHDWallet", "V1.SendTransaction", "V1.CreateSignature", "V1.CreateSignatureFromPrivateKey",
             "V1.GetEncryptWallet", "V1.StartMother", "V1.JoinMother", "V1.GetPrivateKey",
             "BTCV2.GetNewAddress", "BTCV2.GetBitcoinAccount", "BTCV2.ImportPrivateKey",
@@ -136,6 +136,19 @@ namespace VerifiedXCore.Tests
             var ctx = Context("V1", "SomeRouteAddedNextYear");
             new ActionFilterController().OnActionExecuting(ctx);
             Assert.IsType<UnauthorizedObjectResult>(ctx.Result);
+        }
+
+        [Fact]
+        public void Locked_UnlockRoutes_Pass()
+        {
+            // Both the API unlock (GetDecryptWallet) and the GUI unlock (GetEncryptedPassword) must work while locked.
+            Lock();
+            foreach (var a in new[] { "GetDecryptWallet", "GetEncryptedPassword", "UnlockWallet" })
+            {
+                var ctx = Context("V1", a);
+                new ActionFilterController().OnActionExecuting(ctx);
+                Assert.Null(ctx.Result);
+            }
         }
 
         [Fact]

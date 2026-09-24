@@ -291,7 +291,10 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-
+                // BB-3 follow-up: an unverified password must not stay in memory (it made the wallet look
+                // unlocked to the API gate). E.g. no validator account -> exception before verification.
+                Globals.EncryptPassword = new System.Security.SecureString();
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "Password could not be verified." });
             }
 
             return output;

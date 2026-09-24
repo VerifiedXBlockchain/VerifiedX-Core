@@ -34,7 +34,7 @@ namespace VerifiedXCore.Controllers
             "V1.GetConnectionHistory", "V1.GetClientInfo", "V1.GetCLIVersion", "V1.ReadRBXLog", "V1.ReadValLog",
             "V1.GetWalletInfo", "V1.SyncBalances", "V1.ValidateSignature",
             // unlock / lock / encryption status
-            "V1.UnlockWallet", "V1.LockWallet", "V1.GetDecryptWallet", "V1.GetEncryptLock", "V1.GetIsWalletEncrypted",
+            "V1.UnlockWallet", "V1.LockWallet", "V1.GetDecryptWallet", "V1.GetEncryptedPassword", "V1.GetEncryptLock", "V1.GetIsWalletEncrypted",
             "V1.CheckPasswordNeeded", "V1.GetIsEncryptedPasswordStored",
 
             // ── V2 ──────────────────────────────────────────────────────────────────────────
