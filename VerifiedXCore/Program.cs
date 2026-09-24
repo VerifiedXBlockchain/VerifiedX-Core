@@ -750,6 +750,14 @@ namespace VerifiedXCore
             bool useElmah = false;
             string dbPath = GetPathUtility.GetDatabasePath();
             //for web API using Kestrel
+            // VX-03 (follow-up): never expose the wallet API on all interfaces without a credential.
+            var openApiRefusal = ApiRequestGuard.EnforceOpenApiCredential();
+            if (openApiRefusal != null)
+            {
+                Console.WriteLine(openApiRefusal);
+                ErrorLogUtility.LogError(openApiRefusal, "Program.Main()");
+            }
+
             var builder = Host.CreateDefaultBuilder(args)
                 .ConfigureServices((context, services) => { 
 

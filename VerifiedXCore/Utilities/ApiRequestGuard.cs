@@ -42,6 +42,24 @@ namespace VerifiedXCore.Utilities
         /// <param name="origin">The Origin header, if any.</param>
         /// <param name="secFetchSite">The Sec-Fetch-Site header, if any.</param>
         /// <param name="openApi">True when the operator started the node with "openapi" (all interfaces).</param>
+        /// <summary>
+        /// VX-03 (follow-up): "openapi" exposes the wallet API on every interface. Without an API token or API password
+        /// nothing authenticates a network caller (the audit's own setup: openapi, no token — /wallet/api/send/vfx still
+        /// worked after the route fix). Returns the reason and switches OpenAPI off when no credential is configured, so
+        /// the API stays on loopback. Call before the API host is built.
+        /// </summary>
+        public static string? EnforceOpenApiCredential()
+        {
+            if (!Globals.OpenAPI)
+                return null;
+            var hasToken = Globals.APIToken != null && Globals.APIToken.Length > 0;
+            var hasPassword = !string.IsNullOrEmpty(Globals.APIPassword);
+            if (hasToken || hasPassword)
+                return null;
+            Globals.OpenAPI = false;
+            return "openapi refused: no apitoken or APIPassword is configured, so the wallet API would accept anyone on the network. The API stays on localhost. Set apitoken=<secret> (or APIPassword in config.txt) to expose it.";
+        }
+
         public static string? GetRejection(string? host, string? origin, string? secFetchSite, bool openApi)
         {
             // DNS rebinding: an attacker hostname that resolves to 127.0.0.1 arrives with its own Host.

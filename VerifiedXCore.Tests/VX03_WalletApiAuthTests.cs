@@ -237,5 +237,27 @@ namespace VerifiedXCore.Tests
 
         [Fact]
         public void VX03_OriginNull_Refused() => Assert.NotNull(ApiRequestGuard.GetRejection("localhost:7292", "null", null, false));
+
+        // ── Follow-up (independent review): openapi without a credential ─────────────────
+
+        [Fact]
+        public void VX03_OpenApiWithoutAnyCredential_IsRefused_ApiStaysOnLoopback()
+        {
+            var (open, token, pw) = (Globals.OpenAPI, Globals.APIToken, Globals.APIPassword);
+            try
+            {
+                Globals.OpenAPI = true; Globals.APIToken = null; Globals.APIPassword = null;
+                Assert.NotNull(VerifiedXCore.Utilities.ApiRequestGuard.EnforceOpenApiCredential());
+                Assert.False(Globals.OpenAPI);
+
+                Globals.OpenAPI = true; Globals.APIToken = VerifiedXCore.Extensions.GenericExtensions.ToSecureString("token-123");
+                Assert.Null(VerifiedXCore.Utilities.ApiRequestGuard.EnforceOpenApiCredential()); // control: a token keeps openapi
+                Assert.True(Globals.OpenAPI);
+
+                Globals.APIToken = null; Globals.APIPassword = "enc";
+                Assert.Null(VerifiedXCore.Utilities.ApiRequestGuard.EnforceOpenApiCredential()); // control: an API password keeps it too
+            }
+            finally { (Globals.OpenAPI, Globals.APIToken, Globals.APIPassword) = (open, token, pw); }
+        }
     }
 }
