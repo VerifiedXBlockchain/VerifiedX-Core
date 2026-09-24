@@ -53,11 +53,14 @@ namespace VerifiedXCore.Utilities
             if (!Globals.OpenAPI)
                 return null;
             var hasToken = Globals.APIToken != null && Globals.APIToken.Length > 0;
-            var hasPassword = !string.IsNullOrEmpty(Globals.APIPassword);
-            if (hasToken || hasPassword)
+            // VX-03 (follow-up): an APIPassword is a per-caller credential only with AlwaysRequireAPIPassword. Without it,
+            // UnlockWallet/{password} opens a GLOBAL window (Globals.APIUnlockTime) in which every caller on the network
+            // gets the full API, including sends and key export.
+            var hasPerRequestPassword = !string.IsNullOrEmpty(Globals.APIPassword) && Globals.AlwaysRequireAPIPassword;
+            if (hasToken || hasPerRequestPassword)
                 return null;
             Globals.OpenAPI = false;
-            return "openapi refused: no apitoken or APIPassword is configured, so the wallet API would accept anyone on the network. The API stays on localhost. Set apitoken=<secret> (or APIPassword in config.txt) to expose it.";
+            return "openapi refused: no apitoken (or APIPassword with AlwaysRequireAPIPassword=true) is configured, so the wallet API would accept anyone on the network. The API stays on localhost. Set apitoken=<secret> to expose it.";
         }
 
         public static string? GetRejection(string? host, string? origin, string? secFetchSite, bool openApi)

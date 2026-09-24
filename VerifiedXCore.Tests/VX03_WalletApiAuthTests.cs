@@ -243,7 +243,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void VX03_OpenApiWithoutAnyCredential_IsRefused_ApiStaysOnLoopback()
         {
-            var (open, token, pw) = (Globals.OpenAPI, Globals.APIToken, Globals.APIPassword);
+            var (open, token, pw, always) = (Globals.OpenAPI, Globals.APIToken, Globals.APIPassword, Globals.AlwaysRequireAPIPassword);
             try
             {
                 Globals.OpenAPI = true; Globals.APIToken = null; Globals.APIPassword = null;
@@ -254,10 +254,17 @@ namespace VerifiedXCore.Tests
                 Assert.Null(VerifiedXCore.Utilities.ApiRequestGuard.EnforceOpenApiCredential()); // control: a token keeps openapi
                 Assert.True(Globals.OpenAPI);
 
-                Globals.APIToken = null; Globals.APIPassword = "enc";
-                Assert.Null(VerifiedXCore.Utilities.ApiRequestGuard.EnforceOpenApiCredential()); // control: an API password keeps it too
+                // Follow-up (second review): an API password without AlwaysRequireAPIPassword is a global unlock window
+                // (every network caller gets the API after one UnlockWallet), so it is not a network credential.
+                Globals.APIToken = null; Globals.APIPassword = "enc"; Globals.AlwaysRequireAPIPassword = false;
+                Assert.NotNull(VerifiedXCore.Utilities.ApiRequestGuard.EnforceOpenApiCredential());
+                Assert.False(Globals.OpenAPI);
+
+                Globals.OpenAPI = true; Globals.AlwaysRequireAPIPassword = true;
+                Assert.Null(VerifiedXCore.Utilities.ApiRequestGuard.EnforceOpenApiCredential()); // control: checked on every request
+                Assert.True(Globals.OpenAPI);
             }
-            finally { (Globals.OpenAPI, Globals.APIToken, Globals.APIPassword) = (open, token, pw); }
+            finally { (Globals.OpenAPI, Globals.APIToken, Globals.APIPassword, Globals.AlwaysRequireAPIPassword) = (open, token, pw, always); }
         }
     }
 }
