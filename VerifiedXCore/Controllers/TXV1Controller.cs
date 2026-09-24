@@ -1045,7 +1045,10 @@ namespace VerifiedXCore.Controllers
         public async Task<string> TestMempool()
         {
             var processedTxPool = await TransactionData.ProcessTxPool();
-            var txPool = TransactionData.GetPool();
+            // VX-21: GetPool() is the live LiteDB collection handle. Serialising it walked the handle's object graph
+            // (database, engine, mapper...) instead of its rows and overflowed the stack, which kills the process —
+            // one unauthenticated GET took the node down. Serialise the rows.
+            var txPool = TransactionData.GetPool()?.FindAll().ToList() ?? new List<Transaction>();
 
             return JsonConvert.SerializeObject(new { Success = true, Message = $"", Pool = txPool });
         }
