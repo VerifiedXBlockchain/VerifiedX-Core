@@ -92,11 +92,29 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public async Task VX12_ExplicitExport_ReturnsTheCanonicalKey_WhenUnlocked()
+        public async Task VX12_ExplicitExport_ReturnsTheCanonicalKey_WithAnApiToken()
         {
+            var priorToken = Globals.APIToken;
+            try
+            {
+                Globals.APIToken = VerifiedXCore.Extensions.GenericExtensions.ToSecureString("vx12-token");
+                using var server = NewServer();
+                var client = server.CreateClient();
+                client.DefaultRequestHeaders.Add("apitoken", "vx12-token");
+                var body = await client.GetStringAsync($"/api/V1/GetPrivateKey/{_account.Address}");
+                Assert.Contains(Canonical, body);
+            }
+            finally { Globals.APIToken = priorToken; }
+        }
+
+        [Fact]
+        public async Task VX12_FollowUp_ExportOnAnUnprotectedWallet_Refused()
+        {
+            // The audit's setup: unencrypted wallet, no API token or password. Listing + export used to yield every key.
             using var server = NewServer();
             var body = await server.CreateClient().GetStringAsync($"/api/V1/GetPrivateKey/{_account.Address}");
-            Assert.Contains(Canonical, body);
+            AssertNoKey(body);
+            Assert.Contains("requires an encrypted wallet or an API token", body);
         }
 
         [Fact]

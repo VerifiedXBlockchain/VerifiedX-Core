@@ -880,6 +880,16 @@ namespace VerifiedXCore.Controllers
         [HttpGet("GetPrivateKey/{address}")]
         public async Task<string> GetPrivateKey(string address)
         {
+            // VX-12 (follow-up): key export needs a credential. On an unencrypted wallet with no API token or API
+            // password (the audit's setup), any caller that reached the API could read every key in two requests
+            // (list addresses, then export). Allowed only when the wallet is encrypted and unlocked (the BB-3 gate
+            // refuses it while locked), or an API token / API password protects the API.
+            var credentialed = Globals.IsWalletEncrypted
+                || (Globals.APIToken != null && Globals.APIToken.Length > 0)
+                || !string.IsNullOrEmpty(Globals.APIPassword);
+            if (!credentialed)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Key export requires an encrypted wallet or an API token/password. Use the CLI to view keys on an unprotected wallet." });
+
             var account = AccountData.GetSingleAccount(address);
             if (account == null)
                 return JsonConvert.SerializeObject(new { Success = false, Message = "Account not found." });
