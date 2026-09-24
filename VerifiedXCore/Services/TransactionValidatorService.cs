@@ -653,6 +653,13 @@ namespace VerifiedXCore.Services
                                             if(amount == null || toAddress == null || fromAddress == null)
                                                 return (txResult, $"TX Data was missing items.");
 
+                                            // NEW-04: the apply debits the FromAddress named in the data, so it must be the signer
+                                            // (anyone could move any holder's tokens), the credit goes to the transaction's
+                                            // ToAddress, and a negative amount (which minted) is refused.
+                                            var tokenTransferError = LedgerIntegrityRules.TokenTransfer(txRequest.FromAddress, txRequest.ToAddress, fromAddress, toAddress, amount);
+                                            if (tokenTransferError != null)
+                                                return (txResult, tokenTransferError);
+
                                             var stateAccount = StateData.GetSpecificAccountStateTrei(fromAddress);
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
 
@@ -709,6 +716,11 @@ namespace VerifiedXCore.Services
 
                                             if (amount == null ||fromAddress == null)
                                                 return (txResult, $"TX Data was missing items.");
+
+                                            // NEW-04: burn debits the data's FromAddress (must be the signer); a negative amount minted.
+                                            var tokenBurnError = LedgerIntegrityRules.TokenBurn(txRequest.FromAddress, fromAddress, amount);
+                                            if (tokenBurnError != null)
+                                                return (txResult, tokenBurnError);
 
                                             var stateAccount = StateData.GetSpecificAccountStateTrei(fromAddress);
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -792,6 +804,12 @@ namespace VerifiedXCore.Services
 
                                             if (string.IsNullOrEmpty(topicUID))
                                                 return (txResult, "TopicUID cannot be null");
+
+                                            // NEW-04: the vote is recorded for the data's FromAddress, so it must be the signer
+                                            // (anyone could cast any holder's vote).
+                                            var tokenVoteError = LedgerIntegrityRules.TokenVoteCast(txRequest.FromAddress, fromAddress);
+                                            if (tokenVoteError != null)
+                                                return (txResult, tokenVoteError);
 
                                             var stateAccount = StateData.GetSpecificAccountStateTrei(fromAddress);
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
