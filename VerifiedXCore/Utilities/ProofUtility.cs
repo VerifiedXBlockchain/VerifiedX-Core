@@ -264,8 +264,9 @@ namespace VerifiedXCore.Utilities
                 var pubKey = val.PublicKey;
                 if (string.IsNullOrEmpty(pubKey))
                 {
+                    // VX-15: only a key that owns the address.
                     var fromCasters = Globals.BlockCasters
-                        .FirstOrDefault(c => c.ValidatorAddress == val.Address && !string.IsNullOrEmpty(c.ValidatorPublicKey));
+                        .FirstOrDefault(c => c.ValidatorAddress == val.Address && !string.IsNullOrEmpty(NetworkValidator.BoundPublicKey(val.Address, c.ValidatorPublicKey)));
                     if (fromCasters != null && !string.IsNullOrEmpty(fromCasters.ValidatorPublicKey))
                     {
                         pubKey = fromCasters.ValidatorPublicKey;

@@ -66,6 +66,10 @@ namespace VerifiedXCore.Models
         public long BlockHeight { get; set; }
         public string CasterAddress { get; set; } = "";
         public List<ValidatorListEntry> Validators { get; set; } = new();
+        /// <summary>VX-15: unix seconds, inside the signed payload.</summary>
+        public long Timestamp { get; set; }
+        /// <summary>VX-15: CasterAddress's signature over VFX_VALLIST_V1 (ValidatorListExchange.SigningMessage).</summary>
+        public string Signature { get; set; } = "";
     }
 
     /// <summary>
@@ -77,6 +81,10 @@ namespace VerifiedXCore.Models
         public long BlockHeight { get; set; }
         public string CasterAddress { get; set; } = "";
         public List<ValidatorListEntry> Validators { get; set; } = new();
+        /// <summary>VX-15: unix seconds, inside the signed payload.</summary>
+        public long Timestamp { get; set; }
+        /// <summary>VX-15: the responding caster's signature over VFX_VALLIST_V1.</summary>
+        public string Signature { get; set; } = "";
     }
 
 

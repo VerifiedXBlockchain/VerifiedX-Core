@@ -63,6 +63,14 @@ namespace VerifiedXCore.Models
         /// entry's Address and PublicKey (the SignalR handshake signs four parts and other paths two, so a
         /// signature from another purpose cannot be reused here).
         /// </summary>
+        /// <summary>
+        /// VX-15: a registry entry's PublicKey must be the key that owns its Address (it seeds the VRF, and VX-05
+        /// rejects proofs whose key does not derive the address). Writers that take a key from peer data store it only
+        /// when it binds; otherwise "" (the entry then has no usable key, exactly as a mismatched key already had).
+        /// </summary>
+        public static string BoundPublicKey(string? address, string? publicKey) =>
+            ConsensusRequestAuth.PublicKeyMatchesAddress(publicKey, address) ? publicKey! : "";
+
         public static bool TryParseSignedAdvertisement(NetworkValidator validator, out long signedAt)
         {
             signedAt = 0;

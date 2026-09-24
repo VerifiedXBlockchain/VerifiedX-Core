@@ -794,9 +794,10 @@ namespace VerifiedXCore.Controllers
 
         /// <summary>
         /// CONSENSUS-V2 (Fix #4): Exchange full validator list entries between casters.
-        /// On receipt we liveness-gate every unknown peer-supplied entry before merging into
-        /// <see cref="Globals.NetworkValidators"/> as fully trusted. We always echo back our own
-        /// trusted entries so the caller can fill its gaps in a single round-trip.
+        /// VX-15: the request must be signed by a committee caster (fresh, single-use); each entry must carry a key
+        /// that derives its address and hold the validator balance; entries stay pending until distinct committee
+        /// casters corroborate them and a liveness check passes (<see cref="ValidatorListExchange"/>). We echo back
+        /// our own trusted entries, signed, so the caller can fill its gaps in a single round-trip.
         /// </summary>
         [HttpPost]
         [Route("ExchangeValidatorList")]
@@ -807,56 +808,33 @@ namespace VerifiedXCore.Controllers
                 if (req == null || req.BlockHeight <= 0 || string.IsNullOrEmpty(req.CasterAddress))
                     return BadRequest("0");
 
-                // Only accept from known casters
-                var casterList = Globals.BlockCasters.ToList();
-                if (!casterList.Any(c => c.ValidatorAddress == req.CasterAddress))
+                // VX-15: committee membership alone was the gate (a public address string). The list must now be
+                // signed by that caster, fresh, and used once.
+                if (!ValidatorListExchange.VerifyMessage(req.CasterAddress, req.Timestamp, req.Signature, req.Validators, consumeSignature: true, out var whyRejected))
+                {
+                    CasterLogUtility.Log($"VALLIST-SYNC: ExchangeValidatorList from {req.CasterAddress} rejected: {whyRejected}", "CONSENSUS");
                     return BadRequest("0");
+                }
 
                 int merged = 0;
+                int pending = 0;
                 int rejected = 0;
                 if (req.Validators != null)
                 {
+                    var budget = new ValidatorListExchange.Budget(ValidatorListExchange.PromotionBudgetPerMessage);
                     foreach (var entry in req.Validators)
                     {
-                        if (entry == null
-                            || string.IsNullOrEmpty(entry.Address)
-                            || string.IsNullOrEmpty(entry.IPAddress))
-                            continue;
-                        if (entry.Address == Globals.ValidatorAddress)
-                            continue;
-                        if (Globals.NetworkValidators.ContainsKey(entry.Address))
-                            continue;
-
-                        bool live;
-                        try { live = await NetworkValidator.CheckValidatorLiveness(entry.IPAddress); }
-                        catch { live = false; }
-
-                        if (!live)
-                        {
-                            rejected++;
-                            continue;
-                        }
-
-                        var nv = new NetworkValidator
-                        {
-                            Address = entry.Address,
-                            IPAddress = entry.IPAddress,
-                            PublicKey = entry.PublicKey ?? "",
-                            IsFullyTrusted = true,
-                            LastSeen = TimeUtil.GetTime(),
-                            FirstSeenAtHeight = entry.FirstSeenAtHeight > 0
-                                ? entry.FirstSeenAtHeight
-                                : (Globals.LastBlock?.Height ?? req.BlockHeight),
-                            CheckFailCount = 0,
-                        };
-                        if (Globals.NetworkValidators.TryAdd(entry.Address, nv))
-                            merged++;
+                        // VX-15: entry rules + corroboration; never trusted straight from the wire, first-seen is local.
+                        var r = await ValidatorListExchange.OfferAsync(entry, req.CasterAddress, budget.TryTake);
+                        if (r == ValidatorListExchange.OfferResult.Promoted) merged++;
+                        else if (r == ValidatorListExchange.OfferResult.Pending || r == ValidatorListExchange.OfferResult.Deferred) pending++;
+                        else if (r == ValidatorListExchange.OfferResult.Rejected || r == ValidatorListExchange.OfferResult.Unreachable) rejected++;
                     }
                 }
 
-                if (merged > 0 || rejected > 0)
+                if (merged > 0 || pending > 0 || rejected > 0)
                     CasterLogUtility.Log(
-                        $"VALLIST-SYNC: ExchangeValidatorList from {req.CasterAddress} h={req.BlockHeight} merged={merged} rejected={rejected} (peer reported {req.Validators?.Count ?? 0})",
+                        $"VALLIST-SYNC: ExchangeValidatorList from {req.CasterAddress} h={req.BlockHeight} merged={merged} pending={pending} rejected={rejected} (peer reported {req.Validators?.Count ?? 0})",
                         "CONSENSUS");
 
                 // Build response from our own trusted entries.
@@ -881,6 +859,14 @@ namespace VerifiedXCore.Controllers
                     CasterAddress = Globals.ValidatorAddress ?? "",
                     Validators = myEntries
                 };
+                // VX-15: the response is signed too; the caller merges only a list signed by the caster it asked.
+                try
+                {
+                    var (ts, sig) = ValidatorListExchange.SignOwn(myEntries);
+                    response.Timestamp = ts;
+                    response.Signature = sig;
+                }
+                catch { /* unsigned response: the caller will ignore it */ }
                 return Ok(JsonConvert.SerializeObject(response));
             }
             catch { return BadRequest("0"); }

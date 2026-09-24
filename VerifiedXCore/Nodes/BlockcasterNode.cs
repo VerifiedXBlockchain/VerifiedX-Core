@@ -331,7 +331,7 @@ namespace VerifiedXCore.Nodes
                                         {
                                             Address = caster.ValidatorAddress,
                                             IPAddress = (caster.PeerIP ?? "").Replace("::ffff:", ""),
-                                            PublicKey = caster.ValidatorPublicKey ?? "",
+                                            PublicKey = Models.NetworkValidator.BoundPublicKey(caster.ValidatorAddress, caster.ValidatorPublicKey), // VX-15
                                             IsFullyTrusted = true,
                                             LastSeen = srNow,
                                             CheckFailCount = 0,
@@ -1124,6 +1124,8 @@ namespace VerifiedXCore.Nodes
                         // Phase E fix: hydrate the missing public key from the seed's BootstrapStatus
                         // instead of silently skipping (a skipped seed = empty legacy proofs = no-winner stall).
                         pubKey = await FetchPeerValidatorPublicKeyAsync(caster.PeerIP);
+                        // VX-15: the BootstrapStatus answer is unsigned; keep the key only if it owns the address.
+                        pubKey = NetworkValidator.BoundPublicKey(caster.ValidatorAddress, pubKey);
                         if (string.IsNullOrEmpty(pubKey))
                         {
                             CasterLogUtility.Log(
@@ -4148,6 +4150,19 @@ namespace VerifiedXCore.Nodes
             int totalMerged = 0;
             int totalRejected = 0;
             int totalDeferred = 0;
+            int totalPending = 0;
+
+            // VX-15: our request is signed (the receiver rejects unsigned lists); liveness checks this round are
+            // bounded by one shared budget across all peers.
+            long reqTimestamp;
+            string reqSignature;
+            try { (reqTimestamp, reqSignature) = ValidatorListExchange.SignOwn(myEntries); }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"VALLIST-SYNC: cannot sign validator list: {ex.Message}", "CONSENSUS");
+                return;
+            }
+            var promotionBudget = new ValidatorListExchange.Budget(VALIDATOR_LIST_SYNC_MERGE_CAP);
 
             var syncTasks = casters.Select(async caster =>
             {
@@ -4160,7 +4175,9 @@ namespace VerifiedXCore.Nodes
                     {
                         BlockHeight = currentHeight,
                         CasterAddress = Globals.ValidatorAddress ?? "",
-                        Validators = myEntries
+                        Validators = myEntries,
+                        Timestamp = reqTimestamp,
+                        Signature = reqSignature
                     };
                     using var content = new StringContent(
                         JsonConvert.SerializeObject(req),
@@ -4178,67 +4195,16 @@ namespace VerifiedXCore.Nodes
                     if (listResp?.Validators == null || listResp.Validators.Count == 0)
                         return;
 
-                    int peerMerged = 0;
-                    int peerRejected = 0;
-                    int peerDeferred = 0;
-                    foreach (var entry in listResp.Validators)
-                    {
-                        if (entry == null
-                            || string.IsNullOrEmpty(entry.Address)
-                            || string.IsNullOrEmpty(entry.IPAddress))
-                            continue;
-
-                        // Skip self and anything already known.
-                        if (entry.Address == Globals.ValidatorAddress)
-                            continue;
-                        if (Globals.NetworkValidators.ContainsKey(entry.Address))
-                            continue;
-
-                        // CONSENSUS-V2 (Fix #4): Per-round merge cap. Once we've merged
-                        // VALIDATOR_LIST_SYNC_MERGE_CAP entries this round, defer the rest to the next
-                        // sync tick. We still drain the response (no early break) so the HTTP
-                        // socket closes cleanly and we get an accurate "deferred" count for logs.
-                        if (Volatile.Read(ref totalMerged) >= VALIDATOR_LIST_SYNC_MERGE_CAP)
-                        {
-                            Interlocked.Increment(ref peerDeferred);
-                            continue;
-                        }
-
-                        // Liveness + version gate before merging — never trust a peer's word alone.
-                        bool live;
-                        try { live = await NetworkValidator.CheckValidatorLiveness(entry.IPAddress); }
-                        catch { live = false; }
-
-                        if (!live)
-                        {
-                            Interlocked.Increment(ref peerRejected);
-                            continue;
-                        }
-
-                        // Re-check the cap AFTER the (slow) liveness call — another peer task could
-                        // have crossed the threshold while we were awaiting.
-                        if (Volatile.Read(ref totalMerged) >= VALIDATOR_LIST_SYNC_MERGE_CAP)
-                        {
-                            Interlocked.Increment(ref peerDeferred);
-                            continue;
-                        }
-
-                        var nv = new NetworkValidator
-                        {
-                            Address = entry.Address,
-                            IPAddress = entry.IPAddress,
-                            PublicKey = entry.PublicKey ?? "",
-                            IsFullyTrusted = true,
-                            LastSeen = TimeUtil.GetTime(),
-                            FirstSeenAtHeight = entry.FirstSeenAtHeight > 0 ? entry.FirstSeenAtHeight : currentHeight,
-                            CheckFailCount = 0,
-                        };
-                        if (Globals.NetworkValidators.TryAdd(entry.Address, nv))
-                        {
-                            Interlocked.Increment(ref peerMerged);
-                            Interlocked.Increment(ref totalMerged);
-                        }
-                    }
+                    // VX-15: same rules as the route. The response must be signed by the caster we asked; entries need a key
+                    // that derives the address and the validator balance, and join only after distinct committee casters
+                    // corroborate them and a liveness check passes. First-seen is local; the wire value is ignored.
+                    var outcome = await ValidatorListExchange.MergeResponseAsync(listResp, caster.ValidatorAddress ?? "", promotionBudget);
+                    int Count(ValidatorListExchange.OfferResult r) => outcome.TryGetValue(r, out var n) ? n : 0;
+                    int peerMerged = Count(ValidatorListExchange.OfferResult.Promoted);
+                    int peerRejected = Count(ValidatorListExchange.OfferResult.Rejected) + Count(ValidatorListExchange.OfferResult.Unreachable);
+                    int peerDeferred = Count(ValidatorListExchange.OfferResult.Deferred);
+                    Interlocked.Add(ref totalMerged, peerMerged);
+                    Interlocked.Add(ref totalPending, Count(ValidatorListExchange.OfferResult.Pending));
 
                     if (peerMerged > 0 || peerRejected > 0 || peerDeferred > 0)
                         CasterLogUtility.Log(
@@ -4262,7 +4228,7 @@ namespace VerifiedXCore.Nodes
                     "CONSENSUS");
 
             CasterLogUtility.Log(
-                $"VALLIST-SYNC: SUMMARY at height {currentHeight} → casters={casters.Count} merged={totalMerged} rejected={totalRejected} deferred={totalDeferred} myCount(after)={Globals.NetworkValidators.Count}",
+                $"VALLIST-SYNC: SUMMARY at height {currentHeight} → casters={casters.Count} merged={totalMerged} pending={totalPending} rejected={totalRejected} deferred={totalDeferred} myCount(after)={Globals.NetworkValidators.Count}",
                 "CONSENSUS");
         }
 
