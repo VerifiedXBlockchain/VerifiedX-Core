@@ -838,8 +838,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
             {
                 var scState = SmartContractStateTrei.GetSmartContractState(scUID);
 
+                // VX-24: the result was computed and discarded (no return), so execution fell through to
+                // scState.OwnerAddress and threw NullReferenceException on every unknown scUID.
                 if (scState == null)
-                    JsonConvert.SerializeObject(new { Success = false, Message = $"SC State Missing: {scUID}" });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"SC State Missing: {scUID}" });
 
                 bool isOwner = false;
                 if (address == scState.OwnerAddress)
