@@ -466,7 +466,7 @@ namespace VerifiedXCore.Nodes
                                             var recipientAddress = Globals.BlockCasters.ToList()
                                                 .FirstOrDefault(c => (c.PeerIP ?? "").Replace("::ffff:", "") == peer.NodeIP.Replace("::ffff:", ""))?.ValidatorAddress;
                                             if (string.IsNullOrEmpty(recipientAddress))
-                                                return;
+                                                continue; // inside foreach: skip this peer only
                                             var time = TimeUtil.GetTime();
                                             var statusMessage = ConsensusMessageFormatter.FormatValidatorStatusV2(validator.Address, time, account.PublicKey, recipientAddress);
                                             var signature = SignatureService.ValidatorSignature(statusMessage);
