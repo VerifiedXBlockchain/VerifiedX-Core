@@ -213,15 +213,21 @@ namespace VerifiedXCore.Data
                 var accountCheck = AccountData.GetSingleAccount(account.Address);
                 if (accountCheck == null)
                 {
+                    // NEW-01 (follow-up): in an encrypted wallet the key is encrypted (and its keystore record saved)
+                    // BEFORE the account is stored; with the wallet locked the import is refused rather than stored in
+                    // plaintext (e.g. privkey= at startup without encpass=).
+                    if (Globals.IsWalletEncrypted == true && !await WalletEncryptionService.EncryptImportedAccount(account))
+                    {
+                        var refusal = $"Import of {account.Address} refused: the wallet is encrypted and not unlocked with its password. Unlock it (or start with encpass=) and import again.";
+                        Console.WriteLine(refusal);
+                        ErrorLogUtility.LogError(refusal, "AccountData.FinishRestore()");
+                        return;
+                    }
                     AddToAccount(account); //only add if not already in accounts
                     if (rescanForTx == true)
                     {
                         //fire and forget
                         _ = Task.Run(() => BlockchainRescanUtility.RescanForTransactions(account.Address));
-                    }
-                    if (Globals.IsWalletEncrypted == true)
-                    {
-                        await WalletEncryptionService.EncryptWallet(account, true);
                     }
                 }
             }

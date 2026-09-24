@@ -1,0 +1,89 @@
+using System;
+using System.IO;
+using System.Security;
+using System.Threading.Tasks;
+using VerifiedXCore;
+using VerifiedXCore.Data;
+using VerifiedXCore.EllipticCurve;
+using VerifiedXCore.Models;
+using Xunit;
+
+namespace VerifiedXCore.Tests
+{
+    /// <summary>
+    /// NEW-01 (follow-up; found by the independent review): importing a key into an ENCRYPTED wallet.
+    ///  - Locked (e.g. privkey= at startup without encpass=): the account was inserted with its plaintext key, and the
+    ///    encryption step returned null with no password — the plaintext key stayed on disk (and GetKey served it).
+    ///  - Unlocked: the key was encrypted but the keystore record holding its data key was never saved, so the wallet
+    ///    could no longer decrypt the imported key.
+    /// </summary>
+    [Collection("DbContextSequential")]
+    public class NEW01_EncryptedImportTests : IDisposable
+    {
+        private const string WalletPw = "wallet pw new01";
+        private readonly string _tempRoot;
+        private readonly string? _priorCustomPath;
+        private readonly bool _priorEncrypted = Globals.IsWalletEncrypted;
+        private readonly SecureString _priorPassword = Globals.EncryptPassword;
+
+        public NEW01_EncryptedImportTests()
+        {
+            _tempRoot = Path.Combine(Path.GetTempPath(), $"new01b_test_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(_tempRoot);
+            _priorCustomPath = Globals.CustomPath;
+            Globals.CustomPath = _tempRoot;
+            DbContext.Initialize();
+            Globals.IsWalletEncrypted = false;
+            Globals.EncryptPassword = new SecureString();
+            TestWalletKeystore.Ensure(WalletPw);
+            Globals.IsWalletEncrypted = true;
+        }
+
+        public void Dispose()
+        {
+            Globals.IsWalletEncrypted = _priorEncrypted;
+            Globals.EncryptPassword = _priorPassword;
+            try { DbContext.CloseDB(); } catch { }
+            Globals.CustomPath = _priorCustomPath;
+            try { Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        private static SecureString Secure(string s) { var ss = new SecureString(); foreach (var c in s) ss.AppendChar(c); return ss; }
+
+        private static string NewKeyHex() => new PrivateKey("secp256k1").secret.ToString("x").TrimStart('0').PadLeft(64, '0');
+
+        private static async Task<Account?> StoredAfterImport(string address)
+        {
+            for (int i = 0; i < 50; i++) // AddToAccount is fire-and-forget
+            {
+                var a = AccountData.GetSingleAccount(address);
+                if (a != null) return a;
+                await Task.Delay(20);
+            }
+            return null;
+        }
+
+        [Fact]
+        public async Task NEW01_ImportIntoLockedEncryptedWallet_StoresNoPlaintextKey()
+        {
+            var keyHex = NewKeyHex();
+            var account = await AccountData.RestoreAccount(keyHex);
+
+            var stored = await StoredAfterImport(account.Address);
+            Assert.True(stored == null || !stored.PrivateKey.Contains(keyHex.TrimStart('0')), "plaintext key stored in an encrypted wallet");
+        }
+
+        [Fact]
+        public async Task NEW01_ImportIntoUnlockedEncryptedWallet_IsEncryptedAndStillUsable()
+        {
+            Globals.EncryptPassword = Secure(WalletPw);
+            var keyHex = NewKeyHex();
+            var account = await AccountData.RestoreAccount(keyHex);
+
+            var stored = await StoredAfterImport(account.Address);
+            Assert.NotNull(stored);
+            Assert.DoesNotContain(keyHex.TrimStart('0'), stored!.PrivateKey);                   // encrypted at rest
+            Assert.Equal(keyHex.TrimStart('0'), stored.GetKey.TrimStart('0'));                   // and the wallet can still use it
+        }
+    }
+}

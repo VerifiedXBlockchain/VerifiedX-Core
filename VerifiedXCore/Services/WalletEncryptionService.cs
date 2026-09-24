@@ -114,6 +114,28 @@ namespace VerifiedXCore.Services
 			return ok;
 		}
 
+		/// <summary>
+		/// NEW-01 (follow-up): encrypts an imported account for an encrypted wallet and saves its keystore record. Returns
+		/// false (nothing stored) when the wallet password is not in memory or is not the wallet's. The import path used to
+		/// insert the plaintext key first and then call EncryptWallet, which returned null with no password (the plaintext
+		/// key stayed on disk) and, with a password, returned a keystore record the caller never saved (the wallet could
+		/// no longer decrypt the imported key).
+		/// </summary>
+		public static async Task<bool> EncryptImportedAccount(Account account)
+		{
+			if (Globals.EncryptPassword == null || Globals.EncryptPassword.Length == 0)
+				return false;
+			if (!IsWalletPassword(Globals.EncryptPassword.ToUnsecureString()))
+				return false;
+			var ks = await EncryptWallet(account, false);
+			if (ks == null)
+				return false;
+			ks.IsUsed = true;
+			Keystore.SaveKeystore(ks);
+			account.PrivateKey = ks.PrivateKey;
+			return true;
+		}
+
 		/// <summary>VX-14: re-wraps one legacy keystore record (in memory and in the database). False if not legacy or not opened.</summary>
 		public static bool TryRewrapLegacy(Keystore ks, string password)
 		{
