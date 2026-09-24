@@ -345,6 +345,11 @@ namespace VerifiedXCore.P2P
         {
             // VX-09: the byte budget is caller-supplied; clamp it so the span it produces is one this node
             // will actually serve from SendBlockList.
+            // VX-09 (follow-up): the span query walks block documents, so it takes a serve slot like its siblings
+            // (2 per IP, 16 in total); it was the one block-serving hub method without a concurrency cap.
+            using var slot = await BlockServeLimits.TryEnterAsync(GetIP(Context), TimeSpan.FromSeconds(2));
+            if (slot == null)
+                return null;
             var blockSpan = await Blockchain.GetBlockSpan(startHeight, BlockServeLimits.ClampByteBudget(cumulativeBuffer));
 
             if (blockSpan == null)

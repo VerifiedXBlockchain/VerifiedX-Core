@@ -129,5 +129,19 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void VX09_SpanByteBudget_IsClamped() =>
             Assert.Equal(BlockServeLimits.MaxListBytes, BlockServeLimits.ClampByteBudget(long.MaxValue));
+
+        [Fact]
+        public async Task VX09_FollowUp_SendBlockSpan_TakesAServeSlot()
+        {
+            const string ip = "172.28.9.99";
+            var a = await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50));
+            var b = await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50));
+            try
+            {
+                Assert.NotNull(a); Assert.NotNull(b);
+                Assert.Null(await Peer(ip).SendBlockSpan(0, 1_000_000)); // both of this peer's slots are held
+            }
+            finally { a?.Dispose(); b?.Dispose(); }
+        }
     }
 }
