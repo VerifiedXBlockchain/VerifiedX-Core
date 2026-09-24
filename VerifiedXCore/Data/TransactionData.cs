@@ -1184,7 +1184,7 @@ namespace VerifiedXCore.Data
 
         public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
         {
-            var created = new HashSet<string>(StringComparer.Ordinal);
+            var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // LiteDB lookups ignore case
             var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
             var result = new List<Transaction>();
             foreach (var tx in approved)

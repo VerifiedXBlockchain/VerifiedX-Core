@@ -271,7 +271,7 @@ namespace VerifiedXCore.Services
                 foreach (var block in page)
                 {
                     blockCount++;
-                    var createdInBlock = new HashSet<string>(StringComparer.Ordinal); // NEW-06
+                    var createdInBlock = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // NEW-06
                     foreach (var tx in block.Transactions ?? new List<Transaction>())
                     {
                         txCount++;

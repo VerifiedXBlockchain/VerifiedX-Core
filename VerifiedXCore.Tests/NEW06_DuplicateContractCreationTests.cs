@@ -119,5 +119,26 @@ namespace VerifiedXCore.Tests
             Assert.Null(LedgerIntegrityRules.RegisterCreationInBlock(first, seen));
             Assert.Null(LedgerIntegrityRules.RegisterCreationInBlock(other, seen));
         }
+
+        [Fact]
+        public void NEW06_FollowUp_CaseVariantCreations_AreOneContract()
+        {
+            // Found by the second independent review: contract records are looked up through LiteDB's default collation,
+            // which ignores case, so "abc:1" and "ABC:1" are one contract record.
+            static Transaction Deploy(string uid, string from) => new Transaction
+            {
+                FromAddress = from, Hash = uid + from, TransactionType = TransactionType.FTKN_MINT,
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "TokenDeploy()", ContractUID = uid, Data = "x" } }),
+            };
+            var kept = TransactionData.DropDuplicateContractCreations(new List<Transaction> { Deploy("abc:1", "xA"), Deploy("ABC:1", "xB") });
+            Assert.Single(kept);
+        }
+
+        [Fact]
+        public void NEW06_FollowUp_DuplicateCreationRejection_IsNotAStateCorruptionSignal()
+        {
+            // A producer's bad selection must not count toward the consecutive-failure state rebuild.
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal("Duplicate creation of contract X within block."));
+        }
     }
 }

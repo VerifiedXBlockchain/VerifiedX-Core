@@ -81,6 +81,9 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith("Bridge lock ", StringComparison.Ordinal))
                 return false;
+            // NEW-06: a producer-selection fault within one block, not local state corruption.
+            if (reason.StartsWith("Duplicate creation", StringComparison.Ordinal))
+                return false;
             return true;
         }
 
@@ -882,7 +885,8 @@ namespace VerifiedXCore.Services
                         // NEW-06: one contract creation (Mint/TokenDeploy/vBTC V2 create) per ContractUID per block. The
                         // "already deployed" checks read committed state only, so two creations of one UID in the same
                         // block both passed and the second credited its own supply under the first's contract.
-                        var blockCreatedContracts = new HashSet<string>(StringComparer.Ordinal);
+                        // Case-insensitive: contract records are looked up through LiteDB's default collation, which ignores case.
+                        var blockCreatedContracts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         var blockBridgeState = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
