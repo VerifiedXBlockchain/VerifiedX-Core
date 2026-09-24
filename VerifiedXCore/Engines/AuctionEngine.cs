@@ -300,6 +300,21 @@ namespace VerifiedXCore.Engines
                                         DequeueBuyNowBid(buyNow, BidStatus.Rejected);
                                         continue;
                                     }
+                                    // VX-10: a buy-now ends the auction, so it must be signed by the buyer for this
+                                    // listing's buy-now price (a forged datagram used to end any live auction).
+                                    if (DST.DstBidAuthorization.Validate(buyNow, listing, isBuyNow: true, out _) != null)
+                                    {
+                                        AuctionLogUtility.Log($"Buy Now Rejected - not signed for this listing and price. Listing: {buyNow.ListingId}", "AuctionEngine.ProcessBuyNowQueue()");
+                                        DequeueBuyNowBid(buyNow, BidStatus.Rejected);
+                                        continue;
+                                    }
+                                    // VX-10: buy-now may not undercut a standing bid above the buy-now price.
+                                    if (auction.MaxBidPrice > listing.BuyNowPrice.Value && auction.CurrentWinningAddress != listing.AddressOwner)
+                                    {
+                                        AuctionLogUtility.Log($"Buy Now Rejected - a standing bid exceeds the buy-now price. Listing: {buyNow.ListingId}", "AuctionEngine.ProcessBuyNowQueue()");
+                                        DequeueBuyNowBid(buyNow, BidStatus.Rejected);
+                                        continue;
+                                    }
                                     if (listing.RequireBalanceCheck)
                                     {
                                         var addressBalance = AccountStateTrei.GetAccountBalance(buyNow.BidAddress);
@@ -340,7 +355,7 @@ namespace VerifiedXCore.Engines
                                         IsProcessed = true,
                                         ListingId = buyNow.ListingId,
                                         MaxBidAmount = listing.BuyNowPrice.Value,
-                                        PurchaseKey = buyNow.PurchaseKey
+                                        PurchaseKey = listing.PurchaseKey
                                     };
 
                                     auction.CurrentBidPrice = listing.BuyNowPrice.Value;
@@ -410,10 +425,19 @@ namespace VerifiedXCore.Engines
                                         var listing = listings?.Where(x => x.Id == bid.ListingId).FirstOrDefault();
                                         if(listing != null)
                                         {
+                                            // VX-10 (defence in depth; the UDP handler checks first): the bidder must have
+                                            // signed this listing's purchase key and the price being committed.
+                                            if (DST.DstBidAuthorization.Validate(bid, listing, isBuyNow: false, out var committedBidPrice) != null)
+                                            {
+                                                AuctionLogUtility.Log($"Bid Rejected - not signed for this listing and price. Listing: {bid.ListingId}", "AuctionEngine.ProcessBidQueue()");
+                                                DequeueBid(bid, BidStatus.Rejected);
+                                                continue;
+                                            }
                                             if(listing.RequireBalanceCheck)
                                             {
                                                 var addressBalance = AccountStateTrei.GetAccountBalance(bid.BidAddress);
-                                                if(addressBalance <  bid.BidAmount)
+                                                // VX-10: check the price that is committed (was BidAmount while MaxBidAmount was committed)
+                                                if(addressBalance <  committedBidPrice)
                                                 {
                                                     AuctionLogUtility.Log($"Bid Rejected - Balance was too low. Listing: {bid.ListingId}", "AuctionEngine.ProcessBidQueue()");
                                                     DequeueBid(bid, BidStatus.Rejected); 

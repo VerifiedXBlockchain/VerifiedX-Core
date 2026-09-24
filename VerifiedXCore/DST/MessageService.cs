@@ -584,6 +584,25 @@ namespace VerifiedXCore.DST
 
                         bid.EndPoint = endPoint;
                         bid.BidSendReceive = BidSendReceive.Received;
+                        bid.BidStatus = BidStatus.Received; // never trust a status set by the sender
+
+                        // VX-10: the sender must have completed the shop handshake and the bidder must have
+                        // signed this listing's purchase key and the exact price the shop would commit.
+                        var bidListing = Listing.GetListingDb()?.Query().Where(x => x.Id == bid.ListingId).FirstOrDefault();
+                        if (!Globals.ConnectedClients.ContainsKey(endPoint.ToString()) ||
+                            DstBidAuthorization.Validate(bid, bidListing, isBuyNow: false, out _) != null)
+                        {
+                            var rejected = GenerateMessage(new Message
+                            {
+                                Type = MessageType.Bid,
+                                ComType = MessageComType.Response,
+                                Data = $"{bid.Id},{BidStatus.Rejected}",
+                                ResponseMessage = true,
+                                ResponseMessageId = message.Id,
+                            }, false);
+                            udpClient.Send(Encoding.UTF8.GetBytes(rejected), endPoint);
+                            return;
+                        }
 
                         Globals.BidQueue.Enqueue(bid);
 
@@ -640,6 +659,25 @@ namespace VerifiedXCore.DST
 
                         bid.EndPoint = endPoint;
                         bid.BidSendReceive = BidSendReceive.Received;
+                        bid.BidStatus = BidStatus.Received; // never trust a status set by the sender
+
+                        // VX-10: the sender must have completed the shop handshake and the bidder must have
+                        // signed this listing's purchase key and the exact price the shop would commit.
+                        var bidListing = Listing.GetListingDb()?.Query().Where(x => x.Id == bid.ListingId).FirstOrDefault();
+                        if (!Globals.ConnectedClients.ContainsKey(endPoint.ToString()) ||
+                            DstBidAuthorization.Validate(bid, bidListing, isBuyNow: true, out _) != null)
+                        {
+                            var rejected = GenerateMessage(new Message
+                            {
+                                Type = MessageType.Bid,
+                                ComType = MessageComType.Response,
+                                Data = $"{bid.Id},{BidStatus.Rejected}",
+                                ResponseMessage = true,
+                                ResponseMessageId = message.Id,
+                            }, false);
+                            udpClient.Send(Encoding.UTF8.GetBytes(rejected), endPoint);
+                            return;
+                        }
 
                         Globals.BuyNowQueue.Enqueue(bid);
 
