@@ -253,6 +253,16 @@ namespace VerifiedXCore.Models
                     // VX-15: first-seen is a local fact, never taken from the wire.
                     validator.FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0;
 
+                    // VX-15 (follow-up): a new registry entry must belong to a funded validator. Gossip (SendActiveVals
+                    // pull, SendNetworkValidatorList push) admitted entries with no balance check.
+                    decimal newValBalance;
+                    try { newValBalance = AccountStateTrei.GetAccountBalance(validator.Address); } catch { newValBalance = 0M; }
+                    if (newValBalance < ValidatorService.ValidatorRequiredAmount())
+                    {
+                        ErrorLogUtility.LogError($"Validator advertisement for {validator.Address} refused: below validator balance", "NetworkValidator.AddValidatorToPool");
+                        return false;
+                    }
+
                     // New validator - add to pending state
                     validator.FirstAdvertised = TimeUtil.GetTime();
                     validator.OriginalAdvertiser = advertisingPeerIP ?? "unknown";
@@ -324,8 +334,9 @@ namespace VerifiedXCore.Models
         // HAL-11 Fix: Determine required confirmations based on network size
         private static int GetRequiredConfirmations()
         {
+            // VX-15 (follow-up): never fewer than two distinct sources. With one, the first advertiser alone promoted
+            // its own entry to trusted. Validators still become trusted on their own authenticated Status/handshake.
             var connectedValidators = Globals.ValidatorNodes.Count;
-            if (connectedValidators < 3) return 1;  // Bootstrap scenario
             if (connectedValidators < 10) return 2;
             return 3; // Normal operation
         }
@@ -349,14 +360,10 @@ namespace VerifiedXCore.Models
             if (bootstrapPeers.Contains(cleanIP))
                 return true;
 
-            // Also check against connected validator nodes that are known casters
-            var casterIPs = Globals.ValidatorNodes.Values
-                .Where(v => v.IsConnected)
-                .Select(v => v.NodeIP.Replace("::ffff:", "").Replace(":" + Globals.Port, ""))
-                .ToHashSet();
-
-            // If the advertising peer is one of our connected validators, trust it
-            return casterIPs.Contains(cleanIP);
+            // VX-15 (follow-up): a connected validator node is NOT a trust anchor. Outbound validator peers are not
+            // authenticated as servers, so any funded validator we dialed could plant trusted entries with IPs of its
+            // choosing. Only the caster set (above) is trusted; other gossip needs distinct confirmations.
+            return false;
         }
 
         // HAL-11 Fix: Cleanup stale pending validators

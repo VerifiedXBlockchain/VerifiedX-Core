@@ -278,6 +278,7 @@ namespace VerifiedXCore.Tests
             var addr = AccountData.GetHumanAddress(pub);
             var msg = $"{addr}:{TimeUtil.GetTime()}:{pub}";
             Globals.LastBlock = new Block { Height = 5000 };
+            StateData.GetAccountStateTrei().Insert(new AccountStateTrei { Key = addr, Balance = 5_001M, Nonce = 0 }); // VX-15 follow-up: funded
             var ad = new NetworkValidator
             {
                 Address = addr, PublicKey = pub, IPAddress = "8.8.4.4", SignatureMessage = msg, FirstSeenAtHeight = 1,

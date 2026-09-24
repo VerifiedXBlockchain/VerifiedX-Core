@@ -381,5 +381,36 @@ namespace VerifiedXCore.Tests
             Assert.False(Registered(_validator.Address));
             Assert.Equal(2, ValidatorListExchange.PendingReports(_validator.Address, "127.0.0.1", _validator.Pub)); // promoted on a later round
         }
+
+        // ── Follow-up (independent review): the other gossip ingress (AddValidatorToPool) ──
+
+        private static NetworkValidator SignedAdvert((PrivateKey Key, string Pub, string Address) v, string ip)
+        {
+            var msg = $"{v.Address}:{TimeUtil.GetTime()}:{v.Pub}";
+            return new NetworkValidator { Address = v.Address, PublicKey = v.Pub, IPAddress = ip, SignatureMessage = msg, Signature = SignatureService.CreateSignature(msg, v.Key, v.Pub) };
+        }
+
+        [Fact]
+        public async Task VX15_Gossip_UnfundedValidator_Refused()
+        {
+            var poor = NewKey();
+            Assert.False(await NetworkValidator.AddValidatorToPool(SignedAdvert(poor, "203.0.113.5"), "198.51.100.1"));
+            Assert.False(Registered(poor.Item3));
+            Assert.False(NetworkValidator.GetPendingValidators().ContainsKey(poor.Item3));
+        }
+
+        [Fact]
+        public async Task VX15_Gossip_OneSource_StaysPending_TwoDistinctSourcesPromote()
+        {
+            Assert.True(await NetworkValidator.AddValidatorToPool(SignedAdvert(_validator, "203.0.113.5"), "198.51.100.1"));
+            Assert.False(Registered(_validator.Address)); // one gossip source is not enough
+
+            Assert.True(await NetworkValidator.AddValidatorToPool(SignedAdvert(_validator, "203.0.113.5"), "198.51.100.1"));
+            Assert.False(Registered(_validator.Address)); // the same source again does not count twice
+
+            Assert.True(await NetworkValidator.AddValidatorToPool(SignedAdvert(_validator, "203.0.113.5"), "198.51.100.2"));
+            Assert.True(Registered(_validator.Address));
+        }
+
     }
 }
