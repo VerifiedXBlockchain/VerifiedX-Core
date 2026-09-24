@@ -1179,7 +1179,8 @@ namespace VerifiedXCore.Data
             // NEW-06: one contract creation per ContractUID per block (block validation rejects a block carrying two,
             // see BlockValidatorService). Keep the first; drop a later one AND that sender's later transactions so the
             // proposal has no nonce gap. The dropped creation stays in the mempool and fails as "already deployed".
-            return DropDuplicateContractCreations(approvedMemPoolList);
+            // NEW-07: likewise for debits that together overspend a holder's balance on one contract.
+            return SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList));
         }
 
         public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
@@ -1294,6 +1295,11 @@ namespace VerifiedXCore.Data
                 }
                 catch { }
             }
+
+            // NEW-07: every debit-writing type (vBTC V2/V1 and fungible tokens, both data shapes), jointly with the
+            // sender's pending transactions. The vBTC V2 check above only counted typed transfers against each other.
+            if (!SameBlockDebitGuard.CheckAgainstPending(tx, txs).Ok)
+                return true;
 
             //double NFT transfer or burn check
             if (tx.TransactionType != TransactionType.TX && 

@@ -21,8 +21,10 @@ namespace VerifiedXCore.Services
     ///
     /// Also covers the independent-review follow-ups: NEW-04 (token holder bound to signer), NEW-05 (legacy V1 vBTC
     /// amounts and co-signatures; the zero-row balance rule is stateful and approximated — see
-    /// <see cref="ScanChain"/>), NEW-06 (one contract creation per ContractUID per block) and the VX-01 follow-up
-    /// (TransferVBTCV2() function path).
+    /// <see cref="ScanChain"/>), NEW-06 (one contract creation per ContractUID per block), the VX-01 follow-up
+    /// (TransferVBTCV2() function path) and NEW-07 (same-block overspend). NEW-07 compares a block's debits with the
+    /// holder's balance AT that height, which this scan does not reconstruct, so it reports every block in which one
+    /// holder has two or more debits on one contract as a CANDIDATE to be re-checked against historical state.
     ///
     /// Limitation: the contract-type check reads the contract's CURRENT state record. An owner can replace a contract's
     /// code with Update(), so a contract updated after a historical transfer is judged by its current code.
@@ -263,6 +265,7 @@ namespace VerifiedXCore.Services
             long blockCount = 0, txCount = 0;
             const long batch = 1000;
             var v1 = new V1ReceiptTracker();
+            var canonicalUids = new Dictionary<string, string>(StringComparer.Ordinal); // NEW-07
 
             for (long start = 0; start <= tip; start += batch)
             {
@@ -272,6 +275,7 @@ namespace VerifiedXCore.Services
                 {
                     blockCount++;
                     var createdInBlock = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // NEW-06
+                    var debitsInBlock = new Dictionary<SameBlockDebitGuard.DebitKey, (int N, decimal Sum, Transaction Last)>(); // NEW-07
                     foreach (var tx in block.Transactions ?? new List<Transaction>())
                     {
                         txCount++;
@@ -280,7 +284,17 @@ namespace VerifiedXCore.Services
                         if (dup != null)
                             hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-06 duplicate creation in block", dup));
                         try { TrackV1(tx, block.Height, v1, hits); } catch { }
+                        foreach (var (rawKey, amount) in SameBlockDebitGuard.GetDebits(tx))
+                        {
+                            var key = SameBlockDebitGuard.Canonical(rawKey, canonicalUids);
+                            debitsInBlock.TryGetValue(key, out var d);
+                            debitsInBlock[key] = (d.N + 1, d.Sum + amount, tx);
+                        }
                     }
+                    foreach (var (key, d) in debitsInBlock)
+                        if (d.N >= 2)
+                            hits.Add(new Hit(block.Height, d.Last.Hash ?? "", d.Last.TransactionType, "NEW-07 candidate: several debits by one holder on one contract in block",
+                                $"{key.Kind} {key.ContractUid} holder {key.Holder}: {d.N} debits totalling {d.Sum}; compare with the balance at height {block.Height - 1}"));
                 }
                 progress?.Invoke($"Scanned heights {start}..{end} of {tip} — {hits.Count} hit(s) so far");
             }
@@ -295,7 +309,7 @@ namespace VerifiedXCore.Services
             var (blocks, txs, hits) = ScanChain(msg => Console.WriteLine(msg));
 
             var sb = new StringBuilder();
-            sb.AppendLine("VerifiedX security-audit replay scan (VX-01, VX-02, NEW-04, NEW-05, NEW-06)");
+            sb.AppendLine("VerifiedX security-audit replay scan (VX-01, VX-02, NEW-04, NEW-05, NEW-06, NEW-07 candidates)");
             sb.AppendLine($"Network: {(Globals.IsTestNet ? "testnet" : "mainnet")}");
             sb.AppendLine($"Build: {Globals.CLIVersion}");
             sb.AppendLine($"Started (UTC): {startedUtc:O}");

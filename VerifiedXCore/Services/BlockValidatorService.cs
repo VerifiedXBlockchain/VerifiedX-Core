@@ -81,8 +81,10 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith("Bridge lock ", StringComparison.Ordinal))
                 return false;
-            // NEW-06: a producer-selection fault within one block, not local state corruption.
+            // NEW-06 / NEW-07: producer-selection faults within one block, not local state corruption.
             if (reason.StartsWith("Duplicate creation", StringComparison.Ordinal))
+                return false;
+            if (reason.StartsWith(SameBlockDebitGuard.ReasonPrefix, StringComparison.Ordinal))
                 return false;
             return true;
         }
@@ -888,6 +890,8 @@ namespace VerifiedXCore.Services
                         // Case-insensitive: contract records are looked up through LiteDB's default collation, which ignores case.
                         var blockCreatedContracts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         var blockBridgeState = new Bitcoin.Services.BridgeIntraBlockGuard.State();
+                        // NEW-07: one running debit per (ledger, contract, holder) across every debit-writing type.
+                        var blockDebitState = new SameBlockDebitGuard.State();
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -956,6 +960,13 @@ namespace VerifiedXCore.Services
                                     var duplicateCreation = LedgerIntegrityRules.RegisterCreationInBlock(blkTransaction, blockCreatedContracts);
                                     if (duplicateCreation != null)
                                         effectiveTxResult = (false, duplicateCreation);
+                                }
+
+                                // NEW-07: debits by one holder on one contract within the block may not exceed its balance.
+                                if (effectiveTxResult.Item1)
+                                {
+                                    var (debitOk, debitReason) = SameBlockDebitGuard.TryRegister(blkTransaction, blockDebitState);
+                                    if (!debitOk) effectiveTxResult = (false, debitReason);
                                 }
 
                                 // Bridge: one redemption per Base burn and one draw per lock within a block
@@ -1934,6 +1945,7 @@ namespace VerifiedXCore.Services
                 bool rejectBlock = false;
                 var blockPrivateNullifierKeys = new HashSet<string>();
                 var blockBridgeStateTask = new Bitcoin.Services.BridgeIntraBlockGuard.State();
+                var blockDebitStateTask = new SameBlockDebitGuard.State(); // NEW-07
                 foreach (Transaction transaction in block.Transactions)
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
@@ -1950,6 +1962,11 @@ namespace VerifiedXCore.Services
                         {
                             var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(transaction, blockBridgeStateTask);
                             if (!bridgeOk) effectiveTxResult = (false, bridgeReason);
+                        }
+                        if (effectiveTxResult.Item1)
+                        {
+                            var (debitOk, debitReason) = SameBlockDebitGuard.TryRegister(transaction, blockDebitStateTask);
+                            if (!debitOk) effectiveTxResult = (false, debitReason);
                         }
                         rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                         if (rejectBlock)
