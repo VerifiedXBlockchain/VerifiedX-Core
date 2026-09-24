@@ -16,10 +16,15 @@ namespace VerifiedXCore.Services
     {
         // ── NEW-04: fungible-token functions debit the address named in the data, so it must be the signer ──────
 
+        public const string LegacyTokenTransferToAddress = "Token_Base";
+
         public static string? TokenTransfer(string txFrom, string txTo, string? dataFrom, string? dataTo, decimal? amount)
         {
             if (dataFrom != txFrom) return "Token transfer FromAddress must be the transaction signer.";
-            if (dataTo != txTo) return "Token transfer ToAddress must be the transaction's ToAddress.";
+            // Older wallets addressed token transfers to "Token_Base" with the recipient only in the data; that shape is in
+            // the chain history (found by the replay scan: 193 testnet transactions) and must keep replaying. The holder
+            // signs the data, so the data recipient is authorised either way; the binding is a consistency rule.
+            if (dataTo != txTo && txTo != LegacyTokenTransferToAddress) return "Token transfer ToAddress must be the transaction's ToAddress.";
             if (amount == null || amount.Value <= 0M) return "Token transfer amount must be greater than zero.";
             return null;
         }

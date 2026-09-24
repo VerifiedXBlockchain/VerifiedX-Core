@@ -163,5 +163,28 @@ namespace VerifiedXCore.Tests
             Assert.False(ok);
             Assert.Contains("vote FromAddress must be the transaction signer", message);
         }
+
+        // ── Follow-up: the legacy "Token_Base" shape in the chain history (replay scan) ─────
+
+        [Fact]
+        public async Task NEW04_FollowUp_LegacyTokenBaseShape_StillAccepted()
+        {
+            // Older wallets sent TokenTransfer() to "Token_Base" with the recipient only in the data; 193 testnet
+            // transactions have this shape, so refusing it would stop a resync.
+            var tx = TokenTx(_victim, "Token_Base", TransactionType.FTKN_TX,
+                new { Function = "TokenTransfer()", ContractUID = TokenX, FromAddress = _victim.Address, ToAddress = _attacker.Address, Amount = 10M, TokenTicker = "X", TokenName = "X" });
+            var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.True(ok, message);
+        }
+
+        [Fact]
+        public async Task NEW04_FollowUp_LegacyTokenBaseShape_StillBoundToTheSigner()
+        {
+            var tx = TokenTx(_attacker, "Token_Base", TransactionType.FTKN_TX,
+                new { Function = "TokenTransfer()", ContractUID = TokenX, FromAddress = _victim.Address, ToAddress = _attacker.Address, Amount = 10M, TokenTicker = "X", TokenName = "X" });
+            var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(ok);
+            Assert.Contains("FromAddress must be the transaction signer", message);
+        }
     }
 }
