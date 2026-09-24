@@ -3200,7 +3200,7 @@ namespace VerifiedXCore.Services
 
                             // S3C §0: per-CONTRACT mempool guard (same-block defense) — reject if ANY
                             // withdrawal request for this contract, from any requester, is already pending.
-                            // NEW-07 (G): MEMPOOL ADMISSION ONLY, like the multi loop below — at block verification a
+                            // NEW-08: MEMPOOL ADMISSION ONLY, like the multi loop below — at block verification a
                             // node holding a competing request in its own mempool rejected a block its peers accepted.
                             // In-block duplicates are refused by the block-scoped guard in BlockValidatorService.
                             var mempool = TransactionData.GetPool();
