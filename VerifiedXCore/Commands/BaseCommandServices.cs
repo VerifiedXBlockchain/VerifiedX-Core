@@ -201,6 +201,7 @@ namespace VerifiedXCore.Commands
                                     await Keystore.GenerateKeystoreAddresses();
                                     Globals.IsWalletEncrypted = true;
                                     Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13
+                                    VerifiedXCore.Services.WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked(); // VX-14: legacy keystore wraps -> KDF-based
 
                                     Console.WriteLine("Encrypting Wallet has completed...");
                                     MainMenuReturn();

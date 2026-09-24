@@ -15,10 +15,8 @@ namespace VerifiedXCore.Services
 				return null;	
             }
 
-			//Pulling password from secure string and converting to a byte.
+			//Pulling password from secure string.
 			var password = Globals.EncryptPassword.ToUnsecureString();
-			var newPasswordArray = Encoding.ASCII.GetBytes(password);
-			var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
 
 			//Generating a random key to encrypt private key with
 			var key = new byte[32]; 
@@ -28,15 +26,16 @@ namespace VerifiedXCore.Services
 			//Encrypting private key with random 32 byte
 			byte[] encrypted = EncryptKey(account.GetKey, key);
 
-			//Encrypting random 32 byte with clients supplied password. This key will be stored and is encrypted
-			byte[] keyEncrypted = EncryptKey(encryptionString, passwordKey);
+			//Encrypting random 32 byte with clients supplied password. This key will be stored and is encrypted.
+			//VX-14: KDF-based wrap (PasswordKeyWrap v1), not the zero-padded password used as the AES key.
+			var keyEncrypted = PasswordKeyWrap.Wrap(encryptionString, password);
 
 			Keystore keystore = new Keystore
 			{
 				Address = account.Address,
 				PrivateKey = Convert.ToBase64String(encrypted), 
 				PublicKey = account.PublicKey,
-				Key = Convert.ToBase64String(keyEncrypted),
+				Key = keyEncrypted,
 				IsUsed = false
 			};
 
@@ -49,10 +48,67 @@ namespace VerifiedXCore.Services
             }
 
 			password = "0";
-			newPasswordArray = new byte[0];
-			passwordKey = new byte[0];
 
 			return keystore;
+		}
+
+		/// <summary>
+		/// VX-14: re-wraps every legacy (zero-padded password) keystore record under the KDF-based format once the
+		/// wallet password is in memory. Records the password does not open, or whose data key does not decrypt the
+		/// stored private key, are left untouched. Returns the number of records re-wrapped.
+		/// </summary>
+		public static int RewrapLegacyKeystoresIfUnlocked()
+		{
+			if (!Globals.IsWalletEncrypted || Globals.EncryptPassword == null || Globals.EncryptPassword.Length == 0)
+				return 0;
+			int n = 0;
+			try
+			{
+				var keystores = Keystore.GetKeystore();
+				if (keystores == null)
+					return 0;
+				var password = Globals.EncryptPassword.ToUnsecureString();
+				foreach (var ks in keystores.FindAll().ToList())
+				{
+					if (TryRewrapLegacy(ks, password))
+						n++;
+				}
+				if (n > 0)
+					Utilities.LogUtility.Log($"VX-14: re-wrapped {n} legacy keystore record(s) under the KDF-based format.", "WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked()");
+			}
+			catch (Exception ex)
+			{
+				Utilities.ErrorLogUtility.LogError($"Re-wrapping legacy keystores failed: {ex.Message}", "WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked()");
+			}
+			return n;
+		}
+
+		/// <summary>VX-14: re-wraps one legacy keystore record (in memory and in the database). False if not legacy or not opened.</summary>
+		public static bool TryRewrapLegacy(Keystore ks, string password)
+		{
+			if (ks == null || !PasswordKeyWrap.IsLegacy(ks.Key))
+				return false;
+			if (!PasswordKeyWrap.TryUnwrap(ks.Key, password, out var dataKey, out var wasLegacy) || !wasLegacy)
+				return false;
+			try
+			{
+				// The data key must actually open the stored private key before the record is rewritten.
+				var keyHex = DecryptKey(Convert.FromBase64String(ks.PrivateKey), Convert.FromBase64String(dataKey));
+				if (string.IsNullOrEmpty(keyHex) || !System.Numerics.BigInteger.TryParse(keyHex, System.Globalization.NumberStyles.AllowHexSpecifier, null, out _))
+					return false;
+			}
+			catch
+			{
+				return false;
+			}
+			var oldKey = ks.Key;
+			var newKey = PasswordKeyWrap.Wrap(dataKey, password);
+			var db = Keystore.GetKeystore();
+			// Field-level update, conditional on the record still holding the legacy value.
+			var updated = db?.UpdateManySafe(x => new Keystore { Key = newKey }, x => x.Address == ks.Address && x.Key == oldKey) ?? 0;
+			if (updated > 0)
+				ks.Key = newKey;
+			return updated > 0;
 		}
 
         public static void DecryptWallet(string passphrase)

@@ -8,9 +8,14 @@ namespace VerifiedXCore.Services
     /// VX-13 / VX-14: password-based sealing for private keys at rest.
     ///
     /// Format "ks1:" + base64(salt[16] | nonce[12] | tag[16] | ciphertext): AES-256-GCM (authenticated) under a
-    /// key derived with PBKDF2-HMAC-SHA256 (600,000 iterations, per-record random salt). The older wallet
-    /// scheme used the raw ASCII password zero-padded to 32 bytes as an AES-CBC key — no salt, no work factor —
-    /// so one stolen record allowed fast offline password guessing.
+    /// key derived with PBKDF2-HMAC-SHA256 (600,000 iterations, random salt). The older wallet scheme used the raw
+    /// ASCII password zero-padded to 32 bytes as an AES-CBC key — no salt, no work factor — so one stolen record
+    /// allowed fast offline password guessing.
+    ///
+    /// Salt: one random salt per process, carried in every record. A salt exists to stop precomputed guessing across
+    /// wallets; all records of one wallet share its password, so a per-record salt adds nothing there, while it would
+    /// cost one 600,000-iteration derivation per record (the VFX keystore seals 1,000 records when a wallet is
+    /// encrypted). The nonce is random per record, so records sealed under the same derived key never share one.
     ///
     /// Derived keys are cached per (salt, password) for the life of the process so repeated signing does not
     /// repeat the KDF; the cache is keyed by a hash of both, so it is useless without the password.
@@ -22,6 +27,7 @@ namespace VerifiedXCore.Services
         private const int SaltSize = 16, NonceSize = 12, TagSize = 16, KeySize = 32;
 
         private static readonly ConcurrentDictionary<string, byte[]> _derived = new();
+        private static readonly byte[] _processSalt = RandomNumberGenerator.GetBytes(SaltSize);
 
         public static bool IsSealed(string? value) => value != null && value.StartsWith(V1Prefix, StringComparison.Ordinal);
 
@@ -34,7 +40,7 @@ namespace VerifiedXCore.Services
         public static string Seal(string plaintext, string password)
         {
             if (string.IsNullOrEmpty(password)) throw new ArgumentException("A password is required to seal a key.");
-            var salt = RandomNumberGenerator.GetBytes(SaltSize);
+            var salt = _processSalt;
             var nonce = RandomNumberGenerator.GetBytes(NonceSize);
             var pt = Encoding.UTF8.GetBytes(plaintext);
             var ct = new byte[pt.Length];

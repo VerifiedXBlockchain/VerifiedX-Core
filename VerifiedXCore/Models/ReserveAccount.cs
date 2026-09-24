@@ -97,24 +97,7 @@ namespace VerifiedXCore.Models
             {
                 return null;
             }
-            try
-            {
-                var password = passkey;
-                var newPasswordArray = Encoding.ASCII.GetBytes(password);
-                var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
-
-                var keys = Convert.FromBase64String(account.EncryptedDecryptKey);
-                var encryptedPrivKey = Convert.FromBase64String(account.PrivateKey);
-
-                var keyDecrypted = WalletEncryptionService.DecryptKey(keys, passwordKey);
-                var privKeyDecrypted = WalletEncryptionService.DecryptKey(encryptedPrivKey, Convert.FromBase64String(keyDecrypted));
-
-                return privKeyDecrypted;
-            }
-            catch
-            {
-                return null;
-            }
+            return TryDecryptKeyHex(account, passkey);
         }
 
         public static string? GetPrivateKey(ReserveAccount account, string passkey)
@@ -123,17 +106,48 @@ namespace VerifiedXCore.Models
             {
                 return null;
             }
+            return TryDecryptKeyHex(account, passkey);
+        }
+        public static PrivateKey? GetPrivateKey(ReserveAccount account, string passkey, bool sendClass = false)
+        {
+            if (account == null)
+            {
+                return null;
+            }
+            var privKeyDecrypted = TryDecryptKeyHex(account, passkey);
+            if (privKeyDecrypted == null)
+            {
+                return null;
+            }
             try
             {
-                var password = passkey;
-                var newPasswordArray = Encoding.ASCII.GetBytes(password);
-                var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
+                BigInteger b1 = BigInteger.Parse(privKeyDecrypted, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
+                PrivateKey privateKey = new PrivateKey("secp256k1", b1);
 
-                var keys = Convert.FromBase64String(account.EncryptedDecryptKey);
-                var encryptedPrivKey = Convert.FromBase64String(account.PrivateKey);
+                return privateKey;
+            }
+            catch
+            {
+                return null;
+            }
+        }
 
-                var keyDecrypted = WalletEncryptionService.DecryptKey(keys, passwordKey);
-                var privKeyDecrypted = WalletEncryptionService.DecryptKey(encryptedPrivKey, Convert.FromBase64String(keyDecrypted));
+        /// <summary>
+        /// VX-14: the one decrypt path for reserve keys. The password layer is the KDF-based wrap (v1) or the legacy
+        /// zero-padded-password wrap (v0, see PasswordKeyWrap); a v0 record opened with the right password is re-wrapped
+        /// as v1 on the spot. Returns the private key hex, or null for a wrong password or a malformed record.
+        /// </summary>
+        private static string? TryDecryptKeyHex(ReserveAccount account, string passkey)
+        {
+            try
+            {
+                if (!PasswordKeyWrap.TryUnwrap(account.EncryptedDecryptKey, passkey, out var dataKey, out var wasLegacy))
+                    return null;
+
+                var privKeyDecrypted = WalletEncryptionService.DecryptKey(Convert.FromBase64String(account.PrivateKey), Convert.FromBase64String(dataKey));
+
+                if (wasLegacy && !string.IsNullOrEmpty(passkey))
+                    RewrapLegacy(account, dataKey, passkey, privKeyDecrypted);
 
                 return privKeyDecrypted;
             }
@@ -142,28 +156,38 @@ namespace VerifiedXCore.Models
                 return null;
             }
         }
-        public static PrivateKey? GetPrivateKey(ReserveAccount account, string passkey, bool sendClass = false)
+
+        private static void RewrapLegacy(ReserveAccount account, string dataKey, string password, string privKeyHex)
         {
-            if (account == null)
-            {
-                return null;
-            }
             try
             {
-                var password = passkey;
-                var newPasswordArray = Encoding.ASCII.GetBytes(password);
-                var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
+                // Only rewrite a record whose decrypted key really is this account's key.
+                if (AddressFromPrivateKeyHex(privKeyHex) != account.Address)
+                    return;
+                var oldKey = account.EncryptedDecryptKey;
+                var newKey = PasswordKeyWrap.Wrap(dataKey, password);
+                var db = GetReserveAccountsDb();
+                // Field-level update, conditional on the record still holding the legacy value (never clobbers balances).
+                var updated = db?.UpdateManySafe(x => new ReserveAccount { EncryptedDecryptKey = newKey }, x => x.Address == account.Address && x.EncryptedDecryptKey == oldKey) ?? 0;
+                if (updated > 0)
+                    account.EncryptedDecryptKey = newKey;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Re-wrapping legacy reserve key for {account.Address} failed: {ex.Message}", "ReserveAccount.RewrapLegacy()");
+            }
+        }
 
-                var keys = Convert.FromBase64String(account.EncryptedDecryptKey);
-                var encryptedPrivKey = Convert.FromBase64String(account.PrivateKey);
-
-                var keyDecrypted = WalletEncryptionService.DecryptKey(keys, passwordKey);
-                var privKeyDecrypted = WalletEncryptionService.DecryptKey(encryptedPrivKey, Convert.FromBase64String(keyDecrypted));
-
-                BigInteger b1 = BigInteger.Parse(privKeyDecrypted, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
-                PrivateKey privateKey = new PrivateKey("secp256k1", b1);
-
-                return privateKey;
+        /// <summary>Derives the xRBX address of a stored key hex (same parse as signing). Null if the hex is invalid.</summary>
+        public static string? AddressFromPrivateKeyHex(string? keyHex)
+        {
+            if (string.IsNullOrEmpty(keyHex) || keyHex == "0")
+                return null;
+            try
+            {
+                BigInteger b1 = BigInteger.Parse(keyHex, NumberStyles.AllowHexSpecifier);
+                var privateKey = new PrivateKey("secp256k1", b1);
+                return GetHumanAddress("04" + ByteToHex(privateKey.publicKey().toString()));
             }
             catch
             {
@@ -189,6 +213,9 @@ namespace VerifiedXCore.Models
         #region Get Private key Class
         private PrivateKey? GetClassPrivateKey(string privkey)
         {
+            // VX-14: "0" is the locked/expired sentinel from GetKey, not a key (it parsed to a zero-secret key).
+            if (string.IsNullOrEmpty(privkey) || privkey == "0")
+                return null;
             try
             {
                 BigInteger b1 = BigInteger.Parse(privkey, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
@@ -340,23 +367,42 @@ namespace VerifiedXCore.Models
 
         private string GetPrivateKey(string privkey, string address, string decryptKey)
         {
-            //decrypt private key for send
-            if (Globals.ReserveAccountUnlockKeys.TryGetValue(address, out var _address))
+            // VX-14: the unlock expiry is enforced here, at the point of key access. It used to be enforced only by
+            // the once-a-minute sweep in ReserveService, so an expired unlock kept serving the key until the sweep ran.
+            if (TryGetActiveUnlock(address, out var unlock))
             {
-                return GetPrivateKey(address, _address.Password.ToUnsecureString());
+                return GetPrivateKey(address, unlock!.Password.ToUnsecureString()) ?? "0";
             }
-            else
-            {
-                try
-                {
+            return "0";
+        }
 
-                    return "0";
-                }
-                catch (Exception ex)
-                {
-                    return "0";
-                }
+        /// <summary>VX-14: reserve unlock window used when the node has no configured wallet unlock time.</summary>
+        public const int DefaultReserveUnlockMinutes = 15;
+
+        /// <summary>
+        /// VX-14: minutes a reserve unlock lasts. Globals.WalletUnlockTime is only loaded when a wallet or API password
+        /// is configured and is 0 otherwise; a 0-minute unlock would expire on the spot now that expiry is enforced at
+        /// access. 15 is the config file's own default for WalletUnlockTime.
+        /// </summary>
+        public static int ReserveUnlockMinutes => Globals.WalletUnlockTime > 0 ? Globals.WalletUnlockTime : DefaultReserveUnlockMinutes;
+
+        /// <summary>
+        /// VX-14: the single check for "is this reserve account unlocked". An expired entry is removed and reported as
+        /// locked. Every consumer of Globals.ReserveAccountUnlockKeys goes through here.
+        /// </summary>
+        public static bool TryGetActiveUnlock(string address, out ReserveAccountUnlockKey? unlock)
+        {
+            unlock = null;
+            if (string.IsNullOrEmpty(address) || !Globals.ReserveAccountUnlockKeys.TryGetValue(address, out var found) || found == null)
+                return false;
+            if (found.DeleteAfterTime > TimeUtil.GetTime())
+            {
+                unlock = found;
+                return true;
             }
+            // Remove only this exact (expired) entry, never a fresh unlock that raced in.
+            Globals.ReserveAccountUnlockKeys.TryRemove(new KeyValuePair<string, ReserveAccountUnlockKey>(address, found));
+            return false;
         }
 
         #endregion
@@ -369,11 +415,25 @@ namespace VerifiedXCore.Models
             ReserveAccountInfo rAccountInfo = new ReserveAccountInfo();
             var accountMade = false;
 
-            var newPasswordArray = Encoding.ASCII.GetBytes(encryptionPassword);
-            var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
+            // VX-14: validate inputs BEFORE the retry loop. The loop retries on any exception, so a bad input (a password
+            // longer than 32 bytes under the old wrap, an empty password, an invalid supplied key) spun forever.
+            if (string.IsNullOrEmpty(encryptionPassword))
+                throw new ArgumentException("A password is required for a reserve account.");
+            BigInteger? suppliedKey = null;
+            if (!string.IsNullOrEmpty(privKey))
+            {
+                // VX-11: externally supplied key — unsigned parse + range check (the signed parse
+                // read a leading 8-f as negative and created a different account).
+                if (!KeyParsing.TryParseExternalPrivateKeyHex(privKey, out var parsedKey, out var keyError))
+                    throw new ArgumentException(keyError);
+                suppliedKey = parsedKey;
+            }
 
+            var attempts = 0;
             while (accountMade == false)
             {
+                if (++attempts > 100) // ~53% of random keys give an xRBX address; 100 misses in a row is ~1e-33
+                    throw new InvalidOperationException("Reserve account could not be created.");
                 try
                 {
                     var key = new byte[32];
@@ -383,15 +443,7 @@ namespace VerifiedXCore.Models
                     rAccount = new ReserveAccount();
                     rAccountInfo = new ReserveAccountInfo();
 
-                    PrivateKey privateKey = new PrivateKey();
-                    if(!string.IsNullOrEmpty(privKey) )
-                    {
-                        // VX-11: externally supplied key — unsigned parse + range check (the signed parse
-                        // read a leading 8-f as negative and created a different account).
-                        if (!KeyParsing.TryParseExternalPrivateKeyHex(privKey, out var b1, out var keyError))
-                            throw new ArgumentException(keyError);
-                        privateKey = new PrivateKey("secp256k1", b1);
-                    }
+                    PrivateKey privateKey = suppliedKey.HasValue ? new PrivateKey("secp256k1", suppliedKey.Value) : new PrivateKey();
                     var privKeySecretHex = privateKey.secret.ToString("x");
                     var pubKey = privateKey.publicKey();
 
@@ -409,10 +461,11 @@ namespace VerifiedXCore.Models
                     byte[] encrypted = EncryptKey(rAccount.PrivateKey, key);
 
                     //Encrypting random 32 byte with clients supplied password. This key will be stored and is encrypted
-                    byte[] keyEncrypted = EncryptKey(encryptionString, passwordKey);
+                    //VX-14: KDF-based wrap (PasswordKeyWrap v1), not the zero-padded password used as the AES key.
+                    var keyEncrypted = PasswordKeyWrap.Wrap(encryptionString, encryptionPassword);
 
                     rAccount.PrivateKey = Convert.ToBase64String(encrypted);
-                    rAccount.EncryptedDecryptKey = Convert.ToBase64String(keyEncrypted);
+                    rAccount.EncryptedDecryptKey = keyEncrypted;
 
                     account = AccountData.CreateNewAccount(true);
                     rAccount.RecoveryAddress = account.Address;
@@ -493,9 +546,6 @@ namespace VerifiedXCore.Models
                 rAccountInfo.Address = rAccount.Address;
                 rAccountInfo.PrivateKey = privKeySecretHex;
 
-                var newPasswordArray = Encoding.ASCII.GetBytes(password);
-                var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
-
                 var key = new byte[32];
                 RandomNumberGenerator.Create().GetBytes(key);
                 var encryptionString = Convert.ToBase64String(key);
@@ -504,10 +554,11 @@ namespace VerifiedXCore.Models
                 byte[] encrypted = EncryptKey(rAccount.PrivateKey, key);
 
                 //Encrypting random 32 byte with clients supplied password. This key will be stored and is encrypted
-                byte[] keyEncrypted = EncryptKey(encryptionString, passwordKey);
+                //VX-14: KDF-based wrap (PasswordKeyWrap v1), not the zero-padded password used as the AES key.
+                var keyEncrypted = PasswordKeyWrap.Wrap(encryptionString, password);
 
                 rAccount.PrivateKey = Convert.ToBase64String(encrypted);
-                rAccount.EncryptedDecryptKey = Convert.ToBase64String(keyEncrypted);
+                rAccount.EncryptedDecryptKey = keyEncrypted;
 
                 rAccount.RecoveryAddress = account.Address;
 
@@ -601,9 +652,6 @@ namespace VerifiedXCore.Models
                 rAccountInfo.Address = rAccount.Address;
                 rAccountInfo.PrivateKey = privKeySecretHex;
 
-                var newPasswordArray = Encoding.ASCII.GetBytes(password);
-                var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
-
                 var key = new byte[32];
                 RandomNumberGenerator.Create().GetBytes(key);
                 var encryptionString = Convert.ToBase64String(key);
@@ -612,10 +660,11 @@ namespace VerifiedXCore.Models
                 byte[] encrypted = EncryptKey(rAccount.PrivateKey, key);
 
                 //Encrypting random 32 byte with clients supplied password. This key will be stored and is encrypted
-                byte[] keyEncrypted = EncryptKey(encryptionString, passwordKey);
+                //VX-14: KDF-based wrap (PasswordKeyWrap v1), not the zero-padded password used as the AES key.
+                var keyEncrypted = PasswordKeyWrap.Wrap(encryptionString, password);
 
                 rAccount.PrivateKey = Convert.ToBase64String(encrypted);
-                rAccount.EncryptedDecryptKey = Convert.ToBase64String(keyEncrypted);
+                rAccount.EncryptedDecryptKey = keyEncrypted;
 
                 rAccount.RecoveryAddress = account.Address;
 

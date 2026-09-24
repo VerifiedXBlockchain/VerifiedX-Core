@@ -451,9 +451,9 @@ namespace VerifiedXCore.Services
 
                 if(rAccount != null)
                 {
-                    if(Globals.ReserveAccountUnlockKeys.TryGetValue(fromAddress, out var rAUK)) 
+                    if(ReserveAccount.TryGetActiveUnlock(fromAddress, out var rAUK)) // VX-14: expiry enforced
                     {
-                        unlockTime = TimeUtil.GetReserveTime(rAUK.UnlockTimeHours);
+                        unlockTime = TimeUtil.GetReserveTime(rAUK!.UnlockTimeHours);
                     }
                     else
                     {

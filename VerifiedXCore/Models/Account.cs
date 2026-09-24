@@ -142,23 +142,21 @@ namespace VerifiedXCore.Models
                             if (keystore != null)
                             {
                                 var password = Globals.EncryptPassword.ToUnsecureString();
-                                var newPasswordArray = Encoding.ASCII.GetBytes(password);
-                                var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
 
-                                var key = Convert.FromBase64String(keystore.Key);
+                                // VX-14: KDF-based wrap (v1) or the legacy zero-padded-password wrap (v0).
+                                if (!PasswordKeyWrap.TryUnwrap(keystore.Key, password, out var keyDecrypted, out var wasLegacy))
+                                    return privkey;
+
                                 var encryptedPrivKey = Convert.FromBase64String(privkey);
-
-                                var keyDecrypted = WalletEncryptionService.DecryptKey(key, passwordKey);
                                 var privKeyDecrypted = WalletEncryptionService.DecryptKey(encryptedPrivKey, Convert.FromBase64String(keyDecrypted));
+
+                                // Legacy record opened with the right password: re-wrap it now.
+                                if (wasLegacy)
+                                    WalletEncryptionService.TryRewrapLegacy(keystore, password);
 
                                 //clearing values
                                 password = "0";
-                                newPasswordArray = new byte[0];
-                                passwordKey = new byte[0];
-
-                                key = new byte[0];
                                 encryptedPrivKey = new byte[0];
-
                                 keyDecrypted = "0";
                                 return privKeyDecrypted;
 

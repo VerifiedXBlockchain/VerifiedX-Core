@@ -428,10 +428,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (toAddress.StartsWith("xRBX"))
                         return await SCLogUtility.LogAndReturn("Reserve-held vBTC contracts can only be transferred to a normal VFX address.", "VBTCService.TransferOwnership()", false);
 
-                    if (!Globals.ReserveAccountUnlockKeys.TryGetValue(scState.OwnerAddress, out var rAUK))
+                    if (!ReserveAccount.TryGetActiveUnlock(scState.OwnerAddress, out var rAUK)) // VX-14: expiry enforced
                         return await SCLogUtility.LogAndReturn("Reserve account is not unlocked. Please unlock it first.", "VBTCService.TransferOwnership()", false);
 
-                    reserveUnlockHours = rAUK.UnlockTimeHours;
+                    reserveUnlockHours = rAUK!.UnlockTimeHours;
                     reserveKey = rAccount.GetPrivKey;
                 }
 
@@ -549,8 +549,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (toAddress.StartsWith("xRBX"))
                         return (false, "Reserve accounts cannot send vBTC to another Reserve Account.");
 
-                    if (Globals.ReserveAccountUnlockKeys.TryGetValue(fromAddress, out var rAUK))
-                        unlockTime = TimeUtil.GetReserveTime(rAUK.UnlockTimeHours);
+                    if (ReserveAccount.TryGetActiveUnlock(fromAddress, out var rAUK)) // VX-14: expiry enforced
+                        unlockTime = TimeUtil.GetReserveTime(rAUK!.UnlockTimeHours);
                     else
                         return (false, "Reserve account is no longer unlocked. Please unlock again.");
                 }
