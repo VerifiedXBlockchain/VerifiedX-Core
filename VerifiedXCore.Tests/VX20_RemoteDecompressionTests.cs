@@ -75,5 +75,17 @@ namespace VerifiedXCore.Tests
             var code = Encoding.Unicode.GetBytes("function Main() { return 1; }");
             Assert.Equal(code, SmartContractUtility.Decompress(SmartContractUtility.Compress(code))); // control
         }
+
+        [Fact]
+        public void VX20_FollowUp_HonestReplyNearTheServersListCap_Decodes()
+        {
+            // The server caps a list at MaxListBytes of JSON TEXT and compresses it as UTF-16 (2 bytes per char).
+            var bigTx = new Transaction { Hash = "t", FromAddress = "a", ToAddress = "b", Data = new string('d', 6_000_000) };
+            var blocks = new List<Block> { new Block { Height = 1, Hash = "h1", Transactions = new List<Transaction> { bigTx } } };
+            var json = JsonConvert.SerializeObject(blocks);
+            Assert.True(json.Length < VerifiedXCore.P2P.BlockServeLimits.MaxListBytes);
+            var decoded = P2PClient.DecodeBlockSpan(json.ToCompress());
+            Assert.Single(decoded!);
+        }
     }
 }
