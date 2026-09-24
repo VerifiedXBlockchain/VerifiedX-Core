@@ -32,13 +32,13 @@ namespace VerifiedXCore.Tests
         /// encoded exactly as the mint transaction's Data field. Used by VX-02 tests to author bodies
         /// whose embedded identity differs from the carrying transaction.
         /// </summary>
-        public static string BuildContractData(string embeddedUid, string embeddedMinter, List<SmartContractFeatures>? features, string name = "Fixture")
+        public static string BuildContractData(string embeddedUid, string embeddedMinter, List<SmartContractFeatures>? features, string name = "Fixture", string description = "test fixture")
         {
             var scMain = new SmartContractMain
             {
                 SmartContractUID = embeddedUid,
                 Name = name,
-                Description = "test fixture",
+                Description = description,
                 MinterAddress = embeddedMinter,
                 MinterName = "fixture",
                 IsPublic = true,

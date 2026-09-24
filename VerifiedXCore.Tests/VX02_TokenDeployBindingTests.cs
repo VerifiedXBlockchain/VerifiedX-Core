@@ -253,6 +253,51 @@ namespace VerifiedXCore.Tests
             Assert.Contains("MinterAddress does not match", message);
         }
 
+        // ── Follow-up found by the AUDIT-PREP replay scan (testnet heights 71287-71340) ──────────
+
+        /// <summary>The shape of the four historical testnet NFTs: a description with line breaks and emoji.</summary>
+        private const string LegacyDescription = "Get Your Martian. Join the Rebellion.\n\nClaim your identity \U0001F30C\n\U0001F331 Unlock merch";
+
+        [Fact]
+        public void VX02_LegacyBody_ReallyCannotBeDecompiled()
+        {
+            var body = VbtcTestContracts.BuildContractData(FreshUidN, _attackerB.Address, null, description: LegacyDescription);
+            Assert.ThrowsAny<Exception>(() => VerifiedXCore.Models.SmartContracts.SmartContractMain.GenerateSmartContractInMemory(body));
+            Assert.Equal((FreshUidN, _attackerB.Address), SmartContractDeployBinding.ReadDeclaredIdentity(body));
+        }
+
+        [Fact]
+        public async Task VX02_Mint_UndecompilableLegacyBody_WithMatchingDeclaredIdentity_Accepted()
+        {
+            var body = VbtcTestContracts.BuildContractData(FreshUidN, _attackerB.Address, null, description: LegacyDescription);
+
+            var (ok, message) = await TransactionValidatorService.VerifyTX(MintTx("Mint()", FreshUidN, body, _attackerB, TransactionType.NFT_MINT));
+
+            Assert.True(ok, message);
+        }
+
+        [Fact]
+        public async Task VX02_Mint_UndecompilableBody_WithForeignDeclaredMinter_Rejected()
+        {
+            var body = VbtcTestContracts.BuildContractData(FreshUidN, _thirdC.Address, null, description: LegacyDescription);
+
+            var (ok, message) = await TransactionValidatorService.VerifyTX(MintTx("Mint()", FreshUidN, body, _attackerB, TransactionType.NFT_MINT));
+
+            Assert.False(ok);
+            Assert.Contains("MinterAddress does not match", message);
+        }
+
+        [Fact]
+        public async Task VX02_TokenDeploy_UndecompilableBody_StillRejected()
+        {
+            var body = VbtcTestContracts.BuildContractData(FreshUidN, _attackerB.Address, null, description: LegacyDescription);
+
+            var (ok, message) = await TransactionValidatorService.VerifyTX(MintTx("TokenDeploy()", FreshUidN, body, _attackerB));
+
+            Assert.False(ok);
+            Assert.Contains("could not be decompiled", message);
+        }
+
         // ── StateData apply ────────────────────────────────────────────────────────────────────
 
         [Fact]

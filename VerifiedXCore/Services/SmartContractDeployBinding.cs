@@ -60,6 +60,29 @@ namespace VerifiedXCore.Services
             return (null, null, null, null);
         }
 
+        private static readonly System.Text.RegularExpressions.Regex DeclaredUidLine =
+            new(@"^\s*let\s+SmartContractUID\s*=\s*""([^""]*)""", System.Text.RegularExpressions.RegexOptions.Multiline);
+        private static readonly System.Text.RegularExpressions.Regex DeclaredMinterLine =
+            new(@"^\s*let\s+MinterAddress\s*=\s*""([^""]*)""", System.Text.RegularExpressions.RegexOptions.Multiline);
+
+        /// <summary>
+        /// Reads the FIRST <c>let SmartContractUID</c> / <c>let MinterAddress</c> declarations from a body's
+        /// source text (base64 → GZip → UTF-16, the mint encoding). Used only when the decompiler cannot
+        /// evaluate the body. Nulls when the body cannot be decoded or a declaration is absent. Never throws.
+        /// </summary>
+        public static (string? Uid, string? Minter) ReadDeclaredIdentity(string? body)
+        {
+            try
+            {
+                var bytes = Convert.FromBase64String(body ?? "");
+                var text = System.Text.Encoding.Unicode.GetString(Utilities.SmartContractUtility.Decompress(bytes));
+                var uid = DeclaredUidLine.Match(text);
+                var minter = DeclaredMinterLine.Match(text);
+                return (uid.Success ? uid.Groups[1].Value : null, minter.Success ? minter.Groups[1].Value : null);
+            }
+            catch { return (null, null); }
+        }
+
         /// <summary>
         /// Consensus check for "Mint()" and "TokenDeploy()". Returns null when the body is bound to the
         /// transaction, else the rejection reason. <paramref name="decompiled"/> is the decompiled body
@@ -84,7 +107,23 @@ namespace VerifiedXCore.Services
                 decompiled = null;
             }
             if (decompiled == null)
-                return $"Smart contract body could not be decompiled for {label}.";
+            {
+                // TokenDeploy credits a supply read from the body, so a body that cannot be read is refused.
+                if (isTokenDeploy)
+                    return $"Smart contract body could not be decompiled for {label}.";
+
+                // Mint(): legitimate historical mints exist whose bodies the decompiler cannot parse (the
+                // AUDIT-PREP replay scan found four on testnet, heights 71287-71340: descriptions with line
+                // breaks and emoji). Refusing them would halt any node replaying those blocks. Such a body can
+                // feed no downstream reader either (they all decompile), so the binding falls back to the
+                // identity the source DECLARES; a declared identity that disagrees with the TX is refused.
+                var (declaredUid, declaredMinter) = ReadDeclaredIdentity(body);
+                if (declaredUid != null && !string.Equals(declaredUid, txContractUid, StringComparison.Ordinal))
+                    return $"Smart contract body UID does not match the transaction ContractUID for {label}.";
+                if (declaredMinter != null && !string.Equals(declaredMinter, txFromAddress, StringComparison.Ordinal))
+                    return $"Smart contract body MinterAddress does not match the transaction sender for {label}.";
+                return null;
+            }
 
             if (!string.Equals(decompiled.SmartContractUID, txContractUid, StringComparison.Ordinal))
                 return $"Smart contract body UID does not match the transaction ContractUID for {label}.";
