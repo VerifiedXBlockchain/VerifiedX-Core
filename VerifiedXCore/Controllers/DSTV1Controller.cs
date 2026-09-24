@@ -73,7 +73,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -113,7 +113,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -143,7 +143,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -173,7 +173,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -213,7 +213,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -262,7 +262,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -305,7 +305,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -388,7 +388,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -431,7 +431,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -483,7 +483,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -529,7 +529,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -569,7 +569,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -611,7 +611,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = ex.ToString() });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
 
             return output;
@@ -792,7 +792,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
             
             return output;
@@ -1362,7 +1362,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -1398,7 +1398,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -1467,7 +1467,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -1526,7 +1526,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -1554,7 +1554,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -1582,7 +1582,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -1609,7 +1609,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -1705,7 +1705,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex) 
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -1776,7 +1776,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -2038,7 +2038,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); 
@@ -2194,7 +2194,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                return JsonConvert.SerializeObject(new {Success = false, Message = ex.Message});
+                return JsonConvert.SerializeObject(new {Success = false, Message = ApiErrorText.For(ex)});
             }
         }
 

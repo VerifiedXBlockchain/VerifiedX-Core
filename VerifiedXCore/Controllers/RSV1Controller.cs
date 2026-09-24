@@ -279,7 +279,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" }, Formatting.Indented);
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" }, Formatting.Indented);
             }
 
             return output;
@@ -336,7 +336,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -397,7 +397,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error Occurred. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error Occurred. Error: {ApiErrorText.For(ex)}" });
                 SCLogUtility.Log($"Unknown Error Transfering NFT. Error: {ex.ToString()}", "SCV1Controller.TransferNFT()");
             }
 
@@ -436,7 +436,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -476,7 +476,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -509,7 +509,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -567,7 +567,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;

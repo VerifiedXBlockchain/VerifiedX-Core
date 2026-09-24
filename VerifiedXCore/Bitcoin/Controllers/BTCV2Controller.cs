@@ -400,7 +400,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -473,7 +473,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -522,7 +522,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -590,7 +590,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch(Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: Message: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: Message: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -611,7 +611,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: Message: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: Message: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -713,7 +713,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -734,7 +734,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -759,7 +759,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -784,7 +784,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -820,7 +820,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -925,7 +925,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -1023,7 +1023,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     {
                         SmartContractUID = scState.SmartContractUID,
                         Balance = 0.0M,
-                        Error = ex.Message
+                        Error = ApiErrorText.For(ex)
                     });
                 }
             }
@@ -1069,7 +1069,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
     }

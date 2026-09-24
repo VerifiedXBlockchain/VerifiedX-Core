@@ -21,21 +21,21 @@ namespace VerifiedXCore.Controllers
         public IActionResult GetAccounts()
         {
             try { return Ok(WalletVfxService.GetAccounts()); }
-            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/txs/{address}")]
         public IActionResult GetTransactions(string address)
         {
             try { return Ok(WalletVfxService.GetTransactions(address)); }
-            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/nfts/{address}")]
         public IActionResult GetNFTs(string address)
         {
             try { return Ok(WalletVfxService.GetNFTs(address)); }
-            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/send/vfx")]
@@ -53,7 +53,7 @@ namespace VerifiedXCore.Controllers
                 var (success, message) = await WalletVfxService.SendVFX(req.From, req.To, amount);
                 return Ok(new { success, message });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -64,7 +64,7 @@ namespace VerifiedXCore.Controllers
         public IActionResult GetBitcoinAccounts()
         {
             try { return Ok(WalletVbtcService.GetBitcoinAccounts()); }
-            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ApiErrorText.For(ex) }); }
         }
 
         /// <summary>ETH + vBTC.b on Base for each BTC account that has a linked EVM address (Nethereum read; respects Globals.IsTestNet defaults).</summary>
@@ -72,7 +72,7 @@ namespace VerifiedXCore.Controllers
         public async Task<IActionResult> GetBitcoinBaseBalances()
         {
             try { return Ok(await WalletBtcBaseService.GetLinkedBaseBalancesAsync()); }
-            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/btc/link-evm")]
@@ -89,14 +89,14 @@ namespace VerifiedXCore.Controllers
 
                 return Ok(new { success = true, message = "Linked EVM address updated." });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/vbtc/{address}")]
         public IActionResult GetVBTC(string address)
         {
             try { return Ok(WalletVbtcService.GetVBTCContracts(address)); }
-            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/vbtc/withdraw/request")]
@@ -119,7 +119,7 @@ namespace VerifiedXCore.Controllers
                 var (success, message) = await WalletVbtcService.RequestWithdrawal(req.ScUID, req.OwnerAddress, req.BTCAddress, amount, feeRate);
                 return Ok(new { success, message });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/vbtc/withdraw/complete")]
@@ -137,7 +137,7 @@ namespace VerifiedXCore.Controllers
                 else
                     return Ok(new { success = false, message = result.message });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/vbtc/withdraw/cancel")]
@@ -152,14 +152,14 @@ namespace VerifiedXCore.Controllers
                 var (success, message) = await WalletVbtcService.CancelWithdrawal(req.ScUID, req.OwnerAddress, req.RequestHash);
                 return Ok(new { success, message });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/vbtc/withdraw/status/{scUID}")]
         public IActionResult VBTCWithdrawStatus(string scUID)
         {
             try { return Ok(WalletVbtcService.GetWithdrawStatus(scUID)); }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/vbtc/transfer")]
@@ -178,7 +178,7 @@ namespace VerifiedXCore.Controllers
                 var (success, message) = await WalletVbtcService.TransferVBTC(req.ScUID, req.FromAddress, req.ToAddress, amount);
                 return Ok(new { success, message });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -196,7 +196,7 @@ namespace VerifiedXCore.Controllers
                 var result = await WalletVbtcService.GetBridgePreflight(ownerAddress, scUID);
                 return Ok(result);
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/vbtc/bridge/toBase")]
@@ -215,14 +215,14 @@ namespace VerifiedXCore.Controllers
                 var result = await WalletVbtcService.BridgeToBase(req.ScUID, req.OwnerAddress, amount, req.EvmDestination);
                 return Ok(result);
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/vbtc/bridge/status/{lockId}")]
         public IActionResult VBTCBridgeLockStatus(string lockId)
         {
             try { return Ok(WalletVbtcService.GetBridgeLockStatus(lockId)); }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/vbtc/bridge/submitMint/{lockId}")]
@@ -234,7 +234,7 @@ namespace VerifiedXCore.Controllers
                 // Use the retry endpoint instead if a bridge failed.
                 return Ok(new { success = false, message = "Manual caster mint removed. Use /api/vbtc/bridge/retry to retry a failed bridge." });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/vbtc/bridge/retry/{lockId}/{ownerAddress}")]
@@ -248,7 +248,7 @@ namespace VerifiedXCore.Controllers
                 var result = await WalletVbtcService.RetryBridgeMint(lockId, ownerAddress);
                 return Ok(result);
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         /// <summary>
@@ -267,7 +267,7 @@ namespace VerifiedXCore.Controllers
                 var result = await WalletVbtcService.ForceRetryBridgeMint(lockId, ownerAddress);
                 return Ok(result);
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/vbtc/bridge/base-balance/{evmAddress}")]
@@ -278,7 +278,7 @@ namespace VerifiedXCore.Controllers
                 var result = await Bitcoin.Services.BaseBridgeService.GetBaseBalance(evmAddress);
                 return Ok(new { success = result.Success, evmAddress, balance = result.Balance.ToString(System.Globalization.CultureInfo.InvariantCulture), message = result.Message });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -289,7 +289,7 @@ namespace VerifiedXCore.Controllers
         public IActionResult GetShieldedAddresses()
         {
             try { return Ok(WalletPrivacyVfxService.GetShieldedAddresses()); }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         // VX-03: was GET with the password as a URL segment (logged, cached, CSRF-able).
@@ -302,14 +302,14 @@ namespace VerifiedXCore.Controllers
                     return BadRequest(new { success = false, message = "address and password are required." });
                 return Ok(WalletPrivacyVfxService.CreateShieldedAddress(req.Address, req.Password));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/privacy/balance/{zfxAddress}")]
         public IActionResult GetShieldedBalance(string zfxAddress)
         {
             try { return Ok(WalletPrivacyVfxService.GetShieldedBalance(zfxAddress)); }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         private static bool TryParseAmount(string? text, out decimal amount) =>
@@ -326,7 +326,7 @@ namespace VerifiedXCore.Controllers
                     return BadRequest(new { success = false, message = "fromAddress, zfxAddress and a positive amount are required." });
                 return Ok(await WalletPrivacyVfxService.ShieldVFX(req.FromAddress, req.ZfxAddress, amount));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/privacy/unshield")]
@@ -338,7 +338,7 @@ namespace VerifiedXCore.Controllers
                     return BadRequest(new { success = false, message = "zfxAddress, toAddress and a positive amount are required." });
                 return Ok(await WalletPrivacyVfxService.UnshieldVFX(req.ZfxAddress, req.ToAddress, amount, req.Password));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/privacy/transfer")]
@@ -350,7 +350,7 @@ namespace VerifiedXCore.Controllers
                     return BadRequest(new { success = false, message = "fromZfxAddress, toZfxAddress and a positive amount are required." });
                 return Ok(await WalletPrivacyVfxService.PrivateTransferVFX(req.FromZfxAddress, req.ToZfxAddress, amount, req.Password));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/privacy/scan")]
@@ -362,7 +362,7 @@ namespace VerifiedXCore.Controllers
                     return BadRequest(new { success = false, message = "zfxAddress is required." });
                 return Ok(WalletPrivacyVfxService.ScanShieldedVFX(req.ZfxAddress, req.Password, req.FromBlock, req.ToBlock));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/privacy/resync")]
@@ -374,21 +374,21 @@ namespace VerifiedXCore.Controllers
                     return BadRequest(new { success = false, message = "zfxAddress is required." });
                 return Ok(WalletPrivacyVfxService.ResyncShieldedWallet(req.ZfxAddress, req.FromHeight, req.ToHeight));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/privacy/plonkStatus")]
         public IActionResult GetPlonkStatus()
         {
             try { return Ok(WalletPrivacyVfxService.GetPlonkStatus()); }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/privacy/poolState")]
         public IActionResult GetShieldedPoolState()
         {
             try { return Ok(WalletPrivacyVfxService.GetShieldedPoolState()); }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -399,7 +399,7 @@ namespace VerifiedXCore.Controllers
         public IActionResult GetShieldedVbtcBalance(string zfxAddress, string scUID)
         {
             try { return Ok(WalletPrivacyVbtcService.GetShieldedVbtcBalance(zfxAddress, scUID)); }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/privacy/vbtc/shield")]
@@ -417,7 +417,7 @@ namespace VerifiedXCore.Controllers
 
                 return Ok(await WalletPrivacyVbtcService.ShieldVBTC(req.FromAddress, req.ZfxAddress, req.ScUID, amount));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/privacy/vbtc/unshield")]
@@ -435,7 +435,7 @@ namespace VerifiedXCore.Controllers
 
                 return Ok(await WalletPrivacyVbtcService.UnshieldVBTC(req.ZfxAddress, req.ToAddress, req.ScUID, amount, req.Password));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/privacy/vbtc/transfer")]
@@ -453,7 +453,7 @@ namespace VerifiedXCore.Controllers
 
                 return Ok(await WalletPrivacyVbtcService.PrivateTransferVBTC(req.FromZfxAddress, req.ToZfxAddress, req.ScUID, amount, req.Password));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpPost("api/privacy/vbtc/scan")]
@@ -465,14 +465,14 @@ namespace VerifiedXCore.Controllers
                     return BadRequest(new { success = false, message = "zfxAddress and scUID are required." });
                 return Ok(WalletPrivacyVbtcService.ScanShieldedVBTC(req.ZfxAddress, req.ScUID, req.Password, req.FromBlock, req.ToBlock));
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         [HttpGet("api/privacy/vbtc/poolState/{scUID}")]
         public IActionResult GetVbtcShieldedPoolState(string scUID)
         {
             try { return Ok(WalletPrivacyVbtcService.GetVbtcShieldedPoolState(scUID)); }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -497,7 +497,7 @@ namespace VerifiedXCore.Controllers
 
                 return Ok(new { success = true, message = "Base address derived.", baseAddress = baseAddress, vfxAddress = vfxAddress });
             }
-            catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
     }
 }

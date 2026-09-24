@@ -49,7 +49,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = $"Error calling api: {ex.ToString()}";
+                output = $"Error calling api: {ApiErrorText.For(ex)}";
             }
 
             return output;
@@ -77,7 +77,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = $"Error calling api: {ex.ToString()}";
+                output = $"Error calling api: {ApiErrorText.For(ex)}";
             }
             
             return output;
@@ -103,7 +103,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = $"Error calling api: {ex.ToString()}";
+                output = $"Error calling api: {ApiErrorText.For(ex)}";
             }
 
             return output;
@@ -136,7 +136,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = $"Error calling api: {ex.ToString()}";
+                output = $"Error calling api: {ApiErrorText.For(ex)}";
             }
 
             return output;
@@ -168,7 +168,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = $"Error calling api: {ex.ToString()}";
+                output = $"Error calling api: {ApiErrorText.For(ex)}";
             }
 
             return output;
@@ -204,7 +204,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex) 
             {
-                output = $"Error calling api: {ex.ToString()}";
+                output = $"Error calling api: {ApiErrorText.For(ex)}";
             }
              
             return output;

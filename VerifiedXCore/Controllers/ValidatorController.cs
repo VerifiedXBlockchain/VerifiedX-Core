@@ -58,7 +58,7 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex)
             {
                 LogUtility.Log($"[BridgeAttest] SignMintAttestation EXCEPTION for lockId={request?.LockId}: {ex.Message}", "ValidatorController.SignMintAttestation");
-                return StatusCode(500, JsonConvert.SerializeObject(new { success = false, error = ex.Message }));
+                return StatusCode(500, JsonConvert.SerializeObject(new { success = false, error = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -96,7 +96,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -144,7 +144,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -165,7 +165,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -186,7 +186,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -207,7 +207,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -312,7 +312,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -406,7 +406,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -545,7 +545,7 @@ namespace VerifiedXCore.Controllers
                 CasterLogUtility.Log(
                     $"ReceiveCatchUpBlock ERROR: {ex.Message}",
                     "CATCHUP");
-                return BadRequest(ex.Message);
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -598,7 +598,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -626,12 +626,15 @@ namespace VerifiedXCore.Controllers
                 if (req == null || string.IsNullOrWhiteSpace(req.CasterAddress) || string.IsNullOrWhiteSpace(req.WinnerAddress) || string.IsNullOrWhiteSpace(req.Signature))
                     return BadRequest();
 
-                var now = TimeUtil.GetTime();
-                if (Math.Abs(now - req.Timestamp) > 90)
-                    return Unauthorized("timestamp");
-
+                // VX-23: membership first, then an overflow-free freshness check. Math.Abs(now - req.Timestamp) threw
+                // OverflowException for Timestamp = long.MinValue before any authentication ran, and the catch returned
+                // the stack trace to the anonymous caller.
                 if (!IsCasterParticipantAddress(req.CasterAddress))
                     return Unauthorized();
+
+                var now = TimeUtil.GetTime();
+                if (!ConsensusRequestAuth.IsFresh(req.Timestamp, now))
+                    return Unauthorized("timestamp");
 
                 var msg = ConsensusMessageFormatter.FormatRequestBlockV1(req.BlockHeight, req.CasterAddress, req.WinnerAddress, req.Timestamp);
                 if (!SignatureService.VerifySignature(req.CasterAddress, msg, req.Signature))
@@ -664,7 +667,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -706,7 +709,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -970,7 +973,7 @@ namespace VerifiedXCore.Controllers
                 CasterLogUtility.Log(
                     $"HTTP /PromoteToCaster from {remoteIp}: EXCEPTION {ex.GetType().Name}: {ex.Message}",
                     "CasterFlow");
-                return BadRequest($"rejected: {ex.Message}");
+                return BadRequest($"rejected: {ApiErrorText.Generic(ex)}");
             }
         }
 
@@ -991,7 +994,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -1026,7 +1029,7 @@ namespace VerifiedXCore.Controllers
                 CasterLogUtility.Log(
                     $"HTTP /AnnounceCasterPromotion from {remoteIp}: EXCEPTION {ex.GetType().Name}: {ex.Message}",
                     "CasterFlow");
-                return BadRequest($"rejected: {ex.Message}");
+                return BadRequest($"rejected: {ApiErrorText.Generic(ex)}");
             }
         }
 
@@ -1044,7 +1047,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -1551,7 +1554,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.Generic(ex)}" });
             }
         }
 
@@ -1585,7 +1588,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { Height = 0, Casters = new List<CasterInfo>(), Error = ex.Message }));
+                return Ok(JsonConvert.SerializeObject(new { Height = 0, Casters = new List<CasterInfo>(), Error = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -1619,7 +1622,7 @@ namespace VerifiedXCore.Controllers
                 return Ok(JsonConvert.SerializeObject(new PromotionProposalResponse
                 {
                     Accepted = false,
-                    Reason = $"Error: {ex.Message}",
+                    Reason = $"Error: {ApiErrorText.Generic(ex)}",
                     ResponderAddress = Globals.ValidatorAddress ?? ""
                 }));
             }
@@ -1660,7 +1663,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Recovery failed: {ex.Message}" }));
+                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Recovery failed: {ApiErrorText.Generic(ex)}" }));
             }
         }
 
@@ -1694,7 +1697,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Broadcast failed: {ex.Message}" }));
+                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Broadcast failed: {ApiErrorText.Generic(ex)}" }));
             }
         }
 
@@ -1730,7 +1733,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+                return Ok(JsonConvert.SerializeObject(new { Error = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -1808,7 +1811,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+                return Ok(JsonConvert.SerializeObject(new { Error = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -1849,7 +1852,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+                return Ok(JsonConvert.SerializeObject(new { Error = ApiErrorText.Generic(ex) }));
             }
         }
 

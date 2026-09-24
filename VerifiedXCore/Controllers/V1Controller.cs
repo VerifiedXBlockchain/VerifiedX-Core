@@ -358,7 +358,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = false, Message = $"Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -381,7 +381,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = $"ERROR! Message: {ex.ToString()}";
+                output = $"ERROR! Message: {ApiErrorText.For(ex)}";
             }
 
             return output;
@@ -415,7 +415,7 @@ namespace VerifiedXCore.Controllers
                 }
                 catch (Exception ex)
                 {
-                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"There was an error encrypting your wallet. Error: {ex.ToString()}" });
+                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"There was an error encrypting your wallet. Error: {ApiErrorText.For(ex)}" });
                 }
             }
             else
@@ -505,7 +505,7 @@ namespace VerifiedXCore.Controllers
                 password = "";
                 Globals.EncryptPassword.Dispose();
                 Globals.EncryptPassword = new SecureString();
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -1221,7 +1221,7 @@ namespace VerifiedXCore.Controllers
                     catch (Exception ex)
                     {
                         ErrorLogUtility.LogError(ex.ToString(), "V1Controller.StartValidating - result: " + result);
-                        result = $"Unknown Error Occured: {ex.ToString()}";
+                        result = $"Unknown Error Occured: {ApiErrorText.For(ex)}";
                     }
                     output = true;
                 }
@@ -1343,7 +1343,7 @@ namespace VerifiedXCore.Controllers
 
                 output = signature;
             }
-            catch(Exception ex) { return $"ERROR: {ex.ToString()}"; }
+            catch(Exception ex) { return $"ERROR: {ApiErrorText.For(ex)}"; }
             
             return output;
         }
@@ -1561,7 +1561,7 @@ namespace VerifiedXCore.Controllers
                 }
                 catch (Exception ex)
                 {
-                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Peer: {ipAddr} caused the error: {ex.ToString()}" });
+                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Peer: {ipAddr} caused the error: {ApiErrorText.For(ex)}" });
                 }
             }
             return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Peer: {ipAddr} was empty or not valid." });
@@ -1606,7 +1606,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             
@@ -1642,7 +1642,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
             
             return output;
@@ -1697,7 +1697,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error! Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error! Error: {ApiErrorText.For(ex)}" });
             }
            
             return output;

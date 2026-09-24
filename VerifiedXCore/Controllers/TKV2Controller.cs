@@ -211,7 +211,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
         /// <summary>
@@ -267,7 +267,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -317,7 +317,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -363,7 +363,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -409,7 +409,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -469,7 +469,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -531,7 +531,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
             return JsonConvert.SerializeObject(new { Success = false, Message = $"End of Method." });
         }
@@ -599,7 +599,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
         }
 

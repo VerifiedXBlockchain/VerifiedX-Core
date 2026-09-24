@@ -86,7 +86,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = $"Error - {ex.ToString()}. Please Try Again.";
+                output = $"Error - {ApiErrorText.For(ex)}. Please Try Again.";
             }
 
             return output;
@@ -520,7 +520,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = ex.ToString();
+                output = ApiErrorText.For(ex);
             }
 
             return output;
@@ -682,7 +682,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown error occured. Error {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown error occured. Error {ApiErrorText.For(ex)}" });
                 return output;
             }
 
@@ -834,7 +834,7 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex)
             {
                 SCLogUtility.Log($"Failed to create smart contract. Error Message: {ex.ToString()}", "SCV1Controller.CreateSmartContract([FromBody] object jsonData) - Line 247 catch");
-                output = $"Error - {ex.ToString()}. Please Try Again...";
+                output = $"Error - {ApiErrorText.For(ex)}. Please Try Again...";
             }
 
 
@@ -984,7 +984,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error Occurred. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error Occurred. Error: {ApiErrorText.For(ex)}" });
                 SCLogUtility.Log($"Unknown Error Transfering NFT. Error: {ex.ToString()}", "SCV1Controller.TransferNFT()");
             }
             
