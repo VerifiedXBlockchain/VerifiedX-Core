@@ -9,6 +9,28 @@ namespace VerifiedXCore.P2P
 {
     public class P2PMotherServer : Hub
     {
+        /// <summary>
+        /// VX-17: one password check per IP every 2 s. The verifier is deliberately slow (PBKDF2, 600k), so unthrottled
+        /// wrong-password connections would be a cheap way to burn the mother's CPU.
+        /// </summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _lastAuthAttemptMs = new();
+        internal const long AuthAttemptIntervalMs = 2000;
+
+        internal static bool TryBeginAuthAttempt(string peerIP)
+        {
+            var now = Environment.TickCount64;
+            while (true)
+            {
+                if (!_lastAuthAttemptMs.TryGetValue(peerIP, out var last))
+                {
+                    if (_lastAuthAttemptMs.TryAdd(peerIP, now)) return true;
+                    continue;
+                }
+                if (now - last < AuthAttemptIntervalMs) return false;
+                if (_lastAuthAttemptMs.TryUpdate(peerIP, now, last)) return true;
+            }
+        }
+
         #region Connect/Disconnect methods
         public override async Task OnConnectedAsync()
         {
@@ -49,10 +71,15 @@ namespace VerifiedXCore.P2P
                         //Mother is not present. Cannot continue
                         Context.Abort();
                     }
+                    else if (!TryBeginAuthAttempt(peerIP))
+                    {
+                        // VX-17: throttled (see TryBeginAuthAttempt)
+                        Context.Abort();
+                    }
                     else
                     {
-                        var passAttempt = mother.Password.ToDecrypt(password);
-                        if(passAttempt != "Fail" && passAttempt == password)
+                        // VX-17: KDF-based verifier (legacy self-encrypted records are upgraded on success).
+                        if (Mother.VerifyPassword(mother, password))
                         {
                             Globals.MothersKidsContext[peerIP] = Context;
                             connected = true;

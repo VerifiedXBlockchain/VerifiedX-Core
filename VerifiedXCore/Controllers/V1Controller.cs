@@ -1661,7 +1661,8 @@ namespace VerifiedXCore.Controllers
 
             if (mom != null)
             {
-                output = JsonConvert.SerializeObject(mom);
+                // VX-17: never the stored password verifier (it used to be serialised with the record).
+                output = JsonConvert.SerializeObject(new { mom.Id, mom.Name, mom.StartDate });
             }
 
             return output;
@@ -1763,29 +1764,43 @@ namespace VerifiedXCore.Controllers
 
             var kids = Globals.MothersKids.Values.ToList();
 
+            // VX-17: every kid-supplied value is HTML-encoded before it enters the page (the validator name was
+            // emitted verbatim, so a kid could run script in the operator's browser on the wallet API origin).
+            static string Enc(string? v) => System.Text.Encodings.Web.HtmlEncoder.Default.Encode(v ?? "");
+
             if (kids.Count > 0)
             {
                 foreach (var kid in kids)
                 {
                     var newKidCard = mDecompressed2;
-                    newKidCard = newKidCard.Replace("{ValidatorName}", kid.ValidatorName);
-                    newKidCard = newKidCard.Replace("{Balance}", $"{kid.Balance} VFX");
-                    newKidCard = newKidCard.Replace("{IPAddress}", kid.IPAddress);
-                    newKidCard = newKidCard.Replace("{BlockHeight}", kid.BlockHeight.ToString());
+                    newKidCard = newKidCard.Replace("{ValidatorName}", Enc(kid.ValidatorName));
+                    newKidCard = newKidCard.Replace("{Balance}", Enc($"{kid.Balance} VFX"));
+                    newKidCard = newKidCard.Replace("{IPAddress}", Enc(kid.IPAddress));
+                    newKidCard = newKidCard.Replace("{BlockHeight}", Enc(kid.BlockHeight.ToString()));
                     newKidCard = newKidCard.Replace("{IsValidatingYesNo}", kid.ActiveWithValidating ? "Yes" : "No");
                     newKidCard = newKidCard.Replace("{IsConnectedToMotherYesNo}", kid.ActiveWithMother ? "Yes" : "No");
                     newKidCard = newKidCard.Replace("{IsValidatingBg}", kid.ActiveWithValidating ? "bg-success" : "bg-danger");
                     newKidCard = newKidCard.Replace("{IsConnectedToMotherBg}", kid.ActiveWithMother ? "bg-success" : "bg-danger");
-                    newKidCard = newKidCard.Replace("{Address}", kid.Address);
+                    newKidCard = newKidCard.Replace("{Address}", Enc(kid.Address));
 
                     mother.AppendLine(newKidCard);
                 }
-                
+
             }
 
-            mother.AppendLine(mDecompressed3);
+            // VX-17: a Content-Security-Policy as a second line of defence. The page's only script is the auto-refresh
+            // block in the footer template; it runs under a per-response nonce, so an injected script (or handler)
+            // cannot. Inline styles and data: images are the template's own Bootstrap CSS.
+            var nonce = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+            mother.AppendLine(mDecompressed3.Replace("<script>", $"<script nonce=\"{nonce}\">"));
 
             output = mother.ToString();
+
+            Response.Headers["Content-Security-Policy"] =
+                $"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src data:; " +
+                "connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
+            Response.Headers["X-Content-Type-Options"] = "nosniff";
+            Response.Headers["Referrer-Policy"] = "no-referrer";
 
             return base.Content(output, "text/html");
         }
@@ -2024,7 +2039,9 @@ namespace VerifiedXCore.Controllers
             // Add noise layer for grainy effect
             htmlBuilder.AppendLine("<div class=\"noise-layer\"></div>");
             htmlBuilder.AppendLine("<div class=\"gray-line\"></div>");
-            htmlBuilder.AppendLine("<script>");
+            // VX-17 (adjacent): per-response script nonce; see the CSP header below.
+            var debugNonce = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+            htmlBuilder.AppendLine($"<script nonce=\"{debugNonce}\">");
             htmlBuilder.AppendLine("document.addEventListener('DOMContentLoaded', function() {");
             htmlBuilder.AppendLine("    var glitchElement = document.querySelector('.glitch');");
             htmlBuilder.AppendLine("    glitchElement.style.animation = 'glitch-animation 0.1s infinite alternate';");
@@ -2034,8 +2051,16 @@ namespace VerifiedXCore.Controllers
             foreach (var line in lines)
             {
                 // Use inline styling for retro look
-                htmlBuilder.Append($"<div class=\"retro-text\">{line}</div>");
+                // VX-17 (adjacent): the lines include peer-supplied text (e.g. a peer's reported wallet version,
+                // registry IPs) and were emitted verbatim into text/html — the same defect as the Mother page.
+                htmlBuilder.Append($"<div class=\"retro-text\">{System.Text.Encodings.Web.HtmlEncoder.Default.Encode(line)}</div>");
             }
+
+            Response.Headers["Content-Security-Policy"] =
+                $"default-src 'none'; script-src 'nonce-{debugNonce}'; style-src 'unsafe-inline'; img-src data:; " +
+                "connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
+            Response.Headers["X-Content-Type-Options"] = "nosniff";
+            Response.Headers["Referrer-Policy"] = "no-referrer";
 
             // Return the HTML content with content type set to text/html
             return Content(htmlBuilder.ToString(), "text/html");
