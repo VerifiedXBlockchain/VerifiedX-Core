@@ -285,8 +285,14 @@ namespace VerifiedXCore.Controllers
                 if (string.IsNullOrEmpty(peerIP))
                     return BadRequest("Could not determine caller IP");
 
-                // Verify the proof and add it if valid
-                if (proof.VerifyProof())
+                // VX-05: only casters push winner proofs to this route (BlockcasterNode.SendWinningProof).
+                // CasterProofDict is keyed by sender IP and its entries are the casters' votes, so an
+                // arbitrary host must not be able to add entries.
+                if (!BanService.IsCasterIP(peerIP))
+                    return Unauthorized();
+
+                // VX-05: full ingress validation (binding, round, eligibility, registry IP).
+                if (ProofUtility.ValidateIncomingProofForNextRound(proof, out _))
                 {
                     if (!Globals.CasterProofDict.ContainsKey(peerIP))
                     {

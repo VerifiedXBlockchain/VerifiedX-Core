@@ -561,31 +561,83 @@ namespace VerifiedXCore.Utilities
 
             return list;
         }
-        public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight, string prevBlockHash)
+        /// <summary>
+        /// The VRF: a deterministic function of public data. Every node computes the same (VRF number,
+        /// proof hash) for (publicKey, height, prevHash); casters compute proofs for every eligible
+        /// validator themselves. Shared by creation and verification so the two cannot drift.
+        /// </summary>
+        public static (uint VrfNumber, string ProofHash) ComputeVrf(string publicKey, long blockHeight, string prevBlockHash)
         {
-
-            uint vrfNum = 0;
-            var proof = "";
-            // Random seed
             string seed = publicKey + blockHeight.ToString() + prevBlockHash;
-
-            // Convert the combined input to bytes (using UTF-8 encoding)
             byte[] combinedBytes = Encoding.UTF8.GetBytes(seed);
-
-            // Calculate a hash using SHA256
             using (SHA256 sha256 = SHA256.Create())
             {
                 byte[] hashBytes = sha256.ComputeHash(combinedBytes);
-
-                //Produces non-negative by shifting and masking 
+                //Produces non-negative by shifting and masking
                 int randomBytesAsInt = BitConverter.ToInt32(hashBytes, 0);
-                uint nonNegativeRandomNumber = (uint)(randomBytesAsInt & 0x7FFFFFFF);
-
-                vrfNum = nonNegativeRandomNumber;
-                proof = ProofUtility.CalculateSHA256Hash(seed + vrfNum.ToString());
+                uint vrfNum = (uint)(randomBytesAsInt & 0x7FFFFFFF);
+                return (vrfNum, ProofUtility.CalculateSHA256Hash(seed + vrfNum.ToString()));
             }
+        }
 
+        public static async Task<(uint, string)> CreateProof(string address, string publicKey, long blockHeight, string prevBlockHash)
+        {
+            var (vrfNum, proof) = ComputeVrf(publicKey, blockHeight, prevBlockHash);
             return (vrfNum, proof);
+        }
+
+        /// <summary>
+        /// VX-05: content binding. PublicKey must derive Address; VRFNumber and ProofHash must equal the
+        /// recomputed VRF output. Pure — no round or eligibility checks (see ValidateIncomingProof).
+        /// </summary>
+        public static bool VerifyProofBinding(Proof proof)
+        {
+            if (proof == null || string.IsNullOrEmpty(proof.Address) || string.IsNullOrEmpty(proof.PublicKey) ||
+                string.IsNullOrEmpty(proof.PreviousBlockHash) || string.IsNullOrEmpty(proof.ProofHash))
+                return false;
+            if (!ConsensusRequestAuth.PublicKeyMatchesAddress(proof.PublicKey, proof.Address))
+                return false;
+            var (vrf, hash) = ComputeVrf(proof.PublicKey, proof.BlockHeight, proof.PreviousBlockHash);
+            return vrf == proof.VRFNumber && hash == proof.ProofHash;
+        }
+
+        /// <summary>
+        /// VX-05: the check every proof arriving from the network must pass before it can influence a
+        /// round. A wire proof is accepted only if this node could have generated the same proof itself:
+        /// content binding (VerifyProofBinding), bound to the round being decided (next height, current
+        /// parent hash), and for an address that is chain-eligible to produce (validator balance in the
+        /// state trie, not blocklisted). The proof's IPAddress is replaced by the address's registered IP
+        /// when known — it is not covered by the VRF, so a relayed copy could otherwise point the round at
+        /// an attacker host. Registry trust is deliberately NOT required: casters' registry views diverge,
+        /// and rejecting peers' winner proofs on local view would stall rounds.
+        /// </summary>
+        public static bool ValidateIncomingProof(Proof proof, long expectedHeight, string expectedPrevHash, out string reason)
+        {
+            reason = "";
+            if (!VerifyProofBinding(proof)) { reason = "binding"; return false; }
+            if (proof.BlockHeight != expectedHeight) { reason = "height"; return false; }
+            if (!string.Equals(proof.PreviousBlockHash, expectedPrevHash, StringComparison.OrdinalIgnoreCase)) { reason = "prevhash"; return false; }
+            if (Globals.ABL.Exists(x => x == proof.Address)) { reason = "abl"; return false; }
+
+            var state = StateData.GetSpecificAccountStateTrei(proof.Address);
+            if (state == null || state.Balance < ValidatorService.ValidatorRequiredAmount()) { reason = "not-eligible"; return false; }
+
+            if (Globals.NetworkValidators.TryGetValue(proof.Address, out var nv) && !string.IsNullOrEmpty(nv.IPAddress))
+                proof.IPAddress = nv.IPAddress.Replace("::ffff:", "");
+            else
+            {
+                var caster = Globals.BlockCasters.FirstOrDefault(c => c.ValidatorAddress == proof.Address && !string.IsNullOrEmpty(c.PeerIP));
+                if (caster != null)
+                    proof.IPAddress = caster.PeerIP.Replace("::ffff:", "");
+            }
+            return true;
+        }
+
+        /// <summary>Round-bound validation against the local tip (next height, current hash).</summary>
+        public static bool ValidateIncomingProofForNextRound(Proof proof, out string reason)
+        {
+            var tip = Globals.LastBlock;
+            return ValidateIncomingProof(proof, tip.Height + 1, tip.Hash, out reason);
         }
 
         public static async Task<bool> VerifyProofAsync(string publicKey, long blockHeight, string prevBlockHash, string proofHash)
@@ -629,40 +681,8 @@ namespace VerifiedXCore.Utilities
 
         public static bool VerifyProof(string publicKey, long blockHeight, string prevBlockHash, string proofHash)
         {
-            try
-            {
-                uint vrfNum = 0;
-                var proof = "";
-                // Random seed
-                string seed = publicKey + blockHeight.ToString() + prevBlockHash;
-                //if (Globals.BlockHashes.Count >= 35)
-                //{
-                //    var height = blockHeight - 7;
-                //    seed = seed + Globals.BlockHashes[height].ToString();
-                //}
-                // Convert the combined input to bytes (using UTF-8 encoding)
-                byte[] combinedBytes = Encoding.UTF8.GetBytes(seed);
-
-                // Calculate a hash using SHA256
-                using (SHA256 sha256 = SHA256.Create())
-                {
-                    byte[] hashBytes = sha256.ComputeHash(combinedBytes);
-
-                    //Produces non-negative by shifting and masking 
-                    int randomBytesAsInt = BitConverter.ToInt32(hashBytes, 0);
-                    uint nonNegativeRandomNumber = (uint)(randomBytesAsInt & 0x7FFFFFFF);
-
-                    vrfNum = nonNegativeRandomNumber;
-                    proof = ProofUtility.CalculateSHA256Hash(seed + vrfNum.ToString());
-
-                    if (proof == proofHash)
-                        return true;
-                }
-
-                return false;
-            }
+            try { return ComputeVrf(publicKey, blockHeight, prevBlockHash).ProofHash == proofHash; }
             catch { return false; }
-
         }
 
         /// <summary>

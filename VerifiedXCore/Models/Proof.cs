@@ -14,13 +14,18 @@ namespace VerifiedXCore.Models
         public string ProofHash { get; set; }
         public string IPAddress { get; set; }
 
+        /// <summary>
+        /// VX-05: a proof is valid only if it is exactly what anyone could recompute from public data —
+        /// PublicKey derives Address, and VRFNumber and ProofHash are the values the VRF yields for
+        /// (PublicKey, BlockHeight, PreviousBlockHash). Before, only ProofHash was checked, so Address
+        /// and VRFNumber were free fields (a forged proof with PublicKey "aa" and VRFNumber 0 won).
+        /// Round binding and eligibility are checked at ingress by ProofUtility.ValidateIncomingProof.
+        /// </summary>
         public bool VerifyProof()
         {
             try
             {
-                var proofResult = ProofUtility.VerifyProof(PublicKey, BlockHeight, PreviousBlockHash, ProofHash);
-
-                return proofResult;
+                return ProofUtility.VerifyProofBinding(this);
             }
             catch { return false; }
         }

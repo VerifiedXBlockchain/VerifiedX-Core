@@ -1600,8 +1600,12 @@ namespace VerifiedXCore.Nodes
 
                         // FIX B: Apply winner exclusions to proofSnapshot — prevents peer proofs
                         // from overriding local exclusions during winner agreement.
-                        var proofSnapshot = Globals.Proofs
-                            .Where(x => x.BlockHeight == Height && !skippedAddresses.Contains(x.Address))
+                        // VX-05: the snapshot is the casters' votes — exactly one entry per caster
+                        // (CasterProofDict, keyed by caster IP). It used to be read from the shared
+                        // Globals.Proofs bag, which other peers can also add to, so repeated copies of
+                        // one proof inflated that address's count in the count-first selection below.
+                        var proofSnapshot = Globals.CasterProofDict.Values
+                            .Where(x => x != null && x.BlockHeight == Height && !skippedAddresses.Contains(x.Address))
                             .ToList();
 
                         // CONSENSUS-V2 (Fix #5): Proof-set commitment exchange.
@@ -3128,7 +3132,8 @@ namespace VerifiedXCore.Nodes
                 var proof = JsonConvert.DeserializeObject<Proof>(data);
                 if (proof != null)
                 {
-                    if (proof.VerifyProof())
+                    // VX-05: ingress validation.
+                    if (ProofUtility.ValidateIncomingProofForNextRound(proof, out _))
                         Globals.Proofs.Add(proof);
                 }
             }
@@ -4758,7 +4763,8 @@ namespace VerifiedXCore.Nodes
                             if (responseJson != null && responseJson != "0" && responseJson != "\"0\"")
                             {
                                 var remoteCasterProof = JsonConvert.DeserializeObject<Proof>(responseJson);
-                                if (remoteCasterProof != null && remoteCasterProof.VerifyProof())
+                                // VX-05: same ingress validation as the push route.
+                                if (remoteCasterProof != null && ProofUtility.ValidateIncomingProof(remoteCasterProof, proof.BlockHeight, proof.PreviousBlockHash, out _))
                                 {
                                     Globals.CasterProofDict.TryAdd(validator.PeerIP, remoteCasterProof);
                                     CasterLogUtility.Log($"ProofFetch ACCEPTED from {cleanIP} addr={remoteCasterProof.Address} VRF={remoteCasterProof.VRFNumber}", "PROOFDIAG");

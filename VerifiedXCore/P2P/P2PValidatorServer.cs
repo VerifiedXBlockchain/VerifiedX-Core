@@ -1396,7 +1396,8 @@ namespace VerifiedXCore.P2P
                         return;
                     }
 
-                    if (proof.VerifyProof())
+                    // VX-05: ingress validation.
+                    if (ProofUtility.ValidateIncomingProofForNextRound(proof, out _))
                     {
                         Globals.Proofs.Add(proof);
                         
