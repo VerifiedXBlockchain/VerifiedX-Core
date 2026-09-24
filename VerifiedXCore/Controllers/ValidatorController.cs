@@ -215,7 +215,7 @@ namespace VerifiedXCore.Controllers
 
         [HttpPost]
         [Route("Status")]
-        public ActionResult<string> Status([FromBody] NetworkValidator networkVal)
+        public async Task<ActionResult<string>> Status([FromBody] NetworkValidator networkVal)
         {
             try
             {
@@ -244,15 +244,20 @@ namespace VerifiedXCore.Controllers
                     return Unauthorized();
                 }
 
-                _ = Peers.UpdatePeerAsVal(peerIP.Replace("::ffff:", ""), networkVal.Address, networkVal.PublicKey);
-
                 networkVal.IPAddress = peerIP.Replace("::ffff:", "");
 
-                _ = NetworkValidator.AddValidatorToPool(networkVal);
+                // VX-07: the validator's own advertisement — fresh, single-use, key bound to address.
+                // The peer record is updated only AFTER validation (it used to persist the claimed
+                // PublicKey before any check ran).
+                if (await NetworkValidator.AddValidatorToPool(networkVal, advertisingPeerIP: null, directFromValidator: true))
+                    _ = Peers.UpdatePeerAsVal(peerIP.Replace("::ffff:", ""), networkVal.Address, networkVal.PublicKey);
+                else
+                    return Unauthorized();
             }
             catch (Exception ex)
             {
-
+                ErrorLogUtility.LogError($"Status failed: {ex.Message}", "ValidatorController.Status()");
+                return BadRequest("Request failed");
             }
 
             return Ok();

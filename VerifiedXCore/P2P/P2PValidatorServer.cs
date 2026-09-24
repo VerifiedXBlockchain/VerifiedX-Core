@@ -417,38 +417,16 @@ namespace VerifiedXCore.P2P
                                 continue;
                             }
 
-                            if(Globals.NetworkValidators.TryGetValue(networkValidator.Address, out var networkValidatorVal))
+                            if(Globals.NetworkValidators.ContainsKey(networkValidator.Address))
                             {
-                                var verifySig = SignatureService.VerifySignature(
-                                    networkValidator.Address, 
-                                    networkValidator.SignatureMessage, 
-                                    networkValidator.Signature);
-
-                                // HAL-025 Fix: Removed weak .Contains() check - proper cryptographic verification is sufficient
-                                if(verifySig)
-                                {
-                                    // CASTER-PROMOTE-FIX: Never allow a gossiped record to demote a
-                                    // validator that is already trusted locally. A gossiped record
-                                    // from an untrusted peer typically carries IsFullyTrusted=false;
-                                    // blindly overwriting would silently flip our trusted entry to
-                                    // untrusted, removing it from caster-candidate eligibility.
-                                    // Preserve the more authoritative local trust + first-seen info.
-                                    if (networkValidatorVal.IsFullyTrusted)
-                                    {
-                                        networkValidator.IsFullyTrusted = true;
-                                    }
-                                    if (networkValidatorVal.FirstSeenAtHeight > 0)
-                                    {
-                                        networkValidator.FirstSeenAtHeight = networkValidatorVal.FirstSeenAtHeight;
-                                    }
-                                    networkValidator.LastSeen = TimeUtil.GetTime();
-                                    Globals.NetworkValidators[networkValidator.Address] = networkValidator;
+                                // VX-07: a gossiped copy refreshes a known validator through the same merge
+                                // as every other path — it can no longer replace the entry (and so move its
+                                // IP or swap its key). Local trust and first-seen are kept by the merge
+                                // (CASTER-PROMOTE-FIX semantics preserved).
+                                if (await NetworkValidator.AddValidatorToPool(networkValidator, peerIP))
                                     processedCount++;
-                                }
                                 else
-                                {
                                     rejectedCount++;
-                                }
                             }
 
                             else

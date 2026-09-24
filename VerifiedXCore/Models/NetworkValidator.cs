@@ -55,10 +55,49 @@ namespace VerifiedXCore.Models
         private static readonly ConcurrentDictionary<string, NetworkValidator> _pendingValidators = 
             new ConcurrentDictionary<string, NetworkValidator>();
 
-        public static async Task<bool> AddValidatorToPool(NetworkValidator validator, string advertisingPeerIP = null)
+        /// <summary>
+        /// VX-07: a validator advertisement is signed by the validator over exactly
+        /// "{Address}:{unixTime}:{PublicKey}" (ValidatorNode Status). The receiver used to verify a
+        /// caller-supplied free-text message, so ANY signature the validator ever produced could carry an
+        /// attacker-chosen PublicKey/IP. The message must now be that exact three-part shape and name this
+        /// entry's Address and PublicKey (the SignalR handshake signs four parts and other paths two, so a
+        /// signature from another purpose cannot be reused here).
+        /// </summary>
+        public static bool TryParseSignedAdvertisement(NetworkValidator validator, out long signedAt)
+        {
+            signedAt = 0;
+            if (validator == null || string.IsNullOrEmpty(validator.SignatureMessage)) return false;
+            var parts = validator.SignatureMessage.Split(':');
+            if (parts.Length != 3) return false;
+            if (parts[0] != validator.Address) return false;
+            if (!long.TryParse(parts[1], out signedAt)) return false;
+            return parts[2] == validator.PublicKey;
+        }
+
+        /// <param name="directFromValidator">
+        /// VX-07: true only for the validator's own Status call to this node (IPAddress = the socket IP).
+        /// Only a direct advertisement may change an existing entry's IP, key or name, and it must be fresh
+        /// and single-use. Gossiped copies (relayed by other peers, carrying the validator's last — possibly
+        /// old — signature) can confirm or refresh an entry but never move it.
+        /// </param>
+        public static async Task<bool> AddValidatorToPool(NetworkValidator validator, string advertisingPeerIP = null, bool directFromValidator = false)
         {
             try
             {
+                // VX-07: the signed message must bind this entry's Address and PublicKey…
+                if (!TryParseSignedAdvertisement(validator, out var signedAt))
+                {
+                    ErrorLogUtility.LogError($"Malformed validator advertisement for {validator?.Address} from peer {advertisingPeerIP}", "NetworkValidator.AddValidatorToPool");
+                    return false;
+                }
+
+                // …and the PublicKey must be the key that owns the Address (it seeds the VRF).
+                if (!ConsensusRequestAuth.PublicKeyMatchesAddress(validator.PublicKey, validator.Address))
+                {
+                    ErrorLogUtility.LogError($"Validator advertisement PublicKey does not derive {validator.Address} (peer {advertisingPeerIP})", "NetworkValidator.AddValidatorToPool");
+                    return false;
+                }
+
                 // HAL-11 Fix: Enhanced signature verification
                 var verifySig = SignatureService.VerifySignature(
                                 validator.Address,
@@ -71,28 +110,20 @@ namespace VerifiedXCore.Models
                     return false;
                 }
 
-                // HAL-11 Fix: Validate timestamp freshness
-                if (validator.AdvertisementTimestamp > 0)
+                // VX-07: a direct advertisement changes routing, so it must be fresh and used once.
+                // (The old AdvertisementTimestamp check was skipped for 0 — what senders send — and the
+                // gossip paths overwrite that field with local time, so it never applied.)
+                if (directFromValidator)
                 {
-                    var currentTime = TimeUtil.GetTime();
-                    var timeDiff = Math.Abs(currentTime - validator.AdvertisementTimestamp);
-                    
-                    if (timeDiff > 300) // 5 minute window
+                    var now = TimeUtil.GetTime();
+                    if (!ConsensusRequestAuth.IsFresh(signedAt, now))
                     {
-                        ErrorLogUtility.LogError($"Validator advertisement timestamp too old for {validator.Address}. Diff: {timeDiff}s", "NetworkValidator.AddValidatorToPool");
+                        ErrorLogUtility.LogError($"Stale or future direct advertisement for {validator.Address} (signed {signedAt}, now {now})", "NetworkValidator.AddValidatorToPool");
                         return false;
                     }
-                    
-                    // DIAGNOSTIC: Log timestamp diff on success so we can verify freshness
-                    LogUtility.Log($"Validator {validator.Address} timestamp OK (diff={timeDiff}s) from peer {advertisingPeerIP}", "NetworkValidator.AddValidatorToPool");
-                }
-
-                // HAL-11 Fix: Rate limiting per advertising peer
-                if (!string.IsNullOrEmpty(advertisingPeerIP))
-                {
-                    if (!CheckRateLimit(advertisingPeerIP))
+                    if (!ConsensusRequestAuth.TryConsume(validator.Signature, now))
                     {
-                        ErrorLogUtility.LogError($"Rate limit exceeded for validator advertisements from peer {advertisingPeerIP}", "NetworkValidator.AddValidatorToPool");
+                        ErrorLogUtility.LogError($"Replayed direct advertisement for {validator.Address}", "NetworkValidator.AddValidatorToPool");
                         return false;
                     }
                 }
@@ -103,44 +134,44 @@ namespace VerifiedXCore.Models
 
                 if (existingValidator && networkVal != null)
                 {
-                    // Validator already exists — update confirming sources
+                    // VX-07: MERGE onto the stored entry. It used to be replaced wholesale by the wire object,
+                    // so any advertisement (a replayed signature, a gossiped copy) rewrote the entry's IP,
+                    // PublicKey, name and first-seen height. Trust, first-seen and confirmations are local
+                    // facts and are always kept.
                     if (!string.IsNullOrEmpty(advertisingPeerIP))
                     {
                         networkVal.ConfirmingSources.Add(advertisingPeerIP);
                     }
                     // Reset fail count on re-advertisement — the validator is clearly online
                     // if it's being advertised by peers again
-                    validator.CheckFailCount = 0;
-                    validator.ConfirmingSources = networkVal.ConfirmingSources;
-                    validator.LastSeen = TimeUtil.GetTime(); // HAL-26 Fix: Update last seen timestamp
+                    networkVal.CheckFailCount = 0;
+                    networkVal.LastSeen = TimeUtil.GetTime(); // HAL-26 Fix: Update last seen timestamp
+
+                    // Only the validator's own fresh, single-use advertisement may move or rename it.
+                    if (directFromValidator)
+                    {
+                        networkVal.IPAddress = validator.IPAddress;
+                        networkVal.PublicKey = validator.PublicKey;
+                        networkVal.UniqueName = validator.UniqueName;
+                        networkVal.Signature = validator.Signature;
+                        networkVal.SignatureMessage = validator.SignatureMessage;
+                    }
 
                     // RESTART-FIX: If validator was added directly (e.g. P2P connect) with
                     // IsFullyTrusted=false, promote to trusted once we get a peer confirmation
                     // or if the advertising source is a trusted bootstrap peer.
-                    if (networkVal.IsFullyTrusted)
-                    {
-                        validator.IsFullyTrusted = true;
-                    }
-                    else if (!string.IsNullOrEmpty(advertisingPeerIP))
+                    if (!networkVal.IsFullyTrusted && !string.IsNullOrEmpty(advertisingPeerIP))
                     {
                         // Another peer is vouching for this validator — check confirmations
                         if (networkVal.ConfirmingSources.Count >= GetRequiredConfirmations()
                             || IsTrustedBootstrapSource(advertisingPeerIP))
                         {
-                            validator.IsFullyTrusted = true;
-                            LogUtility.Log($"Validator {validator.Address} promoted to fully trusted (was untrusted) after confirmation from {networkVal.ConfirmingSources.Count} sources", "NetworkValidator.AddValidatorToPool");
+                            networkVal.IsFullyTrusted = true;
+                            LogUtility.Log($"Validator {networkVal.Address} promoted to fully trusted (was untrusted) after confirmation from {networkVal.ConfirmingSources.Count} sources", "NetworkValidator.AddValidatorToPool");
                         }
-                        else
-                        {
-                            validator.IsFullyTrusted = false;
-                        }
-                    }
-                    else
-                    {
-                        validator.IsFullyTrusted = networkVal.IsFullyTrusted;
                     }
 
-                    Globals.NetworkValidators[networkVal.Address] = validator;
+                    Globals.NetworkValidators[networkVal.Address] = networkVal;
                     return true;
                 }
                 else if (pendingValidator && pendingVal != null)
@@ -173,6 +204,18 @@ namespace VerifiedXCore.Models
                 }
                 else
                 {
+                    // HAL-11 Fix: Rate limiting per advertising peer — "max 10 NEW validators per hour per
+                    // peer". Applied here (new entries only) so refreshing known validators from a peer's
+                    // list does not exhaust the budget and starve their liveness.
+                    if (!string.IsNullOrEmpty(advertisingPeerIP) && !CheckRateLimit(advertisingPeerIP))
+                    {
+                        ErrorLogUtility.LogError($"Rate limit exceeded for validator advertisements from peer {advertisingPeerIP}", "NetworkValidator.AddValidatorToPool");
+                        return false;
+                    }
+
+                    // VX-15: first-seen is a local fact, never taken from the wire.
+                    validator.FirstSeenAtHeight = Globals.LastBlock?.Height ?? 0;
+
                     // New validator - add to pending state
                     validator.FirstAdvertised = TimeUtil.GetTime();
                     validator.OriginalAdvertiser = advertisingPeerIP ?? "unknown";
