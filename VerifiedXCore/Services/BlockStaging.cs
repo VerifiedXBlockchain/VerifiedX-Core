@@ -60,7 +60,8 @@ namespace VerifiedXCore.Services
             if (block.ChainRefId != BlockchainData.ChainRef) { reason = "wrong chain"; return false; }
             if (block.Size < 0) { reason = "negative size"; return false; }
             var size = LocalSize(block);
-            if (size > Globals.MaxBlockSizeBytes) { reason = $"size {size} exceeds {Globals.MaxBlockSizeBytes}"; return false; }
+            var maxSize = Globals.MaxBlockSizeBytes > 0 ? Globals.MaxBlockSizeBytes : 10_485_760; // unset → config default (10 MB)
+            if (size > maxSize) { reason = $"size {size} exceeds {maxSize}"; return false; }
             if (block.Height != Globals.LastBlock.Height + 1) { reason = $"not the next height (tip {Globals.LastBlock.Height}, block {block.Height})"; return false; }
             if (block.Version != BlockVersionUtility.GetBlockVersion(block.Height)) { reason = "wrong version"; return false; }
             string recomputed;

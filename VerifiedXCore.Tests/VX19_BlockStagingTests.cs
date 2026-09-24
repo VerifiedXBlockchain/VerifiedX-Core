@@ -45,6 +45,7 @@ namespace VerifiedXCore.Tests
             Globals.MessageLocks.Clear();
             Globals.Nodes.Clear();
             Globals.LastBlock = new Block { Height = 0, Hash = "tip-hash" };
+            Globals.MaxBlockSizeBytes = 10_485_760; // other tests leave it at 0 (ProcessConfig on a blank Config)
             BlockDownloadService.BlockDict.Clear();
             Globals.NetworkValidators.Clear();
             Globals.NetworkValidators[_producer.Address] = new NetworkValidator { Address = _producer.Address, PublicKey = _producer.Pub, IPAddress = "10.9.9.9", IsFullyTrusted = true };
