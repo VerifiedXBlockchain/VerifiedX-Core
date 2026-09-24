@@ -1014,8 +1014,16 @@ namespace VerifiedXCore.Services
 
                                             var amount = amountVal.Value;
 
+                                            // NEW-05: legacy V1 had no positive-amount rule; a negative amount wrote a +amount row
+                                            // to the recipient (minting V1 vBTC).
+                                            var v1AmountError = LedgerIntegrityRules.V1TransferAmount(amountVal);
+                                            if (v1AmountError != null)
+                                                return (txResult, v1AmountError);
+
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                                            if (scStateTreiRec != null)
+                                            // NEW-05: a transfer on a contract that does not exist used to pass untouched.
+                                            if (scStateTreiRec == null)
+                                                return (txResult, $"Smart contract not found: {scUID}");
                                             {
                                                 bool isOwner = false;
                                                 if (txRequest.FromAddress == scStateTreiRec.OwnerAddress)
@@ -1056,17 +1064,16 @@ namespace VerifiedXCore.Services
                                                 if (tknz == null)
                                                     return (txResult, $"Token feature error: {scUID}");
 
-                                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null)
+                                                // NEW-05: a non-owner's balance is its ledger sum — zero when it has no rows. The check
+                                                // ran only when rows existed, so a sender with none could send any amount (minting).
+                                                if (!isOwner)
                                                 {
-                                                    var balances = scStateTreiRec.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == txRequest.FromAddress || x.ToAddress == txRequest.FromAddress).ToList();
+                                                    var balance = (scStateTreiRec.SCStateTreiTokenizationTXes ?? new List<SmartContractStateTreiTokenizationTX>())
+                                                        .Where(x => x.FromAddress == txRequest.FromAddress || x.ToAddress == txRequest.FromAddress)
+                                                        .Sum(x => x.Amount);
 
-                                                    if (balances.Any() && !isOwner)
-                                                    {
-                                                        var balance = balances.Sum(x => x.Amount);
-
-                                                        if (balance < amount)
-                                                            return (txResult, $"Insufficient Balance. Current Balance: {balance}");
-                                                    }
+                                                    if (balance < amount)
+                                                        return (txResult, $"Insufficient Balance. Current Balance: {balance}");
                                                 }
                                             }
 
@@ -1113,9 +1120,16 @@ namespace VerifiedXCore.Services
                                                 if (input.FromAddress.StartsWith("xRBX"))
                                                     return (txResult, "Reserve accounts cannot send legacy vBTC (V1). Use vBTC V2 transfers.");
 
-                                                var signatureCheck = SignatureService.VerifySignature(input.FromAddress, signatureInput + txRequest.ToAddress + txRequest.FromAddress, input.Signature);
+                                                // NEW-05: the input's signature was computed and never used, so any holder's
+                                                // balance could be spent by naming them as an input. It must verify, and the
+                                                // input amount must be positive.
+                                                var v1InputError = LedgerIntegrityRules.V1TransferMultiInput(input, signatureInput, txRequest.ToAddress, txRequest.FromAddress);
+                                                if (v1InputError != null)
+                                                    return (txResult, v1InputError);
+
                                                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(input.SCUID);
-                                                if (scStateTreiRec != null)
+                                                if (scStateTreiRec == null)
+                                                    return (txResult, $"Smart contract not found: {input.SCUID}");
                                                 {
                                                     bool isOwner = false;
                                                     if (input.FromAddress == scStateTreiRec.OwnerAddress)
@@ -1154,17 +1168,15 @@ namespace VerifiedXCore.Services
                                                     if (tknz == null)
                                                         return (txResult, $"Token feature error: {input.SCUID}");
 
-                                                    if (scStateTreiRec.SCStateTreiTokenizationTXes != null)
+                                                    // NEW-05: zero balance when the input holder has no ledger rows (see TransferCoin()).
+                                                    if (!isOwner)
                                                     {
-                                                        var balances = scStateTreiRec.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == input.FromAddress || x.ToAddress == input.FromAddress).ToList();
+                                                        var balance = (scStateTreiRec.SCStateTreiTokenizationTXes ?? new List<SmartContractStateTreiTokenizationTX>())
+                                                            .Where(x => x.FromAddress == input.FromAddress || x.ToAddress == input.FromAddress)
+                                                            .Sum(x => x.Amount);
 
-                                                        if (balances.Any() && !isOwner)
-                                                        {
-                                                            var balance = balances.Sum(x => x.Amount);
-
-                                                            if (balance < input.Amount)
-                                                                return (txResult, $"Insufficient Balance. Current Balance: {balance}");
-                                                        }
+                                                        if (balance < input.Amount)
+                                                            return (txResult, $"Insufficient Balance. Current Balance: {balance}");
                                                     }
                                                 }
                                             }
