@@ -470,8 +470,11 @@ namespace VerifiedXCore.P2P
                                     try
                                     {
                                         ErrorLogUtility.LogError($"TX Failed From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()-3");
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -563,8 +566,11 @@ namespace VerifiedXCore.P2P
                                     try
                                     {
                                         ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-1");
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -627,8 +633,11 @@ namespace VerifiedXCore.P2P
                                 try
                                 {
                                     ErrorLogUtility.LogError($"TX Failed From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()-4");
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -718,8 +727,11 @@ namespace VerifiedXCore.P2P
                                 try
                                 {
                                     ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-2");
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
