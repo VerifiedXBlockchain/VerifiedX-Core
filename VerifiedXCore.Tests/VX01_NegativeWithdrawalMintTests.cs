@@ -131,6 +131,32 @@ namespace VerifiedXCore.Tests
             m!.Invoke(null, new object[] { tx });
         }
 
+        // ── Follow-up (independent review): the TransferVBTCV2() function path ─────────────
+
+        private Transaction FunctionTransfer(string scUid, decimal amount) =>
+            Signed(TransactionType.TKNZ_TX, _funded, _attacker,
+                new { Function = "TransferVBTCV2()", ContractUID = scUid, FromAddress = _funded, ToAddress = _attacker, Amount = amount },
+                _funderKey, _funderPub);
+
+        [Fact]
+        public async Task VX01_FunctionPath_OnANonVbtcContract_Refused()
+        {
+            // Same ledger move as VBTC_V2_TRANSFER, reachable through the function dispatcher, which lacked the
+            // contract-type check VX-01 added to the typed transaction.
+            SeedContract("nft-not-vbtc:1", VbtcTestContracts.PlainNftContractData, (_funded, _funded, 4.0M));
+            var (ok, message) = await TransactionValidatorService.VerifyTX(FunctionTransfer("nft-not-vbtc:1", 1.0M));
+            Assert.False(ok);
+            Assert.Contains("not a vBTC V2 contract", message);
+        }
+
+        [Fact]
+        public async Task VX01_FunctionPath_MoreThan8Decimals_Refused()
+        {
+            SeedContract("vbtc-v2-fn:1", VbtcTestContracts.VbtcV2ContractData, (_funded, _funded, 4.0M));
+            var (ok, _) = await TransactionValidatorService.VerifyTX(FunctionTransfer("vbtc-v2-fn:1", 0.000000001M));
+            Assert.False(ok);
+        }
+
         // ── Audit PoC and controls, consensus validator ─────────────────────────────────────
 
         [Fact]

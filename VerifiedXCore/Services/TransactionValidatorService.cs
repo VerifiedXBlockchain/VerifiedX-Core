@@ -1366,14 +1366,21 @@ namespace VerifiedXCore.Services
                                                 return (txResult, "Reserve accounts must use the typed vBTC V2 transfer transaction.");
 
                                             // FIND-006 FIX #2: Validate amount is positive
-                                            if (!amount.HasValue || amount.Value <= 0)
-                                                return (txResult, "Amount must be greater than zero.");
+                                            // VX-01 (follow-up): same amount rule as VBTC_V2_TRANSFER (> 0, at most 8 decimals).
+                                            var fnAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "vBTC V2 transfer");
+                                            if (fnAmountError != null)
+                                                return (txResult, fnAmountError);
 
                                             // Balance validation for both owner and non-owner:
                                             // - Owner: query ElectrumX for deposit address balance + ledger balance
                                             // - Non-owner: check ledger balance from tokenization TXes
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                                            if (scStateTreiRec != null)
+                                            // VX-01 (follow-up): this function path moves vBTC V2 ledger balances like VBTC_V2_TRANSFER, so
+                                            // it needs the same contract-type check, and a missing contract is refused (it passed untouched).
+                                            if (scStateTreiRec == null)
+                                                return (txResult, $"Smart contract not found: {scUID}");
+                                            if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scStateTreiRec))
+                                                return (txResult, $"Target contract {scUID} is not a vBTC V2 contract.");
                                             {
                                                 bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 
