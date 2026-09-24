@@ -120,7 +120,8 @@ namespace VerifiedXCore.Data
         ///   account is restored as well, so funds sent to a previously mis-imported address stay reachable.
         ///   The returned account's <see cref="Account.AlsoRestoredLegacyAddress"/> names it.
         /// </summary>
-        public static async Task<Account> RestoreAccount(string privKey, bool rescanForTx = false, bool skipSave = false, bool legacy = false)
+        /// <summary>Null when the import was refused (encrypted wallet not unlocked with its password).</summary>
+        public static async Task<Account?> RestoreAccount(string privKey, bool rescanForTx = false, bool skipSave = false, bool legacy = false)
         {
             if (legacy)
                 return await RestoreAccountLegacy(privKey, rescanForTx, skipSave);
@@ -139,7 +140,9 @@ namespace VerifiedXCore.Data
                 account.PublicKey = "04" + ByteToHex(privateKey.publicKey().toString());
                 account.Address = GetHumanAddress(account.PublicKey);
 
-                await FinishRestore(account, rescanForTx, skipSave);
+                // NEW-01 (follow-up): a refused import is reported as a failure, not returned as if it were stored.
+                if (!await FinishRestore(account, rescanForTx, skipSave))
+                    return null;
 
                 // Legacy compatibility (owner-approved): restore the address an older wallet derived from this
                 // same key too, when it has on-chain history — never silently pick only one.
@@ -170,7 +173,7 @@ namespace VerifiedXCore.Data
         /// wallets did before the fix, so it reproduces the address such a wallet derived for a key. Only for
         /// restoring those addresses; do not change the parse.
         /// </summary>
-        public static async Task<Account> RestoreAccountLegacy(string privKey, bool rescanForTx = false, bool skipSave = false)
+        public static async Task<Account?> RestoreAccountLegacy(string privKey, bool rescanForTx = false, bool skipSave = false)
         {
             Account account = new Account();
             try
@@ -184,7 +187,8 @@ namespace VerifiedXCore.Data
                 account.PublicKey = "04" + ByteToHex(pubKey.toString());
                 account.Address = GetHumanAddress(account.PublicKey);
 
-                await FinishRestore(account, rescanForTx, skipSave);
+                if (!await FinishRestore(account, rescanForTx, skipSave))
+                    return null; // NEW-01 (follow-up): refused import
             }
             catch (Exception)
             {
@@ -211,7 +215,8 @@ namespace VerifiedXCore.Data
         }
 
         /// <summary>Shared tail of every key restore: balance/ADNR lookup and (unless skipSave) persistence.</summary>
-        private static async Task FinishRestore(Account account, bool rescanForTx, bool skipSave)
+        /// <summary>False when the import was refused (encrypted wallet not unlocked with its password).</summary>
+        private static async Task<bool> FinishRestore(Account account, bool rescanForTx, bool skipSave)
         {
             //Update balance from state trei
             var accountState = StateData.GetSpecificAccountStateTrei(account.Address);
@@ -232,10 +237,10 @@ namespace VerifiedXCore.Data
                     // plaintext (e.g. privkey= at startup without encpass=).
                     if (Globals.IsWalletEncrypted == true && !await WalletEncryptionService.EncryptImportedAccount(account))
                     {
-                        var refusal = $"Import of {account.Address} refused: the wallet is encrypted and not unlocked with its password. Unlock it (or start with encpass=) and import again.";
+                        var refusal = $"Import of {account.Address} refused: the wallet is encrypted and the key could not be sealed (wallet locked or password not verified, or a keystore record for this address that opens to a different key). Unlock it (or start with encpass=) and import again.";
                         Console.WriteLine(refusal);
                         ErrorLogUtility.LogError(refusal, "AccountData.FinishRestore()");
-                        return;
+                        return false;
                     }
                     AddToAccount(account); //only add if not already in accounts
                     if (rescanForTx == true)
@@ -245,6 +250,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
+            return true;
         }
 
 		/// <summary>

@@ -367,7 +367,8 @@ namespace VerifiedXCore.Commands
                                     var legacyAnswer = await ReadLineUtility.ReadLine();
                                     var useLegacy = !string.IsNullOrEmpty(legacyAnswer) && legacyAnswer.Trim().ToLower() == "y";
                                     var restoredAccount = await Account.Restore(privKey, rescanForTx, useLegacy);
-                                    AccountData.WalletInfo(restoredAccount);
+                                    if (restoredAccount != null && !string.IsNullOrEmpty(restoredAccount.Address))
+                                        AccountData.WalletInfo(restoredAccount);
                                 }
                             }
                             catch(Exception ex) { }
@@ -391,7 +392,8 @@ namespace VerifiedXCore.Commands
                                 var legacyAnswer = await ReadLineUtility.ReadLine();
                                 var useLegacy = !string.IsNullOrEmpty(legacyAnswer) && legacyAnswer.Trim().ToLower() == "y";
                                 var restoredAccount = await Account.Restore(privKey, false, useLegacy);
-                                AccountData.WalletInfo(restoredAccount);
+                                if (restoredAccount != null && !string.IsNullOrEmpty(restoredAccount.Address))
+                                    AccountData.WalletInfo(restoredAccount);
                             }
                         }
                         catch (Exception ex) { }

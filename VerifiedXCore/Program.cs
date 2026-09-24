@@ -582,7 +582,7 @@ namespace VerifiedXCore
                             var privateKey = keySplit[1];
                             // VX-11: add the "legacykey" argument to force the pre-fix derivation.
                             var account = await AccountData.RestoreAccount(privateKey, legacy: argList.Exists(a => a.ToLower() == "legacykey"));
-                            if (account != null)
+                            if (account != null && !string.IsNullOrEmpty(account.Address)) // NEW-01 (follow-up): null when refused
                             {
                                 ConsoleWriterService.Output("Account Loaded: " + account.Address);
 

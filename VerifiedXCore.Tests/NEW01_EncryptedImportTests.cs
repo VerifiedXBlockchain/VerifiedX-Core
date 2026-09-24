@@ -67,10 +67,18 @@ namespace VerifiedXCore.Tests
         public async Task NEW01_ImportIntoLockedEncryptedWallet_StoresNoPlaintextKey()
         {
             var keyHex = NewKeyHex();
+            var before = AccountData.GetAccounts().Count();
             var account = await AccountData.RestoreAccount(keyHex);
 
-            var stored = await StoredAfterImport(account.Address);
-            Assert.True(stored == null || !stored.PrivateKey.Contains(keyHex.TrimStart('0')), "plaintext key stored in an encrypted wallet");
+            if (account?.Address != null)
+            {
+                var stored = await StoredAfterImport(account.Address);
+                Assert.True(stored == null || !stored.PrivateKey.Contains(keyHex.TrimStart('0')), "plaintext key stored in an encrypted wallet");
+            }
+            // Follow-up (second review): the refusal is reported (null), not returned as if the account were stored.
+            Assert.Null(account);
+            await Task.Delay(100);
+            Assert.Equal(before, AccountData.GetAccounts().Count());
         }
 
         [Fact]

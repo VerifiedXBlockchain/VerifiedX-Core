@@ -61,7 +61,7 @@ namespace VerifiedXCore.Models
             return account;
         }
 
-        public async static Task<Account> Restore(string privKey, bool rescanForTx = false, bool legacy = false)
+        public async static Task<Account?> Restore(string privKey, bool rescanForTx = false, bool legacy = false)
         {
             Account account = await AccountData.RestoreAccount(privKey, rescanForTx, legacy: legacy);
             return account;
