@@ -514,6 +514,18 @@ namespace VerifiedXCore
             StartupService.CheckBlockRefVerToDb(); //checks check ID
             StartupService.HDWalletCheck();// checks for HD wallet
             StartupService.EncryptedWalletCheck(); //checks if wallet is encrypted
+
+            // Security-audit replay precondition (VX-01/VX-02 ship ungated): scan every stored block
+            // with the new consensus predicates, write a report, and exit before any networking.
+            if (argList.Any(a => a.ToLower() == "auditreplayscan"))
+            {
+                Console.WriteLine("Running security-audit replay scan (VX-01, VX-02) over the local chain...");
+                var reportPath = AuditReplayScanService.RunAndWriteReport();
+                Console.WriteLine($"Report written: {reportPath}");
+                Console.WriteLine(File.ReadLines(reportPath).FirstOrDefault(l => l.StartsWith("RESULT:")) ?? "");
+                Environment.Exit(0);
+            }
+
             SeedNodeService.SeedNodes(); //adds nodes to initial find blocks
             SeedNodeService.SeedBench(); //seeds adj bench
             await StartupService.GetArbiters();
