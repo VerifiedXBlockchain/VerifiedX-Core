@@ -45,9 +45,12 @@ namespace VerifiedXCore.Services
             return $"VFX_WINVOTE_V1|{blockHeight}|{voterAddress}|{winnerAddress}|{excluded}|{sequence}";
         }
 
-        /// <summary>VX-16: one caster's proof-set commitment for a height.</summary>
-        public static string FormatProofSetV1(long blockHeight, string casterAddress, string commitmentHash)
-            => $"VFX_PROOFSET_V1|{blockHeight}|{casterAddress}|{NormalizeHash(commitmentHash)}";
+        /// <summary>
+        /// VX-16: one caster's proof-set commitment for a height. <paramref name="sequence"/> is the caster's increasing
+        /// counter: a caster re-commits when a height is retried, and only a newer signed commitment replaces an older one.
+        /// </summary>
+        public static string FormatProofSetV1(long blockHeight, string casterAddress, string commitmentHash, long sequence)
+            => $"VFX_PROOFSET_V1|{blockHeight}|{casterAddress}|{NormalizeHash(commitmentHash)}|{sequence}";
 
         /// <summary>VX-07: a validator's own registry advertisement (address, key and IP it claims).</summary>
         public static string FormatValidatorStatusV1(string address, long timestampUnix, string publicKey, string ipAddress)

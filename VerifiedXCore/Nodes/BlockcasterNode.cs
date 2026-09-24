@@ -3985,9 +3985,16 @@ namespace VerifiedXCore.Nodes
 
             var requiredAgreement = ConsensusQuorum.Required(committeeCount); // ONE-QUORUM
 
+            // VX-16: only committee members' signed commitments count — first-hand or relayed.
+            var committeeCasters = new HashSet<string>(casters.Where(c => !string.IsNullOrEmpty(c.ValidatorAddress)).Select(c => c.ValidatorAddress!), StringComparer.Ordinal);
+            committeeCasters.Add(Globals.ValidatorAddress ?? "");
+            bool IsCommitteeCaster(string a) => committeeCasters.Contains(a);
+
+            // VX-16: our own commitment is signed (peers reject unsigned ones) and recorded through the store.
+            myCommitment = ProofSetCommitmentStore.SignOwn(myCommitment);
+            ProofSetCommitmentStore.TryRecord(myCommitment, IsCommitteeCaster);
             var commitsForHeight = Globals.CasterProofSetCommitDict
                 .GetOrAdd(height, _ => new ConcurrentDictionary<string, Models.ProofSetCommitment>());
-            commitsForHeight[Globals.ValidatorAddress ?? ""] = myCommitment;
 
             var sw = Stopwatch.StartNew();
             // Cache hash → sorted address list so we don't have to track group-membership
@@ -4025,12 +4032,9 @@ namespace VerifiedXCore.Nodes
                             {
                                 if (kv.Value == null) continue;
                                 if (kv.Value.BlockHeight != height) continue;
-                                if (string.IsNullOrEmpty(kv.Value.CasterAddress)) continue;
-                                // Re-verify the commitment hash so a bad peer can't poison our tally.
-                                var recomputed = ComputeProofSetCommitmentHash(kv.Value.ProofAddressesSorted ?? new List<string>());
-                                if (!string.Equals(recomputed, kv.Value.CommitmentHash, StringComparison.Ordinal))
-                                    continue;
-                                commitsForHeight[kv.Value.CasterAddress] = kv.Value;
+                                // VX-16: each relayed commitment must be signed by its own caster, who must be in the
+                                // committee; hash re-verified inside. It used to be merged on the hash check alone.
+                                ProofSetCommitmentStore.TryRecord(kv.Value, IsCommitteeCaster);
                             }
                         }
                         catch { /* best-effort */ }
@@ -4040,14 +4044,16 @@ namespace VerifiedXCore.Nodes
                 await Task.WhenAll(peerTasks).ConfigureAwait(false);
 
                 hashToAddresses[myCommitment.CommitmentHash] = myCommitment.ProofAddressesSorted ?? new List<string>();
-                foreach (var c in commitsForHeight.Values)
+                // VX-16: tally committee members only (the store may also hold other accepted casters from the route).
+                var committeeCommits = commitsForHeight.Where(kv => IsCommitteeCaster(kv.Key)).Select(kv => kv.Value).ToList();
+                foreach (var c in committeeCommits)
                 {
                     if (c == null || string.IsNullOrEmpty(c.CommitmentHash)) continue;
                     if (!hashToAddresses.ContainsKey(c.CommitmentHash))
                         hashToAddresses[c.CommitmentHash] = c.ProofAddressesSorted ?? new List<string>();
                 }
 
-                var byHash = commitsForHeight.Values
+                var byHash = committeeCommits
                     .Where(c => c != null && !string.IsNullOrEmpty(c.CommitmentHash))
                     .GroupBy(c => c.CommitmentHash, StringComparer.Ordinal)
                     .OrderByDescending(g => g.Count())

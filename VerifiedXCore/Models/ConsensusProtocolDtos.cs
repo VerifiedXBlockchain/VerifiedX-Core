@@ -179,6 +179,10 @@ namespace VerifiedXCore.Models
         public List<string> ProofAddressesSorted { get; set; } = new();
         /// <summary>SHA256 hex of <c>"|".Join(ProofAddressesSorted)</c>. Lower-case, no separators.</summary>
         public string CommitmentHash { get; set; } = "";
+        /// <summary>VX-16: the caster's increasing counter (unix ms); a newer signed commitment replaces an older one.</summary>
+        public long Sequence { get; set; }
+        /// <summary>VX-16: CasterAddress's signature over VFX_PROOFSET_V1 (ProofSetCommitmentStore.SigningMessage).</summary>
+        public string Signature { get; set; } = "";
     }
 
     /// <summary>

@@ -875,8 +875,9 @@ namespace VerifiedXCore.Controllers
         /// <summary>
         /// CONSENSUS-V2 (Fix #5): Receives a peer caster's <see cref="ProofSetCommitment"/>
         /// for a given block height, stores it in <see cref="Globals.CasterProofSetCommitDict"/>
-        /// after re-verifying the commitment hash, and returns the full set of commitments this
-        /// node currently holds for that height. Pure exchange — no consensus decisions are made
+        /// through <see cref="ProofSetCommitmentStore"/> (VX-16: signed by its caster, caster accepted,
+        /// height in the current window, hash re-verified), and returns the full set of signed commitments
+        /// this node currently holds for that height. Pure exchange — no consensus decisions are made
         /// here; the caller's <c>ReachProofSetAgreementAsync</c> tallies cross-peer responses.
         /// </summary>
         [HttpPost]
@@ -891,26 +892,26 @@ namespace VerifiedXCore.Controllers
                     || string.IsNullOrEmpty(req.CommitmentHash))
                     return BadRequest("0");
 
-                // Recompute hash to defend against a peer claiming a hash that doesn't match its own list.
-                var sortedAddrs = req.ProofAddressesSorted ?? new List<string>();
-                var recomputed = Nodes.BlockcasterNode.ComputeProofSetCommitmentHash(sortedAddrs);
-                if (!string.Equals(recomputed, req.CommitmentHash, System.StringComparison.Ordinal))
+                var remoteIp = HttpContext?.Connection?.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+                if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                    return Unauthorized();
+
+                // VX-16: only the round in progress (was: any height — the audit stored 205 identities at h=42, tip 0).
+                if (!ConsensusRequestAuth.IsHeightInWindow(req.BlockHeight, Globals.LastBlock.Height))
+                    return BadRequest("0");
+
+                // VX-16: signed by its caster, caster accepted, hash matches the list; a caster's commitment is replaced
+                // only by a newer one it signed (was: stored for any caller-supplied address, overwritten by indexer).
+                if (ProofSetCommitmentStore.TryRecord(req, IsCasterParticipantAddress) == ProofSetRecordResult.Invalid)
                 {
-                    CasterLogUtility.Log(
-                        $"[CONSENSUS-V2] ExchangeProofSet REJECT from {req.CasterAddress} h={req.BlockHeight}: hash mismatch (peer={req.CommitmentHash[..System.Math.Min(10, req.CommitmentHash.Length)]} recomputed={recomputed[..System.Math.Min(10, recomputed.Length)]})",
-                        "CONSENSUS");
+                    CasterLogUtility.Log($"[CONSENSUS-V2] ExchangeProofSet REJECT from {req.CasterAddress} h={req.BlockHeight}: unsigned, not a caster, or hash mismatch", "CONSENSUS");
                     return BadRequest("0");
                 }
 
-                var commitsForHeight = Globals.CasterProofSetCommitDict.GetOrAdd(
-                    req.BlockHeight,
-                    _ => new System.Collections.Concurrent.ConcurrentDictionary<string, ProofSetCommitment>());
-                commitsForHeight[req.CasterAddress] = req;
+                ProofSetCommitmentStore.PruneBelow(Globals.LastBlock.Height - 10);
 
-                // Snapshot for the response so we don't expose the live ConcurrentDictionary.
-                var snapshot = new Dictionary<string, ProofSetCommitment>();
-                foreach (var kv in commitsForHeight)
-                    snapshot[kv.Key] = kv.Value;
+                // Snapshot for the response (signed commitments, so the caller can verify relayed ones).
+                var snapshot = ProofSetCommitmentStore.Snapshot(req.BlockHeight);
 
                 var resp = new ProofSetExchangeResponse
                 {
