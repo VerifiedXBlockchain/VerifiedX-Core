@@ -85,13 +85,15 @@ namespace VerifiedXCore.Controllers
                     });
                 }
 
-                List<string> APIExclusionList = new List<string> { "SendBlock", "GetWalletInfo", "GetAllAddresses", "GetValidatorAddresses",
+                // VX-12: routes that touch key material (GetAllAddresses, GetAllReserveAccounts,
+                // GetBitcoinAccountList) are no longer excluded from the API log.
+                List<string> APIExclusionList = new List<string> { "SendBlock", "GetWalletInfo", "GetValidatorAddresses",
                     "GetAllLocalTX", "GetSuccessfulLocalTX", "GetFailedLocalTX", "GetPendingLocalTX", "GetMinedLocalTX", "GetAllTopics",
                     "GetActiveTopics", "GetInactiveTopics", "GetMyTopics", "GetAllSmartContracts", "GetMintedSmartContracts", "CheckStatus",
                     "GetIsWalletEncrypted", "GetMyVotes", "GetSingleSmartContract", "GetNFTAssetLocation", "GetCLIVersion", "CheckPasswordNeeded",
                     "GetBeacons", "GetValidatorInfo", "IsValidating", "NetworkMetrics", "Network", "Height", "LastBlock", "GetDecShop", "GetSummaryChatMessages",
-                    "GetAllCollections", "GetAllReserveAccounts", "GetSimpleShopChatMessages", "GetDecShopData", "GetShopSpecificAuction", "GetListing", "GetCollectionListings",
-                    "GetSmartContractData", "GetBalances", "GetDefaultAddressType", "GetLastAccounySync", "GetTokenizedBTCList", "GetBitcoinAccountList", "GetAddressTXList",
+                    "GetAllCollections", "GetSimpleShopChatMessages", "GetDecShopData", "GetShopSpecificAuction", "GetListing", "GetCollectionListings",
+                    "GetSmartContractData", "GetBalances", "GetDefaultAddressType", "GetLastAccounySync", "GetTokenizedBTCList", "GetAddressTXList",
                     "GetDefaultAddressType", "GetAddressUTXOList", "GetCurrentSCOwner", "GetBitcoinTXList", "GetElectrumXState" };
 
                 if (actionName == null || !APIExclusionList.Contains(actionName))

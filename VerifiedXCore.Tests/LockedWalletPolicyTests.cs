@@ -65,7 +65,7 @@ namespace VerifiedXCore.Tests
         {
             "V1.GetNewAddress", "V1.ImportPrivateKey", "V1.GetMother", "V1.GetEncryptedPassword", "V1.GetHDWallet",
             "V1.GetRestoreHDWallet", "V1.SendTransaction", "V1.CreateSignature", "V1.CreateSignatureFromPrivateKey",
-            "V1.GetEncryptWallet", "V1.StartMother", "V1.JoinMother",
+            "V1.GetEncryptWallet", "V1.StartMother", "V1.JoinMother", "V1.GetPrivateKey",
             "BTCV2.GetNewAddress", "BTCV2.GetBitcoinAccount", "BTCV2.ImportPrivateKey",
             "BTCV2.ReplaceByFee", "BTCV2.SendTransaction", "BTCV2.Broadcast", "BTCV2.ResetAccount",
             "RSV1.DecodeRestoreCode", "RSV1.UnlockReserveAccount", "RSV1.NewReserveAddress", "RSV1.GetReserveAccountNFTAssets",

@@ -863,6 +863,28 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
+        /// VX-12: explicit private-key export for one local address (the operator's backup path). Key material is
+        /// no longer included in any account listing; this is the one deliberate way to get it. Refused while the
+        /// wallet is encrypted and locked (not in LockedWalletPolicy), never excluded from the API log, and
+        /// returns the canonical 64-digit key (VX-11), which imports correctly into any tool.
+        /// </summary>
+        [HttpGet("GetPrivateKey/{address}")]
+        public async Task<string> GetPrivateKey(string address)
+        {
+            var account = AccountData.GetSingleAccount(address);
+            if (account == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Account not found." });
+            try
+            {
+                return JsonConvert.SerializeObject(new { Success = true, Address = account.Address, PrivateKey = KeyParsing.CanonicalKeyHexFromStored(account.GetKey) });
+            }
+            catch
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Key is not available (is the wallet unlocked?)." });
+            }
+        }
+
+        /// <summary>
         /// Imports a private key.
         /// </summary>
         /// <param name="id"></param>
