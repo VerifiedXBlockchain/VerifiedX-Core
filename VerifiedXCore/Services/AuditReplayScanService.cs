@@ -15,9 +15,17 @@ namespace VerifiedXCore.Services
     /// transaction the new rules would reject. Zero hits on a fully synced node means replay is safe.
     ///
     /// It deliberately calls the SAME predicates consensus uses (<see cref="VBTCService.GetVbtcAmountError"/>,
-    /// <see cref="VBTCService.IsVbtcV2Contract"/>, <see cref="SmartContractDeployBinding.Validate"/>), so it
-    /// cannot drift from the rules it certifies. State-dependent checks that existed before the audit fixes
-    /// (balances, active-request gates) are out of scope; they are unchanged.
+    /// <see cref="VBTCService.IsVbtcV2Contract"/>, <see cref="SmartContractDeployBinding.Validate"/>,
+    /// <see cref="LedgerIntegrityRules"/>), so it cannot drift from the rules it certifies. State-dependent checks that
+    /// existed before the audit fixes (balances, active-request gates) are out of scope; they are unchanged.
+    ///
+    /// Also covers the independent-review follow-ups: NEW-04 (token holder bound to signer), NEW-05 (legacy V1 vBTC
+    /// amounts and co-signatures; the zero-row balance rule is stateful and approximated — see
+    /// <see cref="ScanChain"/>), NEW-06 (one contract creation per ContractUID per block) and the VX-01 follow-up
+    /// (TransferVBTCV2() function path).
+    ///
+    /// Limitation: the contract-type check reads the contract's CURRENT state record. An owner can replace a contract's
+    /// code with Update(), so a contract updated after a historical transfer is judged by its current code.
     ///
     /// Run: start the node with the <c>auditreplayscan</c> argument. It scans, writes
     /// <c>audit-replay-scan-&lt;utc&gt;.txt</c> to the database folder, prints a summary and exits.
@@ -52,6 +60,8 @@ namespace VerifiedXCore.Services
 
                 if (IsMintFamily(tx.TransactionType))
                     CheckMintOrDeploy(tx, Add);
+
+                CheckFunctionRules(tx, Add);
             }
             catch (Exception ex)
             {
@@ -132,6 +142,118 @@ namespace VerifiedXCore.Services
                 add(isDeploy ? "VX-02 binding (TokenDeploy)" : "VX-02 binding (Mint)", $"{error} tx ContractUID={scUid}");
         }
 
+        /// <summary>Stateless follow-up rules on function-dispatched transactions (NEW-04, NEW-05, VX-01 follow-up).</summary>
+        private static void CheckFunctionRules(Transaction tx, Action<string, string> add)
+        {
+            if (string.IsNullOrEmpty(tx.Data)) return;
+            var (_, _, scUid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
+            if (string.IsNullOrEmpty(function)) return;
+            JObject? obj = null;
+            JToken? first = null;
+            try { obj = JObject.Parse(tx.Data); } catch { }
+            try { if (obj == null) first = JArray.Parse(tx.Data).FirstOrDefault(); } catch { }
+            var d = (JToken?)obj ?? first;
+            if (d == null) return;
+
+            switch (function)
+            {
+                case "TokenTransfer()":
+                    {
+                        var e = LedgerIntegrityRules.TokenTransfer(tx.FromAddress, tx.ToAddress, d["FromAddress"]?.ToObject<string?>(), d["ToAddress"]?.ToObject<string?>(), d["Amount"]?.ToObject<decimal?>());
+                        if (e != null) add("NEW-04 token transfer binding", e);
+                        break;
+                    }
+                case "TokenBurn()":
+                    {
+                        var e = LedgerIntegrityRules.TokenBurn(tx.FromAddress, d["FromAddress"]?.ToObject<string?>(), d["Amount"]?.ToObject<decimal?>());
+                        if (e != null) add("NEW-04 token burn binding", e);
+                        break;
+                    }
+                case "TokenVoteTopicCast()":
+                    {
+                        var e = LedgerIntegrityRules.TokenVoteCast(tx.FromAddress, d["FromAddress"]?.ToObject<string?>());
+                        if (e != null) add("NEW-04 token vote binding", e);
+                        break;
+                    }
+                case "TransferCoin()":
+                    {
+                        var e = LedgerIntegrityRules.V1TransferAmount(d["Amount"]?.ToObject<decimal?>());
+                        if (e != null) add("NEW-05 V1 amount", e);
+                        if (!string.IsNullOrEmpty(scUid) && SmartContractStateTrei.GetSmartContractState(scUid) == null)
+                            add("NEW-05 V1 missing contract", $"Contract {scUid} not found.");
+                        break;
+                    }
+                case "TransferCoinMulti()":
+                    {
+                        var sigInput = d["SignatureInput"]?.ToObject<string?>() ?? "";
+                        foreach (var input in d["Inputs"]?.ToObject<List<VBTCTransferInput>>() ?? new())
+                        {
+                            var e = LedgerIntegrityRules.V1TransferMultiInput(input, sigInput, tx.ToAddress, tx.FromAddress);
+                            if (e != null) add("NEW-05 V1 multi input", e);
+                            if (!string.IsNullOrEmpty(input?.SCUID) && SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
+                                add("NEW-05 V1 missing contract", $"Contract {input.SCUID} not found.");
+                        }
+                        break;
+                    }
+                case "TransferVBTCV2()":
+                    {
+                        var e = VBTCService.GetVbtcAmountError(d["Amount"]?.ToObject<decimal?>(), "vBTC V2 transfer");
+                        if (e != null) add("VX-01 amount (TransferVBTCV2 function)", e);
+                        if (string.IsNullOrEmpty(scUid) || SmartContractStateTrei.GetSmartContractState(scUid) == null)
+                            add("VX-01 missing contract (TransferVBTCV2 function)", $"Contract {scUid} not found.");
+                        else
+                            CheckContract(scUid, add, "VX-01 contract-type (TransferVBTCV2 function)");
+                        break;
+                    }
+            }
+        }
+
+        /// <summary>
+        /// NEW-05 zero-row balance rule, approximated (it is stateful): a non-owner legacy V1 sender must have received on
+        /// that contract earlier in the chain. "Owner" is the contract's current owner or minter. Hits under this rule are
+        /// candidates for manual review, not proof.
+        /// </summary>
+        private sealed class V1ReceiptTracker
+        {
+            private readonly HashSet<string> _received = new(StringComparer.Ordinal);
+            public void Received(string scUid, string address) => _received.Add(scUid + "|" + address);
+            public bool HasReceived(string scUid, string address) => _received.Contains(scUid + "|" + address);
+        }
+
+        private static void TrackV1(Transaction tx, long height, V1ReceiptTracker tracker, List<Hit> hits)
+        {
+            if (tx.TransactionType != TransactionType.TKNZ_TX || string.IsNullOrEmpty(tx.Data)) return;
+            var (_, _, scUid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
+            if (function == "TransferCoin()" && !string.IsNullOrEmpty(scUid))
+            {
+                CheckV1Sender(scUid, tx.FromAddress, tx, height, tracker, hits);
+                tracker.Received(scUid, tx.ToAddress);
+            }
+            else if (function == "TransferCoinMulti()")
+            {
+                try
+                {
+                    foreach (var input in JObject.Parse(tx.Data)["Inputs"]?.ToObject<List<VBTCTransferInput>>() ?? new())
+                    {
+                        if (string.IsNullOrEmpty(input?.SCUID)) continue;
+                        CheckV1Sender(input.SCUID, input.FromAddress, tx, height, tracker, hits);
+                        tracker.Received(input.SCUID, tx.ToAddress);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static void CheckV1Sender(string scUid, string sender, Transaction tx, long height, V1ReceiptTracker tracker, List<Hit> hits)
+        {
+            var sc = SmartContractStateTrei.GetSmartContractState(scUid);
+            if (sc == null) return; // reported by the missing-contract rule
+            if (sender == sc.OwnerAddress || sender == sc.MinterAddress) return;
+            if (!tracker.HasReceived(scUid, sender))
+                hits.Add(new Hit(height, tx.Hash ?? "", tx.TransactionType, "NEW-05 V1 zero-row sender (approximate — review)",
+                    $"{sender} sends on {scUid} with no earlier receipt on that contract in this chain."));
+        }
+
         /// <summary>Scans every block in the local database, in height order.</summary>
         public static (long Blocks, long Transactions, List<Hit> Hits) ScanChain(Action<string>? progress = null)
         {
@@ -140,6 +262,7 @@ namespace VerifiedXCore.Services
             var hits = new List<Hit>();
             long blockCount = 0, txCount = 0;
             const long batch = 1000;
+            var v1 = new V1ReceiptTracker();
 
             for (long start = 0; start <= tip; start += batch)
             {
@@ -148,10 +271,15 @@ namespace VerifiedXCore.Services
                 foreach (var block in page)
                 {
                     blockCount++;
+                    var createdInBlock = new HashSet<string>(StringComparer.Ordinal); // NEW-06
                     foreach (var tx in block.Transactions ?? new List<Transaction>())
                     {
                         txCount++;
                         hits.AddRange(CheckTransaction(tx, block.Height));
+                        var dup = LedgerIntegrityRules.RegisterCreationInBlock(tx, createdInBlock);
+                        if (dup != null)
+                            hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-06 duplicate creation in block", dup));
+                        try { TrackV1(tx, block.Height, v1, hits); } catch { }
                     }
                 }
                 progress?.Invoke($"Scanned heights {start}..{end} of {tip} — {hits.Count} hit(s) so far");
@@ -167,7 +295,7 @@ namespace VerifiedXCore.Services
             var (blocks, txs, hits) = ScanChain(msg => Console.WriteLine(msg));
 
             var sb = new StringBuilder();
-            sb.AppendLine("VerifiedX security-audit replay scan (VX-01, VX-02)");
+            sb.AppendLine("VerifiedX security-audit replay scan (VX-01, VX-02, NEW-04, NEW-05, NEW-06)");
             sb.AppendLine($"Network: {(Globals.IsTestNet ? "testnet" : "mainnet")}");
             sb.AppendLine($"Build: {Globals.CLIVersion}");
             sb.AppendLine($"Started (UTC): {startedUtc:O}");
@@ -175,6 +303,8 @@ namespace VerifiedXCore.Services
             sb.AppendLine($"Blocks scanned: {blocks}");
             sb.AppendLine($"Transactions scanned: {txs}");
             sb.AppendLine($"Hits: {hits.Count}");
+            foreach (var g in hits.GroupBy(h => h.Rule).OrderBy(g => g.Key))
+                sb.AppendLine($"  {g.Key}: {g.Count()}");
             sb.AppendLine(hits.Count == 0
                 ? "RESULT: PASS — no historical transaction violates the new rules; ungated replay is safe."
                 : "RESULT: FAIL — historical transactions below violate the new rules; do NOT deploy ungated.");

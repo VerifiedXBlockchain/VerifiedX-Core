@@ -93,5 +93,44 @@ namespace VerifiedXCore.Tests
             var hit = Assert.Single(hits);
             Assert.Equal(1, hit.Height);
         }
+
+        // ── Independent-review follow-ups ─────────────────────────────────────────────────
+
+        [Fact]
+        public void Scan_FlagsTheFollowUpRules()
+        {
+            Transaction TokenTx(string fn, string from, object data) =>
+                new Transaction { TransactionType = TransactionType.FTKN_TX, FromAddress = from, ToAddress = "xTO", Hash = Guid.NewGuid().ToString("N"), Data = JsonConvert.SerializeObject(data) };
+
+            // NEW-04
+            Assert.Empty(AuditReplayScanService.CheckTransaction(TokenTx("t", "xA", new { Function = "TokenTransfer()", ContractUID = "c", FromAddress = "xA", ToAddress = "xTO", Amount = 1M }), 5));
+            Assert.Contains(AuditReplayScanService.CheckTransaction(TokenTx("t", "xA", new { Function = "TokenTransfer()", ContractUID = "c", FromAddress = "xVICTIM", ToAddress = "xTO", Amount = 1M }), 5), h => h.Rule == "NEW-04 token transfer binding");
+            Assert.Contains(AuditReplayScanService.CheckTransaction(TokenTx("t", "xA", new { Function = "TokenBurn()", ContractUID = "c", FromAddress = "xA", Amount = -1M }), 5), h => h.Rule == "NEW-04 token burn binding");
+            Assert.Contains(AuditReplayScanService.CheckTransaction(TokenTx("t", "xA", new { Function = "TokenVoteTopicCast()", ContractUID = "c", FromAddress = "xVICTIM", TopicUID = "t" }), 5), h => h.Rule == "NEW-04 token vote binding");
+
+            // NEW-05 (V1)
+            var v1 = new Transaction { TransactionType = TransactionType.TKNZ_TX, FromAddress = "xA", ToAddress = "xB", Hash = "v1",
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "TransferCoin()", ContractUID = "scan:nft", Amount = -3M } }) };
+            Assert.Contains(AuditReplayScanService.CheckTransaction(v1, 6), h => h.Rule == "NEW-05 V1 amount");
+            var multi = new Transaction { TransactionType = TransactionType.TKNZ_TX, FromAddress = "xA", ToAddress = "xB", Hash = "m1",
+                Data = JsonConvert.SerializeObject(new { Function = "TransferCoinMulti()", SignatureInput = "s", Amount = 1M,
+                    Inputs = new[] { new { SCUID = "scan:nft", FromAddress = "xVICTIM", Amount = 1M, Signature = "forged" } } }) };
+            Assert.Contains(AuditReplayScanService.CheckTransaction(multi, 6), h => h.Rule == "NEW-05 V1 multi input");
+
+            // VX-01 follow-up (function path)
+            var fn = new Transaction { TransactionType = TransactionType.TKNZ_TX, FromAddress = "xA", ToAddress = "xB", Hash = "f1",
+                Data = JsonConvert.SerializeObject(new { Function = "TransferVBTCV2()", ContractUID = "scan:nft", FromAddress = "xA", ToAddress = "xB", Amount = 1M }) };
+            Assert.Contains(AuditReplayScanService.CheckTransaction(fn, 7), h => h.Rule == "VX-01 contract-type (TransferVBTCV2 function)");
+        }
+
+        [Fact]
+        public void ScanChain_FlagsDuplicateCreationInABlock()
+        {
+            var body = VbtcTestContracts.TokenContractData("dup:1", Minter, 10);
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = 0, Hash = "h0", Transactions = new List<Transaction> { Deploy("dup:1", body), Deploy("dup:1", body) } });
+            Globals.LastBlock = new Block { Height = 0 };
+            var (_, _, hits) = AuditReplayScanService.ScanChain();
+            Assert.Contains(hits, h => h.Rule == "NEW-06 duplicate creation in block");
+        }
     }
 }
