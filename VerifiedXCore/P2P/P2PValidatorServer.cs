@@ -974,16 +974,20 @@ namespace VerifiedXCore.P2P
                         }
                         else
                         {
-                            var isTxStale = await TransactionData.IsTxTimestampStale(txReceived);
+                            // VX-06: the received object is untrusted — only its Hash matched a stored TX. Every
+                            // decision here uses the STORED transaction (txFound). Staleness used to be evaluated
+                            // on the received Timestamp, so a forged object with a victim's hash and an old
+                            // timestamp deleted the victim's pending TX from every node.
+                            var isTxStale = await TransactionData.IsTxTimestampStale(txFound);
                             if (!isTxStale)
                             {
-                                var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(txReceived);
+                                var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(txFound);
                                 if (isCraftedIntoBlock)
                                 {
                                     try
                                     {
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        mempool.DeleteManySafe(x => x.Hash == txFound.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txFound.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -997,8 +1001,8 @@ namespace VerifiedXCore.P2P
                             {
                                 try
                                 {
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    mempool.DeleteManySafe(x => x.Hash == txFound.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txFound.Hash);
                                 }
                                 catch (Exception ex)
                                 {
