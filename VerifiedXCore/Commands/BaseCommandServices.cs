@@ -1690,7 +1690,10 @@ namespace VerifiedXCore.Commands
                 else
                 {
                     var account = new Account().Build();
-                    AccountData.WalletInfo(account);
+                    if (account != null)
+                        AccountData.WalletInfo(account);
+                    else
+                        Console.WriteLine("The wallet is encrypted and locked; unlock it with its password to create an address.");
                 }
 
             }

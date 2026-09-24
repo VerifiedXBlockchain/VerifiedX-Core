@@ -530,6 +530,9 @@ namespace VerifiedXCore.Controllers
                 account = AccountData.CreateNewAccount();
             }
 
+            if (account == null)
+                return "Fail. The wallet is encrypted and locked; unlock it with its password to create an address.";
+
             var newAddressInfo = new[]
             {
                 new { Address = account.Address, PrivateKey = KeyParsing.CanonicalKeyHexFromStored(account.GetKey) } // VX-11: portable 64-digit form

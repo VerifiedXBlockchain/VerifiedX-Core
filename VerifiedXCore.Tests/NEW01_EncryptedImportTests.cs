@@ -85,5 +85,35 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain(keyHex.TrimStart('0'), stored!.PrivateKey);                   // encrypted at rest
             Assert.Equal(keyHex.TrimStart('0'), stored.GetKey.TrimStart('0'));                   // and the wallet can still use it
         }
+
+        // ── Follow-up (second review): new addresses in an encrypted, non-HD wallet ────────
+
+        [Fact]
+        public async Task NEW01_FollowUp_NewAddressInLockedEncryptedWallet_NotCreated()
+        {
+            // GetNewAddress -> CreateNewAccount -> AddToAccount stored the plaintext key (its encryption step is
+            // commented out). Locked: no address is made rather than one stored in plaintext.
+            var created = AccountData.CreateNewAccount();
+            if (created != null)
+            {
+                var stored = await StoredAfterImport(created.Address);
+                Assert.True(stored == null || !stored.PrivateKey.Contains(created.PrivateKey.TrimStart('0')), "plaintext key stored in an encrypted wallet");
+            }
+            Assert.Null(created);
+        }
+
+        [Fact]
+        public async Task NEW01_FollowUp_NewAddressInUnlockedEncryptedWallet_IsEncryptedAndUsable()
+        {
+            Globals.EncryptPassword = Secure(WalletPw);
+            var created = AccountData.CreateNewAccount();
+            Assert.NotNull(created);
+            var keyHex = created!.GetKey;
+
+            var stored = await StoredAfterImport(created.Address);
+            Assert.NotNull(stored);
+            Assert.DoesNotContain(keyHex.TrimStart('0'), stored!.PrivateKey);   // encrypted at rest
+            Assert.Equal(keyHex.TrimStart('0'), stored.GetKey.TrimStart('0'));   // and usable
+        }
     }
 }

@@ -22,10 +22,12 @@ namespace VerifiedXCore.Data
 {
     public static class AccountData
     {
-		public static Account CreateNewAccount(bool skipSave = false)
+		/// <summary>Null when the wallet is encrypted and not unlocked (NEW-01 follow-up).</summary>
+		public static Account? CreateNewAccount(bool skipSave = false)
         {
 			Account account = new Account();
 			var accountMade = false;
+			var refused = false;
 			while(accountMade == false)
             {
 				try
@@ -45,7 +47,14 @@ namespace VerifiedXCore.Data
                     if (verify == true)
                     {
 						if (!skipSave)
-							AddToAccount(account);
+						{
+							// NEW-01 (follow-up): same rule as imports — in an encrypted wallet the key is encrypted (and
+							// its keystore record saved) before the account is stored; while locked, no address is made.
+							if (Globals.IsWalletEncrypted == true && !WalletEncryptionService.EncryptImportedAccount(account).GetAwaiter().GetResult())
+								refused = true;
+							else
+								AddToAccount(account);
+						}
 						accountMade = true;
 					}
 				}
@@ -54,7 +63,12 @@ namespace VerifiedXCore.Data
                     ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "AccountData.CreateNewAccount()");
                 }
             }
-			
+
+			if (refused)
+			{
+				ErrorLogUtility.LogError("New address refused: the wallet is encrypted and not unlocked with its password.", "AccountData.CreateNewAccount()");
+				return null;
+			}
 
 			return account;
 		}
