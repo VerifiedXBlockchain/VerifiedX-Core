@@ -21,6 +21,7 @@ namespace VerifiedXCore.Models
         /// <summary>
         /// This is where a private key is stored. Do not use this to get the private key. Instead use GetKey.
         /// </summary>
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore] // BB-2: key material is never serialized into API responses
         public string PrivateKey { get; set; }
 
         /// <summary>
@@ -47,8 +48,10 @@ namespace VerifiedXCore.Models
         // NEW-01: never persisted. GetKey decrypts when the wallet is unlocked; LiteDB used to write it (in
         // plaintext) into the wallet database on every save made while unlocked.
         [LiteDB.BsonIgnore]
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore]
         public string GetKey{ get { return GetPrivateKey(PrivateKey, Address); } }
         [LiteDB.BsonIgnore]
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore]
         public PrivateKey? GetPrivKey { get { return GetClassPrivateKey(GetKey); } }
 
         public Account Build()

@@ -14,7 +14,9 @@ namespace VerifiedXCore.Bitcoin.Models
         #region Variables
 
         public long Id { get; set; }
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore] // BB-2 (VX-13): key material is never serialized into API responses
         public string PrivateKey { get; set; }
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore]
         public string WifKey { get; set; }
         public string PublicKey { set; get; }
         public string Address { get; set; }

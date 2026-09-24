@@ -24,19 +24,23 @@ namespace VerifiedXCore.Models
         /// <summary>
         /// This is where a private key is stored. Do not use this to get the private key. Instead use GetKey.
         /// </summary>
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore] // BB-2: key material is never serialized into API responses
         public string PrivateKey { get; set; }
         public string PublicKey { set; get; }
         public string Address { get; set; }
         public string RecoveryAddress { get; set; }
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore] // BB-2 (VX-14): the wrapped key — useful for offline password guessing
         public string EncryptedDecryptKey { get; set; }
         public decimal AvailableBalance { get; set; } //funds reserved or locked must always be above 0.5 VFX
         public decimal LockedBalance { get; set; } //funds currently pending use
         public bool IsNetworkProtected { get; set; } // this is set once 4 VFX has been sent.
         // NEW-01: never persisted (decrypts while the reserve account is unlocked).
         [BsonIgnore]
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore]
         public string GetKey { get { return GetPrivateKey(PrivateKey, Address, EncryptedDecryptKey); } }
         public decimal TotalBalance { get { return AvailableBalance + LockedBalance; } }
         [BsonIgnore]
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore]
         public PrivateKey? GetPrivKey { get { return GetClassPrivateKey(GetKey); } }
 
         public class ReserveAccountInfo
