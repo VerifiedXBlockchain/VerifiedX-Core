@@ -388,8 +388,15 @@ namespace VerifiedXCore.Nodes
                                         var validator = validators.FindOne(x => x.Address == account.Address);
                                         if (validator != null)
                                         {
-                                            var time = TimeUtil.GetTime().ToString();
-                                            var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+                                            // VX-07 (follow-up): the Status is signed for this caster only (its address is in
+                                            // the message), so another node cannot replay it. No known address → no Status.
+                                            var recipientAddress = Globals.BlockCasters.ToList()
+                                                .FirstOrDefault(c => (c.PeerIP ?? "").Replace("::ffff:", "") == peer.NodeIP.Replace("::ffff:", ""))?.ValidatorAddress;
+                                            if (string.IsNullOrEmpty(recipientAddress))
+                                                return;
+                                            var time = TimeUtil.GetTime();
+                                            var statusMessage = ConsensusMessageFormatter.FormatValidatorStatusV2(validator.Address, time, account.PublicKey, recipientAddress);
+                                            var signature = SignatureService.ValidatorSignature(statusMessage);
 
                                             var networkVal = new NetworkValidator
                                             {
@@ -399,7 +406,7 @@ namespace VerifiedXCore.Nodes
                                                 PublicKey = account.PublicKey,
                                                 Signature = signature,
                                                 UniqueName = validator.UniqueName,
-                                                SignatureMessage = validator.Address + ":" + time + ":" + account.PublicKey
+                                                SignatureMessage = statusMessage
                                             };
 
                                             var postData = JsonConvert.SerializeObject(networkVal);
@@ -454,8 +461,15 @@ namespace VerifiedXCore.Nodes
                                         var validator = validators.FindOne(x => x.Address == account.Address);
                                         if (validator != null)
                                         {
-                                            var time = TimeUtil.GetTime().ToString();
-                                            var signature = SignatureService.ValidatorSignature(validator.Address + ":" + time + ":" + account.PublicKey);
+                                            // VX-07 (follow-up): the Status is signed for this caster only (its address is in
+                                            // the message), so another node cannot replay it. No known address → no Status.
+                                            var recipientAddress = Globals.BlockCasters.ToList()
+                                                .FirstOrDefault(c => (c.PeerIP ?? "").Replace("::ffff:", "") == peer.NodeIP.Replace("::ffff:", ""))?.ValidatorAddress;
+                                            if (string.IsNullOrEmpty(recipientAddress))
+                                                return;
+                                            var time = TimeUtil.GetTime();
+                                            var statusMessage = ConsensusMessageFormatter.FormatValidatorStatusV2(validator.Address, time, account.PublicKey, recipientAddress);
+                                            var signature = SignatureService.ValidatorSignature(statusMessage);
 
                                             var networkVal = new NetworkValidator
                                             {
@@ -465,7 +479,7 @@ namespace VerifiedXCore.Nodes
                                                 PublicKey = account.PublicKey,
                                                 Signature = signature,
                                                 UniqueName = validator.UniqueName,
-                                                SignatureMessage = validator.Address + ":" + time + ":" + account.PublicKey
+                                                SignatureMessage = statusMessage
                                             };
 
                                             var postData = JsonConvert.SerializeObject(networkVal);

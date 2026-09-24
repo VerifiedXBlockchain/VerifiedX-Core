@@ -56,6 +56,8 @@ namespace VerifiedXCore.Tests
             var key = new PrivateKey("secp256k1");
             var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
             _victim = (key, pub, AccountData.GetHumanAddress(pub));
+            _priorValidatorAddress = Globals.ValidatorAddress;
+            Globals.ValidatorAddress = Me; // this caster: direct Status must be addressed to it
 
             // The trusted entry the caster already holds for the victim.
             Globals.NetworkValidators[_victim.Address] = new NetworkValidator
@@ -69,11 +71,26 @@ namespace VerifiedXCore.Tests
         {
             try { _listener.Stop(); } catch { }
             Globals.ValAPIPort = _priorValPort;
+            Globals.ValidatorAddress = _priorValidatorAddress;
             Globals.LastBlock = _priorLastBlock;
             Globals.NetworkValidators = _priorNetVals;
             try { DbContext.CloseDB(); } catch { }
             Globals.CustomPath = _priorCustomPath;
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        private const string Me = "xVX07_THIS_CASTER";
+        private readonly string _priorValidatorAddress;
+
+        /// <summary>VX-07 (follow-up): a validator's direct Status, signed for one recipient caster.</summary>
+        private NetworkValidator DirectStatus(long signedAt, string recipient = Me)
+        {
+            var msg = ConsensusMessageFormatter.FormatValidatorStatusV2(_victim.Address, signedAt, _victim.Pub, recipient);
+            return new NetworkValidator
+            {
+                Address = _victim.Address, IPAddress = "0.0.0.0", PublicKey = _victim.Pub, UniqueName = "victim",
+                SignatureMessage = msg, Signature = SignatureService.CreateSignature(msg, _victim.Key, _victim.Pub),
+            };
         }
 
         private NetworkValidator Advertisement(long signedAt, string? claimedPub = null, string ip = "0.0.0.0")
@@ -128,7 +145,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task VX07_ByteIdenticalReplay_OfAFreshAdvertisement_RefusedTheSecondTime()
         {
-            var fresh = Advertisement(TimeUtil.GetTime());
+            var fresh = DirectStatus(TimeUtil.GetTime());
             var first = await From("127.0.0.1").Status(fresh);
             Assert.IsType<OkResult>(first.Result);
 
@@ -142,10 +159,65 @@ namespace VerifiedXCore.Tests
         public async Task VX07_Control_FreshAdvertisementFromTheValidator_UpdatesItsIp()
         {
             // A legitimate IP change: the validator's own fresh, single-use advertisement.
-            var r = await From("127.0.0.1").Status(Advertisement(TimeUtil.GetTime()));
+            var r = await From("127.0.0.1").Status(DirectStatus(TimeUtil.GetTime()));
             Assert.IsType<OkResult>(r.Result);
             Assert.Equal("127.0.0.1", Entry.IPAddress);
             Assert.True(Entry.IsFullyTrusted);
+        }
+
+        // ── Follow-up (independent review): cross-node replay and re-encoded signatures ────
+
+        [Fact]
+        public async Task VX07_FreshStatusAddressedToAnotherCaster_Refused()
+        {
+            // A fresh Status the victim sent caster A, harvested from A's registry gossip, replayed to this caster.
+            var r = await From("127.0.0.1").Status(DirectStatus(TimeUtil.GetTime(), recipient: "xSOME_OTHER_CASTER"));
+            Assert.IsType<UnauthorizedResult>(r.Result);
+            Assert.Equal("172.28.0.11", Entry.IPAddress);
+        }
+
+        [Fact]
+        public async Task VX07_LegacyUnboundMessage_CannotMoveTheEntry()
+        {
+            var r = await From("127.0.0.1").Status(Advertisement(TimeUtil.GetTime()));
+            Assert.IsType<UnauthorizedResult>(r.Result);
+            Assert.Equal("172.28.0.11", Entry.IPAddress);
+        }
+
+        [Fact]
+        public async Task VX07_ReEncodedSignature_CountsAsTheSameSignature()
+        {
+            var fresh = DirectStatus(TimeUtil.GetTime());
+            Assert.IsType<OkResult>((await From("127.0.0.1").Status(fresh)).Result);
+
+            var parts = fresh.Signature.Split('.', 2);
+            // 1. whitespace inside the base64 (Convert.FromBase64String ignores it)
+            var spaced = DirectStatus(0);
+            spaced.SignatureMessage = fresh.SignatureMessage;
+            spaced.Signature = parts[0].Insert(4, " ") + "." + parts[1];
+            Assert.IsType<UnauthorizedResult>((await From("127.0.0.1").Status(spaced)).Result);
+
+            // 2. the (r, n - s) twin, which ECDSA also accepts
+            var sig = VerifiedXCore.EllipticCurve.Signature.fromBase64(parts[0]);
+            var twin = new VerifiedXCore.EllipticCurve.Signature(sig.r, VerifiedXCore.EllipticCurve.Curves.secp256k1.N - sig.s);
+            var malleated = DirectStatus(0);
+            malleated.SignatureMessage = fresh.SignatureMessage;
+            malleated.Signature = twin.toBase64() + "." + parts[1];
+            Assert.True(SignatureService.VerifySignature(_victim.Address, fresh.SignatureMessage, malleated.Signature)); // it IS valid
+            Assert.IsType<UnauthorizedResult>((await From("127.0.0.1").Status(malleated)).Result);
+        }
+
+        [Fact]
+        public void VX07_HandshakeSignature_IsNotStoredForGossip()
+        {
+            var hs = $"{_victim.Address}:{TimeUtil.GetTime()}:{_victim.Pub}:nonce123"; // the SignalR handshake shape
+            NetworkValidator.UpsertTrustedOnDirectConnect(new NetworkValidator
+            {
+                Address = _victim.Address, IPAddress = "172.28.0.11", PublicKey = _victim.Pub,
+                SignatureMessage = hs, Signature = SignatureService.CreateSignature(hs, _victim.Key, _victim.Pub),
+            });
+            Assert.NotEqual(hs, Entry.SignatureMessage);
+            Assert.DoesNotContain("nonce123", Entry.SignatureMessage ?? "");
         }
 
         // ── Binding rules (shared by every path) ───────────────────────────────────────────

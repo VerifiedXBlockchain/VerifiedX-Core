@@ -48,7 +48,28 @@ namespace VerifiedXCore.Services
         /// Call only after every other check passed.
         /// </summary>
         public static bool TryConsume(string signature, long nowUnix) =>
-            !string.IsNullOrEmpty(signature) && Globals.Signatures.TryAdd(signature, nowUnix);
+            !string.IsNullOrEmpty(signature) && Globals.Signatures.TryAdd(CanonicalSignatureKey(signature), nowUnix);
+
+        /// <summary>
+        /// VX-07 (follow-up): the one-use key for a signature is its decoded (r, low-s) pair, not the raw string. Base64
+        /// decoding ignores whitespace and ECDSA accepts both s and n−s, so the same signature had many spellings and a
+        /// re-encoded copy passed the replay check as "unused". Falls back to the raw string if it cannot be decoded.
+        /// </summary>
+        public static string CanonicalSignatureKey(string signature)
+        {
+            try
+            {
+                var sigPart = signature.Split('.', 2)[0];
+                var sig = EllipticCurve.Signature.fromBase64(sigPart);
+                var n = EllipticCurve.Curves.secp256k1.N;
+                var s = sig.s > n / 2 ? n - sig.s : sig.s;
+                return "sig:" + sig.r.ToString("x") + ":" + s.ToString("x");
+            }
+            catch
+            {
+                return signature;
+            }
+        }
 
         /// <summary>True when <paramref name="publicKeyHex"/> ("04…" uncompressed) derives <paramref name="address"/>.</summary>
         public static bool PublicKeyMatchesAddress(string? publicKeyHex, string? address)

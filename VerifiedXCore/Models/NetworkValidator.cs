@@ -71,10 +71,29 @@ namespace VerifiedXCore.Models
         public static string BoundPublicKey(string? address, string? publicKey) =>
             ConsensusRequestAuth.PublicKeyMatchesAddress(publicKey, address) ? publicKey! : "";
 
-        public static bool TryParseSignedAdvertisement(NetworkValidator validator, out long signedAt)
+        public static bool TryParseSignedAdvertisement(NetworkValidator validator, out long signedAt) =>
+            TryParseSignedAdvertisement(validator, out signedAt, out _);
+
+        /// <summary>
+        /// VX-07 (follow-up): also accepts the recipient-bound form "VFX_VALSTATUS_V2|Address|ts|PublicKey|Recipient"
+        /// (<paramref name="recipient"/> set). The legacy "Address:ts:PublicKey" form (recipient null) is accepted only
+        /// for gossip, which never moves an entry.
+        /// </summary>
+        public static bool TryParseSignedAdvertisement(NetworkValidator validator, out long signedAt, out string? recipient)
         {
             signedAt = 0;
+            recipient = null;
             if (validator == null || string.IsNullOrEmpty(validator.SignatureMessage)) return false;
+            if (validator.SignatureMessage.StartsWith(ConsensusMessageFormatter.ValidatorStatusV2Prefix + "|", StringComparison.Ordinal))
+            {
+                var v2 = validator.SignatureMessage.Split('|');
+                if (v2.Length != 5) return false;
+                if (v2[1] != validator.Address || v2[3] != validator.PublicKey) return false;
+                if (!long.TryParse(v2[2], out signedAt)) return false;
+                if (string.IsNullOrEmpty(v2[4])) return false;
+                recipient = v2[4];
+                return true;
+            }
             var parts = validator.SignatureMessage.Split(':');
             if (parts.Length != 3) return false;
             if (parts[0] != validator.Address) return false;
@@ -93,9 +112,19 @@ namespace VerifiedXCore.Models
             try
             {
                 // VX-07: the signed message must bind this entry's Address and PublicKey…
-                if (!TryParseSignedAdvertisement(validator, out var signedAt))
+                if (!TryParseSignedAdvertisement(validator, out var signedAt, out var signedRecipient))
                 {
                     ErrorLogUtility.LogError($"Malformed validator advertisement for {validator?.Address} from peer {advertisingPeerIP}", "NetworkValidator.AddValidatorToPool");
+                    return false;
+                }
+
+                // VX-07 (follow-up): a direct Status moves the entry to the caller's IP, so it must be addressed to THIS
+                // node. A fresh signature addressed to another caster (obtainable from that caster's registry gossip)
+                // is refused here instead of re-pointing the entry at the replayer.
+                if (directFromValidator
+                    && (string.IsNullOrEmpty(Globals.ValidatorAddress) || signedRecipient != Globals.ValidatorAddress))
+                {
+                    ErrorLogUtility.LogError($"Direct advertisement for {validator.Address} not addressed to this node", "NetworkValidator.AddValidatorToPool");
                     return false;
                 }
 
@@ -425,6 +454,24 @@ namespace VerifiedXCore.Models
                 return;
 
             var currentTime = TimeUtil.GetTime();
+
+            // VX-07 (follow-up): the SignalR handshake signature is not an advertisement and must not be stored where
+            // registry gossip (SendActiveVals, /api/V2/ValidatorPool) would hand it to anyone for replay against another
+            // node's handshake. Keep the entry's existing advertisement signature, if any.
+            if (!TryParseSignedAdvertisement(validator, out _))
+            {
+                if (Globals.NetworkValidators.TryGetValue(validator.Address, out var prior) && TryParseSignedAdvertisement(prior, out _))
+                {
+                    validator.Signature = prior.Signature;
+                    validator.SignatureMessage = prior.SignatureMessage;
+                }
+                else
+                {
+                    validator.Signature = "";
+                    validator.SignatureMessage = "";
+                }
+            }
+
             validator.IsFullyTrusted = true;
             if (validator.LastSeen == 0) validator.LastSeen = currentTime;
             if (validator.FirstAdvertised == 0) validator.FirstAdvertised = currentTime;

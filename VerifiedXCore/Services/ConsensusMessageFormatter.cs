@@ -56,6 +56,17 @@ namespace VerifiedXCore.Services
         public static string FormatValidatorStatusV1(string address, long timestampUnix, string publicKey, string ipAddress)
             => $"VFX_VALSTATUS_V1|{address}|{timestampUnix}|{publicKey}|{ipAddress}";
 
+        /// <summary>
+        /// VX-07 (follow-up): a validator's direct Status to one caster, bound to that caster's address. The IP cannot be
+        /// signed (a validator behind NAT does not know the address peers see), so the signature names its recipient
+        /// instead: a fresh Status that caster A relays in its registry gossip cannot be replayed to caster B to move the
+        /// entry to the replayer's IP.
+        /// </summary>
+        public const string ValidatorStatusV2Prefix = "VFX_VALSTATUS_V2";
+
+        public static string FormatValidatorStatusV2(string address, long timestampUnix, string publicKey, string recipientAddress)
+            => $"{ValidatorStatusV2Prefix}|{address}|{timestampUnix}|{publicKey}|{recipientAddress}";
+
         /// <summary>VX-15: a caster's validator-list exchange; <paramref name="entriesHash"/> covers the entries.</summary>
         public static string FormatValidatorListV1(string casterAddress, long timestampUnix, string entriesHash)
             => $"VFX_VALLIST_V1|{casterAddress}|{timestampUnix}|{NormalizeHash(entriesHash)}";
