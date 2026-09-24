@@ -950,7 +950,7 @@ function renderTokens(tokens){
       '<td><div style=""display:flex;align-items:center;gap:10px""><div class=""tok-icon"">'+esc(initials)+'</div><div><div style=""font-weight:600"">'+esc(t.name)+'</div><div class=""muted"" style=""font-size:11px"">'+esc(t.ticker)+'</div></div></div></td>'+
       '<td class=""grn"" style=""font-weight:700;font-variant-numeric:tabular-nums"">'+fmtTok(t.balance,t.decimals)+'</td>'+
       '<td class=""muted"" style=""font-variant-numeric:tabular-nums"">'+fmtTok(t.lockedBalance,t.decimals)+'</td>'+
-      '<td><button class=""act-btn prim"" onclick=""openSendToken(\''+esc(t.scUID)+'\',\''+esc(t.name)+'\',\''+esc(t.ticker)+'\')"">&rarr; Send</button></td>'+
+      '<td><button class=""act-btn prim"" onclick=""openSendToken('+jsa(t.scUID)+','+jsa(t.name)+','+jsa(t.ticker)+')"">&rarr; Send</button></td>'+
       '</tr>';
   }).join('');
   c.innerHTML='<div class=""tbl-wrap""><table class=""dtbl""><thead><tr><th>Token</th><th>Balance</th><th>Locked</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
@@ -981,7 +981,7 @@ function renderNFTs(nfts){
       '<div class=""nft-uid"" title=""'+esc(n.scUID)+'"">'+uid+'</div>'+
       (n.minterName?'<div class=""muted"" style=""font-size:11px"">By: '+esc(n.minterName)+'</div>':'')+
       '<div class=""nft-actions"">'+
-      '<button class=""act-btn prim"" onclick=""openTransferNFT(\''+esc(n.scUID)+'\',\''+esc(n.name||'Unnamed')+'\')"">&rarr; Transfer</button>'+
+      '<button class=""act-btn prim"" onclick=""openTransferNFT('+jsa(n.scUID)+','+jsa(n.name||'Unnamed')+')"">&rarr; Transfer</button>'+
       '</div>'+
       '</div>';
   }).join('');
@@ -1006,17 +1006,17 @@ function renderVBTC(contracts){
     var canRequest=c.balance>0&&(c.withdrawalStatus==='None'||c.withdrawalStatus==='Completed');
     var canComplete=c.withdrawalStatus==='Requested';
     var btns='<div class=""nft-actions"" style=""margin-top:6px"">';
-    if(c.balance>0)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx(\''+esc(c.scUID)+'\','+c.balance+')"">&rarr; Send vBTC</button>';
-    if(c.balance>0)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge(\''+esc(c.scUID)+'\',\''+esc(c.ownerAddress)+'\','+c.balance+')"">&#127881; Bridge to Base</button>';
-    if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD(\''+esc(c.scUID)+'\',\''+esc(c.ownerAddress)+'\','+c.balance+')"">&darr; Withdraw</button>';
-    if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC(\''+esc(c.scUID)+'\','+c.activeWithdrawalAmount+',\''+esc(c.activeWithdrawalDest||'')+'\')"">&check; Complete Withdrawal</button>';
+    if(c.balance>0)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx('+jsa(c.scUID)+','+Number(c.balance)+')"">&rarr; Send vBTC</button>';
+    if(c.balance>0)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&#127881; Bridge to Base</button>';
+    if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&darr; Withdraw</button>';
+    if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC('+jsa(c.scUID)+','+Number(c.activeWithdrawalAmount)+','+jsa(c.activeWithdrawalDest||'')+')"">&check; Complete Withdrawal</button>';
     btns+='</div>';
     return '<div class=""vbtc-card"">'+
       '<div class=""muted"" style=""font-size:11px;font-family:monospace"">'+esc(c.scUID||'')+'</div>'+
       '<div class=""vbtc-bal"">'+fmtBal(c.balance)+'<span>vBTC</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">BTC Deposit</span><span class=""v"">'+esc(c.depositAddress||'N/A')+'</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">Withdrawal Status</span><span class=""badge '+statusCls+'"">'+esc(c.withdrawalStatus)+'</span></div>'+
-      (c.activeWithdrawalAmount?'<div class=""vbtc-row""><span class=""k"">Pending Withdrawal</span><span class=""v org"">'+c.activeWithdrawalAmount+' BTC &rarr; '+esc(c.activeWithdrawalDest||'')+'</span></div>':'')+
+      (c.activeWithdrawalAmount?'<div class=""vbtc-row""><span class=""k"">Pending Withdrawal</span><span class=""v org"">'+Number(c.activeWithdrawalAmount)+' BTC &rarr; '+esc(c.activeWithdrawalDest||'')+'</span></div>':'')+
       '<div class=""vbtc-row""><span class=""k"">Validators</span><span class=""v"">'+c.totalValidators+' (threshold: '+c.requiredThreshold+')</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">Proof Block</span><span class=""v"">#'+c.proofBlockHeight+'</span></div>'+
       btns+
@@ -1121,7 +1121,7 @@ function loadBridgeHistory(){
       var lid=lk.LockId||lk.lockId||'';
       var actCol='--';
       if(!finalStatuses[st]){
-        actCol='<button class=""act-btn sec"" style=""padding:4px 10px;font-size:11px"" onclick=""doForceRetryBridge(\''+esc(lid)+'\')""  title=""Force retry: re-collect attestations and re-submit mint"">&#128260; Retry</button>';
+        actCol='<button class=""act-btn sec"" style=""padding:4px 10px;font-size:11px"" onclick=""doForceRetryBridge('+jsa(lid)+')""  title=""Force retry: re-collect attestations and re-submit mint"">&#128260; Retry</button>';
       }
       return '<tr><td><code class=""muted"" style=""cursor:pointer;word-break:break-all"" title=""Click to copy"" onclick=""navigator.clipboard.writeText(this.textContent)"">'+lid+'</code></td>'+
         '<td>'+fmtBal(lk.Amount||lk.amount||0)+' vBTC</td>'+
@@ -1243,8 +1243,8 @@ function renderBTC(accs){
       (a.adnr?'<div class=""muted"" style=""font-size:12px"">'+esc(a.adnr)+'</div>':'')+
       baseHtml+
       '<div class=""nft-actions"" style=""margin-top:8px;display:flex;flex-wrap:wrap;gap:6px"">'+
-      '<button class=""act-btn prim"" onclick=""openSendBTC(\''+esc(a.address)+'\')"">&rarr; Send BTC</button>'+
-      '<button class=""act-btn sec"" onclick=""linkBtcEvm(\''+esc(a.address)+'\')"">Link Base EVM</button>'+
+      '<button class=""act-btn prim"" onclick=""openSendBTC('+jsa(a.address)+')"">&rarr; Send BTC</button>'+
+      '<button class=""act-btn sec"" onclick=""linkBtcEvm('+jsa(a.address)+')"">Link Base EVM</button>'+
       '</div>'+
       '</div>';
   }).join('');
@@ -2063,7 +2063,8 @@ window.doScanVbtc=function(){
 
 /* ---- Helpers ---- */
 function el(id){return document.getElementById(id);}
-function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}" + @"
+function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}
+function jsa(s){return esc(JSON.stringify(s==null?'':String(s)));} /* VX-17 (follow-up): a value passed into an inline handler as a JSON string literal, then HTML-escaped. esc() alone is decoded back by the HTML parser before the handler runs, so a quote in a name broke out. */" + @"
 function shn(s,max){return s?(s.length>max?s.substring(0,max)+'...':s):'--';}
 function fmtBal(n){return n!=null?(+n).toFixed(8):'0.00000000';}
 function fmtTok(n,dec){var d=dec!=null?dec:8;return n!=null?(+n).toFixed(d):'0';}

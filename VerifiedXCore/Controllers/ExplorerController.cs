@@ -635,8 +635,8 @@ function blkRow(b){
   var hs=b.hash?b.hash.substring(0,14)+'...':'N/A';
   var vs=b.validator&&b.validator.length>24?b.validator.substring(0,24)+'...':b.validator||'N/A';
   var tc=b.numOfTx>0?'txcnt has':'txcnt';
-  return '<tr class=""block-row"" onclick=""viewBlock('+b.height+')"">'+
-    '<td><span class=""ht-badge"">'+b.height+'</span></td>'+
+  return '<tr class=""block-row"" onclick=""viewBlock('+Number(b.height)+')"">'+
+    '<td><span class=""ht-badge"">'+Number(b.height)+'</span></td>'+
     '<td><code class=""hash-lnk"" title=""'+esc(b.hash)+'"">' +hs+'</code></td>'+
     '<td class=""muted"">'+ago(b.timestamp)+'</td>'+
     '<td><code class=""addr-t"" title=""'+esc(b.validator)+'"">' +vs+'</code></td>'+
@@ -682,7 +682,7 @@ function blkRowInner(b){
   var hs=b.hash?b.hash.substring(0,14)+'...':'N/A';
   var vs=b.validator&&b.validator.length>24?b.validator.substring(0,24)+'...':b.validator||'N/A';
   var tc=b.numOfTx>0?'txcnt has':'txcnt';
-  return '<td><span class=""ht-badge"">'+b.height+'</span></td>'+
+  return '<td><span class=""ht-badge"">'+Number(b.height)+'</span></td>'+
     '<td><code class=""hash-lnk"" title=""'+esc(b.hash)+'"">' +hs+'</code></td>'+
     '<td class=""muted"">'+ago(b.timestamp)+'</td>'+
     '<td><code class=""addr-t"" title=""'+esc(b.validator||'')+'"">' +vs+'</code></td>'+
@@ -725,17 +725,17 @@ function renderMempool(data){
 
 function mpRow(tx){
   var hs=tx.hash?tx.hash.substring(0,10)+'...':'N/A';
-  var fs=shn(tx.fromAddress,20);var ts2=shn(tx.toAddress,20);
+  var fs=esc(shn(tx.fromAddress,20));var ts2=esc(shn(tx.toAddress,20));
   var tt=ttype(tx.transactionType);
   var tc=tCls(tx.transactionType);
   var pi=tx.privacyInfo;
   var extra='';
   if(pi){extra=' title=""'+esc(pi.kind)+' | '+esc(pi.asset)+' | outs:'+pi.outputCount+' nulls:'+pi.nullifierCount+'""';}
-  return '<tr class=""block-row"" onclick=""vt(\''+esc(tx.hash)+'\')"">' +
+  return '<tr class=""block-row"" onclick=""vt('+jsa(tx.hash)+')"">' +
     '<td><code class=""hash-lnk"" title=""'+esc(tx.hash)+'"">' +hs+'</code></td>' +
     '<td><span class=""type-badge'+tc+'""'+extra+'>' +tt+'</span></td>' +
-    '<td><code class=""addr-t clk"" title=""'+esc(tx.fromAddress||'')+'""  onclick=""event.stopPropagation();sa(\''+esc(tx.fromAddress||'')+'\')"">' +fs+'</code></td>' +
-    '<td><code class=""addr-t clk"" title=""'+esc(tx.toAddress||'')+'""  onclick=""event.stopPropagation();sa(\''+esc(tx.toAddress||'')+'\')"">' +ts2+'</code></td>' +
+    '<td><code class=""addr-t clk"" title=""'+esc(tx.fromAddress||'')+'""  onclick=""event.stopPropagation();sa('+jsa(tx.fromAddress||'')+')"">' +fs+'</code></td>' +
+    '<td><code class=""addr-t clk"" title=""'+esc(tx.toAddress||'')+'""  onclick=""event.stopPropagation();sa('+jsa(tx.toAddress||'')+')"">' +ts2+'</code></td>' +
     '<td class=""rwd"">'+tx.amount+'</td>' +
     '<td class=""muted"">'+tx.fee+'</td>' +
     '<td class=""muted"">'+ago(tx.timestamp)+'</td>' +
@@ -751,12 +751,12 @@ window.viewBlock=function(h){
 function renderBlkDet(b){
   var txr=(b.transactions||[]).map(txRow).join('');
   var h=
-    '<div class=""det-hdr""><button class=""back-btn"" onclick=""goHome()"">&#8592; Back</button><h2>Block #'+b.height+'</h2></div>' +
+    '<div class=""det-hdr""><button class=""back-btn"" onclick=""goHome()"">&#8592; Back</button><h2>Block #'+Number(b.height)+'</h2></div>' +
     '<div class=""det-grid"">' +
     di('Hash','<code>'+esc(b.hash||'N/A')+'</code>',true) +
     di('Height',b.height) +
     di('Timestamp',b.timestamp?new Date(b.timestamp*1000).toLocaleString():'N/A') +
-    di('Validator','<code class=""clk"" onclick=""sa(\''+esc(b.validator||'')+'\')"">' +esc(b.validator||'N/A')+'</code>',true) +
+    di('Validator','<code class=""clk"" onclick=""sa('+jsa(b.validator||'')+')"">' +esc(b.validator||'N/A')+'</code>',true) +
     di('Previous Hash','<code>'+esc(b.prevHash||'N/A')+'</code>',true) +
     di('Merkle Root','<code>'+esc(b.merkleRoot||'N/A')+'</code>',true) +
     di('State Root','<code>'+esc(b.stateRoot||'N/A')+'</code>',true) +
@@ -782,15 +782,15 @@ function renderBlkDet(b){
 
 function txRow(tx,i){
   var hs=tx.hash?tx.hash.substring(0,10)+'...':'N/A';
-  var fs=shn(tx.fromAddress,20);var ts2=shn(tx.toAddress,20);
+  var fs=esc(shn(tx.fromAddress,20));var ts2=esc(shn(tx.toAddress,20));
   var sc=stCls(tx.transactionStatus);var st=stNm(tx.transactionStatus);
   var tt=ttype(tx.transactionType);
-  return '<tr class=""block-row"" onclick=""vt(\''+esc(tx.hash)+'\')"">' +
+  return '<tr class=""block-row"" onclick=""vt('+jsa(tx.hash)+')"">' +
     '<td class=""muted"">'+(i+1)+'</td>' +
     '<td><code class=""hash-lnk"" title=""'+esc(tx.hash)+'"">' +hs+'</code></td>' +
     '<td><span class=""type-badge'+tCls(tx.transactionType)+'"">' +tt+'</span></td>' +
-    '<td><code class=""addr-t clk"" title=""'+esc(tx.fromAddress||'')+'""  onclick=""event.stopPropagation();sa(\''+esc(tx.fromAddress||'')+'\')"">' +fs+'</code></td>' +
-    '<td><code class=""addr-t clk"" title=""'+esc(tx.toAddress||'')+'""  onclick=""event.stopPropagation();sa(\''+esc(tx.toAddress||'')+'\')"">' +ts2+'</code></td>' +
+    '<td><code class=""addr-t clk"" title=""'+esc(tx.fromAddress||'')+'""  onclick=""event.stopPropagation();sa('+jsa(tx.fromAddress||'')+')"">' +fs+'</code></td>' +
+    '<td><code class=""addr-t clk"" title=""'+esc(tx.toAddress||'')+'""  onclick=""event.stopPropagation();sa('+jsa(tx.toAddress||'')+')"">' +ts2+'</code></td>' +
     '<td class=""rwd"">'+tx.amount+'</td>' +
     '<td class=""muted"">'+tx.fee+'</td>' +
     '<td><span class=""st-badge '+sc+'"">' +st+'</span></td>' +
@@ -812,11 +812,11 @@ function renderTxDet(tx){
     di('Hash','<code>'+esc(tx.hash||'N/A')+'</code>',true) +
     di('Type','<span class=""type-badge'+tCls(tx.transactionType)+'"">' +ttype(tx.transactionType)+'</span>') +
     di('Status','<span class=""st-badge '+sc+'"">' +st+'</span>') +
-    di('From','<code class=""clk"" onclick=""sa(\''+esc(tx.fromAddress||'')+'\')"">' +esc(tx.fromAddress||'N/A')+'</code>',true) +
-    di('To','<code class=""clk"" onclick=""sa(\''+esc(tx.toAddress||'')+'\')"">' +esc(tx.toAddress||'N/A')+'</code>',true) +
+    di('From','<code class=""clk"" onclick=""sa('+jsa(tx.fromAddress||'')+')"">' +esc(tx.fromAddress||'N/A')+'</code>',true) +
+    di('To','<code class=""clk"" onclick=""sa('+jsa(tx.toAddress||'')+')"">' +esc(tx.toAddress||'N/A')+'</code>',true) +
     di('Amount',tx.amount+' VFX') +
     di('Fee',tx.fee+' VFX') +
-    di('Block','<span class=""clk"" onclick=""viewBlock('+tx.height+')"">#'+tx.height+'</span>') +
+    di('Block','<span class=""clk"" onclick=""viewBlock('+Number(tx.height)+')"">#'+Number(tx.height)+'</span>') +
     di('Nonce',tx.nonce) +
     di('Timestamp',tx.timestamp?new Date(tx.timestamp*1000).toLocaleString():'N/A') +
     (tx.unlockTime?di('Unlock Time',new Date(tx.unlockTime*1000).toLocaleString()):'') +
@@ -842,8 +842,8 @@ function renderPrivacyPayload(dataStr){
     s+=pi('Outputs',p.outs?p.outs.length:0);
     s+=pi('Nullifiers',p.nulls?p.nulls.length:0);
     s+=pi('Merkle Root',p.merkle_root?shn(p.merkle_root,24):'N/A');
-    s+=pi('Proof','<span class=""'+(p.proof_b64?'yes':'no')+'"">'+(p.proof_b64?'Present':'None')+'</span>');
-    s+=pi('Fee Proof','<span class=""'+(p.fee_proof_b64?'yes':'no')+'"">'+(p.fee_proof_b64?'Present':'None')+'</span>');
+    s+=piRaw('Proof','<span class=""'+(p.proof_b64?'yes':'no')+'"">'+(p.proof_b64?'Present':'None')+'</span>');
+    s+=piRaw('Fee Proof','<span class=""'+(p.fee_proof_b64?'yes':'no')+'"">'+(p.fee_proof_b64?'Present':'None')+'</span>');
     if(p.transparent_amount!=null)s+=pi('Transparent Amt',p.transparent_amount+' VFX');
     if(p.transparent_input)s+=pi('Transparent In',shn(p.transparent_input,24));
     if(p.transparent_output)s+=pi('Transparent Out',shn(p.transparent_output,24));
@@ -861,7 +861,7 @@ function renderPrivacyPayload(dataStr){
       s+='<table class=""priv-outs-tbl""><thead><tr><th>Idx</th><th>Commitment</th><th>Note Hash</th><th>Enc. Note</th></tr></thead><tbody>';
       for(var i=0;i<p.outs.length;i++){
         var o=p.outs[i];
-        s+='<tr><td>'+o.i+'</td><td>'+shn(o.c||'',20)+'</td><td>'+shn(o.nh||'N/A',20)+'</td><td>'+(o.note?shn(o.note,16):'N/A')+'</td></tr>';
+        s+='<tr><td>'+esc(o.i)+'</td><td>'+esc(shn(o.c||'',20))+'</td><td>'+esc(shn(o.nh||'N/A',20))+'</td><td>'+(o.note?esc(shn(o.note,16)):'N/A')+'</td></tr>'; /* VX-17 (follow-up): payload outputs are peer data */
       }
       s+='</tbody></table>';
     }
@@ -869,8 +869,8 @@ function renderPrivacyPayload(dataStr){
       s+='<div style=""margin-top:10px;font-size:12px;font-weight:700;color:var(--purple)"">Nullifiers</div>';
       s+='<div style=""display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"">';
       for(var j=0;j<p.nulls.length;j++){
-        var pos=p.spent_tree_positions&&p.spent_tree_positions[j]!=null?' (pos:'+p.spent_tree_positions[j]+')':'';
-        s+='<code style=""background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:11px"">'+shn(p.nulls[j],20)+pos+'</code>';
+        var pos=p.spent_tree_positions&&p.spent_tree_positions[j]!=null?' (pos:'+esc(p.spent_tree_positions[j])+')':'';
+        s+='<code style=""background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:11px"">'+esc(shn(p.nulls[j],20))+pos+'</code>';
       }
       s+='</div>';
     }
@@ -881,7 +881,8 @@ function renderPrivacyPayload(dataStr){
   }
 }
 
-function pi(lbl,val){return '<div class=""priv-item""><label>'+lbl+'</label><span>'+val+'</span></div>';}
+function pi(lbl,val){return piRaw(lbl,esc(val));} /* VX-17 (follow-up): privacy payload fields are peer data (sub_type, kind, asset, notes); they were inserted into innerHTML unescaped */
+function piRaw(lbl,html){return '<div class=""priv-item""><label>'+lbl+'</label><span>'+html+'</span></div>';}
 
 function isPrivTx(t){return t>=31&&t<=36;}
 
@@ -943,7 +944,8 @@ window.goHome=function(){
 function el(id){return document.getElementById(id);}
 function set(id,v){var e=el(id);if(e)e.textContent=v;}
 function num(n){return n!=null&&n>=0?n.toLocaleString():'--';}
-function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';} 
+function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}
+function jsa(s){return esc(JSON.stringify(s==null?'':String(s)));} /* VX-17 (follow-up): a value passed into an inline handler as a JSON string literal, then HTML-escaped. esc() alone is decoded back by the HTML parser before the handler runs, so a quote in a name broke out. */ 
 function shn(s,max){return s?(s.length>max?s.substring(0,max)+'...':s):'N/A';}
 function fmtBal(n){return n!=null?(+n).toFixed(8):'0.00000000';}
 
