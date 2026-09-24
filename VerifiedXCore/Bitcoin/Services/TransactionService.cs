@@ -34,6 +34,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                if (!BitcoinFeePolicy.TryValidateFeeRate(chosenFeeRate, out var feeRateError)) // VX-18
+                    return (false, feeRateError);
+
                 receiver = receiver.ToBTCAddressNormalize();
 
                 var btcAccount = BitcoinAccount.GetBitcoinAccount(sender);
@@ -216,6 +219,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                if (!BitcoinFeePolicy.TryValidateFeeRate(chosenFeeRate, out var feeRateError)) // VX-18
+                    return (false, feeRateError);
+
                 receiver = receiver.ToBTCAddressNormalize();
 
                 var btcAccount = BitcoinAccount.GetBitcoinAccount(sender);
@@ -231,10 +237,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 Console.WriteLine($"Account Checks Passed.");
 
-                // VX-13: sealed keys are available only while the wallet is unlocked.
-                string? senderPrivateKeyHex = BitcoinKeystore.GetPrivateKeyHex(btcAccount);
-                if (string.IsNullOrEmpty(senderPrivateKeyHex))
-                    return (false, "You must type in your encryption password first!");
+                // VX-18: fee estimation needs no key (it never signs). The key read here made the estimate fail while
+                // the wallet was locked, although the route is allowed then.
 
                 BitcoinAddress senderAddress = BitcoinAddress.Create(sender, Globals.BTCNetwork);
                 BitcoinAddress recipientAddress = BitcoinAddress.Create(receiver, Globals.BTCNetwork);
@@ -325,10 +329,17 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        public static async Task<string> ReplaceByFeeTransaction(string txid, long nFeeRate)
+        public static async Task<string> ReplaceByFeeTransaction(string txid, long nFeeRate, bool allowHighFee = false)
         {
             try
             {
+                // VX-18: explicit unlock check (the route was outside the old encryption gate and this method had none),
+                // and a bounded fee rate (it was multiplied into the fee unchecked).
+                if (BitcoinFeePolicy.WalletIsLocked())
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "You must type in your encryption password first!" });
+                if (!BitcoinFeePolicy.TryValidateFeeRate(nFeeRate, out var feeRateError))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = feeRateError });
+
                 var transaction = await BitcoinTransaction.GetTX(txid);
 
                 if (transaction == null)
@@ -432,6 +443,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 decimal totalAmountSpent = (amountToSend + finalFee) * SatoshiMultiplier;
                 decimal originalAmountSpent = (transaction.Amount + transaction.Fee);
 
+                // VX-18: the replacement's total fee is bounded relative to the amount unless explicitly allowed.
+                if (!BitcoinFeePolicy.TryValidateTotalFee(finalFee, amountToSend, allowHighFee, out var totalFeeError))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = totalFeeError });
+
                 byte[] privateKeyBytes = senderPrivateKeyHex.HexToByteArray();
                 Key senderKey = new Key(privateKeyBytes);
 
@@ -508,6 +523,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                if (!BitcoinFeePolicy.TryValidateFeeRate(chosenFeeRate, out var feeRateError)) // VX-18
+                    return await SCLogUtility.LogAndReturn(feeRateError, "TransactionService.SendMultiSigTransactions()", false);
+
                 Script scriptPubKey = PayToMultiSigTemplate.Instance.GenerateScriptPubKey(Globals.TotalArbiterThreshold, pubKeys.OrderBy(x => x.ScriptPubKey.ToString()).ToArray());
                 Script redeemScript = scriptPubKey.PaymentScript;
 
@@ -756,6 +774,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                if (!BitcoinFeePolicy.TryValidateFeeRate(chosenFeeRate, out var feeRateError)) // VX-18
+                    return await SCLogUtility.LogAndReturn(feeRateError, "TransactionService.SendMultiSigTransactions()", false);
+
                 Script scriptPubKey = PayToMultiSigTemplate.Instance.GenerateScriptPubKey(Globals.TotalArbiterThreshold, pubKeys.OrderBy(x => x.ScriptPubKey.ToString()).ToArray());
                 Script redeemScript = scriptPubKey.PaymentScript;
 

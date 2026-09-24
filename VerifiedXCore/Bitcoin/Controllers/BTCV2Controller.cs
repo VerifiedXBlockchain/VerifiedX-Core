@@ -630,13 +630,14 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// Get Tokenized BTC List
         /// </summary>
         /// <returns></returns>
-        [HttpGet("ReplaceByFee/{txid}/{feeRate}")]
-        public async Task<string> ReplaceByFee(string txid, int feeRate)
+        [HttpGet("ReplaceByFee/{txid}/{feeRate}/{allowHighFee?}")]
+        public async Task<string> ReplaceByFee(string txid, int feeRate, bool allowHighFee = false)
         {
             if(string.IsNullOrEmpty(txid) || feeRate == 0)
                 return JsonConvert.SerializeObject(new { Success = false, Message = "Incorrect URL parameters" });
 
-            var result = await TransactionService.ReplaceByFeeTransaction(txid, feeRate);
+            // VX-18: unlock check, fee-rate bound and total-fee bound are enforced in the service.
+            var result = await TransactionService.ReplaceByFeeTransaction(txid, feeRate, allowHighFee);
 
             return result;
         }

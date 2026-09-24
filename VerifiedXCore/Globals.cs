@@ -229,6 +229,8 @@ namespace VerifiedXCore
         public static SemaphoreSlim BlocksDownloadSlim = new SemaphoreSlim(1, 1);
         public static SemaphoreSlim BlocksDownloadV2Slim = new SemaphoreSlim(1, 1);
         public static int WalletUnlockTime = 0;
+        /// <summary>VX-18: highest Bitcoin fee rate (sat/vB) any local signing path will use. Config "MaxBtcFeeRateSatPerVb".</summary>
+        public static long MaxBtcFeeRateSatPerVb = 2_000;
         public static int ChainCheckPointInterval = 0;
         public static int ChainCheckPointRetain = 0;
         public static int PasswordClearTime = 10;

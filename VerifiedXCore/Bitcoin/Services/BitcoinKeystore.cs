@@ -24,6 +24,10 @@ namespace VerifiedXCore.Bitcoin.Services
         public static string? GetPrivateKeyHex(BitcoinAccount account)
         {
             if (account == null) return null;
+            // VX-18: an encrypted wallet that is locked signs nothing. A key not yet sealed (created before this build,
+            // wallet not unlocked since) used to be returned here in plaintext, so every Bitcoin signing path could
+            // still sign while locked.
+            if (BitcoinFeePolicy.WalletIsLocked()) return null;
             if (!account.IsEncrypted)
             {
                 var plain = account.PrivateKey;
