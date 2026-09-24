@@ -71,5 +71,28 @@ namespace VerifiedXCore.Tests
             Assert.Contains("esc(o.i)", html);
             Assert.Contains("var fs=esc(shn(tx.fromAddress,20))", html);
         }
+
+        [Theory]
+        [InlineData("/wallet")]
+        [InlineData("/explorer")]
+        public async Task VX17_FollowUp_EscRendersZero(string path)
+        {
+            // Second review: esc() returned '' for every falsy value, so after pi() started encoding, counts and indexes
+            // of 0 rendered blank. Only null/undefined are empty now.
+            var html = await Page(path);
+            Assert.Contains("function esc(s){return s!=null?String(s)", html);
+        }
+
+        [Fact]
+        public async Task VX17_FollowUp_WalletBridgeAndPeerCellsAreEncoded()
+        {
+            // Second review: the bridge history (lock id, EVM destination, Base tx hash) and the history peer cell were
+            // inserted as raw HTML.
+            var html = await Page("/wallet");
+            Assert.Contains("'+esc(lid)+'</code>", html);
+            Assert.Contains("esc(shn(lk.EvmDestination||lk.evmDestination||'',14))", html);
+            Assert.Contains("esc(shn(lk.BaseTxHash||lk.baseTxHash,12))", html);
+            Assert.Contains("esc(shn(peer||'--',18))", html);
+        }
     }
 }

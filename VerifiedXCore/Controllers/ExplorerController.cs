@@ -944,7 +944,7 @@ window.goHome=function(){
 function el(id){return document.getElementById(id);}
 function set(id,v){var e=el(id);if(e)e.textContent=v;}
 function num(n){return n!=null&&n>=0?n.toLocaleString():'--';}
-function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}
+function esc(s){return s!=null?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}
 function jsa(s){return esc(JSON.stringify(s==null?'':String(s)));} /* VX-17 (follow-up): a value passed into an inline handler as a JSON string literal, then HTML-escaped. esc() alone is decoded back by the HTML parser before the handler runs, so a quote in a name broke out. */ 
 function shn(s,max){return s?(s.length>max?s.substring(0,max)+'...':s):'N/A';}
 function fmtBal(n){return n!=null?(+n).toFixed(8):'0.00000000';}

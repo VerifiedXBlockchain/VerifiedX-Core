@@ -1123,11 +1123,11 @@ function loadBridgeHistory(){
       if(!finalStatuses[st]){
         actCol='<button class=""act-btn sec"" style=""padding:4px 10px;font-size:11px"" onclick=""doForceRetryBridge('+jsa(lid)+')""  title=""Force retry: re-collect attestations and re-submit mint"">&#128260; Retry</button>';
       }
-      return '<tr><td><code class=""muted"" style=""cursor:pointer;word-break:break-all"" title=""Click to copy"" onclick=""navigator.clipboard.writeText(this.textContent)"">'+lid+'</code></td>'+
+      return '<tr><td><code class=""muted"" style=""cursor:pointer;word-break:break-all"" title=""Click to copy"" onclick=""navigator.clipboard.writeText(this.textContent)"">'+esc(lid)+'</code></td>'+
         '<td>'+fmtBal(lk.Amount||lk.amount||0)+' vBTC</td>'+
-        '<td><code class=""muted"" title=""'+esc(lk.EvmDestination||lk.evmDestination||'')+'"">'+ shn(lk.EvmDestination||lk.evmDestination||'',14)+'</code></td>'+
+        '<td><code class=""muted"" title=""'+esc(lk.EvmDestination||lk.evmDestination||'')+'"">'+ esc(shn(lk.EvmDestination||lk.evmDestination||'',14))+'</code></td>'+
         '<td><span class=""badge '+sCls+'"">'+esc(st)+'</span></td>'+
-        '<td>'+(lk.BaseTxHash||lk.baseTxHash?'<code class=""muted"">'+shn(lk.BaseTxHash||lk.baseTxHash,12)+'</code>':'--')+'</td>'+
+        '<td>'+(lk.BaseTxHash||lk.baseTxHash?'<code class=""muted"">'+esc(shn(lk.BaseTxHash||lk.baseTxHash,12))+'</code>':'--')+'</td>'+
         '<td>'+actCol+'</td></tr>';
     }).join('');
     el('bridge-hist-content').innerHTML='<div class=""tbl-wrap""><table class=""dtbl""><thead><tr><th>Lock ID</th><th>Amount</th><th>EVM Dest</th><th>Status</th><th>Base TX</th><th>Actions</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
@@ -1275,7 +1275,7 @@ function renderHistory(txs){
       '<td><code class=""muted"">'+hashShort+'</code></td>'+
       '<td>'+dirLbl+'</td>'+
       '<td><span class=""badge badge-tok"" style=""font-size:10px"">'+tt+'</span></td>'+
-      '<td><code class=""muted"" title=""'+esc(peer||'')+'"">'+shn(peer||'--',18)+'</code></td>'+
+      '<td><code class=""muted"" title=""'+esc(peer||'')+'"">'+esc(shn(peer||'--',18))+'</code></td>'+
       '<td class=""'+(dir==='in'?'grn':'red')+'"" style=""font-weight:600;font-variant-numeric:tabular-nums"">'+(dir==='in'?'+':'-')+tx.amount+' VFX</td>'+
       '<td><span class=""badge '+sc+'"">'+sn+'</span></td>'+
       '<td class=""muted"">'+ago(tx.timestamp)+'</td>'+
@@ -2063,7 +2063,7 @@ window.doScanVbtc=function(){
 
 /* ---- Helpers ---- */
 function el(id){return document.getElementById(id);}
-function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}
+function esc(s){return s!=null?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}
 function jsa(s){return esc(JSON.stringify(s==null?'':String(s)));} /* VX-17 (follow-up): a value passed into an inline handler as a JSON string literal, then HTML-escaped. esc() alone is decoded back by the HTML parser before the handler runs, so a quote in a name broke out. */" + @"
 function shn(s,max){return s?(s.length>max?s.substring(0,max)+'...':s):'--';}
 function fmtBal(n){return n!=null?(+n).toFixed(8):'0.00000000';}
