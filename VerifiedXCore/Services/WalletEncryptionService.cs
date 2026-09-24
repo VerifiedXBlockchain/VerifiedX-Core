@@ -127,6 +127,22 @@ namespace VerifiedXCore.Services
 				return false;
 			if (!IsWalletPassword(Globals.EncryptPassword.ToUnsecureString()))
 				return false;
+			// NEW-01 (follow-up): SaveKeystore keeps an existing record for the address and drops the new one, which
+			// would leave the account holding ciphertext that no record opens. Reuse an existing record only when it
+			// opens to this same key; otherwise refuse.
+			var existing = Keystore.GetKeystore()?.FindOne(x => x.Address == account.Address);
+			if (existing != null)
+			{
+				var plain = account.PrivateKey;
+				account.PrivateKey = existing.PrivateKey;
+				string? opened = null;
+				try { opened = account.GetKey; } catch { }
+				if (!string.IsNullOrEmpty(opened) && string.Equals(opened.TrimStart('0'), plain.TrimStart('0'), StringComparison.OrdinalIgnoreCase))
+					return true;
+				account.PrivateKey = plain;
+				Utilities.ErrorLogUtility.LogError($"Keystore record for {account.Address} exists and does not open to this key; not storing it.", "WalletEncryptionService.EncryptImportedAccount()");
+				return false;
+			}
 			var ks = await EncryptWallet(account, false);
 			if (ks == null)
 				return false;

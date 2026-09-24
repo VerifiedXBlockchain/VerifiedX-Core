@@ -115,5 +115,25 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain(keyHex.TrimStart('0'), stored!.PrivateKey);   // encrypted at rest
             Assert.Equal(keyHex.TrimStart('0'), stored.GetKey.TrimStart('0'));   // and usable
         }
+
+        [Fact]
+        public async Task NEW01_FollowUp_ReimportWithAStaleKeystoreRecord_StaysUsable()
+        {
+            // SaveKeystore keeps an existing record for the address and drops the new one; the import used to store
+            // ciphertext under a data key no record held. An existing record that opens to the same key is reused.
+            Globals.EncryptPassword = Secure(WalletPw);
+            var keyHex = NewKeyHex();
+            var first = await AccountData.RestoreAccount(keyHex);
+            Assert.NotNull(await StoredAfterImport(first!.Address));
+
+            AccountData.GetAccounts().DeleteMany(x => x.Address == first.Address); // account gone, keystore record stays
+            Assert.NotNull(Keystore.GetKeystore()!.FindOne(x => x.Address == first.Address));
+
+            var again = await AccountData.RestoreAccount(keyHex);
+            Assert.NotNull(again);
+            var stored = await StoredAfterImport(first.Address);
+            Assert.NotNull(stored);
+            Assert.Equal(keyHex.TrimStart('0'), stored!.GetKey.TrimStart('0'));
+        }
     }
 }
