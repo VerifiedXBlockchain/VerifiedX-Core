@@ -134,6 +134,12 @@ namespace VerifiedXCore.Tests
         public async Task VX09_FollowUp_SendBlockSpan_TakesAServeSlot()
         {
             const string ip = "172.28.9.99";
+            // Seed the span index (the Blockchain summary collection GetBlockSpan reads).
+            var index = VerifiedXCore.Models.Blockchain.GetBlockchain()!;
+            for (long h = 0; h < 5; h++)
+                index.InsertSafe(new VerifiedXCore.Models.Blockchain { Height = h, Hash = "h" + h, Size = 100, CumulativeSize = 100 * (h + 1) });
+            Assert.NotNull(await Peer(ip).SendBlockSpan(0, 1_000_000)); // control: served when slots are free
+
             var a = await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50));
             var b = await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50));
             try
