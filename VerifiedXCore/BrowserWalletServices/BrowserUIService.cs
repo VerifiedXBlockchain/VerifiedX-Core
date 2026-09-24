@@ -1696,7 +1696,7 @@ window.doCreateZfx=function(){
   if(!pwd||pwd.length<8){showMsg('czfx-msg','Password must be at least 8 characters.','err');return;}
   var btn=el('czfx-btn');
   btn.disabled=true;btn.textContent='Creating...';
-  fetch('/wallet/api/privacy/createShieldedAddress/'+encodeURIComponent(addr)+'/'+encodeURIComponent(pwd))
+  fetch('/wallet/api/privacy/createShieldedAddress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:addr,password:pwd})})
     .then(function(r){return r.json();}).then(function(d){
       btn.disabled=false;btn.textContent='Create';
       if(d.success){
@@ -1731,7 +1731,7 @@ window.doShield=function(){
   if(!zfx.startsWith('zfx_')){showMsg('sh-msg','Shielded address must start with zfx_','err');return;}
   var btn=el('sh-btn');
   btn.disabled=true;btn.textContent='Shielding...';
-  fetch('/wallet/api/privacy/shield/'+encodeURIComponent(from)+'/'+encodeURIComponent(zfx)+'/'+encodeURIComponent(amt))
+  fetch('/wallet/api/privacy/shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fromAddress:from,zfxAddress:zfx,amount:String(amt)})})
     .then(function(r){return r.json();}).then(function(d){
       btn.disabled=false;btn.textContent='Shield';
       if(d.success){
@@ -1767,9 +1767,7 @@ window.doUnshield=function(){
   if(!zfx||!to||!amt){showMsg('ush-msg','Please fill all fields.','err');return;}
   var btn=el('ush-btn');
   btn.disabled=true;btn.textContent='Unshielding...';
-  var url='/wallet/api/privacy/unshield/'+encodeURIComponent(zfx)+'/'+encodeURIComponent(to)+'/'+encodeURIComponent(amt);
-  if(pwd)url+='?password='+encodeURIComponent(pwd);
-  fetch(url).then(function(r){return r.json();}).then(function(d){
+  fetch('/wallet/api/privacy/unshield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zfxAddress:zfx,toAddress:to,amount:String(amt),password:pwd||null})}).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Unshield';
     if(d.success){
       showMsg('ush-msg','Unshield TX broadcast! Hash: '+(d.hash||''),'ok');
@@ -1804,9 +1802,7 @@ window.doPrivTransfer=function(){
   if(!to.startsWith('zfx_')){showMsg('ptx-msg','Recipient must be a zfx_ address.','err');return;}
   var btn=el('ptx-btn');
   btn.disabled=true;btn.textContent='Sending...';
-  var url='/wallet/api/privacy/transfer/'+encodeURIComponent(from)+'/'+encodeURIComponent(to)+'/'+encodeURIComponent(amt);
-  if(pwd)url+='?password='+encodeURIComponent(pwd);
-  fetch(url).then(function(r){return r.json();}).then(function(d){
+  fetch('/wallet/api/privacy/transfer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fromZfxAddress:from,toZfxAddress:to,amount:String(amt),password:pwd||null})}).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Send';
     if(d.success){
       showMsg('ptx-msg','Private transfer broadcast! Hash: '+(d.hash||''),'ok');
@@ -1825,8 +1821,7 @@ window.doScanZfx=function(){
   if(!selZfx)return;
   var scanBtn=document.querySelector('#priv-actions .act-btn.sec');
   if(scanBtn){scanBtn.disabled=true;scanBtn.textContent='Scanning...';}
-  var url='/wallet/api/privacy/scan/'+encodeURIComponent(selZfx);
-  fetch(url).then(function(r){return r.json();}).then(function(d){
+  fetch('/wallet/api/privacy/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zfxAddress:selZfx})}).then(function(r){return r.json();}).then(function(d){
     if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan for Notes';}
     if(d.success){
       var msg='Scanned '+d.blocksScanned+' blocks, '+d.transactionsScanned+' TXs. Found '+d.newNotesFound+' new note'+(d.newNotesFound!==1?'s':'')+ '.';
@@ -2051,8 +2046,7 @@ window.doScanVbtc=function(){
   if(!selZfx||!selVbtcPrivSc)return;
   var scanBtn=document.querySelector('#vbtc-priv-actions .act-btn.sec');
   if(scanBtn){scanBtn.disabled=true;scanBtn.textContent='Scanning...';}
-  var url='/wallet/api/privacy/vbtc/scan/'+encodeURIComponent(selZfx)+'/'+encodeURIComponent(selVbtcPrivSc);
-  fetch(url).then(function(r){return r.json();}).then(function(d){
+  fetch('/wallet/api/privacy/vbtc/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zfxAddress:selZfx,scUID:selVbtcPrivSc})}).then(function(r){return r.json();}).then(function(d){
     if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan vBTC Notes';}
     if(d.success){
       var msg='Scanned '+d.blocksScanned+' blocks, '+d.transactionsScanned+' TXs. Found '+d.newNotesFound+' new note'+(d.newNotesFound!==1?'s':'')+'. Balance: '+fmtBal(d.vbtcShieldedBalance)+' vBTC';

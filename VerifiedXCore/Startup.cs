@@ -38,7 +38,10 @@ namespace VerifiedXCore
             var logDirectory = path;
             var logFilePath = Path.Combine(logDirectory, "elmah.xml");
 
-            services.AddControllers();
+            // VX-03: the validator/consensus controller belongs to the validator host (StartupP2PCaster,
+            // ValAPIPort) only. Default discovery also exposed all of its routes on this wallet API host.
+            services.AddControllers().ConfigureApplicationPartManager(apm =>
+                apm.FeatureProviders.Add(new WithoutControllerFeatureProvider<Controllers.ValidatorController>()));
             //services.AddApiVersioning(options =>
             //{
             //    options.ReportApiVersions = true;
@@ -129,11 +132,29 @@ namespace VerifiedXCore
                 c.DisplayRequestDuration();
             });
 
+            // VX-03: refuse cross-origin browser requests and (unless openapi) non-loopback Host headers
+            // before anything else runs. See ApiRequestGuard for why this cannot break a working client.
             app.Use((context, func) =>
             {
-                // Block explorer and wallet are always accessible regardless of API lock state
-                var reqPath = context.Request.Path.HasValue ? context.Request.Path.Value.ToLower() : "";
-                if (reqPath.StartsWith("/explorer") || reqPath.StartsWith("/wallet"))
+                var rejection = ApiRequestGuard.GetRejection(
+                    context.Request.Host.Value,
+                    context.Request.Headers["Origin"].FirstOrDefault(),
+                    context.Request.Headers["Sec-Fetch-Site"].FirstOrDefault(),
+                    Globals.OpenAPI);
+                if (rejection != null)
+                {
+                    context.Response.StatusCode = 403;
+                    return context.Response.WriteAsync(rejection);
+                }
+                return func.Invoke();
+            });
+
+            app.Use((context, func) =>
+            {
+                // VX-03: only the read-only explorer and the browser-wallet HTML shell skip the API gate.
+                // /wallet/api/* (which signs and broadcasts) used to be exempt as a prefix.
+                var reqPath = context.Request.Path.HasValue ? context.Request.Path.Value : "";
+                if (ApiRequestGuard.IsGateExemptPath(context.Request.Method, reqPath))
                 {
                     return func.Invoke();
                 }

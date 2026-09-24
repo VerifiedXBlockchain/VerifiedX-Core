@@ -5,6 +5,7 @@ using VerifiedXCore.Bitcoin.Models;
 namespace VerifiedXCore.Controllers
 {
     [Route("wallet")]
+    [ActionFilterController] // VX-03: this controller had no API filter at all
     [ApiController]
     public class WalletController : ControllerBase
     {
@@ -291,10 +292,16 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
-        [HttpGet("api/privacy/createShieldedAddress/{address}/{password}")]
-        public IActionResult CreateShieldedAddress(string address, string password)
+        // VX-03: was GET with the password as a URL segment (logged, cached, CSRF-able).
+        [HttpPost("api/privacy/createShieldedAddress")]
+        public IActionResult CreateShieldedAddress([FromBody] ZfxCreateRequest req)
         {
-            try { return Ok(WalletPrivacyVfxService.CreateShieldedAddress(address, password)); }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.Address) || string.IsNullOrEmpty(req.Password))
+                    return BadRequest(new { success = false, message = "address and password are required." });
+                return Ok(WalletPrivacyVfxService.CreateShieldedAddress(req.Address, req.Password));
+            }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
@@ -305,38 +312,68 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
-        [HttpGet("api/privacy/shield/{fromAddress}/{zfxAddress}/{amount}")]
-        public async Task<IActionResult> ShieldVFX(string fromAddress, string zfxAddress, decimal amount)
+        private static bool TryParseAmount(string? text, out decimal amount) =>
+            decimal.TryParse(text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out amount) && amount > 0;
+
+        // VX-03: the shield / unshield / transfer / scan / resync routes below were GET (CSRF-able by
+        // any page, passwords in the query string). They sign or mutate, so they are POST with a body.
+        [HttpPost("api/privacy/shield")]
+        public async Task<IActionResult> ShieldVFX([FromBody] ZfxShieldRequest req)
         {
-            try { return Ok(await WalletPrivacyVfxService.ShieldVFX(fromAddress, zfxAddress, amount)); }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.FromAddress) || string.IsNullOrWhiteSpace(req.ZfxAddress) || !TryParseAmount(req.Amount, out var amount))
+                    return BadRequest(new { success = false, message = "fromAddress, zfxAddress and a positive amount are required." });
+                return Ok(await WalletPrivacyVfxService.ShieldVFX(req.FromAddress, req.ZfxAddress, amount));
+            }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
-        [HttpGet("api/privacy/unshield/{zfxAddress}/{toAddress}/{amount}")]
-        public async Task<IActionResult> UnshieldVFX(string zfxAddress, string toAddress, decimal amount, [FromQuery] string? password = null)
+        [HttpPost("api/privacy/unshield")]
+        public async Task<IActionResult> UnshieldVFX([FromBody] ZfxUnshieldRequest req)
         {
-            try { return Ok(await WalletPrivacyVfxService.UnshieldVFX(zfxAddress, toAddress, amount, password)); }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ZfxAddress) || string.IsNullOrWhiteSpace(req.ToAddress) || !TryParseAmount(req.Amount, out var amount))
+                    return BadRequest(new { success = false, message = "zfxAddress, toAddress and a positive amount are required." });
+                return Ok(await WalletPrivacyVfxService.UnshieldVFX(req.ZfxAddress, req.ToAddress, amount, req.Password));
+            }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
-        [HttpGet("api/privacy/transfer/{fromZfxAddress}/{toZfxAddress}/{amount}")]
-        public async Task<IActionResult> PrivateTransferVFX(string fromZfxAddress, string toZfxAddress, decimal amount, [FromQuery] string? password = null)
+        [HttpPost("api/privacy/transfer")]
+        public async Task<IActionResult> PrivateTransferVFX([FromBody] ZfxTransferRequest req)
         {
-            try { return Ok(await WalletPrivacyVfxService.PrivateTransferVFX(fromZfxAddress, toZfxAddress, amount, password)); }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.FromZfxAddress) || string.IsNullOrWhiteSpace(req.ToZfxAddress) || !TryParseAmount(req.Amount, out var amount))
+                    return BadRequest(new { success = false, message = "fromZfxAddress, toZfxAddress and a positive amount are required." });
+                return Ok(await WalletPrivacyVfxService.PrivateTransferVFX(req.FromZfxAddress, req.ToZfxAddress, amount, req.Password));
+            }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
-        [HttpGet("api/privacy/scan/{zfxAddress}")]
-        public IActionResult ScanShieldedVFX(string zfxAddress, [FromQuery] string? password = null, [FromQuery] long? fromBlock = null, [FromQuery] long? toBlock = null)
+        [HttpPost("api/privacy/scan")]
+        public IActionResult ScanShieldedVFX([FromBody] ZfxScanRequest req)
         {
-            try { return Ok(WalletPrivacyVfxService.ScanShieldedVFX(zfxAddress, password, fromBlock, toBlock)); }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return BadRequest(new { success = false, message = "zfxAddress is required." });
+                return Ok(WalletPrivacyVfxService.ScanShieldedVFX(req.ZfxAddress, req.Password, req.FromBlock, req.ToBlock));
+            }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
-        [HttpGet("api/privacy/resync/{zfxAddress}/{fromHeight}")]
-        public IActionResult ResyncShieldedWallet(string zfxAddress, long fromHeight, [FromQuery] long? toHeight = null)
+        [HttpPost("api/privacy/resync")]
+        public IActionResult ResyncShieldedWallet([FromBody] ZfxResyncRequest req)
         {
-            try { return Ok(WalletPrivacyVfxService.ResyncShieldedWallet(zfxAddress, fromHeight, toHeight)); }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ZfxAddress))
+                    return BadRequest(new { success = false, message = "zfxAddress is required." });
+                return Ok(WalletPrivacyVfxService.ResyncShieldedWallet(req.ZfxAddress, req.FromHeight, req.ToHeight));
+            }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
@@ -419,10 +456,15 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
-        [HttpGet("api/privacy/vbtc/scan/{zfxAddress}/{scUID}")]
-        public IActionResult ScanShieldedVBTC(string zfxAddress, string scUID, [FromQuery] string? password = null, [FromQuery] long? fromBlock = null, [FromQuery] long? toBlock = null)
+        [HttpPost("api/privacy/vbtc/scan")]
+        public IActionResult ScanShieldedVBTC([FromBody] ZfxScanRequest req)
         {
-            try { return Ok(WalletPrivacyVbtcService.ScanShieldedVBTC(zfxAddress, scUID, password, fromBlock, toBlock)); }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ZfxAddress) || string.IsNullOrWhiteSpace(req.ScUID))
+                    return BadRequest(new { success = false, message = "zfxAddress and scUID are required." });
+                return Ok(WalletPrivacyVbtcService.ScanShieldedVBTC(req.ZfxAddress, req.ScUID, req.Password, req.FromBlock, req.ToBlock));
+            }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 

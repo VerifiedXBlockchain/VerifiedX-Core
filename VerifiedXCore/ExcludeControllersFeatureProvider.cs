@@ -17,4 +17,19 @@ namespace VerifiedXCore
             }
         }
     }
+
+    /// <summary>
+    /// VX-03: removes controller <typeparamref name="T"/> from a host's controller set (the inverse of
+    /// <see cref="ExcludeControllersFeatureProvider{T}"/>, which keeps ONLY <typeparamref name="T"/>).
+    /// Register after the default provider so it runs on the populated feature.
+    /// </summary>
+    public class WithoutControllerFeatureProvider<T> : IApplicationFeatureProvider<ControllerFeature>
+    {
+        public void PopulateFeature(IEnumerable<ApplicationPart> parts, ControllerFeature feature)
+        {
+            var target = typeof(T).GetTypeInfo();
+            foreach (var c in feature.Controllers.Where(c => c == target).ToList())
+                feature.Controllers.Remove(c);
+        }
+    }
 }

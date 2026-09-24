@@ -76,4 +76,50 @@ namespace VerifiedXCore.BrowserWalletServices
         public string BtcAddress { get; set; } = "";
         public string? EvmAddress { get; set; }
     }
+
+    // VX-03: bodies for privacy routes that were GET with secrets / amounts in the URL.
+    public class ZfxCreateRequest
+    {
+        public string Address { get; set; } = "";
+        public string Password { get; set; } = "";
+    }
+
+    public class ZfxShieldRequest
+    {
+        public string FromAddress { get; set; } = "";
+        public string ZfxAddress { get; set; } = "";
+        public string Amount { get; set; } = "";
+    }
+
+    public class ZfxUnshieldRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string ToAddress { get; set; } = "";
+        public string Amount { get; set; } = "";
+        public string? Password { get; set; }
+    }
+
+    public class ZfxTransferRequest
+    {
+        public string FromZfxAddress { get; set; } = "";
+        public string ToZfxAddress { get; set; } = "";
+        public string Amount { get; set; } = "";
+        public string? Password { get; set; }
+    }
+
+    public class ZfxScanRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string? ScUID { get; set; }
+        public string? Password { get; set; }
+        public long? FromBlock { get; set; }
+        public long? ToBlock { get; set; }
+    }
+
+    public class ZfxResyncRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public long FromHeight { get; set; }
+        public long? ToHeight { get; set; }
+    }
 }
