@@ -116,6 +116,10 @@ namespace VerifiedXCore.Services
                 if (scState == null)
                     return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
 
+                // VX-01: same contract-type rule as the single shape.
+                if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
+                    return (false, $"Contract {input.SCUID} is not a vBTC V2 contract.");
+
                 // S3C §0: per-CONTRACT active-withdrawal gate. includeLocalOnlyRows: false —
                 // consensus must not read rows that exist on this node only (fork vector).
                 if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, gateHeight, includeLocalOnlyRows: false))
@@ -2647,6 +2651,10 @@ namespace VerifiedXCore.Services
                                 if (scStateMulti == null)
                                     return (txResult, $"vBTC V2 contract not found in state trei: {input.SCUID}");
 
+                                // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract.
+                                if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scStateMulti))
+                                    return (txResult, $"Contract {input.SCUID} is not a vBTC V2 contract.");
+
                                 bool isOwnerMulti = txRequest.FromAddress == scStateMulti.OwnerAddress;
                                 decimal ledgerBalanceMulti = 0M;
                                 if (scStateMulti.SCStateTreiTokenizationTXes != null && scStateMulti.SCStateTreiTokenizationTXes.Any())
@@ -2721,9 +2729,11 @@ namespace VerifiedXCore.Services
                             if (txRequest.FromAddress != fromAddress)
                                 return (txResult, "From address in data must match transaction FromAddress for vBTC V2 transfer.");
 
-                            // Amount validation
-                            if (!amount.HasValue || amount.Value <= 0)
-                                return (txResult, "Amount must be greater than zero for vBTC V2 transfer.");
+                            // Amount validation (VX-01: shared rule — positive, at most 8 decimal places,
+                            // matching the multi-contract transfer shape)
+                            var transferAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "vBTC V2 transfer");
+                            if (transferAmountError != null)
+                                return (txResult, transferAmountError);
 
                             // Recipient binding: the ledger credits tx.ToAddress, so the validated
                             // Data.ToAddress must be the same address — otherwise sentinel recipients
@@ -2781,6 +2791,11 @@ namespace VerifiedXCore.Services
 
                             // Balance validation for both owner and non-owner
                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+
+                            // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract.
+                            if (scStateTreiRec != null && !Bitcoin.Services.VBTCService.IsVbtcV2Contract(scStateTreiRec))
+                                return (txResult, $"Contract {scUID} is not a vBTC V2 contract.");
+
                             if (scStateTreiRec != null)
                             {
                                 bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
@@ -3088,10 +3103,26 @@ namespace VerifiedXCore.Services
                                 !amount.HasValue || !feeRate.HasValue)
                                 return (txResult, "Missing required fields for withdrawal request (ContractUID, BTCAddress, Amount, FeeRate).");
 
+                            // VX-01: presence is not validity. The balance gate below is the only other
+                            // quantitative check, and "balance < amount" is false for every negative
+                            // amount — the escrow apply then negated it into an unbacked credit (mint).
+                            // Same rule as the transfer and multi-withdrawal shapes.
+                            var wdAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "vBTC V2 withdrawal request");
+                            if (wdAmountError != null)
+                                return (txResult, wdAmountError);
+
+                            if (feeRate.Value <= 0)
+                                return (txResult, "FeeRate must be greater than zero for vBTC V2 withdrawal request.");
+
                             // Validate contract exists via state trei (available on ALL nodes, not just local)
                             var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                             if (scState == null)
                                 return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+
+                            // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract;
+                            // any minted smart contract used to be accepted as a withdrawal target.
+                            if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
+                                return (txResult, $"Contract {scUID} is not a vBTC V2 contract.");
 
                             // S3C §0: per-CONTRACT active-withdrawal gate (was per-user) — rejects if
                             // the contract already has a mined active request (anti-grief expiry inside).
@@ -3436,8 +3467,18 @@ namespace VerifiedXCore.Services
                     if (txRequest.FromAddress != txRequest.ToAddress)
                         return (txResult, "Bridge lock must be a self-transaction (from == to).");
 
-                    if (!amount.HasValue || amount.Value <= 0)
-                        return (txResult, "Amount must be greater than zero for bridge lock.");
+                    // VX-01: shared vBTC amount rule (positive, at most 8 decimal places). A sub-satoshi
+                    // Amount used to pass because AmountSats is the truncated value.
+                    var lockAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "bridge lock");
+                    if (lockAmountError != null)
+                        return (txResult, lockAmountError);
+
+                    // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract.
+                    var lockScState = SmartContractStateTrei.GetSmartContractState(scUID);
+                    if (lockScState == null)
+                        return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+                    if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(lockScState))
+                        return (txResult, $"Contract {scUID} is not a vBTC V2 contract.");
 
                     if (!amountSats.HasValue)
                         return (txResult, "AmountSats is required for bridge lock.");

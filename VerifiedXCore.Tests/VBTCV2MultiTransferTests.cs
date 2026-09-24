@@ -79,6 +79,8 @@ namespace VerifiedXCore.Tests
             {
                 SmartContractUID = scUid,
                 OwnerAddress = owner,
+                // VX-01: consensus requires a real vBTC V2 (TokenizationV2) contract body.
+                ContractData = VbtcTestContracts.VbtcV2ContractData,
                 SCStateTreiTokenizationTXes = rows
                     .Select(r => new SmartContractStateTreiTokenizationTX { FromAddress = r.From, ToAddress = r.To, Amount = r.Amount })
                     .ToList(),

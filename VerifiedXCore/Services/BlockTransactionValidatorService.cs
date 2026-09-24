@@ -861,6 +861,19 @@ namespace VerifiedXCore.Services
                                 return;
                             }
 
+                            // VX-01: mirror the consensus amount rule for local bookkeeping (a
+                            // non-positive request is never applied by StateData).
+                            var wdAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "vBTC V2 withdrawal request");
+                            if (wdAmountError != null)
+                            {
+                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: {wdAmountError}",
+                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                                var txdata = TransactionData.GetAll();
+                                tx.TransactionStatus = TransactionStatus.Invalid;
+                                txdata.InsertSafe(tx);
+                                return;
+                            }
+
                             // Validate contract exists via state trei (available on ALL nodes)
                             var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
                             if (scStateTrei == null)

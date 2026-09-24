@@ -3118,18 +3118,46 @@ namespace VerifiedXCore.Data
         /// (list of lockId + unlockAmount pairs) so all nodes produce identical state.
         /// </summary>
         /// <summary>
-        /// Writes one tokenization ledger row for a withdrawal: a negative amount is a debit from
-        /// <paramref name="address"/> ("-" sink: escrow at REQUEST, or the legacy burn at COMPLETE);
-        /// a positive amount is a credit back to <paramref name="address"/> ("+" source: refund on an
-        /// approved cancellation). Consensus-critical — runs on ALL nodes.
+        /// VX-01: debits <paramref name="amount"/> from <paramref name="address"/> on the contract's
+        /// tokenization ledger ("-" sink row): the escrow at withdrawal REQUEST, or the legacy burn at
+        /// COMPLETE. <paramref name="amount"/> is the POSITIVE quantity to remove; anything else is
+        /// refused and nothing is written. Consensus-critical — runs on ALL nodes.
         /// </summary>
-        private static bool WriteWithdrawalLedgerRow(string scUID, string address, decimal signedAmount)
+        /// <remarks>
+        /// Replaces a single signed-amount writer whose callers passed <c>-amount</c>: a negative
+        /// request amount turned the debit into a "+" credit row, minting unbacked vBTC. Debit and
+        /// credit are now separate entry points that each reject a non-positive amount, so no caller
+        /// can reintroduce the sign inversion.
+        /// </remarks>
+        private static bool WriteWithdrawalEscrowDebit(string scUID, string address, decimal amount)
+        {
+            if (amount <= 0M)
+            {
+                ErrorLogUtility.LogError($"WriteWithdrawalEscrowDebit refused non-positive amount {amount} for {address} on {scUID}", "StateData.WriteWithdrawalEscrowDebit()");
+                return false;
+            }
+            return AppendWithdrawalLedgerRow(scUID, new SmartContractStateTreiTokenizationTX { Amount = -amount, FromAddress = address, ToAddress = "-" });
+        }
+
+        /// <summary>
+        /// VX-01: credits <paramref name="amount"/> back to <paramref name="address"/> ("+" source row):
+        /// the escrow refund on an approved cancellation — the ONLY path that returns escrow.
+        /// <paramref name="amount"/> must be positive; anything else is refused and nothing is written.
+        /// </summary>
+        private static bool WriteWithdrawalRefundCredit(string scUID, string address, decimal amount)
+        {
+            if (amount <= 0M)
+            {
+                ErrorLogUtility.LogError($"WriteWithdrawalRefundCredit refused non-positive amount {amount} for {address} on {scUID}", "StateData.WriteWithdrawalRefundCredit()");
+                return false;
+            }
+            return AppendWithdrawalLedgerRow(scUID, new SmartContractStateTreiTokenizationTX { Amount = amount, FromAddress = "+", ToAddress = address });
+        }
+
+        private static bool AppendWithdrawalLedgerRow(string scUID, SmartContractStateTreiTokenizationTX row)
         {
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-            if (scStateTreiRec == null || signedAmount == 0M) return false;
-            var row = signedAmount < 0M
-                ? new SmartContractStateTreiTokenizationTX { Amount = signedAmount, FromAddress = address, ToAddress = "-" }
-                : new SmartContractStateTreiTokenizationTX { Amount = signedAmount, FromAddress = "+", ToAddress = address };
+            if (scStateTreiRec == null) return false;
             if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
                 scStateTreiRec.SCStateTreiTokenizationTXes.Add(row);
             else
@@ -3504,6 +3532,14 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
+                // VX-01 (defense in depth; VerifyTX rejects this): a non-positive request is never
+                // applied — no request record, no escrow row.
+                if (amount.Value <= 0M)
+                {
+                    ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal refused non-positive amount {amount.Value}. TX: {tx.Hash}", "StateData.RequestVBTCV2Withdrawal()");
+                    return;
+                }
+
                 // FIND-002 FIX: Create per-user withdrawal request record
                 // This allows tracking of who requested the withdrawal and prevents
                 // unauthorized parties from completing another user's withdrawal
@@ -3544,7 +3580,7 @@ namespace VerifiedXCore.Data
                 // Refunded only by an approved cancellation — never by expiry.
                 if (VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
                 {
-                    if (!WriteWithdrawalLedgerRow(scUID, requesterAddress, -amount.Value))
+                    if (!WriteWithdrawalEscrowDebit(scUID, requesterAddress, amount.Value))
                         ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal: escrow debit could not be written for {scUID} (contract state missing)", "StateData.RequestVBTCV2Withdrawal()");
                 }
 
@@ -3639,7 +3675,7 @@ namespace VerifiedXCore.Data
                     // ESCROW (gated): identical rule to the single shape, applied per contract.
                     if (VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
                     {
-                        if (!WriteWithdrawalLedgerRow(input.SCUID, requesterAddress, -input.Amount))
+                        if (!WriteWithdrawalEscrowDebit(input.SCUID, requesterAddress, input.Amount))
                             ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti: escrow debit could not be written for {input.SCUID} (contract state missing)", "StateData.RequestVBTCV2WithdrawalMulti()");
                     }
 
@@ -3767,7 +3803,7 @@ namespace VerifiedXCore.Data
                 // requests are burned here, using the STORED amount (FIND-002), never tx.Data.
                 if (!VBTCWithdrawalRequest.EscrowAppliesTo(withdrawalRequest.RequestBlockHeight))
                 {
-                    WriteWithdrawalLedgerRow(scUID, withdrawalRequest.RequestorAddress, storedAmount * -1.0M);
+                    WriteWithdrawalEscrowDebit(scUID, withdrawalRequest.RequestorAddress, storedAmount);
                 }
 
                 SCLogUtility.Log($"CompleteVBTCV2Withdrawal completed: SCUID={scUID}, Requester={withdrawalRequest.RequestorAddress}, BTCTxHash={btcTxHash}, Amount={storedAmount} BTC, TxHash={tx.Hash}", 
@@ -3963,7 +3999,7 @@ namespace VerifiedXCore.Data
                                     // Escrowed request: give the debited amount back (approved cancellation is
                                     // the ONLY path that returns escrow; expiry never does).
                                     if (VBTCWithdrawalRequest.EscrowAppliesTo(withdrawalRequest.RequestBlockHeight))
-                                        WriteWithdrawalLedgerRow(cancellation.SmartContractUID, withdrawalRequest.RequestorAddress, withdrawalRequest.Amount);
+                                        WriteWithdrawalRefundCredit(cancellation.SmartContractUID, withdrawalRequest.RequestorAddress, withdrawalRequest.Amount);
                                 }
                             }
 

@@ -21,6 +21,62 @@ namespace VerifiedXCore.Bitcoin.Services
     /// </summary>
     public class VBTCService
     {
+        /// <summary>vBTC amounts are denominated in BTC and settle in satoshis: 8 decimal places.</summary>
+        public const int VbtcDecimalPlaces = 8;
+
+        /// <summary>
+        /// VX-01: consensus amount rule shared by every vBTC V2 transaction that moves value
+        /// (transfer, withdrawal request, bridge lock). Returns null when valid, else the rejection
+        /// reason. A non-positive amount is never meaningful: on the withdrawal escrow path a
+        /// negative amount inverted the debit into an unbacked credit (mint).
+        /// </summary>
+        public static string? GetVbtcAmountError(decimal? amount, string context)
+        {
+            if (!amount.HasValue || amount.Value <= 0M)
+                return $"Amount must be greater than zero for {context}.";
+            if (amount.Value != Math.Round(amount.Value, VbtcDecimalPlaces))
+                return $"Amount cannot have more than {VbtcDecimalPlaces} decimal places for {context}.";
+            return null;
+        }
+
+        // Keyed by SmartContractUID; the stored digest guards against a (never expected) change of
+        // ContractData under the same UID. Decompiling runs a Trillium REPL, so this is cached.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string DataDigest, bool IsV2)> _vbtcV2ContractCache = new();
+
+        /// <summary>
+        /// VX-01: consensus definition of "a vBTC V2 contract" — the contract code stored in the
+        /// state trei (available on ALL nodes) declares the TokenizationV2 feature. The tokenization
+        /// ledger machinery (transfer, withdrawal, bridge lock) must only ever operate on such a
+        /// contract; before this check any minted smart contract (e.g. an NFT) was accepted as a
+        /// target. S3C contracts carry the same feature (IsS3C flag) and pass. Missing or
+        /// undecompilable contract data is NOT a vBTC V2 contract.
+        /// </summary>
+        public static bool IsVbtcV2Contract(SmartContractStateTrei? scState)
+        {
+            if (scState == null || string.IsNullOrEmpty(scState.SmartContractUID) || string.IsNullOrEmpty(scState.ContractData))
+                return false;
+
+            var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scState.ContractData)));
+            if (_vbtcV2ContractCache.TryGetValue(scState.SmartContractUID, out var cached) && cached.DataDigest == digest)
+                return cached.IsV2;
+
+            bool isV2;
+            try
+            {
+                var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
+                isV2 = scMain?.Features?.Any(f => f != null && f.FeatureName == FeatureName.TokenizationV2) == true;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"IsVbtcV2Contract: contract {scState.SmartContractUID} could not be decompiled: {ex.Message}",
+                    "VBTCService.IsVbtcV2Contract()");
+                isV2 = false;
+            }
+
+            _vbtcV2ContractCache[scState.SmartContractUID] = (digest, isV2);
+            return isV2;
+        }
+
         /// <summary>
         /// Spendable transparent vBTC for <paramref name="fromAddress"/> on contract <paramref name="scUid"/>:
         /// owner = BTC deposit balance + tokenization ledger; non-owner = ledger only (matches <see cref="TransferVBTC"/>).
@@ -967,6 +1023,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Fail here with the real reason instead of a generic account-not-found.
                 if (requestorAddress.StartsWith("xRBX"))
                     return (false, "Reserve accounts cannot request BTC withdrawals. Move the vBTC to a normal VFX address first.");
+
+                // VX-01: fail fast with the consensus rule's own message.
+                var amountError = GetVbtcAmountError(amount, "vBTC V2 withdrawal request");
+                if (amountError != null)
+                    return (false, amountError);
+                if (feeRate <= 0)
+                    return (false, "FeeRate must be greater than zero for vBTC V2 withdrawal request.");
 
                 // Get account and validate
                 var account = AccountData.GetSingleAccount(requestorAddress);
