@@ -200,6 +200,7 @@ namespace VerifiedXCore.Commands
                                     Console.WriteLine("Encrypting Wallet. Please do not close wallet as this may take a few moments.");
                                     await Keystore.GenerateKeystoreAddresses();
                                     Globals.IsWalletEncrypted = true;
+                                    Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13
 
                                     Console.WriteLine("Encrypting Wallet has completed...");
                                     MainMenuReturn();

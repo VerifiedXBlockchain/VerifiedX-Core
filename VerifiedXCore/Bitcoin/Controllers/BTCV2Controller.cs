@@ -58,7 +58,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
             
             LogUtility.Log("New Address Created: " + account.Address, "BTCV2Controller.GetNewAddress()");
 
-            return JsonConvert.SerializeObject(new { Success = true, Message = $"New Address Added", account.Address, account.PrivateKey, account.WifKey });
+            // VX-13: the one deliberate key hand-off (new address); refused while locked by the BB-3 gate, and the key
+            // is sealed at rest when the wallet is encrypted.
+            var newKeyHex = BitcoinKeystore.GetPrivateKeyHex(account);
+            if (newKeyHex == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "You must type in your encryption password first!" });
+            return JsonConvert.SerializeObject(new { Success = true, Message = $"New Address Added", account.Address, PrivateKey = newKeyHex, WifKey = BitcoinKeystore.GetWif(account) });
         }
 
         /// <summary>

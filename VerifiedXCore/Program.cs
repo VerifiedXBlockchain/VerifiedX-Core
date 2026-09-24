@@ -514,6 +514,7 @@ namespace VerifiedXCore
             StartupService.CheckBlockRefVerToDb(); //checks check ID
             StartupService.HDWalletCheck();// checks for HD wallet
             StartupService.EncryptedWalletCheck(); //checks if wallet is encrypted
+            VerifiedXCore.Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13: e.g. started with encpass=
 
             // Security-audit replay precondition (VX-01/VX-02 ship ungated): scan every stored block
             // with the new consensus predicates, write a report, and exit before any networking.

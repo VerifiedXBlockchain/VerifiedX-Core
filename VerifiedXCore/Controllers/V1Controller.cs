@@ -278,6 +278,7 @@ namespace VerifiedXCore.Controllers
                     {
                         password = "";
                         Globals.GUIPasswordNeeded = false;
+                        Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13
                         output = JsonConvert.SerializeObject(new { Result = "Success", Message = "" });
                     }
                     else
@@ -405,6 +406,7 @@ namespace VerifiedXCore.Controllers
                     Globals.EncryptPassword = password.ToSecureString();
                     await Keystore.GenerateKeystoreAddresses();
                     Globals.IsWalletEncrypted = true;
+                    Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13: Bitcoin keys follow the wallet
 
                     password = "0";
                     output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Wallet Encrypted." });
@@ -480,6 +482,7 @@ namespace VerifiedXCore.Controllers
                         {
                             Globals.GUIPasswordNeeded = false;
                             password = "";
+                            Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13
                             output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Password has been stored for {Globals.PasswordClearTime} minutes." });
                         }
                         else

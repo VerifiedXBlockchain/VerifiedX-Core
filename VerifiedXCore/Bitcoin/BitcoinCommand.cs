@@ -368,7 +368,7 @@ namespace VerifiedXCore.Bitcoin
 
                 foreach (var account in accountList)
                 {
-                    table.AddRow($"[blue]{account.Address}[/]", $"[green]{account.PrivateKey}[/]");
+                    table.AddRow($"[blue]{account.Address}[/]", $"[green]{Services.BitcoinKeystore.GetPrivateKeyHex(account) ?? "(wallet locked)"}[/]");
                 }
 
                 table.Border(TableBorder.Rounded);

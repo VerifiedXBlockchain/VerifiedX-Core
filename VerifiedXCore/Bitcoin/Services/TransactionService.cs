@@ -52,7 +52,10 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 Console.WriteLine($"Account Checks Passed.");
 
-                string senderPrivateKeyHex = btcAccount.PrivateKey;
+                // VX-13: sealed keys are available only while the wallet is unlocked.
+                string? senderPrivateKeyHex = BitcoinKeystore.GetPrivateKeyHex(btcAccount);
+                if (string.IsNullOrEmpty(senderPrivateKeyHex))
+                    return (false, "You must type in your encryption password first!");
 
                 BitcoinAddress senderAddress = BitcoinAddress.Create(sender, Globals.BTCNetwork);
                 BitcoinAddress recipientAddress = BitcoinAddress.Create(receiver, Globals.BTCNetwork);
@@ -228,7 +231,10 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 Console.WriteLine($"Account Checks Passed.");
 
-                string senderPrivateKeyHex = btcAccount.PrivateKey;
+                // VX-13: sealed keys are available only while the wallet is unlocked.
+                string? senderPrivateKeyHex = BitcoinKeystore.GetPrivateKeyHex(btcAccount);
+                if (string.IsNullOrEmpty(senderPrivateKeyHex))
+                    return (false, "You must type in your encryption password first!");
 
                 BitcoinAddress senderAddress = BitcoinAddress.Create(sender, Globals.BTCNetwork);
                 BitcoinAddress recipientAddress = BitcoinAddress.Create(receiver, Globals.BTCNetwork);
@@ -339,7 +345,10 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 Console.WriteLine($"Account Checks Passed.");
 
-                string senderPrivateKeyHex = btcAccount.PrivateKey;
+                // VX-13: sealed keys are available only while the wallet is unlocked.
+                string? senderPrivateKeyHex = BitcoinKeystore.GetPrivateKeyHex(btcAccount);
+                if (string.IsNullOrEmpty(senderPrivateKeyHex))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "You must type in your encryption password first!" });
 
                 BitcoinAddress senderAddress = BitcoinAddress.Create(transaction.FromAddress, Globals.BTCNetwork);
                 BitcoinAddress recipientAddress = BitcoinAddress.Create(transaction.ToAddress, Globals.BTCNetwork);

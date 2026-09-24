@@ -20,6 +20,9 @@ namespace VerifiedXCore.Bitcoin.Models
         public string WifKey { get; set; }
         public string PublicKey { set; get; }
         public string Address { get; set; }
+        /// <summary>VX-13: true when PrivateKey holds a KeystoreCrypto-sealed value (wallet encrypted). Read the key
+        /// with BitcoinKeystore.GetPrivateKeyHex / GetWif, never the fields directly.</summary>
+        public bool IsEncrypted { get; set; }
         public string? ADNR { get; set; }
         public decimal Balance { get; set; }
         public bool IsValidating { get; set; }
@@ -116,6 +119,13 @@ namespace VerifiedXCore.Bitcoin.Models
                 }
                 else
                 {
+                    // VX-13: an encrypted wallet never stores a plaintext Bitcoin key. Sealed with the wallet
+                    // password; refused while the wallet is locked (the key would otherwise be written in the clear).
+                    if (Globals.IsWalletEncrypted && !Services.BitcoinKeystore.TrySeal(btcAddr))
+                    {
+                        ErrorLogUtility.LogError($"Refused to store Bitcoin key for {btcAddr.Address}: wallet is encrypted and locked.", "BitcoinAccount.SaveBitcoinAddress()");
+                        return false;
+                    }
                     bitcoin.InsertSafe(btcAddr);
                     return true;
                 }
@@ -288,8 +298,8 @@ namespace VerifiedXCore.Bitcoin.Models
             Console.WriteLine("======================");
             Console.WriteLine("\nAddress :\n{0}", account.Address);
             Console.WriteLine("\nPublic Key (Uncompressed):\n{0}", account.PublicKey);
-            Console.WriteLine("\nPrivate Key:\n{0}", account.PrivateKey);
-            Console.WriteLine("\nWif Key:\n{0}", account.WifKey);
+            Console.WriteLine("\nPrivate Key:\n{0}", Services.BitcoinKeystore.GetPrivateKeyHex(account) ?? "(wallet locked)");
+            Console.WriteLine("\nWif Key:\n{0}", Services.BitcoinKeystore.GetWif(account) ?? "(wallet locked)");
             Console.WriteLine("\n - - - - - - - - - - - - - - - - - - - - - - ");
             Console.WriteLine("*** Be sure to save private key!                   ***");
             Console.WriteLine("*** Use your private key to restore account!       ***");

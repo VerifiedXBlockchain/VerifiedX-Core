@@ -66,7 +66,7 @@ namespace VerifiedXCore.Tests
             "V1.GetNewAddress", "V1.ImportPrivateKey", "V1.GetMother", "V1.GetHDWallet",
             "V1.GetRestoreHDWallet", "V1.SendTransaction", "V1.CreateSignature", "V1.CreateSignatureFromPrivateKey",
             "V1.GetEncryptWallet", "V1.StartMother", "V1.JoinMother", "V1.GetPrivateKey",
-            "BTCV2.GetNewAddress", "BTCV2.GetBitcoinAccount", "BTCV2.ImportPrivateKey",
+            "BTCV2.GetNewAddress", "BTCV2.ImportPrivateKey",
             "BTCV2.ReplaceByFee", "BTCV2.SendTransaction", "BTCV2.Broadcast", "BTCV2.ResetAccount",
             "RSV1.DecodeRestoreCode", "RSV1.UnlockReserveAccount", "RSV1.NewReserveAddress", "RSV1.GetReserveAccountNFTAssets",
             "TXV1.TestMempool", "TXV1.SendTransaction",
@@ -85,10 +85,11 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void BitcoinAccountList_IsDeniedWhileLocked_UntilKeysAreRemovedFromTheResponse()
+        public void BitcoinAccountReads_AreAllowedWhileLocked_NowThatTheyCarryNoKeys()
         {
-            // BB-3 lands before VX-13; the list route returned plaintext keys until VX-13 replaces it with a DTO.
-            Assert.False(LockedWalletPolicy.IsAllowedWhileLocked("BTCV2", "GetBitcoinAccountList"));
+            // BB-3 initially denied these (they returned plaintext keys); VX-13 removed the keys from them.
+            Assert.True(LockedWalletPolicy.IsAllowedWhileLocked("BTCV2", "GetBitcoinAccountList"));
+            Assert.True(LockedWalletPolicy.IsAllowedWhileLocked("BTCV2", "GetBitcoinAccount"));
         }
 
         private static ActionExecutingContext Context(string controller, string action)
@@ -120,7 +121,7 @@ namespace VerifiedXCore.Tests
         public void Locked_AuditBypassRoutes_Are401()
         {
             Lock();
-            foreach (var (c, a) in new[] { ("BTCV2", "GetBitcoinAccountList"), ("BTCV2", "GetBitcoinAccount"), ("BTCV2", "GetNewAddress"), ("BTCV2", "ReplaceByFee") })
+            foreach (var (c, a) in new[] { ("BTCV2", "GetNewAddress"), ("BTCV2", "ReplaceByFee") })
             {
                 var ctx = Context(c, a);
                 new ActionFilterController().OnActionExecuting(ctx);

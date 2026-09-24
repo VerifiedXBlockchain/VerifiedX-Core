@@ -97,6 +97,8 @@ namespace VerifiedXCore.Controllers
             "BTCV2.GetBitcoinTXList", "BTCV2.GetLastAccounySync", "BTCV2.GetElectrumXState", "BTCV2.CalculateFee",
             "BTCV2.GetTokenizationDetails", "BTCV2.GetTokenizedBTCList", "BTCV2.SyncStatus", "BTCV2.GetvBTCBalance",
             "BTCV2.GetDefaultImageBase",
+            // VX-13: account reads no longer carry key material (BB-2 + sealed keys), so they may run while locked.
+            "BTCV2.GetBitcoinAccountList", "BTCV2.GetBitcoinAccount",
 
             // ── vBTC (reads + raw, externally signed flows) ─────────────────────────────────
             "VBTC.Get", "VBTC.GetValidatorList", "VBTC.GetValidatorStatus", "VBTC.GetMPCDepositAddress",
