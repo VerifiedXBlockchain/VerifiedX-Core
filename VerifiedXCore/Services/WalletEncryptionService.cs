@@ -83,6 +83,37 @@ namespace VerifiedXCore.Services
 			return n;
 		}
 
+		private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _passwordChecks = new();
+
+		/// <summary>Test hook: forget verified passwords (a test process opens many wallets).</summary>
+		internal static void ResetPasswordChecks() => _passwordChecks.Clear();
+
+		/// <summary>
+		/// VX-13 (follow-up): true when <paramref name="password"/> is this wallet's encryption password — it opens a
+		/// keystore record and that record's data key opens its stored private key. Anything that seals keys under the
+		/// in-memory password must check this first: the password can be set before it is verified (encpass= at startup,
+		/// the unlock routes' set-then-verify window), and sealing under a typo would lock the keys for good.
+		/// </summary>
+		public static bool IsWalletPassword(string? password)
+		{
+			if (string.IsNullOrEmpty(password)) return false;
+			var id = Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes("vfx-wallet-pw-check|" + password)));
+			if (_passwordChecks.TryGetValue(id, out var known)) return known;
+			var ok = false;
+			try
+			{
+				var ks = Keystore.GetKeystore()?.FindAll().FirstOrDefault(k => !string.IsNullOrEmpty(k.Key) && !string.IsNullOrEmpty(k.PrivateKey));
+				if (ks != null && PasswordKeyWrap.TryUnwrap(ks.Key, password, out var dataKey, out _))
+				{
+					var keyHex = DecryptKey(Convert.FromBase64String(ks.PrivateKey), Convert.FromBase64String(dataKey));
+					ok = !string.IsNullOrEmpty(keyHex) && System.Numerics.BigInteger.TryParse(keyHex, System.Globalization.NumberStyles.AllowHexSpecifier, null, out _);
+				}
+			}
+			catch { ok = false; }
+			if (ok) _passwordChecks[id] = true; // only cache successes (the keystore can appear later)
+			return ok;
+		}
+
 		/// <summary>VX-14: re-wraps one legacy keystore record (in memory and in the database). False if not legacy or not opened.</summary>
 		public static bool TryRewrapLegacy(Keystore ks, string password)
 		{

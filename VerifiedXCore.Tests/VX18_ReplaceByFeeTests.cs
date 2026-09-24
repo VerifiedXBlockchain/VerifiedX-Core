@@ -40,6 +40,7 @@ namespace VerifiedXCore.Tests
             _priorCustomPath = Globals.CustomPath;
             Globals.CustomPath = _tempRoot;
             DbContext.Initialize();
+            TestWalletKeystore.Ensure("correct horse 18"); // VX-13 follow-up: sealing verifies the wallet password
             Startup.APIEnabled = true;
             Globals.IsWalletEncrypted = false;
             Globals.EncryptPassword = new SecureString();

@@ -9,6 +9,7 @@ using VerifiedXCore;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
 using VerifiedXCore.Data;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Services;
 using Xunit;
 
@@ -39,6 +40,7 @@ namespace VerifiedXCore.Tests
             _priorCustomPath = Globals.CustomPath;
             Globals.CustomPath = _tempRoot;
             DbContext.Initialize();
+            TestWalletKeystore.Ensure("correct horse 12"); // VX-13 follow-up: sealing verifies the wallet password
             Startup.APIEnabled = true;
             Globals.IsWalletEncrypted = false;
             Globals.EncryptPassword = new SecureString();
@@ -175,6 +177,42 @@ namespace VerifiedXCore.Tests
             var tampered = sealedValue.Substring(0, sealedValue.Length - 4) + (sealedValue.EndsWith("AAAA") ? "BBBB" : "AAAA");
             Assert.False(KeystoreCrypto.TryOpen(tampered, "pw-1", out _));
             Assert.NotEqual(sealedValue, KeystoreCrypto.Seal("secret-hex", "pw-1")); // salted + random nonce
+        }
+
+        // ── Follow-up (independent review) ────────────────────────────────────────────────
+
+        [Fact]
+        public void VX13_MistypedPassword_NeverSealsKeysUnderTheTypo()
+        {
+            var a = BitcoinAccount.CreateAddress(save: true); // plaintext, pre-upgrade
+            var keyHex = a.PrivateKey;
+            Globals.IsWalletEncrypted = true;
+            Globals.EncryptPassword = Pw("correct horse 21"); // e.g. a mistyped encpass= at startup
+
+            Assert.Equal(0, BitcoinKeystore.SealPlaintextAccountsIfUnlocked());
+            Assert.False(Stored(a.Address).IsEncrypted);
+
+            Unlock(); // the real password
+            Assert.Equal(1, BitcoinKeystore.SealPlaintextAccountsIfUnlocked());
+            Assert.Equal(keyHex, BitcoinKeystore.GetPrivateKeyHex(Stored(a.Address)));
+        }
+
+        [Fact]
+        public void VX13_WriteBackAfterLazySeal_DoesNotRestoreThePlaintextKey()
+        {
+            var a = BitcoinAccount.CreateAddress(save: true);
+            var keyHex = a.PrivateKey;
+            Unlock();
+
+            var inMemory = Stored(a.Address);                 // what a send path holds
+            Assert.Equal(keyHex, BitcoinKeystore.GetPrivateKeyHex(inMemory)); // lazy seal happens here
+            inMemory.Balance += 1M;
+            BitcoinAccount.GetBitcoin()!.UpdateSafe(inMemory); // the send path's balance write-back
+
+            var stored = Stored(a.Address);
+            Assert.True(stored.IsEncrypted);
+            Assert.True(KeystoreCrypto.IsSealed(stored.PrivateKey));
+            Assert.DoesNotContain(keyHex, stored.PrivateKey);
         }
     }
 }

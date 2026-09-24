@@ -20,6 +20,16 @@ namespace VerifiedXCore.Bitcoin.Services
         private static string? CurrentPassword() =>
             Globals.EncryptPassword != null && Globals.EncryptPassword.Length > 0 ? Globals.EncryptPassword.ToUnsecureString() : null;
 
+        /// <summary>
+        /// VX-13 (follow-up): the in-memory password only if it IS the wallet password. Sealing used the in-memory value
+        /// unchecked, so a mistyped encpass= on the first start after upgrading sealed every Bitcoin key under the typo.
+        /// </summary>
+        private static string? VerifiedPassword()
+        {
+            var pw = CurrentPassword();
+            return pw != null && VerifiedXCore.Services.WalletEncryptionService.IsWalletPassword(pw) ? pw : null;
+        }
+
         /// <summary>The account's private key as hex, or null when it is sealed and the wallet is locked.</summary>
         public static string? GetPrivateKeyHex(BitcoinAccount account)
         {
@@ -31,8 +41,18 @@ namespace VerifiedXCore.Bitcoin.Services
             if (!account.IsEncrypted)
             {
                 var plain = account.PrivateKey;
-                if (Globals.IsWalletEncrypted && CurrentPassword() != null)
-                    TrySealAndSave(account); // lazy migration: never leave a plaintext key in an encrypted wallet
+                if (Globals.IsWalletEncrypted && VerifiedPassword() != null && TrySealAndSave(account))
+                {
+                    // VX-13 (follow-up): seal the caller's copy too. Send/RBF write this object back after signing
+                    // (balance update), which put the plaintext key back over the freshly sealed record.
+                    var sealedRec = BitcoinAccount.GetBitcoin()?.FindOne(x => x.Address == account.Address);
+                    if (sealedRec != null && sealedRec.IsEncrypted)
+                    {
+                        account.PrivateKey = sealedRec.PrivateKey;
+                        account.WifKey = sealedRec.WifKey;
+                        account.IsEncrypted = true;
+                    }
+                }
                 return plain;
             }
             var pw = CurrentPassword();
@@ -52,7 +72,7 @@ namespace VerifiedXCore.Bitcoin.Services
         public static bool TrySeal(BitcoinAccount account)
         {
             if (account.IsEncrypted) return true;
-            var pw = CurrentPassword();
+            var pw = VerifiedPassword(); // VX-13 (follow-up): never seal under an unverified password
             if (pw == null) return false;
             account.PrivateKey = KeystoreCrypto.Seal(account.PrivateKey, pw);
             account.WifKey = "";
@@ -84,7 +104,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public static int SealPlaintextAccountsIfUnlocked()
         {
-            if (!Globals.IsWalletEncrypted || CurrentPassword() == null) return 0;
+            if (!Globals.IsWalletEncrypted || VerifiedPassword() == null) return 0; // VX-13 (follow-up)
             int n = 0;
             try
             {
