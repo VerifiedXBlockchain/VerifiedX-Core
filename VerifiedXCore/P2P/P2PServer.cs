@@ -345,7 +345,9 @@ namespace VerifiedXCore.P2P
 
         public async Task<long?> SendBlockSpan(long startHeight, long cumulativeBuffer)
         {
-            var blockSpan = await Blockchain.GetBlockSpan(startHeight, cumulativeBuffer);
+            // VX-09: the byte budget is caller-supplied; clamp it so the span it produces is one this node
+            // will actually serve from SendBlockList.
+            var blockSpan = await Blockchain.GetBlockSpan(startHeight, BlockServeLimits.ClampByteBudget(cumulativeBuffer));
 
             if (blockSpan == null)
                 return null;
@@ -359,11 +361,22 @@ namespace VerifiedXCore.P2P
         public async Task<string> SendBlockList(long startHeight, long endHeight)
         {
             var peerIP = GetIP(Context);
-            var blockSpan = (startHeight, endHeight);
-            var blockList = await Blockchain.GetBlockListFromSpan(blockSpan);
-            if (blockList?.Count > 0)
+
+            // VX-09: validate and clamp the range (end >= start, at most MaxBlocksPerList, never past the tip),
+            // bound the reply bytes while building it, and cap concurrent builds per peer and in total. It used
+            // to materialise any caller-named range — 0..long.MaxValue returned the whole chain.
+            var range = BlockServeLimits.ClampRange(startHeight, endHeight, Globals.LastBlock.Height);
+            if (range == null)
+                return "0";
+
+            using var slot = await BlockServeLimits.TryEnterAsync(peerIP, TimeSpan.FromSeconds(2));
+            if (slot == null)
+                return "0";
+
+            var (json, count) = BlockServeLimits.BuildListJson(range.Value.Start, range.Value.End, BlockchainData.GetBlockByHeight);
+            if (count > 0)
             {
-                var blockListJsonCompressed = JsonConvert.SerializeObject(blockList).ToCompress();
+                var blockListJsonCompressed = json.ToCompress();
                 return blockListJsonCompressed;
             }
             else
@@ -398,6 +411,13 @@ namespace VerifiedXCore.P2P
                 //    }
                 //});
                 var peerIP = GetIP(Context);
+
+                // VX-09: cap concurrent block serving per peer and in total (the hub allows 200 parallel
+                // invocations per connection). Not the SignalRQueue: its sub-second delay escalation would
+                // throttle the one-block-at-a-time V1 downloader.
+                using var slot = await BlockServeLimits.TryEnterAsync(peerIP, TimeSpan.FromSeconds(2));
+                if (slot == null)
+                    return null;
 
                 var message = "";
                 var nextBlockHeight = currentBlock + 1;
