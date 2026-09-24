@@ -496,7 +496,8 @@ namespace VerifiedXCore.P2P
             {
                 // HAL-19 Fix: Add SignalRQueue protection with block size-based cost calculation
                 // HAL-16 Fix: Use Block message type to ensure blocks NEVER blocked by TXs
-                return await SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, SignalRMessageType.Block, async () =>
+                // VX-19: queue cost measured locally, not the wire Size.
+                return await SignalRQueue(Context, BlockStaging.QueueCost(nextBlock), SignalRMessageType.Block, async () =>
                 {
                     // HAL-18 Fix: Validate caller is an authenticated validator
                     var callerIP = GetIP(Context);
@@ -575,17 +576,18 @@ namespace VerifiedXCore.P2P
                             && !await ValidatorCommitGate.ConfirmAsync(nextBlock, IP, "P2PValidatorServer.ReceiveBlockVal"))
                             return false;
 
+                        // VX-19: a block ahead of tip+1 is not staged; it starts the downloader.
+                        if (currentHeight > nextHeight)
+                        {
+                            _ = BlockDownloadService.GetAllBlocks();
+                            return false;
+                        }
+
                         if (currentHeight >= nextHeight)
                         {
-                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                            BlockDownloadService.BlockDict.AddOrUpdate(
-                                currentHeight,
-                                new List<(Block, string)> { (nextBlock, IP) },
-                                (key, existingList) =>
-                                {
-                                    existingList.Add((nextBlock, IP));
-                                    return existingList;
-                                });
+                            // VX-19: gossip pre-checks, then de-duplicated, capped staging.
+                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                                return false;
 
                             // HAL-017 Fix: Use configurable delay instead of hardcoded value
                             await Task.Delay(Globals.BlockProcessingDelayMs);

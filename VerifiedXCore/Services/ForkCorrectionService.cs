@@ -95,14 +95,7 @@ namespace VerifiedXCore.Services
                 else if (height == myHeight + 1)
                 {
                     // This is the next expected block — add to download dict for normal processing
-                    BlockDownloadService.BlockDict.AddOrUpdate(
-                        correctBlock.Height,
-                        new List<(Block block, string IPAddress)> { (correctBlock, casterIP) },
-                        (key, existingList) =>
-                        {
-                            existingList.Add((correctBlock, casterIP));
-                            return existingList;
-                        });
+                    BlockStaging.Stage(correctBlock, casterIP); // VX-19: de-duplicated staging
 
                     await BlockValidatorService.ValidateBlocks();
                 }

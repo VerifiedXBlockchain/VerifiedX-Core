@@ -4377,14 +4377,7 @@ namespace VerifiedXCore.Nodes
 
             if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
             {
-                BlockDownloadService.BlockDict.AddOrUpdate(
-                    currentHeight,
-                    new List<(Block, string)> { (block, producerIp) },
-                    (key, existingList) =>
-                    {
-                        existingList.Add((block, producerIp));
-                        return existingList;
-                    });
+                BlockStaging.Stage(block, producerIp); // VX-19: de-duplicated staging (our own agreed block)
                 if (nextHeight == currentHeight)
                     await BlockValidatorService.ValidateBlocks();
                 if (nextHeight < currentHeight)

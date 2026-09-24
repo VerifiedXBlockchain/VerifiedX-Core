@@ -224,44 +224,42 @@ namespace VerifiedXCore.P2P
             try
             {
                 // HAL-16 Fix: Use Block semaphore to ensure blocks are NEVER blocked by TXs
-                return await SignalRQueue(Context, (int)nextBlock.Size, SignalRMessageType.Block, async () =>
+                // VX-19: the queue cost is measured locally (the wire Size was trusted; a negative value credited the budget).
+                return await SignalRQueue(Context, BlockStaging.QueueCost(nextBlock), SignalRMessageType.Block, async () =>
                 {
-                   
-                    if (nextBlock.ChainRefId == BlockchainData.ChainRef)
+
+                    if (nextBlock != null && nextBlock.ChainRefId == BlockchainData.ChainRef)
                     {
                         var IP = GetIP(Context);
                         var nextHeight = Globals.LastBlock.Height + 1;
                         var currentHeight = nextBlock.Height;
-                        
-                        if (currentHeight >= nextHeight)
+
+                        // VX-19: a block ahead of tip+1 is never staged (it used to be held forever — ValidateBlocks only
+                        // evicts heights below the tip). It only tells us we are behind: start the normal downloader,
+                        // which fetches from peers and validates in order.
+                        if (currentHeight > nextHeight)
+                        {
+                            _ = BlockDownloadService.GetAllBlocks();
+                            return false;
+                        }
+
+                        if (currentHeight == nextHeight)
                         {
                             // GOSSIP-GATE (Sep 2026): on a caster, a live tip+1 block from the general hub must pass
                             // the same agreed-hash / majority-attestation rule as message 7 before it is staged.
-                            if (currentHeight == nextHeight
-                                && !await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"P2PHub.ReceiveBlock:{IP}"))
+                            if (!await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"P2PHub.ReceiveBlock:{IP}"))
                                 return false;
 
-                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                            BlockDownloadService.BlockDict.AddOrUpdate(
-                                currentHeight,
-                                new List<(Block, string)> { (nextBlock, IP) },
-                                (key, existingList) =>
-                                {
-                                    existingList.Add((nextBlock, IP));
-                                    return existingList;
-                                });
+                            // VX-19: header hash, signature, version, local size and known producer; then de-duplicated,
+                            // capped staging. A block that fails is neither staged nor re-gossiped.
+                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                                return false;
 
                             await BlockValidatorService.ValidateBlocks();
 
-                            if (nextHeight == currentHeight)
-                            {
-                                string data = "";
-                                data = JsonConvert.SerializeObject(nextBlock);
-                                await Clients.All.SendAsync("GetMessage", "blk", data);
-                            }
-
-                            if (nextHeight < currentHeight)
-                                await BlockDownloadService.GetAllBlocks();
+                            string data = "";
+                            data = JsonConvert.SerializeObject(nextBlock);
+                            await Clients.All.SendAsync("GetMessage", "blk", data);
 
                             return true;
                         }
