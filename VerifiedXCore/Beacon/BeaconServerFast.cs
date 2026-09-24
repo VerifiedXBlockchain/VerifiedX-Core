@@ -38,18 +38,7 @@ namespace VerifiedXCore.Beacon
 
         private static bool CheckExtension(string fileName)
         {
-            bool output = false;
-
-            string ext = Path.GetExtension(fileName);
-
-            if (!string.IsNullOrEmpty(ext))
-            {
-                var rejectedExtList = Globals.RejectAssetExtensionTypes;
-                var exist = rejectedExtList.Contains(ext);
-                if (!exist)
-                    output = true;
-            }
-            return output;
+            return BeaconPaths.ExtensionAllowed(fileName); // NEW-03: case-insensitive
         }
         enum RequestType
         {
@@ -88,8 +77,6 @@ namespace VerifiedXCore.Beacon
                 var fileName = request.FileName;
                 var scUID = request.UniqueId;
 
-                var scuidFolder = request.UniqueId.Replace(":", "");
-
                 if (request.RequestType == RequestType.Ping)
                 {
                     var randomNum = request.UniqueId;
@@ -98,14 +85,21 @@ namespace VerifiedXCore.Beacon
                     return;
                 }
 
+                // NEW-03: every path below is resolved inside the contract's beacon folder first. The request's file
+                // name and UID were concatenated unchecked (directory creation, upload write and download read).
+                if (!BeaconPaths.TryResolve(saveArea, scUID, fileName, out var resolvedPath))
+                {
+                    await SendResponse(client.GetStream(), new Response(ResponseType.Failure, "Invalid file name."));
+                    return;
+                }
+
                 if (request.RequestType == RequestType.Upload)
                 {
                     Console.WriteLine($"Receiving file from {client.Client.RemoteEndPoint}...");
 
-                   
-
-                    if (!Directory.Exists($@"{saveArea}{scuidFolder}{Path.DirectorySeparatorChar}"))
-                        Directory.CreateDirectory($@"{saveArea}{scuidFolder}{Path.DirectorySeparatorChar}");
+                    var contractFolder = Path.GetDirectoryName(resolvedPath)!;
+                    if (!Directory.Exists(contractFolder))
+                        Directory.CreateDirectory(contractFolder);
 
                     
                     //perform file check
@@ -118,7 +112,7 @@ namespace VerifiedXCore.Beacon
                         return;
                     }
 
-                    bool fileExist = File.Exists($@"{saveArea}{scuidFolder}{Path.DirectorySeparatorChar}{request.FileName}");
+                    bool fileExist = File.Exists(resolvedPath);
                     if (fileExist)
                     {
                         var failResponse = new Response(ResponseType.Success, "Success. File Already Exist");
@@ -141,7 +135,7 @@ namespace VerifiedXCore.Beacon
                             var _beaconData = beaconData.Where(x => x.IPAdress == ip_address && x.AssetName == fileName).FirstOrDefault();
                             if (_beaconData != null)
                             {
-                                await ReceiveFile(client.GetStream(), $@"{saveArea}{scuidFolder}{Path.DirectorySeparatorChar}{request.FileName}", request.UniqueId);
+                                await ReceiveFile(client.GetStream(), resolvedPath, request.UniqueId);
                                 Console.WriteLine($"File received from {client.Client.RemoteEndPoint} successfully!");
 
                                 // Send a response back to the client
@@ -173,7 +167,7 @@ namespace VerifiedXCore.Beacon
                     //make sure its the correct person and what not.
                     //check if file exist
                     //create unique id + asset name to find.
-                    var filePath = $@"{saveArea}{scuidFolder}{Path.DirectorySeparatorChar}{request.FileName}";
+                    var filePath = resolvedPath;
                     bool fileExist = File.Exists(filePath);
                     if (!fileExist)
                     {

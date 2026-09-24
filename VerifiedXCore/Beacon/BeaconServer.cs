@@ -73,7 +73,13 @@ namespace VerifiedXCore.Beacon
                         {
                             case 125:
                                 {
-                                    bool fileExist = File.Exists(@"" + SaveTo + Encoding.UTF8.GetString(recv_data));
+                                    // NEW-03: the received name is resolved inside the beacon folder or the session ends.
+                                    if (!BeaconPaths.TryResolve(SaveTo, null, Encoding.UTF8.GetString(recv_data), out var uploadPath))
+                                    {
+                                        loop_break = true;
+                                        break;
+                                    }
+                                    bool fileExist = File.Exists(uploadPath);
                                     if (fileExist)
                                     {
                                         byte[] data_file_exist = CreateDataPacket(Encoding.UTF8.GetBytes("777"), Encoding.UTF8.GetBytes(Convert.ToString(current_file_pointer)));
@@ -119,7 +125,7 @@ namespace VerifiedXCore.Beacon
                                         }
                                     }
 
-                                    fs = new FileStream(@"" + SaveTo + fileName, FileMode.CreateNew);
+                                    fs = new FileStream(uploadPath, FileMode.CreateNew);
                                     byte[] data_to_send = CreateDataPacket(Encoding.UTF8.GetBytes("126"), Encoding.UTF8.GetBytes(Convert.ToString(current_file_pointer)));
                                     ns.Write(data_to_send, 0, data_to_send.Length);
                                     ns.Flush();
@@ -144,7 +150,7 @@ namespace VerifiedXCore.Beacon
                                             ns.Close();
                                             fs.Flush();
                                             fs.Close();
-                                            File.Delete(@"" + SaveTo + fileName);
+                                            if (BeaconPaths.TryResolve(SaveTo, null, fileName, out var deletePath)) File.Delete(deletePath);
                                             break;
                                         }
                                         catch
@@ -162,7 +168,13 @@ namespace VerifiedXCore.Beacon
                                 }
                                 break;
                             case 224:
-                                bool fileExistLoc = File.Exists(@"" + SaveTo + Encoding.UTF8.GetString(recv_data));
+                                // NEW-03: resolved inside the beacon folder or refused (a download read any file).
+                                if (!BeaconPaths.TryResolve(SaveTo, null, Encoding.UTF8.GetString(recv_data), out var downloadPath))
+                                {
+                                    loop_break = true;
+                                    break;
+                                }
+                                bool fileExistLoc = File.Exists(downloadPath);
                                 if (!fileExistLoc)
                                 {
                                     loop_break = true;
@@ -175,7 +187,7 @@ namespace VerifiedXCore.Beacon
                                     }
                                     break;
                                 }
-                                string Selected_file = (@"" + SaveTo + Encoding.UTF8.GetString(recv_data));
+                                string Selected_file = downloadPath;
                                 string File_name = Path.GetFileName(Selected_file);
 
                                 var beaconDataDb = BeaconData.GetBeacon();
@@ -251,7 +263,7 @@ namespace VerifiedXCore.Beacon
                         loop_break = true;
                         ns.Flush();
                         ns.Close();
-                        File.Delete(@"" + SaveTo + fileName);
+                        if (BeaconPaths.TryResolve(SaveTo, null, fileName, out var deletePath)) File.Delete(deletePath);
                         break;
                     }
                     catch { }

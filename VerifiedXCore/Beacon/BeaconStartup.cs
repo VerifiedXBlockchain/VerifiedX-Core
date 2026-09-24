@@ -53,8 +53,14 @@ namespace VerifiedXCore.Beacon
 
                             // Save the uploaded file
                             var fileName = file.FileName;
-                            var scuidFolder = scUID.Replace(":", "");
-                            var filePath = $@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}{fileName}";
+                            // NEW-03: the multipart file name and the route UID were concatenated onto the beacon folder
+                            // unchecked ("../../x" wrote anywhere). Resolve inside the contract's folder or refuse.
+                            if (!BeaconPaths.TryResolve(SaveArea, scUID, fileName, out var filePath))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync("Invalid file name.");
+                                return;
+                            }
 
                             var extChkResult = CheckExtension(fileName);
                             if (!extChkResult)
@@ -73,8 +79,9 @@ namespace VerifiedXCore.Beacon
                                 return;
                             }
 
-                            if (!Directory.Exists($@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}"))
-                                Directory.CreateDirectory($@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}");
+                            var contractFolder = Path.GetDirectoryName(filePath)!;
+                            if (!Directory.Exists(contractFolder))
+                                Directory.CreateDirectory(contractFolder);
 
 
                             var beaconData = BeaconData.GetBeaconData();
@@ -161,9 +168,13 @@ namespace VerifiedXCore.Beacon
                             return;
                         }
 
-                        var scuidFolder = scUID.Replace(":", "");
-
-                        var filePath = $@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}{fileName}";
+                        // NEW-03: resolve inside the contract's folder or refuse (a download read any file on Windows).
+                        if (!BeaconPaths.TryResolve(SaveArea, scUID, fileName, out var filePath))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync("Invalid file name.");
+                            return;
+                        }
                         bool fileExist = File.Exists(filePath);
                         if (!fileExist)
                         {
@@ -218,18 +229,7 @@ namespace VerifiedXCore.Beacon
 
         private static bool CheckExtension(string fileName)
         {
-            bool output = false;
-
-            string ext = Path.GetExtension(fileName);
-
-            if (!string.IsNullOrEmpty(ext))
-            {
-                var rejectedExtList = Globals.RejectAssetExtensionTypes;
-                var exist = rejectedExtList.Contains(ext);
-                if (!exist)
-                    output = true;
-            }
-            return output;
+            return BeaconPaths.ExtensionAllowed(fileName); // NEW-03: case-insensitive
         }
     }
 }

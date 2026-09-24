@@ -326,6 +326,13 @@ namespace VerifiedXCore.P2P
                         return result;
                     }
 
+                    // NEW-03: asset names become file names on this beacon; only plain names are registered.
+                    if (bsd.Assets == null || bsd.Assets.Any(a => !NFTAssetFileUtility.IsSafeAssetFileName(a)))
+                    {
+                        SCLogUtility.Log($"Unsafe asset name in upload request for {bsd.SmartContractUID}", "P2PBeaconServer.ReceiveUploadRequest");
+                        return result;
+                    }
+
                     var beaconData = BeaconData.GetBeaconData();
                     foreach (var fileName in bsd.Assets)
                     {
