@@ -268,7 +268,9 @@ namespace VerifiedXCore.Data
                                         EvolveDevolveSpecific(tx);
                                         break;
                                     case "TokenDeploy()":
-                                        DeployTokenContract(tx, block);
+                                        // VX-02: awaited. It was fire-and-forget, so a later TX in the same
+                                        // block could run before this deploy's state writes landed.
+                                        await DeployTokenContract(tx, block);
                                         break;
                                     case "TokenTransfer()":
                                         TokenTransfer(tx, block);
@@ -1761,27 +1763,40 @@ namespace VerifiedXCore.Data
             }
         }
 
+        /// <summary>
+        /// TokenDeploy() apply. VX-02: every identity used here comes from the SIGNED transaction:
+        /// the state record, the token owner (TokenDetails.ContractOwner), the credited account and the
+        /// token account's contract UID are tx.FromAddress / the tx ContractUID. The decompiled body is
+        /// read only for the token parameters. Previously the supply was credited under the body's own
+        /// SmartContractUID to the body's own MinterAddress, so a deploy under a fresh UID could inflate
+        /// an existing token for any address. The validator now rejects a mismatched body; this apply is
+        /// written so it could not credit a foreign identity even if one were ever mined.
+        /// Never throws: it is awaited by UpdateTreis, where a throw would flag the block's state apply.
+        /// </summary>
         private static async Task DeployTokenContract(Transaction tx, Block block)
         {
-            SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
-            var stDb = GetAccountStateTrei();
-            if (scData != null)
+            try
             {
-                var function = (string?)scData["Function"];
-                var data = (string?)scData["Data"];
-                var scUID = (string?)scData["ContractUID"];
-                var md5List = (string?)scData["MD5List"];
+                var (_, scUID, data, md5List) = SmartContractDeployBinding.ReadPayload(tx.Data);
+                if (string.IsNullOrEmpty(scUID))
+                {
+                    ErrorLogUtility.LogError($"DeployTokenContract: missing ContractUID. TX: {tx.Hash}", "StateData.DeployTokenContract()");
+                    return;
+                }
 
+                var owner = tx.FromAddress;
+                var stDb = GetAccountStateTrei();
 
-                scST.ContractData = data;
-                scST.MinterAddress = tx.FromAddress;
-                scST.OwnerAddress = tx.FromAddress;
-                scST.SmartContractUID = scUID;
-                scST.Nonce = 0;
-                scST.MD5List = md5List;
-                scST.IsToken = true;
+                SmartContractStateTrei scST = new SmartContractStateTrei
+                {
+                    ContractData = data,
+                    MinterAddress = owner,
+                    OwnerAddress = owner,
+                    SmartContractUID = scUID,
+                    Nonce = 0,
+                    MD5List = md5List,
+                    IsToken = true,
+                };
 
                 try
                 {
@@ -1796,59 +1811,45 @@ namespace VerifiedXCore.Data
                             if(tokenFeature != null)
                             {
                                 var tokenDetails = TokenDetails.CreateTokenDetails(tokenFeature, sc);
+                                tokenDetails.ContractOwner = owner; // VX-02: not sc.MinterAddress
                                 scST.TokenDetails = tokenDetails;
 
                                 if(tokenFeature.TokenSupply > 0)
                                 {
-                                    var toAddress = GetSpecificAccountStateTrei(sc.MinterAddress);
+                                    // VX-02: token account keyed on the tx UID, credited to the tx sender.
+                                    var tokenAccount = TokenAccount.CreateTokenAccount(scUID, tokenFeature.TokenName,
+                                        tokenFeature.TokenTicker, tokenFeature.TokenSupply, tokenFeature.TokenDecimalPlaces);
+
+                                    var toAddress = GetSpecificAccountStateTrei(owner);
                                     if(toAddress != null)
                                     {
-                                        var tokenAccount = TokenAccount.CreateTokenAccount(sc.SmartContractUID, tokenFeature.TokenName,
-                                            tokenFeature.TokenTicker, tokenFeature.TokenSupply, tokenFeature.TokenDecimalPlaces);
-
                                         if(toAddress.TokenAccounts?.Count > 0)
                                         {
                                             toAddress.TokenAccounts.Add(tokenAccount);
                                         }
                                         else
                                         {
-                                            List<TokenAccount> tokenAccounts = new List<TokenAccount>
-                                            {
-                                                tokenAccount
-                                            };
-
-                                            toAddress.TokenAccounts = tokenAccounts;
+                                            toAddress.TokenAccounts = new List<TokenAccount> { tokenAccount };
                                         }
 
                                         await stDb.UpdateSafeAsync(toAddress);
                                     }
                                     else
                                     {
-                                        var tokenAccount = TokenAccount.CreateTokenAccount(sc.SmartContractUID, tokenFeature.TokenName, 
-                                            tokenFeature.TokenTicker, tokenFeature.TokenSupply, tokenFeature.TokenDecimalPlaces);
-
-                                        List<TokenAccount> tokenAccounts = new List<TokenAccount>
-                                        {
-                                            tokenAccount
-                                        };
-
                                         var acctStateTreiTo = new AccountStateTrei
                                         {
-                                            Key = tx.ToAddress,
+                                            Key = owner, // VX-02: was tx.ToAddress (a third identity)
                                             Nonce = 0,
                                             Balance = 0.0M,
                                             StateRoot = block.StateRoot,
                                             LockedBalance = 0.0M,
-                                            TokenAccounts = tokenAccounts
+                                            TokenAccounts = new List<TokenAccount> { tokenAccount }
                                         };
 
                                         await stDb.InsertSafeAsync(acctStateTreiTo);
                                     }
-
-
                                 }
                             }
-                            
                         }
                         else if (tokenizationV2Features != null)
                         {
@@ -1867,7 +1868,7 @@ namespace VerifiedXCore.Data
                                     StartingSupply = 0,
                                     CurrentSupply = 0,
                                     IsPaused = false,
-                                    ContractOwner = sc.MinterAddress,
+                                    ContractOwner = owner, // VX-02: not sc.MinterAddress
                                     DecimalPlaces = 8,
                                     TokenBurnable = false,
                                     TokenMintable = false,
@@ -1882,6 +1883,10 @@ namespace VerifiedXCore.Data
 
                 //Save to state trei
                 SmartContractStateTrei.SaveSmartContract(scST);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"DeployTokenContract error: {ex.Message}. TX: {tx.Hash}", "StateData.DeployTokenContract()");
             }
         }
         private static void TokenContractOwnerChange(Transaction tx)

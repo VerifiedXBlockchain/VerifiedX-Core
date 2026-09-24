@@ -487,6 +487,13 @@ namespace VerifiedXCore.Services
                                             if(txRequest.FromAddress.StartsWith("xRBX"))
                                                 return (txResult, "A reserve account may not mint a smart contract.");
 
+                                            // VX-02: the body's embedded UID and MinterAddress must be the
+                                            // transaction's; downstream readers of ContractData trust them.
+                                            var mintBody = SmartContractDeployBinding.ReadPayload(txData).Data;
+                                            var mintBindingError = SmartContractDeployBinding.Validate(mintBody, scUID, txRequest.FromAddress, isTokenDeploy: false, out _);
+                                            if (mintBindingError != null)
+                                                return (txResult, mintBindingError);
+
                                             break;
                                         }
 
@@ -498,6 +505,15 @@ namespace VerifiedXCore.Services
                                             
                                             if (txRequest.FromAddress.StartsWith("xRBX"))
                                                 return (txResult, "A reserve account may not deploy a token smart contract.");
+
+                                            // VX-02: the apply credits the initial supply; the body's embedded
+                                            // UID and MinterAddress must be the transaction's (a mismatched body
+                                            // credited an attacker-chosen supply of an EXISTING token), and the
+                                            // supply / decimals must be within documented bounds.
+                                            var deployBody = SmartContractDeployBinding.ReadPayload(txData).Data;
+                                            var deployBindingError = SmartContractDeployBinding.Validate(deployBody, scUID, txRequest.FromAddress, isTokenDeploy: true, out _);
+                                            if (deployBindingError != null)
+                                                return (txResult, deployBindingError);
 
                                             break;
                                         }
@@ -2550,6 +2566,13 @@ namespace VerifiedXCore.Services
                         var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                         if (scStateTreiRec != null)
                             return (txResult, "This vBTC V2 smart contract has already been minted.");
+
+                        // VX-02: same body binding as the generic Mint() path — this type is applied by
+                        // the same StateData mint dispatcher.
+                        var v2Body = SmartContractDeployBinding.ReadPayload(txData).Data;
+                        var v2BindingError = SmartContractDeployBinding.Validate(v2Body, scUID, txRequest.FromAddress, isTokenDeploy: false, out _);
+                        if (v2BindingError != null)
+                            return (txResult, v2BindingError);
                     }
                     catch (Exception ex)
                     {

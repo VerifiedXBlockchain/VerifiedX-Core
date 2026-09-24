@@ -27,6 +27,54 @@ namespace VerifiedXCore.Tests
         /// <summary>ContractData of an ordinary NFT with no features — NOT a vBTC contract.</summary>
         public static string PlainNftContractData => _plainNft.Value;
 
+        /// <summary>
+        /// Builds a real contract body with an arbitrary embedded UID, minter and feature list,
+        /// encoded exactly as the mint transaction's Data field. Used by VX-02 tests to author bodies
+        /// whose embedded identity differs from the carrying transaction.
+        /// </summary>
+        public static string BuildContractData(string embeddedUid, string embeddedMinter, List<SmartContractFeatures>? features, string name = "Fixture")
+        {
+            var scMain = new SmartContractMain
+            {
+                SmartContractUID = embeddedUid,
+                Name = name,
+                Description = "test fixture",
+                MinterAddress = embeddedMinter,
+                MinterName = "fixture",
+                IsPublic = true,
+                SCVersion = Globals.SCVersion,
+                IsMinter = true,
+                IsPublished = false,
+                IsToken = false,
+                SmartContractAsset = new SmartContractAsset { Name = "fixture_asset", Location = "default", AssetAuthorName = "fixture", FileSize = 0 },
+                Features = features,
+            };
+            var (scText, _, _) = SmartContractWriterService.WriteSmartContract(scMain).GetAwaiter().GetResult();
+            if (string.IsNullOrWhiteSpace(scText) || scText.StartsWith("Failed", StringComparison.Ordinal))
+                throw new InvalidOperationException($"Fixture contract generation failed: {scText}");
+            return Encoding.Unicode.GetBytes(scText).ToCompress().ToBase64();
+        }
+
+        /// <summary>A fungible-token deploy body (Token feature) with the given embedded identity and supply.</summary>
+        public static string TokenContractData(string embeddedUid, string embeddedMinter, long supply, int decimals = 2)
+            => BuildContractData(embeddedUid, embeddedMinter, new List<SmartContractFeatures>
+            {
+                new SmartContractFeatures
+                {
+                    FeatureName = FeatureName.Token,
+                    FeatureFeatures = Newtonsoft.Json.Linq.JObject.FromObject(new TokenFeature
+                    {
+                        TokenName = "Fixture Token",
+                        TokenTicker = "FXT",
+                        TokenDecimalPlaces = decimals,
+                        TokenSupply = supply,
+                        TokenBurnable = false,
+                        TokenVoting = false,
+                        TokenMintable = false,
+                    }),
+                },
+            }, name: "Fixture Token");
+
         private static string Build(bool vbtcV2)
         {
             var scMain = new SmartContractMain
