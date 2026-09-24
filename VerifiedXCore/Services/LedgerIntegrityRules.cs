@@ -73,5 +73,12 @@ namespace VerifiedXCore.Services
             catch { }
             return null;
         }
+
+        /// <summary>NEW-06: registers a block transaction's contract creation; the reason when its UID was already created in this block.</summary>
+        public static string? RegisterCreationInBlock(Transaction tx, HashSet<string> createdInBlock)
+        {
+            var uid = CreatedContractUid(tx);
+            return uid != null && !createdInBlock.Add(uid) ? $"Duplicate creation of contract {uid} within block." : null;
+        }
     }
 }

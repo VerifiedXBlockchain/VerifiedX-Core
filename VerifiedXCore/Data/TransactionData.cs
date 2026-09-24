@@ -1176,7 +1176,31 @@ namespace VerifiedXCore.Data
 
             }
 
-            return approvedMemPoolList;
+            // NEW-06: one contract creation per ContractUID per block (block validation rejects a block carrying two,
+            // see BlockValidatorService). Keep the first; drop a later one AND that sender's later transactions so the
+            // proposal has no nonce gap. The dropped creation stays in the mempool and fails as "already deployed".
+            return DropDuplicateContractCreations(approvedMemPoolList);
+        }
+
+        public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
+        {
+            var created = new HashSet<string>(StringComparer.Ordinal);
+            var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
+            var result = new List<Transaction>();
+            foreach (var tx in approved)
+            {
+                if (tx.FromAddress != null && blockedSenders.Contains(tx.FromAddress))
+                    continue;
+                var uid = LedgerIntegrityRules.CreatedContractUid(tx);
+                if (uid != null && !created.Add(uid))
+                {
+                    if (tx.FromAddress != null) blockedSenders.Add(tx.FromAddress);
+                    LogUtility.Log($"[ProcessTxPool] Skipping duplicate creation of contract {uid} (tx {tx.Hash}) for this block", "TransactionData.ProcessTxPool()");
+                    continue;
+                }
+                result.Add(tx);
+            }
+            return result;
         }
 
         public static async Task<bool> DoubleSpendReplayCheck(Transaction tx)

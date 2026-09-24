@@ -879,6 +879,10 @@ namespace VerifiedXCore.Services
                         // VBTC_V2_WITHDRAWAL_REQUESTs for the same contract in one block. Track the
                         // contracts seen here and reject the second (mirrors blockPrivateNullifierKeys).
                         var blockWithdrawalContracts = new HashSet<string>();
+                        // NEW-06: one contract creation (Mint/TokenDeploy/vBTC V2 create) per ContractUID per block. The
+                        // "already deployed" checks read committed state only, so two creations of one UID in the same
+                        // block both passed and the second credited its own supply under the first's contract.
+                        var blockCreatedContracts = new HashSet<string>(StringComparer.Ordinal);
                         var blockBridgeState = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
@@ -941,6 +945,13 @@ namespace VerifiedXCore.Services
                                         }
                                     }
                                     catch { }
+                                }
+
+                                if (effectiveTxResult.Item1)
+                                {
+                                    var duplicateCreation = LedgerIntegrityRules.RegisterCreationInBlock(blkTransaction, blockCreatedContracts);
+                                    if (duplicateCreation != null)
+                                        effectiveTxResult = (false, duplicateCreation);
                                 }
 
                                 // Bridge: one redemption per Base burn and one draw per lock within a block
