@@ -44,7 +44,11 @@ namespace VerifiedXCore.Models
         /// public string PrivateKey
         /// </returns>
         /// <exception cref="PrivateKey"></exception>
+        // NEW-01: never persisted. GetKey decrypts when the wallet is unlocked; LiteDB used to write it (in
+        // plaintext) into the wallet database on every save made while unlocked.
+        [LiteDB.BsonIgnore]
         public string GetKey{ get { return GetPrivateKey(PrivateKey, Address); } }
+        [LiteDB.BsonIgnore]
         public PrivateKey? GetPrivKey { get { return GetClassPrivateKey(GetKey); } }
 
         public Account Build()

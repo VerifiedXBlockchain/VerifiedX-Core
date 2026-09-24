@@ -127,6 +127,8 @@ namespace VerifiedXCore.Services
         {
             ConsoleWriterService.Output("Initializing VerifiedX Database...");
             DbContext.Initialize();
+            // NEW-01: remove private keys that older builds wrote to the wallet database in plaintext.
+            KeyPersistenceScrub.Run(DbContext.DB_Wallet, GetPathUtility.GetDatabasePath() + DbContext.RSRV_DB_WALLET_NAME);
             var peerDb = Peers.GetAll();
             Globals.BannedIPs = new ConcurrentDictionary<string, Peers>(
                 peerDb.Find(x => x.IsBanned || x.IsPermaBanned).ToArray().ToDictionary(x => x.PeerIP, x => x));

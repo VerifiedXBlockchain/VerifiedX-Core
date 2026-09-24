@@ -32,8 +32,11 @@ namespace VerifiedXCore.Models
         public decimal AvailableBalance { get; set; } //funds reserved or locked must always be above 0.5 VFX
         public decimal LockedBalance { get; set; } //funds currently pending use
         public bool IsNetworkProtected { get; set; } // this is set once 4 VFX has been sent.
+        // NEW-01: never persisted (decrypts while the reserve account is unlocked).
+        [BsonIgnore]
         public string GetKey { get { return GetPrivateKey(PrivateKey, Address, EncryptedDecryptKey); } }
         public decimal TotalBalance { get { return AvailableBalance + LockedBalance; } }
+        [BsonIgnore]
         public PrivateKey? GetPrivKey { get { return GetClassPrivateKey(GetKey); } }
 
         public class ReserveAccountInfo
