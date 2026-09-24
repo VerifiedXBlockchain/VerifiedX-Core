@@ -473,6 +473,27 @@ namespace VerifiedXCore.DST
             }
         }
 
+        /// <summary>VX-04: true when <paramref name="scUID"/> is a contract this shop lists.</summary>
+        internal static bool IsListedOnThisShop(string? scUID)
+        {
+            if (string.IsNullOrEmpty(scUID)) return false;
+            var listings = Listing.GetAllListings();
+            return listings != null && listings.Any(l => l.SmartContractUID == scUID);
+        }
+
+        /// <summary>
+        /// VX-04: true when <paramref name="requestedName"/> is the thumbnail name of one of the assets of
+        /// listed contract <paramref name="scUID"/> (same mapping the buyer uses to request it).
+        /// </summary>
+        internal static async Task<bool> IsListedAssetThumbnail(string? scUID, string? requestedName)
+        {
+            if (string.IsNullOrEmpty(requestedName) || !IsListedOnThisShop(scUID)) return false;
+            var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
+            if (sc == null) return false;
+            var assets = await NFTAssetFileUtility.GetAssetListFromSmartContract(sc);
+            return assets.Any(a => string.Equals(NFTAssetFileUtility.ThumbnailRequestName(a), requestedName, StringComparison.Ordinal));
+        }
+
         public static async Task AssetRequest(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
             if (message.Type == MessageType.AssetReq)
@@ -482,6 +503,9 @@ namespace VerifiedXCore.DST
                     if(message.ComType == MessageComType.Info)
                     {
                         var scUID = message.Data;
+                        // VX-04: only contracts this shop actually lists (was: any contract in the local DB).
+                        if (!IsListedOnThisShop(scUID))
+                            return;
                         var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
                         if (sc == null)
                             return;
@@ -507,8 +531,8 @@ namespace VerifiedXCore.DST
                     if (message.ComType == MessageComType.Request)
                     {
 
-                        var assetMessageDataArray = message.Data.Split(',');
-                        if(assetMessageDataArray != null) 
+                        var assetMessageDataArray = message.Data?.Split(',');
+                        if(assetMessageDataArray != null && assetMessageDataArray.Length >= 4)
                         {
                             var uniqueId = assetMessageDataArray[0];
                             var asset = assetMessageDataArray[1];
@@ -523,7 +547,17 @@ namespace VerifiedXCore.DST
                                     _asset = asset.Replace(".pdf", ".jpg");
                                 }
 
-                                _ = AssetSendService.SendAsset(_asset, assetscUID, endPoint, udpClient, ackNum);
+                                // VX-04: unauthenticated datagrams used to reach the filesystem with a
+                                // caller-chosen name and contract. Now: the sender must have completed
+                                // the shop handshake, the contract must be listed on this shop, and the
+                                // name must be one of that contract's thumbnail names. Path resolution is
+                                // additionally confined to the asset folder (NFTAssetFileUtility).
+                                if (ackNumParse && ackNum >= 0 &&
+                                    Globals.ConnectedClients.ContainsKey(endPoint.ToString()) &&
+                                    await IsListedAssetThumbnail(assetscUID, _asset))
+                                {
+                                    _ = AssetSendService.SendAsset(_asset, assetscUID, endPoint, udpClient, ackNum);
+                                }
                             }
                             catch { }
                         }   

@@ -10,12 +10,22 @@ namespace VerifiedXCore.Services
     {
         public static ConcurrentDictionary<string, byte[][]> AssetByteArrayDictionary = new ConcurrentDictionary<string, byte[][]>();
 
+        /// <summary>VX-04: thumbnails served over UDP are small; refuse to load anything larger.</summary>
+        public const long MaxServedAssetBytes = 25L * 1024 * 1024;
+
         public static async Task SendAsset(string asset, string scUID, IPEndPoint endPoint, UdpClient udpClient, int ackNum)
         {
             try
             {
+                if (ackNum < 0)
+                    return;
+
                 var location = NFTAssetFileUtility.NFTAssetPath(asset, scUID, true);
-                var dictKey = asset + scUID;
+                if (location == "NA")
+                    return;
+
+                // VX-04: cache by the canonical, validated path (was the raw request string).
+                var dictKey = location;
 
                 if(AssetByteArrayDictionary.TryGetValue(dictKey, out var packetArray)) 
                 {
@@ -32,7 +42,7 @@ namespace VerifiedXCore.Services
                 }
                 else
                 {
-                    if (location != "NA")
+                    if (location != "NA" && new FileInfo(location).Length <= MaxServedAssetBytes)
                     {
                         var assetBytes = NFTAssetFileUtility.GetNFTAssetByteArray(location);
                         if (assetBytes != null)
