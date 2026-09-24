@@ -528,11 +528,30 @@ namespace VerifiedXCore.Controllers
         }
 
 
+        /// <summary>VX-22: request body limit for the image decompression routes (Kestrel's default was 30 MB).</summary>
+        public const int MaxCompressedImageRequestBytes = 4_000_000;
+        /// <summary>VX-22: absolute output bound for a decompressed image.</summary>
+        public const int MaxDecompressedImageBytes = 16 * 1024 * 1024;
+        /// <summary>VX-22: images are already compressed, so a real one expands ~1:1; the audit's payload expanded 771:1.</summary>
+        public const int MaxImageExpansionRatio = 100;
+
+        /// <summary>
+        /// VX-22: decompresses a caller-supplied image within the absolute bound and the expansion-ratio bound (small
+        /// inputs may expand to 64 KB regardless of ratio). Throws InvalidDataException past either bound.
+        /// </summary>
+        public static byte[] DecompressImage(byte[] compressedBytes)
+        {
+            var ratioBound = (long)compressedBytes.Length * MaxImageExpansionRatio;
+            var limit = (int)Math.Min(MaxDecompressedImageBytes, Math.Max(64 * 1024, ratioBound));
+            return compressedBytes.ToDecompress(limit);
+        }
+
         /// <summary>
         /// Takes compressed base 64 image and decompresses it and returns byte array.
         /// </summary>
         /// <returns></returns>
         [HttpPost("GetImageUncompressedByte")]
+        [RequestSizeLimit(MaxCompressedImageRequestBytes)] // VX-22
         public async Task<string> GetUncompressedByte([FromBody] string jsonData)
         {
             try
@@ -541,13 +560,15 @@ namespace VerifiedXCore.Controllers
 
                 byte[] compressedBytes = compressedBase64.FromBase64ToByteArray();
 
-                byte[] decompressedBytes = compressedBytes.ToDecompress();
+                byte[] decompressedBytes = DecompressImage(compressedBytes); // VX-22: bounded (was unbounded)
 
                 return JsonConvert.SerializeObject(new { Success = true, Message = "Success", ImageByteArray = decompressedBytes });
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                // VX-22: no exception detail to the caller (it returned the full exception text).
+                Utilities.ErrorLogUtility.LogError($"GetImageUncompressedByte failed: {ex.Message}", "V2Controller.GetUncompressedByte()");
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Error: invalid or oversized compressed image." });
             }
         }
 
@@ -556,6 +577,7 @@ namespace VerifiedXCore.Controllers
         /// </summary>
         /// <returns></returns>
         [HttpPost("GetImageUncompressedBase")]
+        [RequestSizeLimit(MaxCompressedImageRequestBytes)] // VX-22
         public async Task<string> GetImageUncompressedBase([FromBody] string jsonData)
         {
             try
@@ -564,13 +586,15 @@ namespace VerifiedXCore.Controllers
 
                 byte[] compressedBytes = compressedBase64.FromBase64ToByteArray();
 
-                string decompressedBase64 = compressedBytes.ToDecompress().ToBase64();
+                string decompressedBase64 = DecompressImage(compressedBytes).ToBase64(); // VX-22: bounded (was unbounded)
 
                 return JsonConvert.SerializeObject(new { Success = true, Message = "Success", ImageBase64 = decompressedBase64 });
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                // VX-22: no exception detail to the caller.
+                Utilities.ErrorLogUtility.LogError($"GetImageUncompressedBase failed: {ex.Message}", "V2Controller.GetImageUncompressedBase()");
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Error: invalid or oversized compressed image." });
             }
         }
 
