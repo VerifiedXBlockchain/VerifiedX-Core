@@ -29,17 +29,17 @@ namespace VerifiedXCore
                 options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
                 options.MaximumReceiveMessageSize = 1179648;
                 options.StreamBufferCapacity = 1024;
-                options.EnableDetailedErrors = true;
+                options.EnableDetailedErrors = false; // VX-23 (follow-up): no exception detail to remote peers
                 options.MaximumParallelInvocationsPerClient = 20; // HAL-054 Fix: Limit concurrent invocations per client
                 options.HandshakeTimeout = TimeSpan.FromSeconds(30);
             }).AddHubOptions<P2PValidatorServer>(options =>
             {
-                options.EnableDetailedErrors = true;
+                options.EnableDetailedErrors = false; // VX-23 (follow-up): no exception detail to remote peers
                 options.MaximumReceiveMessageSize = 8388608;
             })
             .AddHubOptions<P2PBlockcasterServer>(options =>
             {
-                options.EnableDetailedErrors = true;
+                options.EnableDetailedErrors = false; // VX-23 (follow-up): no exception detail to remote peers
                 options.MaximumReceiveMessageSize = 8388608;
             });
 

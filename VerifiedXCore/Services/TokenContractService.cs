@@ -222,7 +222,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Unknown Error. Error: {ex.ToString()}");
+                return (false, $"Unknown Error. Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -328,7 +328,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Unknown Error. Error: {ex.ToString()}");
+                return (false, $"Unknown Error. Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -427,7 +427,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Unknown Error. Error: {ex.ToString()}");
+                return (false, $"Unknown Error. Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -548,7 +548,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Unknown Error. Error: {ex.ToString()}");
+                return (false, $"Unknown Error. Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -646,7 +646,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Unknown Error. Error: {ex.ToString()}");
+                return (false, $"Unknown Error. Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -745,7 +745,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Unknown Error. Error: {ex.ToString()}");
+                return (false, $"Unknown Error. Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -851,7 +851,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Unknown Error. Error: {ex.ToString()}");
+                return (false, $"Unknown Error. Error: {ApiErrorText.For(ex)}");
             }
         }
     }

@@ -30,7 +30,7 @@ namespace VerifiedXCore
                 options.ClientTimeoutInterval = TimeSpan.FromSeconds(60); //close connection after 60 seconds
                 options.MaximumReceiveMessageSize = 1179648;
                 options.StreamBufferCapacity = 25; //was 1024
-                options.EnableDetailedErrors = true;
+                options.EnableDetailedErrors = false; // VX-23 (follow-up): no exception detail to remote peers
                 options.MaximumParallelInvocationsPerClient = 200; // HAL-054 Fix: Limit concurrent invocations per client
             });
             services.AddHostedService<ClientCallService>();

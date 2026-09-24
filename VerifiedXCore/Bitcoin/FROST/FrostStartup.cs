@@ -2767,7 +2767,7 @@ namespace VerifiedXCore.Bitcoin.FROST
             }
             catch (Exception ex)
             {
-                return (false, $"Error checking previously signed transaction: {ex.Message}");
+                return (false, $"Error checking previously signed transaction: {ApiErrorText.For(ex)}");
             }
         }
 

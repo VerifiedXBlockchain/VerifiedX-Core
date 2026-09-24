@@ -1942,7 +1942,7 @@ namespace VerifiedXCore.Services
                 CasterLogUtility.Log(
                     $"[CONSENSUS-V2] HandlePromoteAnnounce EXCEPTION: {ex.GetType().Name}: {ex.Message}",
                     "CasterFlow");
-                return $"rejected: {ex.Message}";
+                return $"rejected: {ApiErrorText.For(ex)}";
             }
         }
 

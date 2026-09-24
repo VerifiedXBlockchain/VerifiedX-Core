@@ -47,7 +47,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 // ── 1. Parse the transaction and bind the announced sighashes to it ────────────
                 NBitcoin.Transaction tx;
                 try { tx = NBitcoin.Transaction.Parse(request.UnsignedTxHex, Globals.BTCNetwork); }
-                catch (Exception ex) { return (false, $"UnsignedTxHex unparseable: {ex.Message}"); }
+                catch (Exception ex) { return (false, $"UnsignedTxHex unparseable: {ApiErrorText.For(ex)}"); }
 
                 var inputCount = tx.Inputs.Count;
                 if (inputCount == 0 || tx.Outputs.Count == 0) return (false, "Transaction must have inputs and outputs");
@@ -106,7 +106,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                 Script depositScript;
                 try { depositScript = BitcoinAddress.Create(depositAddress, Globals.BTCNetwork).ScriptPubKey; }
-                catch (Exception ex) { return (false, $"Contract deposit address invalid: {ex.Message}"); }
+                catch (Exception ex) { return (false, $"Contract deposit address invalid: {ApiErrorText.For(ex)}"); }
 
                 for (int i = 0; i < inputCount; i++)
                 {
@@ -150,7 +150,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                 Script destinationScript;
                 try { destinationScript = BitcoinAddress.Create(destination, Globals.BTCNetwork).ScriptPubKey; }
-                catch (Exception ex) { return (false, $"Authorized destination invalid: {ex.Message}"); }
+                catch (Exception ex) { return (false, $"Authorized destination invalid: {ApiErrorText.For(ex)}"); }
 
                 // ── 4. Outputs: destination (bounded) or change to the vault, nothing else ─────
                 //      AND the vault's total cost (destination + miner fee) must fit the authorization.
@@ -176,7 +176,7 @@ namespace VerifiedXCore.Bitcoin.FROST
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"FrostSigningAuthorization error: {ex}", "FrostSigningAuthorization.Authorize");
-                return (false, $"Authorization error: {ex.Message}");
+                return (false, $"Authorization error: {ApiErrorText.For(ex)}");
             }
         }
 

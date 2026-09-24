@@ -264,7 +264,7 @@ namespace VerifiedXCore.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error Saving: {ex.ToString()}", "DecShop.SaveMyDecShopLocal()");
-                return (false, $"Unknown Error Saving/Updating Dec Shop. Error: {ex.ToString()}");
+                return (false, $"Unknown Error Saving/Updating Dec Shop. Error: {ApiErrorText.For(ex)}");
             }
         }
 

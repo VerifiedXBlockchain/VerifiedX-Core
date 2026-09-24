@@ -203,7 +203,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Invalid Taproot address '{taprootAddress}': {ex.Message}", "BitcoinTransactionService.GetTaprootUTXOs()");
-                return UtxoLookupResult.Failed($"Invalid Taproot address: {ex.Message}", 0);
+                return UtxoLookupResult.Failed($"Invalid Taproot address: {ApiErrorText.For(ex)}", 0);
             }
 
             var candidates = GetElectrumServerCandidates();
@@ -344,7 +344,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
                 catch (Exception ex)
                 {
-                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), $"Invalid address: {ex.Message}");
+                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), $"Invalid address: {ApiErrorText.For(ex)}");
                 }
 
                 // Get UTXOs
@@ -470,7 +470,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error building unsigned Taproot transaction: {ex}", "BitcoinTransactionService.BuildUnsignedTaprootTransaction()");
-                return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), $"Error: {ex.Message}");
+                return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -686,7 +686,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error signing transaction with FROST: {ex}", "BitcoinTransactionService.SignTransactionWithFROST()");
-                return (false, string.Empty, string.Empty, $"Error: {ex.Message}", null);
+                return (false, string.Empty, string.Empty, $"Error: {ApiErrorText.For(ex)}", null);
             }
         }
 
@@ -733,7 +733,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error broadcasting transaction: {ex}", "BitcoinTransactionService.BroadcastTransaction()");
-                return (false, string.Empty, $"Error: {ex.Message}");
+                return (false, string.Empty, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -959,7 +959,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Error executing FROST withdrawal: {ex}", "BitcoinTransactionService.ExecuteFROSTWithdrawal()");
-                return (false, string.Empty, string.Empty, $"Error: {ex.Message}", null);
+                return (false, string.Empty, string.Empty, $"Error: {ApiErrorText.For(ex)}", null);
             }
         }
     }

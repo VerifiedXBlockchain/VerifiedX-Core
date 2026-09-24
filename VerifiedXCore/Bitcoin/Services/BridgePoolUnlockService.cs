@@ -164,7 +164,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Bridge Pool Unlock Error: {ex.Message}", "BridgePoolUnlockService.CreateBridgePoolUnlockTx()");
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
     }

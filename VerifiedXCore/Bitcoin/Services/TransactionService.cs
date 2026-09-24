@@ -210,7 +210,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"ERROR: {ex}", "TransactionService.SendTransaction()");
-                return (false, $"Error: {ex}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
 
         }
@@ -325,7 +325,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Error: {ex}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -513,7 +513,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = true, Message = $"TX not verified. ERROR: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = true, Message = $"TX not verified. ERROR: {ApiErrorText.For(ex)}" });
             }
 
         }
@@ -764,7 +764,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TransactionService.SendMultiSigTransactions()", false);
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ApiErrorText.For(ex)}", "TransactionService.SendMultiSigTransactions()", false);
             }
 
         }
@@ -998,7 +998,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TransactionService.SendMultiSigTransactions()", false);
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ApiErrorText.For(ex)}", "TransactionService.SendMultiSigTransactions()", false);
             }
 
         }

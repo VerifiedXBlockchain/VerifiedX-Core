@@ -1851,7 +1851,7 @@ namespace VerifiedXCore.Services
                     }
                     catch(Exception ex)
                     {
-                        return (txResult, $"Unknown TX Error: {ex.ToString()}");
+                        return (txResult, $"Unknown TX Error: {ApiErrorText.For(ex)}");
                     }
                     
                 }
@@ -4045,7 +4045,7 @@ namespace VerifiedXCore.Services
         {
             List<PoolUnlockAllocation>? allocations;
             try { allocations = allocationsToken?.ToObject<List<PoolUnlockAllocation>>(); }
-            catch (Exception ex) { return (false, $"unparseable allocations: {ex.Message}"); }
+            catch (Exception ex) { return (false, $"unparseable allocations: {ApiErrorText.For(ex)}"); }
 
             if (allocations == null || allocations.Count == 0) return (false, "no allocations");
             var seen = new HashSet<string>(StringComparer.Ordinal);

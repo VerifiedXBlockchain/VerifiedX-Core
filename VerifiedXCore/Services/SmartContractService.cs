@@ -865,7 +865,7 @@ namespace VerifiedXCore.Services
             }
             catch (Exception ex)
             {
-                return (null, $"Unknown error decompiling SC. Error: {ex.ToString()}");
+                return (null, $"Unknown error decompiling SC. Error: {ApiErrorText.For(ex)}");
             }
 
             var txData = JsonConvert.SerializeObject(new { Function = "M_Sale_Complete()", ContractUID = scUID, Royalty = isRoyalty, RoyaltyAmount = royaltyAmount, RoyaltyPayTo = royaltyPayTo, Transactions = scTxList, KeySign = keySign });
@@ -1968,7 +1968,7 @@ namespace VerifiedXCore.Services
             }
             catch(Exception ex)
             { 
-                return (null, $"Unknown error decompiling SC. Error: {ex.ToString()}");
+                return (null, $"Unknown error decompiling SC. Error: {ApiErrorText.For(ex)}");
             }
             
             var txData = JsonConvert.SerializeObject(new { Function = "Sale_Complete()", ContractUID = scUID, Royalty = isRoyalty, RoyaltyAmount = royaltyAmount, RoyaltyPayTo = royaltyPayTo, Transactions = scTxList, KeySign = keySign });
@@ -2100,7 +2100,7 @@ namespace VerifiedXCore.Services
             }
             catch(Exception ex)
             {
-                return (null, $"Unknown Error Occurred. Error: {ex.ToString()}");
+                return (null, $"Unknown Error Occurred. Error: {ApiErrorText.For(ex)}");
             }
         }
 

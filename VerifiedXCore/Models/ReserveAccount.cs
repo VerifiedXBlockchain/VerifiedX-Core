@@ -1073,7 +1073,7 @@ namespace VerifiedXCore.Models
             }
             catch(Exception ex) 
             {
-                return (false, $"Beacon upload failed. Unknown Error : {ex.ToString()}");
+                return (false, $"Beacon upload failed. Unknown Error : {ApiErrorText.For(ex)}");
             }
 
         }

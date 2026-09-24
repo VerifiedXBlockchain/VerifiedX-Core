@@ -196,7 +196,7 @@ namespace VerifiedXCore.Beacon
             catch (Exception ex)
             {
                 BeaconLogUtility.Log($"Unknown Error: {ex.ToString()}", "BeaconClient.Send()");
-                return new BeaconResponse { Status = -1, Description = "Error: " + ex.ToString() };
+                return new BeaconResponse { Status = -1, Description = "Error: " + ApiErrorText.For(ex) };
             }
         }
 

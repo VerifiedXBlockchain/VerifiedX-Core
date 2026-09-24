@@ -886,7 +886,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 ErrorLogUtility.LogError($"Signing ceremony error. sid={sessionId} input={inputIndex}: {ex}", "FrostMPCService.CoordinateSigningCeremony");
                 AbortCeremony();
-                return FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.CoordinatorException, sessionId, ex.Message, inputIndex: inputIndex);
+                return FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.CoordinatorException, sessionId, ApiErrorText.For(ex), inputIndex: inputIndex);
             }
         }
 
@@ -1054,7 +1054,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Signing start error: {ex.Message}", "FrostMPCService.BroadcastSigningStart");
-                return (0, new List<FrostValidatorFailure> { new FrostValidatorFailure { ValidatorAddress = "coordinator", HttpStatus = 0, Message = ex.Message } }, timestamp, signingLeaderSignature);
+                return (0, new List<FrostValidatorFailure> { new FrostValidatorFailure { ValidatorAddress = "coordinator", HttpStatus = 0, Message = ApiErrorText.For(ex) } }, timestamp, signingLeaderSignature);
             }
         }
 
@@ -1604,7 +1604,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Signature aggregation error: {ex}", "FrostMPCService.AggregateSignature");
-                return (null, FrostCeremonyFailureCode.CoordinatorException, $"aggregation exception: {ex.Message}");
+                return (null, FrostCeremonyFailureCode.CoordinatorException, $"aggregation exception: {ApiErrorText.For(ex)}");
             }
         }
 

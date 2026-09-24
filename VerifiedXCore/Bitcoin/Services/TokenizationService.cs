@@ -255,7 +255,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"Fatal Error: {ex}", "TokenizationService.MintSmartContract(string id)");
-                return (false, $"Fatal Error: {ex}");
+                return (false, $"Fatal Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -547,7 +547,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TokenizationService.TransferCoin()", false);
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ApiErrorText.For(ex)}", "TokenizationService.TransferCoin()", false);
             }
 
             return await SCLogUtility.LogAndReturn($"EOM ERROR", "TokenizationService.TransferCoin()", false);
@@ -715,7 +715,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TokenizationService.TransferCoinMulti()", false);
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ApiErrorText.For(ex)}", "TokenizationService.TransferCoinMulti()", false);
             }
         }
 
@@ -842,7 +842,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TokenizationService.WithdrawalCoin()", false);
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ApiErrorText.For(ex)}", "TokenizationService.WithdrawalCoin()", false);
             }
 
             return await SCLogUtility.LogAndReturn($"EOM ERROR", "TokenizationService.WithdrawalCoin()", false);
@@ -909,7 +909,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "TokenizationService.WithdrawalCoin()", false);
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ApiErrorText.For(ex)}", "TokenizationService.WithdrawalCoin()", false);
             }
         }
 

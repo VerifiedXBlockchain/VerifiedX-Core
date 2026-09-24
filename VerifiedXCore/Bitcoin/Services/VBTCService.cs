@@ -232,7 +232,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return (false, 0M, ex.Message);
+                return (false, 0M, ApiErrorText.For(ex));
             }
         }
 
@@ -511,7 +511,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return await SCLogUtility.LogAndReturn($"Unknown Error: {ex}", "VBTCService.TransferOwnership()", false);
+                return await SCLogUtility.LogAndReturn($"Unknown Error: {ApiErrorText.For(ex)}", "VBTCService.TransferOwnership()", false);
             }
         }
 
@@ -650,7 +650,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Transfer Error: {ex.Message}", "VBTCService.TransferVBTC()");
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -1001,7 +1001,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Multi Transfer Error: {ex.Message}", "VBTCService.TransferVBTCMulti()");
-                return (false, $"Error: {ex.Message}", null);
+                return (false, $"Error: {ApiErrorText.For(ex)}", null);
             }
         }
 
@@ -1130,7 +1130,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Withdrawal Request Error: {ex.Message}", "VBTCService.RequestWithdrawal()");
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -1289,7 +1289,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Multi Withdrawal Request Error: {ex.Message}", "VBTCService.RequestWithdrawalMulti()");
-                return (false, $"Error: {ex.Message}", null);
+                return (false, $"Error: {ApiErrorText.For(ex)}", null);
             }
         }
 
@@ -2012,7 +2012,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Withdrawal Complete Error: {ex.Message}", "VBTCService.CompleteWithdrawal()");
-                return (false, string.Empty, string.Empty, $"Error: {ex.Message}", null);
+                return (false, string.Empty, string.Empty, $"Error: {ApiErrorText.For(ex)}", null);
             }
         }
 
@@ -2233,7 +2233,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Withdrawal Cancel Error: {ex.Message}", "VBTCService.CancelWithdrawal()");
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -2431,7 +2431,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Bridge Lock Error: {ex.Message}", "VBTCService.CreateBridgeLockTx()");
-                return (false, $"Error: {ex.Message}", string.Empty);
+                return (false, $"Error: {ApiErrorText.For(ex)}", string.Empty);
             }
         }
 
@@ -2549,7 +2549,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Bridge Unlock Error: {ex.Message}", "VBTCService.CreateBridgeUnlockTx()");
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -2626,7 +2626,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -2727,7 +2727,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"Bridge exit-to-BTC complete error: {ex.Message}", "VBTCService.CreateBridgeExitToBTCCompleteTx()");
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -2817,7 +2817,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"Bridge exit-to-BTC fail error: {ex.Message}", "VBTCService.CreateBridgeExitToBTCFailTx()");
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 

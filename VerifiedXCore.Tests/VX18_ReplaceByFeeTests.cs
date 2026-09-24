@@ -161,5 +161,18 @@ namespace VerifiedXCore.Tests
             var (_, message) = await TransactionService.CalcuateFee(a.Address, BitcoinAccount.CreateAddress(save: false).Address, 0.001M, 10);
             Assert.DoesNotContain("encryption password", message); // it fails later for lack of UTXOs, not for the key
         }
+
+        [Fact]
+        public async Task VX23_FollowUp_ServiceErrorsReachTheCallerWithoutAStackTrace()
+        {
+            // The review's trigger: CalculateFee (allowed while locked) with an invalid receiver returned the full exception.
+            var a = BitcoinAccount.CreateAddress(save: false);
+            a.Balance = 1M;
+            Assert.True(BitcoinAccount.SaveBitcoinAddress(a));
+
+            var (_, message) = await TransactionService.CalcuateFee(a.Address, "notanaddress", 0.001M, 10);
+            Assert.DoesNotContain(" at VerifiedXCore", message);
+            Assert.DoesNotContain(".cs:line", message);
+        }
     }
 }
