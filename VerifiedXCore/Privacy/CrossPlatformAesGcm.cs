@@ -14,9 +14,14 @@ namespace VerifiedXCore.Privacy
     {
         private const int TagSizeBits = 128;
 
+        /// <summary>Tests only: use the managed (BouncyCastle) implementation even where AesGcm is supported.</summary>
+        internal static bool ForceManaged { get; set; }
+
+        private static bool UseNative => AesGcm.IsSupported && !ForceManaged;
+
         public static void Encrypt(byte[] key, byte[] nonce, ReadOnlySpan<byte> plaintext, byte[] ciphertext, byte[] tag, byte[]? associatedData)
         {
-            if (AesGcm.IsSupported)
+            if (UseNative)
             {
                 using var aes = new AesGcm(key);
                 var ad = associatedData != null ? new ReadOnlySpan<byte>(associatedData) : ReadOnlySpan<byte>.Empty;
@@ -39,7 +44,7 @@ namespace VerifiedXCore.Privacy
 
         public static void Decrypt(byte[] key, byte[] nonce, byte[] ciphertext, byte[] tag, byte[] plaintext, byte[]? associatedData)
         {
-            if (AesGcm.IsSupported)
+            if (UseNative)
             {
                 using var aes = new AesGcm(key);
                 var ad = associatedData != null ? new ReadOnlySpan<byte>(associatedData) : ReadOnlySpan<byte>.Empty;
@@ -53,8 +58,17 @@ namespace VerifiedXCore.Privacy
             var ctPlusTag = new byte[ciphertext.Length + tag.Length];
             Buffer.BlockCopy(ciphertext, 0, ctPlusTag, 0, ciphertext.Length);
             Buffer.BlockCopy(tag, 0, ctPlusTag, ciphertext.Length, tag.Length);
-            var len = cipher.ProcessBytes(ctPlusTag, 0, ctPlusTag.Length, plaintext, 0);
-            len += cipher.DoFinal(plaintext, len);
+            int len;
+            try
+            {
+                len = cipher.ProcessBytes(ctPlusTag, 0, ctPlusTag.Length, plaintext, 0);
+                len += cipher.DoFinal(plaintext, len);
+            }
+            catch (BouncyCryptography::Org.BouncyCastle.Crypto.InvalidCipherTextException ex)
+            {
+                // Same failure the native AesGcm reports for a wrong key or a tampered record.
+                throw new CryptographicException("GCM authentication failed.", ex);
+            }
             if (len != plaintext.Length)
                 throw new CryptographicException("GCM decrypt failed or length mismatch.");
         }

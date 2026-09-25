@@ -45,8 +45,8 @@ namespace VerifiedXCore.Services
             var pt = Encoding.UTF8.GetBytes(plaintext);
             var ct = new byte[pt.Length];
             var tag = new byte[TagSize];
-            using (var gcm = new AesGcm(DeriveKey(password, salt)))
-                gcm.Encrypt(nonce, pt, ct, tag);
+            // CrossPlatformAesGcm: AesGcm is not supported on macOS under .NET 6; the managed fallback writes the same format.
+            VerifiedXCore.Privacy.CrossPlatformAesGcm.Encrypt(DeriveKey(password, salt), nonce, pt, ct, tag, null);
             return V1Prefix + Convert.ToBase64String(salt.Concat(nonce).Concat(tag).Concat(ct).ToArray());
         }
 
@@ -64,8 +64,7 @@ namespace VerifiedXCore.Services
                 var tag = blob.AsSpan(SaltSize + NonceSize, TagSize).ToArray();
                 var ct = blob.AsSpan(SaltSize + NonceSize + TagSize).ToArray();
                 var pt = new byte[ct.Length];
-                using (var gcm = new AesGcm(DeriveKey(password, salt)))
-                    gcm.Decrypt(nonce, ct, tag, pt);
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Decrypt(DeriveKey(password, salt), nonce, ct, tag, pt, null);
                 plaintext = Encoding.UTF8.GetString(pt);
                 return true;
             }
