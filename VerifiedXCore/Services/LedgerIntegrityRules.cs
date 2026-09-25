@@ -103,6 +103,21 @@ namespace VerifiedXCore.Services
 
         // ── NEW-13: a transaction's Height is its block's height ────────────────────────────────────────────────
 
+        // ── NEW-18: an unambiguous hash preimage ────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// The hash preimage appends UnlockTime directly after Data with no separator (Transaction.GetHashPreimage), so
+        /// digits can move between the two with the hash - and the signature - unchanged: Data null + UnlockTime 1790390189
+        /// hashes like Data "1" + UnlockTime 790390189. UnlockTime drives a reserve transfer's settlement (and the 24h
+        /// rule is not checked during block download), so a relaying peer could change it on syncing nodes. Honest
+        /// transactions with an UnlockTime carry no Data or JSON Data; one whose Data ends in a digit is refused, which
+        /// leaves exactly one reading of every preimage that has an UnlockTime.
+        /// </summary>
+        public static string? CanonicalPreimage(Transaction tx) =>
+            tx?.UnlockTime != null && !string.IsNullOrEmpty(tx.Data) && char.IsDigit(tx.Data[^1])
+                ? "A transaction with an UnlockTime may not have Data ending in a digit (ambiguous hash)."
+                : null;
+
         // ── NEW-17: NFT sale amounts ─────────────────────────────────────────────────────────────────────────────
 
         /// <summary>

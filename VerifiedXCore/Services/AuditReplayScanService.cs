@@ -65,6 +65,10 @@ namespace VerifiedXCore.Services
 
                 CheckFunctionRules(tx, Add);
 
+                var preimageError = LedgerIntegrityRules.CanonicalPreimage(tx); // NEW-18
+                if (preimageError != null)
+                    Add("NEW-18 ambiguous preimage", preimageError);
+
                 var saleError = LedgerIntegrityRules.SaleAmounts(tx); // NEW-17
                 if (saleError != null)
                     Add("NEW-17 sale amounts", saleError);

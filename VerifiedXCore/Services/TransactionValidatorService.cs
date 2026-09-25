@@ -235,6 +235,11 @@ namespace VerifiedXCore.Services
             if (badNFTTx) 
                 return (true, "");
 
+            // NEW-18: one reading of the hash preimage (Data and UnlockTime are joined without a separator).
+            var preimageError = LedgerIntegrityRules.CanonicalPreimage(txRequest);
+            if (preimageError != null)
+                return (false, preimageError);
+
             // NEW-10: contract UIDs are exact (creation format; references equal the stored record's UID).
             var contractUidError = LedgerIntegrityRules.ContractUids(txRequest);
             if (contractUidError != null)
