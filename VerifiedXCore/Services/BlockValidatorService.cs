@@ -86,8 +86,6 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith(SameBlockDebitGuard.ReasonPrefix, StringComparison.Ordinal))
                 return false;
-            if (reason.StartsWith(LedgerIntegrityRules.TransactionHeightPrefix, StringComparison.Ordinal)) // NEW-13
-                return false;
             return true;
         }
 
@@ -909,6 +907,8 @@ namespace VerifiedXCore.Services
                         }
                         
                         // Process transactions ordered by nonce to ensure sequential validation
+                        // NEW-13: the apply and the guard read tx.Height, which no hash covers - use the block's height.
+                        LedgerIntegrityRules.NormalizeTransactionHeights(block);
                         var orderedTransactions = block.Transactions
                             .OrderBy(x => x.FromAddress)
                             .ThenBy(x => x.Nonce)
@@ -966,13 +966,6 @@ namespace VerifiedXCore.Services
                                     var duplicateCreation = LedgerIntegrityRules.RegisterCreationInBlock(blkTransaction, blockCreatedContracts);
                                     if (duplicateCreation != null)
                                         effectiveTxResult = (false, duplicateCreation);
-                                }
-
-                                // NEW-13: the transaction's Height (read by the apply) must be this block's height.
-                                if (effectiveTxResult.Item1)
-                                {
-                                    var heightError = LedgerIntegrityRules.TransactionHeight(blkTransaction, block.Height);
-                                    if (heightError != null) effectiveTxResult = (false, heightError);
                                 }
 
                                 // NEW-07: debits by one holder on one contract within the block may not exceed its balance.
@@ -1959,6 +1952,7 @@ namespace VerifiedXCore.Services
                 var blockPrivateNullifierKeys = new HashSet<string>();
                 var blockBridgeStateTask = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                 var blockDebitStateTask = new SameBlockDebitGuard.State(); // NEW-07
+                LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13
                 foreach (Transaction transaction in block.Transactions)
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
@@ -1975,11 +1969,6 @@ namespace VerifiedXCore.Services
                         {
                             var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(transaction, blockBridgeStateTask);
                             if (!bridgeOk) effectiveTxResult = (false, bridgeReason);
-                        }
-                        if (effectiveTxResult.Item1)
-                        {
-                            var heightError = LedgerIntegrityRules.TransactionHeight(transaction, block.Height); // NEW-13
-                            if (heightError != null) effectiveTxResult = (false, heightError);
                         }
                         if (effectiveTxResult.Item1)
                         {

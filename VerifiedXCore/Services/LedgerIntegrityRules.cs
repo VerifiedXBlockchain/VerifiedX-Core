@@ -98,18 +98,20 @@ namespace VerifiedXCore.Services
 
         // ── NEW-13: a transaction's Height is its block's height ────────────────────────────────────────────────
 
-        public const string TransactionHeightPrefix = "Transaction height";
-
         /// <summary>
         /// tx.Height is covered by neither the transaction hash nor the block hash, and the apply reads it (vBTC withdrawal
         /// escrow: EscrowAppliesTo(tx.Height), stored RequestBlockHeight). A producer or relaying peer could set an escrowed
         /// request's Height to 1 so it was applied as pre-escrow (no debit; burned later at COMPLETE without a balance
-        /// check). Honest producers set it to the block height (BlockchainData.GiveOtherInfos).
+        /// check). Validation and apply therefore use the block's own height for every transaction. The field is
+        /// overwritten rather than checked: mainnet history contains non-coinbase transactions with Height 0 (blocks
+        /// 2,684,414-2,750,422), and refusing them stopped a sync from genesis (fifth review).
         /// </summary>
-        public static string? TransactionHeight(Transaction tx, long blockHeight) =>
-            tx != null && tx.Height != blockHeight
-                ? $"{TransactionHeightPrefix} {tx.Height} does not match block height {blockHeight}."
-                : null;
+        public static void NormalizeTransactionHeights(Block block)
+        {
+            if (block?.Transactions == null) return;
+            foreach (var tx in block.Transactions)
+                if (tx != null) tx.Height = block.Height;
+        }
 
         // ── NEW-10: contract UIDs are exact ─────────────────────────────────────────────────────────────────────
 

@@ -443,19 +443,33 @@ namespace VerifiedXCore.Tests
             Assert.True(Block(Send(5M, 0), Send(4.4M, 1)).Ok);
         }
 
-        // ── NEW-13 (fourth review): tx.Height is not covered by any hash ────────────────────
+        // ── NEW-13 (fourth/fifth review): tx.Height is not covered by any hash ──────────────
 
         [Fact]
-        public void NEW13_PoC_HeightIsNotCoveredByTheTransactionHash_AndIsNowBoundToTheBlock()
+        public void NEW13_PoC_RelabelledHeightDoesNotChangeTheHash_AndIsReplacedByTheBlockHeight()
         {
-            var wd = V2Withdrawal(1.0M, 1);
-            var hash = wd.Hash;
-            wd.Height = 1;
-            Assert.Equal(hash, wd.GetHash());                                        // relabelling does not change the hash
-            Assert.NotNull(LedgerIntegrityRules.TransactionHeight(wd, 5_000));        // refused in a block at 5,000
-            wd.Height = 5_000;
-            Assert.Null(LedgerIntegrityRules.TransactionHeight(wd, 5_000));           // control
-            Assert.False(BlockValidatorService.IsStateCorruptionSignal(LedgerIntegrityRules.TransactionHeight(wd, 1)));
+            // A producer/relay relabelled an escrowed withdrawal request as pre-escrow (Height 1): no debit at request.
+            var prior = Globals.WithdrawalEscrowHeight;
+            try
+            {
+                Globals.WithdrawalEscrowHeight = 5_000;
+                var wd = V2Withdrawal(1.0M, 1);
+                var hash = wd.Hash;
+                wd.Height = 1;
+                Assert.Equal(hash, wd.GetHash());                                                   // hash unchanged
+                Assert.DoesNotContain(SameBlockDebitGuard.GetDebits(wd), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2);
+
+                var block = new Block { Height = 5_000, Transactions = new List<Transaction> { V2FunctionTransfer(1.0M, 0), wd } };
+                LedgerIntegrityRules.NormalizeTransactionHeights(block);                             // what validation/apply now do
+                Assert.Equal(5_000, wd.Height);
+                Assert.False(Block(block.Transactions.ToArray()).Ok);                               // escrow debit counted again
+
+                // Mainnet history has non-coinbase transactions with Height 0: normalising (not refusing) keeps them replayable.
+                var legacy = new Block { Height = 2_684_414, Transactions = new List<Transaction> { new Transaction { Height = 0, Hash = "legacy" } } };
+                LedgerIntegrityRules.NormalizeTransactionHeights(legacy);
+                Assert.Equal(2_684_414, legacy.Transactions[0].Height);
+            }
+            finally { Globals.WithdrawalEscrowHeight = prior; }
         }
     }
 }

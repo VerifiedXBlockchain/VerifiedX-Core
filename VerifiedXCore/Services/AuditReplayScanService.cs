@@ -297,6 +297,7 @@ namespace VerifiedXCore.Services
                 foreach (var block in page)
                 {
                     blockCount++;
+                    LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: as validation and apply do
                     var createdInBlock = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // NEW-06
                     var debitsInBlock = new Dictionary<SameBlockDebitGuard.DebitKey, (int N, decimal Sum, Transaction Last)>(); // NEW-07
                     var sweepState = new SameBlockDebitGuard.State(_ => null); // NEW-07: balances not judged, only the Recover() rule
@@ -310,9 +311,6 @@ namespace VerifiedXCore.Services
                         try { TrackV1(tx, block.Height, v1, hits); } catch { }
                         if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd")
                         {
-                            var heightError = LedgerIntegrityRules.TransactionHeight(tx, block.Height); // NEW-13
-                            if (heightError != null)
-                                hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-13 transaction height", heightError));
                             var (sweepOk, sweepReason) = SameBlockDebitGuard.TryRegister(tx, sweepState);
                             if (!sweepOk)
                                 hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-07 Recover() shares its block", sweepReason));
