@@ -112,5 +112,24 @@ namespace VerifiedXCore.Tests
             Assert.False(BeaconPaths.ExtensionAllowed("payload.exe"));
             Assert.True(BeaconPaths.ExtensionAllowed("image.png"));
         }
+
+        [Theory]
+        [InlineData("a.exe ")]
+        [InlineData("a.exe.")]
+        [InlineData("a.exe . ")]
+        public void NEW03_FollowUp_TrailingSpaceOrDot_Refused(string name)
+        {
+            // Second review: on Windows "a.exe " passed the extension list (".exe ") and was written as "a.exe".
+            Assert.False(VerifiedXCore.Beacon.BeaconPaths.ExtensionAllowed(name));
+            if (OperatingSystem.IsWindows())
+                Assert.False(VerifiedXCore.Beacon.BeaconPaths.TryResolve(System.IO.Path.GetTempPath(), "abc:1", name, out _));
+        }
+
+        [Fact]
+        public void NEW03_FollowUp_Control_PlainNameResolves()
+        {
+            Assert.True(VerifiedXCore.Beacon.BeaconPaths.ExtensionAllowed("art.png"));
+            Assert.True(VerifiedXCore.Beacon.BeaconPaths.TryResolve(System.IO.Path.GetTempPath(), "abc:1", "art.png", out _));
+        }
     }
 }
