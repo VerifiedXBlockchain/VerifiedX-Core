@@ -28,6 +28,7 @@ namespace VerifiedXCore.Bitcoin.Services
         private const int BtcArrivalMaxSeconds = 3600;           // BTC confirmation ceiling
         private const int GasPollSeconds = 30;
         private const int GasMaxSeconds = 3600;                  // <= 1h gas window (§12.4)
+        private const int CompanionConfirmMaxSeconds = 1800;     // NEW-26 follow-up: wait for the companion to be on chain
 
         public static S3CAutoBridgeState? GetStatus(string orchestrationId)
             => _orchestrations.TryGetValue(orchestrationId, out var s) ? s : null;
@@ -103,8 +104,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
                 Set(s, S3CAutoBridgeStatus.AwaitingCompanionReady);
 
-                if (string.IsNullOrEmpty(s.PublicDepositAddress))
-                { Set(s, S3CAutoBridgeStatus.Failed, "Companion has no deposit address."); return; }
+                // NEW-26 (follow-up): BTC goes only to a companion that exists on chain. The create response (and a local
+                // record) carries the deposit address before the creation is mined; if it never is, BTC sent there has no
+                // contract and no withdrawal path. Wait for the contract, then take the address from the confirmation-gated
+                // GetMPCDepositAddress. Nothing has moved yet if this gives up.
+                var confirmedDeposit = await WaitForCompanionOnChain(s.PublicScUID!, CompanionConfirmMaxSeconds, CeremonyPollSeconds);
+                if (string.IsNullOrEmpty(confirmedDeposit))
+                { Set(s, S3CAutoBridgeStatus.Abandoned, "The companion contract was not confirmed on chain within the wait window; nothing moved."); return; }
+                s.PublicDepositAddress = confirmedDeposit;
 
                 // 2. Wait for the S3C contract's withdrawal slot to be free (§0 / §12.4).
                 Set(s, S3CAutoBridgeStatus.WaitingForContractFree);
@@ -203,6 +210,31 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 ErrorLogUtility.LogError($"[S3C AutoBridge] CreateCompanion error: {ex.Message}", "S3CAutoBridgeService.CreateCompanion");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// NEW-26 (follow-up): the companion's deposit address once its contract is on chain, polling up to
+        /// <paramref name="maxSeconds"/>; null if it never confirms. Uses GetMPCDepositAddress, which answers only for a
+        /// contract in chain state.
+        /// </summary>
+        internal static async Task<string?> WaitForCompanionOnChain(string companionScUID, int maxSeconds, int pollSeconds)
+        {
+            var controller = new VBTCController();
+            var waited = 0;
+            while (true)
+            {
+                try
+                {
+                    var obj = JObject.Parse(await controller.GetMPCDepositAddress(companionScUID));
+                    var address = obj["DepositAddress"]?.ToObject<string>();
+                    if (obj["Success"]?.ToObject<bool>() == true && !string.IsNullOrEmpty(address))
+                        return address;
+                }
+                catch { }
+                if (waited >= maxSeconds) return null;
+                await Task.Delay(TimeSpan.FromSeconds(pollSeconds));
+                waited += pollSeconds;
             }
         }
 
