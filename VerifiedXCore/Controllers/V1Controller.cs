@@ -531,7 +531,7 @@ namespace VerifiedXCore.Controllers
             }
 
             if (account == null)
-                return "Fail. The wallet is encrypted and locked; unlock it with its password to create an address.";
+                return "Fail. No address was created: an encrypted wallet must be unlocked with its password, and an HD wallet cannot be used in an encrypted wallet.";
 
             var newAddressInfo = new[]
             {

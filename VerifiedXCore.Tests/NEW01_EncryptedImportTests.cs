@@ -143,5 +143,42 @@ namespace VerifiedXCore.Tests
             Assert.NotNull(stored);
             Assert.Equal(keyHex.TrimStart('0'), stored!.GetKey.TrimStart('0'));
         }
+
+        // ── Follow-up (third review): HD wallets inside an encrypted wallet ────────────────
+
+        [Fact]
+        public async Task NEW01_FollowUp_HdWalletInEncryptedWallet_Refused()
+        {
+            // Encrypting an HD wallet was refused, but creating/restoring one in an encrypted wallet was not; every
+            // derived key (and the seed) was then stored in plaintext.
+            Globals.EncryptPassword = Secure(WalletPw); // unlocked
+            var before = AccountData.GetAccounts().Count();
+
+            var created = VerifiedXCore.Models.HDWallet.HDWalletData.CreateHDWallet(12, VerifiedXCore.BIP39.BIP39Wordlist.English);
+            Assert.False(created.Item1);
+            Assert.Null(VerifiedXCore.Models.HDWallet.HDWalletData.GetHDWallet());
+
+            const string mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+            var restored = await VerifiedXCore.Models.HDWallet.HDWalletData.RestoreHDWallet(mnemonic);
+            Assert.DoesNotContain("Restored", restored);
+            Assert.Null(VerifiedXCore.Models.HDWallet.HDWalletData.GetHDWallet());
+            Assert.Equal(before, AccountData.GetAccounts().Count());
+        }
+
+        [Fact]
+        public async Task NEW01_FollowUp_ExistingHdRecordInEncryptedWallet_DerivesNoPlaintextAddress()
+        {
+            // A wallet that already reached this state (HD record present, wallet encrypted) makes no more addresses.
+            Globals.EncryptPassword = Secure(WalletPw);
+            VerifiedXCore.Models.HDWallet.HDWalletData.GetHDWalletData().Insert(new VerifiedXCore.Models.HDWallet
+            {
+                Nonce = 0, Path = "m/0'/0'",
+                WalletSeed = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+            });
+            var before = AccountData.GetAccounts().Count();
+            Assert.Null(await VerifiedXCore.Models.HDWallet.HDWalletData.GenerateAddress());
+            await Task.Delay(100);
+            Assert.Equal(before, AccountData.GetAccounts().Count());
+        }
     }
 }

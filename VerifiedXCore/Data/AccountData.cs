@@ -394,8 +394,11 @@ namespace VerifiedXCore.Data
 			return GetHumanAddress("04" + ByteToHex(pubKey.toString()));
 		}
 
-		public static async Task<Account> RestoreHDAccount(string privKey)
+		/// <summary>Null in an encrypted wallet: HD keys are stored unencrypted (NEW-01 follow-up).</summary>
+		public static async Task<Account?> RestoreHDAccount(string privKey)
 		{
+			if (Globals.IsWalletEncrypted)
+				return null;
 			Account account = new Account();
 			try
 			{
