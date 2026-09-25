@@ -157,6 +157,30 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, message);
         }
 
+        [Theory]
+        [InlineData("TokenDeploy()", TransactionType.TKNZ_MINT)]
+        [InlineData("Mint()", TransactionType.NFT_MINT)]
+        [InlineData("Mint()", TransactionType.VBTC_V2_CONTRACT_CREATE)]
+        public async Task VX02_FollowUp_UnsignedCreationNamingAFundedAddress_RefusedBeforeTheBodyRuns(string function, TransactionType type)
+        {
+            // Owner's audit review: the binding decompiled - ran in the Trillium interpreter - the submitted body before the
+            // signature check, so a transaction nobody signed, naming any funded address, reached the interpreter at
+            // admission. The body here would fail the binding (third-party minter): the refusal must be the signature, i.e.
+            // the body never ran.
+            var body = VbtcTestContracts.TokenContractData(FreshUidN, _thirdC.Address, 1000);
+            var tx = MintTx(function, FreshUidN, body, _victimA, type);
+
+            tx.Signature = "forged";                                             // the hash still matches the content
+            var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(ok);
+            Assert.Equal("Signature Failed to verify.", message);
+
+            tx.Signature = null;
+            (ok, message) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(ok);
+            Assert.Equal("Signature cannot be null.", message);
+        }
+
         [Fact]
         public async Task VX02_SupplyAboveDocumentedBound_Rejected()
         {

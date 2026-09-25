@@ -246,11 +246,6 @@ namespace VerifiedXCore.Services
             if (contractUidError != null)
                 return (false, contractUidError);
 
-            // NEW-26: a vBTC V2 deposit address must be the validators' FROST key (height-gated; block height at verify,
-            // tip + 1 at admission).
-            var dkgAttestationError = LedgerIntegrityRules.VbtcV2DkgAttestation(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
-            if (dkgAttestationError != null)
-                return (false, dkgAttestationError);
 
             // Height-gated vBTC privacy disable (inert until VbtcPrivacyDisableHeight is set).
             // Deterministic under replay/sync: block validation passes the block's own height;
@@ -487,6 +482,23 @@ namespace VerifiedXCore.Services
                     }
                 }
 
+            }
+
+            // VX-02 (follow-up): a contract creation (Mint(), TokenDeploy(), vBTC V2 create) has its submitted body
+            // decompiled - run in the Trillium interpreter - by the binding checks below. Check the signature first, so a
+            // transaction nobody signed (naming any funded address) never reaches the interpreter. The hash check above
+            // already binds the signed hash to this content. The same signature check still ends VerifyTX.
+            if (LedgerIntegrityRules.CreatedContractUid(txRequest) != null)
+            {
+                var creationSignatureError = SignatureError(txRequest);
+                if (creationSignatureError != null)
+                    return (txResult, creationSignatureError);
+
+                // NEW-26: a vBTC V2 deposit address must be the validators' FROST key (height-gated; block height at
+                // verify, tip + 1 at admission). Runs after the signature check (it decompiles the body too).
+                var dkgAttestationError = LedgerIntegrityRules.VbtcV2DkgAttestation(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
+                if (dkgAttestationError != null)
+                    return (txResult, dkgAttestationError);
             }
 
             if (txRequest.TransactionType != TransactionType.TX)
@@ -4081,26 +4093,24 @@ namespace VerifiedXCore.Services
             }
 
             //Signature Check - Final Check to return true.
-            if (!string.IsNullOrEmpty(txRequest.Signature))
-            {
-                var isTxValid = SignatureService.VerifySignature(txRequest.FromAddress, txRequest.Hash, txRequest.Signature);
-                if (isTxValid)
-                {
-                    txResult = true;
-                }
-                else
-                {
-                    return (txResult, "Signature Failed to verify.");
-                }
-            }
-            else
-            {
-                return (txResult, "Signature cannot be null.");
-            }
+            var signatureError = SignatureError(txRequest);
+            if (signatureError != null)
+                return (txResult, signatureError);
+            txResult = true;
             
             //Return verification result.
             return (txResult, "Transaction has been verified.");
 
+        }
+
+        /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
+        private static string? SignatureError(Transaction txRequest)
+        {
+            if (string.IsNullOrEmpty(txRequest.Signature))
+                return "Signature cannot be null.";
+            return SignatureService.VerifySignature(txRequest.FromAddress, txRequest.Hash, txRequest.Signature)
+                ? null
+                : "Signature Failed to verify.";
         }
 
         public static async Task BadTXDetected(Transaction Tx)
