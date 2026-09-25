@@ -147,5 +147,21 @@ namespace VerifiedXCore.Tests
             var error = LedgerIntegrityRules.ContractUids(deploy);
             Assert.Equal(allowed, error == null);
         }
+
+        [Theory]
+        [InlineData("scuid")]
+        [InlineData("Scuid")]
+        [InlineData("contractuid")]
+        public void NEW10_FollowUp_UidFieldNamesAreMatchedCaseInsensitively(string field)
+        {
+            // Fourth review: Newtonsoft binds {"scuid": ...} to an input's SCUID property, but the field-name set was
+            // exact-case, so an aliased UID under such a key was never inspected (pre-escrow multi-withdrawal PoC).
+            var data = "{\"Function\":\"WithdrawalRequestMulti()\",\"Inputs\":[{\"" + field + "\":\"" + V2.ToUpperInvariant() + "\",\"Amount\":1}]}";
+            var tx = new Transaction { FromAddress = _holder.Address, TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST, Data = data, Height = 1 };
+            Globals.WithdrawalEscrowHeight = long.MaxValue; // pre-escrow: no debit keys, only the field walk sees the UID
+            var error = LedgerIntegrityRules.ContractUids(tx);
+            Assert.NotNull(error);
+            Assert.Contains("does not match the stored contract", error);
+        }
     }
 }

@@ -931,6 +931,9 @@ namespace VerifiedXCore.Services
                                     try
                                     {
                                         var wScUID = JObject.Parse(blkTransaction.Data)["ContractUID"]?.ToObject<string>();
+                                        // Keyed by the stored contract's UID (LiteDB lookups ignore case and invisible characters).
+                                        if (!string.IsNullOrEmpty(wScUID))
+                                            wScUID = SmartContractStateTrei.GetSmartContractState(wScUID)?.SmartContractUID ?? wScUID;
                                         if (!string.IsNullOrEmpty(wScUID))
                                         {
                                             if (!blockWithdrawalContracts.Add(wScUID))
@@ -942,8 +945,9 @@ namespace VerifiedXCore.Services
                                             // serialization must register EVERY input contract — otherwise
                                             // two multi requests drawing on the same vault could share a
                                             // block and both open, defeating the per-contract gate.
-                                            foreach (var (wMultiScUid, _) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(blkTransaction))
+                                            foreach (var (wMultiScUidRaw, _) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(blkTransaction))
                                             {
+                                                var wMultiScUid = SmartContractStateTrei.GetSmartContractState(wMultiScUidRaw)?.SmartContractUID ?? wMultiScUidRaw;
                                                 if (!blockWithdrawalContracts.Add(wMultiScUid))
                                                 {
                                                     effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wMultiScUid} within block.");

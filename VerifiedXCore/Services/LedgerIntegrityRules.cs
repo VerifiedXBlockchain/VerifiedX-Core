@@ -102,7 +102,9 @@ namespace VerifiedXCore.Services
         public static readonly System.Text.RegularExpressions.Regex CreationUidFormat =
             new(@"^[0-9a-f]{1,64}:[0-9]{1,20}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
-        private static readonly HashSet<string> UidFieldNames = new(StringComparer.Ordinal) { "ContractUID", "SmartContractUID", "SCUID", "ScUID", "scUID" };
+        // Case-insensitive: Newtonsoft binds JSON keys to properties case-insensitively, so {"scuid": ...} reaches the SCUID
+        // property of an input and must be inspected too (fourth review).
+        private static readonly HashSet<string> UidFieldNames = new(StringComparer.OrdinalIgnoreCase) { "ContractUID", "SmartContractUID", "SCUID" };
 
         /// <summary>
         /// Contract records are looked up through LiteDB's default collation, which is culture-aware and ignores case and
