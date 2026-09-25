@@ -1684,6 +1684,8 @@ namespace VerifiedXCore.Controllers
             return output;
         }
 
+        private static bool ContainsLineBreak(string? value) => value != null && (value.Contains('\n') || value.Contains('\r'));
+
         /// <summary>
         /// Joins the mothers house
         /// </summary>
@@ -1696,6 +1698,9 @@ namespace VerifiedXCore.Controllers
             try
             {
                 var momJoinPayload = JsonConvert.DeserializeObject<Mother.MotherJoinPayload>(jsonData.ToString());
+                // Both values are appended to config.txt as key=value lines: a line break injected further settings.
+                if (ContainsLineBreak(momJoinPayload?.IPAddress) || ContainsLineBreak(momJoinPayload?.Password))
+                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Mother address and password may not contain line breaks." });
                 Globals.MotherAddress = momJoinPayload.IPAddress;
                 Globals.MotherPassword = momJoinPayload.Password.ToSecureString();
                 Globals.ConnectToMother = true;

@@ -189,5 +189,23 @@ namespace VerifiedXCore.Tests
             Assert.False(P2PMotherServer.TryBeginAuthAttempt(ip));
             Assert.True(P2PMotherServer.TryBeginAuthAttempt(ip + "1")); // another IP is independent
         }
+
+        [Fact]
+        public async Task VX17_FollowUp_JoinMother_RefusesLineBreaksThatWouldInjectConfigLines()
+        {
+            // Sixth review: JoinMother appends MotherAddress= and MotherPassword= lines to config.txt; a line break in
+            // either value injected further settings (e.g. a password "pw" + newline + "OpenAPI=true").
+            var (addr, pw, connect) = (Globals.MotherAddress, Globals.MotherPassword, Globals.ConnectToMother);
+            var configFile = System.IO.Path.Combine(VerifiedXCore.Utilities.GetPathUtility.GetConfigPath(), "config.txt");
+            System.IO.File.WriteAllText(configFile, "Port=3338");
+            try
+            {
+                var payload = Newtonsoft.Json.JsonConvert.SerializeObject(new { IPAddress = "10.0.0.1", Password = "pw\nOpenAPI=true" });
+                var result = await new VerifiedXCore.Controllers.V1Controller().JoinMother(Newtonsoft.Json.Linq.JToken.Parse(payload));
+                Assert.Contains("Fail", result);
+                Assert.Equal("Port=3338", System.IO.File.ReadAllText(configFile));
+            }
+            finally { (Globals.MotherAddress, Globals.MotherPassword, Globals.ConnectToMother) = (addr, pw, connect); }
+        }
     }
 }
