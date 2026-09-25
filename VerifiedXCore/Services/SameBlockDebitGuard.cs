@@ -58,8 +58,15 @@ namespace VerifiedXCore.Services
             // already sum a sender's pending transactions (DoubleSpendReplayCheck); block validation did not, so a
             // producer could include spends that together exceed the balance (third review).
             if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd"
-                && !Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType) && tx.Amount + tx.Fee > 0M)
-                debits.Add((new DebitKey(LedgerKind.Native, NativeUid, tx.FromAddress), tx.Amount + tx.Fee));
+                && !Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
+            {
+                // An NFT sale completion's apply also debits the buyer for the inner payments (seller, royalty payee)
+                // on top of the outer Amount + Fee (Amount is 0 there). One entry per transaction, so a lone sale is
+                // judged only by the per-transaction rules (fourth review: sale + VFX send in one block went negative).
+                var native = tx.Amount + tx.Fee + SaleCompletionPayments(tx);
+                if (native > 0M)
+                    debits.Add((new DebitKey(LedgerKind.Native, NativeUid, tx.FromAddress), native));
+            }
 
             if (string.IsNullOrEmpty(tx.Data))
                 return debits;
@@ -187,7 +194,9 @@ namespace VerifiedXCore.Services
             {
                 // No account: VerifyTX allows that only for TKNZ_WD_ARB (arbiters); not judged here.
                 var account = StateData.GetSpecificAccountStateTrei(key.Holder);
-                return account?.Balance;
+                if (account == null) return null;
+                // Reserve accounts must keep 0.5 VFX (VerifyTX's reserve rule); the per-block total honours it too.
+                return key.Holder.StartsWith("xRBX") ? account.Balance - 0.5M : account.Balance;
             }
 
             if (key.Kind == LedgerKind.Token)
@@ -329,6 +338,33 @@ namespace VerifiedXCore.Services
             state.Senders.Add(sender);
             if (isSweep) state.Swept.Add(sender);
             return (true, "");
+        }
+
+        /// <summary>The buyer debits StateData.CompleteSaleSmartContract writes beyond the outer transaction.</summary>
+        public static decimal SaleCompletionPayments(Transaction tx)
+        {
+            if (tx?.TransactionType != TransactionType.NFT_SALE || string.IsNullOrEmpty(tx.Data))
+                return 0M;
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                var function = jobj["Function"]?.ToObject<string?>();
+                if (function != "Sale_Complete()" && function != "M_Sale_Complete()")
+                    return 0M;
+                var inner = jobj["Transactions"]?.ToObject<List<Transaction>?>();
+                if (inner == null || inner.Count == 0)
+                    return 0M;
+                var royalty = jobj["Royalty"]?.ToObject<bool?>();
+                if (royalty == true)
+                {
+                    var toSeller = inner.FirstOrDefault(x => (x.Data ?? "").Contains("1/2"));
+                    var toPayee = inner.FirstOrDefault(x => (x.Data ?? "").Contains("2/2"));
+                    return (toSeller == null ? 0M : toSeller.Amount + toSeller.Fee) + (toPayee == null ? 0M : toPayee.Amount + toPayee.Fee);
+                }
+                var first = inner[0];
+                return first == null ? 0M : first.Amount + first.Fee;
+            }
+            catch { return 0M; }
         }
 
         public static bool IsReserveRecover(Transaction tx)

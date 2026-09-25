@@ -413,5 +413,34 @@ namespace VerifiedXCore.Tests
                 new Transaction { FromAddress = "xArbiterWithoutAccount", ToAddress = "xRequestor", TransactionType = TransactionType.TKNZ_WD_ARB, Amount = 0M, Fee = 0.00001M, Nonce = nonce, Hash = $"arb-{nonce}" };
             Assert.True(Block(Arb(0), Arb(1)).Ok);
         }
+
+        [Fact]
+        public void NEW07_FollowUp_NftSaleCompletionPaymentsCountAsNativeDebits()
+        {
+            // Fourth review: Sale_Complete has Amount 0 but its apply debits the buyer for the inner payments; a sale of
+            // 100 plus a VFX send of 100 from a buyer holding 100 both passed and the buyer went negative.
+            var inner = new List<Transaction> { new Transaction { FromAddress = _holder.Address, ToAddress = _owner.Address, Amount = 60M, Fee = 0M, Data = "1/2" } };
+            var sale = new Transaction
+            {
+                FromAddress = _holder.Address, ToAddress = _owner.Address, TransactionType = TransactionType.NFT_SALE, Amount = 0M, Fee = 0.00001M, Nonce = 0, Hash = "sale",
+                Data = JsonConvert.SerializeObject(new { Function = "Sale_Complete()", ContractUID = "x", Royalty = false, Transactions = inner, KeySign = "k" }),
+            };
+            Assert.Equal(60M, SameBlockDebitGuard.SaleCompletionPayments(sale));
+            var send = new Transaction { FromAddress = _holder.Address, ToAddress = _other.Address, TransactionType = TransactionType.TX, Amount = 60M, Fee = 0.00001M, Nonce = 1, Hash = "send" };
+            Assert.False(Block(sale, send).Ok);
+            Assert.True(Block(sale).Ok); // a lone sale is left to the per-transaction rules
+        }
+
+        [Fact]
+        public void NEW07_FollowUp_ReserveKeepsItsMinimumAcrossTheBlock()
+        {
+            // VerifyTX requires a reserve to keep 0.5 VFX after each send; two sends could leave it between 0 and 0.5.
+            const string reserve = "xRBXminimum000000000000000000000";
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = reserve, Balance = 10M, Nonce = 0 });
+            Transaction Send(decimal amount, long nonce) =>
+                new Transaction { FromAddress = reserve, ToAddress = _other.Address, TransactionType = TransactionType.TX, Amount = amount, Fee = 0M, Nonce = nonce, Hash = $"r-{amount}-{nonce}" };
+            Assert.False(Block(Send(5M, 0), Send(4.8M, 1)).Ok);
+            Assert.True(Block(Send(5M, 0), Send(4.4M, 1)).Ok);
+        }
     }
 }

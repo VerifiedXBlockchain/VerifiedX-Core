@@ -270,7 +270,7 @@ namespace VerifiedXCore.Services
             void Add(string? a, decimal v) { if (!string.IsNullOrEmpty(a)) { bal.TryGetValue(a, out var b); bal[a] = b + v; } }
             var coinbase = tx.FromAddress == "Coinbase_TrxFees" || tx.FromAddress == "Coinbase_BlkRwd";
             if (height > 0 && !coinbase && !VerifiedXCore.Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
-                Add(tx.FromAddress, -(tx.Amount + tx.Fee));
+                Add(tx.FromAddress, -(tx.Amount + tx.Fee + SameBlockDebitGuard.SaleCompletionPayments(tx)));
             if (tx.ToAddress != null && BaseAddresses.Contains(tx.ToAddress))
                 return;
             var reserveSender = tx.FromAddress?.StartsWith("xRBX") == true; // credited to LockedBalance (not spendable)
