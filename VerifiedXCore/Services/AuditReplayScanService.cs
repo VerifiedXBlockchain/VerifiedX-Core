@@ -325,7 +325,7 @@ namespace VerifiedXCore.Services
                         {
                             var (sweepOk, sweepReason) = SameBlockDebitGuard.TryRegister(tx, sweepState);
                             if (!sweepOk)
-                                hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-07 Recover() shares its block", sweepReason));
+                                hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-07/24 block rule (Recover() alone, no repeated transaction)", sweepReason));
                         }
                         foreach (var (rawKey, amount) in SameBlockDebitGuard.GetDebits(tx))
                         {

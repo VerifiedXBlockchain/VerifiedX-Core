@@ -471,5 +471,14 @@ namespace VerifiedXCore.Tests
             }
             finally { Globals.WithdrawalEscrowHeight = prior; }
         }
+
+        [Fact]
+        public void NEW24_PoC_SameSignedTransactionTwiceInABlock_Refused()
+        {
+            // Sixth review (PoC R6_SameSignedTxRepeatedInOneBlock_AppliedNTimes: five copies of one payment, +500).
+            var pay = new Transaction { FromAddress = _holder.Address, ToAddress = _other.Address, TransactionType = TransactionType.TX, Amount = 1M, Fee = 0.00001M, Nonce = 0, Hash = "same-payment" };
+            Assert.False(Block(pay, pay).Ok);
+            Assert.True(Block(pay).Ok);
+        }
     }
 }

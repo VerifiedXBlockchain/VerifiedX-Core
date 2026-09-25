@@ -266,6 +266,7 @@ namespace VerifiedXCore.Services
             internal Dictionary<DebitKey, int> Count { get; } = new();
             internal Dictionary<string, string> CanonicalUids { get; } = new(StringComparer.Ordinal);
             internal HashSet<string> Senders { get; } = new(StringComparer.Ordinal);
+            internal HashSet<string> Hashes { get; } = new(StringComparer.Ordinal);
             internal HashSet<string> Swept { get; } = new(StringComparer.Ordinal);
             private readonly Dictionary<DebitKey, decimal?> _balances = new();
 
@@ -291,6 +292,12 @@ namespace VerifiedXCore.Services
         {
             if (tx == null || state == null)
                 return (true, "");
+            // NEW-24: the same signed transaction may appear only once in a block - nothing refused a repeat, so a producer
+            // could apply a victim's payment N times (the nonce rule is inactive).
+            if (!string.IsNullOrEmpty(tx.Hash) && state.Hashes.Contains(tx.Hash))
+                return (false, $"{ReasonPrefix}: transaction {tx.Hash} appears more than once in the block.");
+            if (!string.IsNullOrEmpty(tx.Hash))
+                state.Hashes.Add(tx.Hash);
             // Whitelisted historical transactions skip VerifyTX entirely; they are not judged here either.
             if (Globals.BadTxList.Exists(x => x == tx.Hash) || Globals.BadNFTTxList.Exists(x => x == tx.Hash))
                 return (true, "");
