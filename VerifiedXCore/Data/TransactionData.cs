@@ -1020,7 +1020,9 @@ namespace VerifiedXCore.Data
 
                                 if (passedPreCheck)
                                 {
-                                    var dblspndChk = await DoubleSpendReplayCheck(tx);
+                                    // NEW-07: the proposal applies the same-block debit guard itself (DropSameBlockOverspends,
+                                    // which defers); here it would DELETE a valid transaction whose sibling overspends.
+                                    var dblspndChk = await DoubleSpendReplayCheck(tx, skipDebitGuard: true);
                                     var isCraftedIntoBlock = await HasTxBeenCraftedIntoBlock(tx);
                                     var txVerify = await TransactionValidatorService.VerifyTX(tx);
 
@@ -1204,7 +1206,7 @@ namespace VerifiedXCore.Data
             return result;
         }
 
-        public static async Task<bool> DoubleSpendReplayCheck(Transaction tx)
+        public static async Task<bool> DoubleSpendReplayCheck(Transaction tx, bool skipDebitGuard = false)
         {
             bool result = false;
             AccountStateTrei? stateTreiAcct = null;
@@ -1298,7 +1300,7 @@ namespace VerifiedXCore.Data
 
             // NEW-07: every debit-writing type (vBTC V2/V1 and fungible tokens, both data shapes), jointly with the
             // sender's pending transactions. The vBTC V2 check above only counted typed transfers against each other.
-            if (!SameBlockDebitGuard.CheckAgainstPending(tx, txs).Ok)
+            if (!skipDebitGuard && !SameBlockDebitGuard.CheckAgainstPending(tx, txs).Ok)
                 return true;
 
             //double NFT transfer or burn check

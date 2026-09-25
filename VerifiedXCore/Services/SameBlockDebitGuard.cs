@@ -62,9 +62,17 @@ namespace VerifiedXCore.Services
                         return debits;
 
                     case TransactionType.VBTC_V2_WITHDRAWAL_REQUEST:
+                    {
+                        // The request debits (escrow) only from WithdrawalEscrowHeight on; earlier requests were burned
+                        // at COMPLETE, so counting them here would refuse historical blocks the apply accepts. Same height
+                        // source as the apply (tx.Height, set when the transaction is crafted into its block).
+                        var height = tx.Height > 0 ? tx.Height : (Globals.LastBlock?.Height ?? 0) + 1;
+                        if (!Bitcoin.Models.VBTCWithdrawalRequest.EscrowAppliesTo(height))
+                            return debits;
                         foreach (var (uid, amt) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(tx))
                             debits.Add((new DebitKey(LedgerKind.VbtcV2, uid, tx.FromAddress), amt));
                         return debits;
+                    }
 
                     case TransactionType.VBTC_V2_BRIDGE_LOCK:
                     {
@@ -186,6 +194,25 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// Mempool admission and block proposal only (never block validation): a vBTC V2 OWNER's balance is its deposit
+        /// address's confirmed BTC (ElectrumX) plus its owner ledger, the same figure the per-transaction admission check
+        /// uses. Honest nodes therefore neither admit nor propose two owner debits that together exceed it; block
+        /// validation keeps trusting the producer for owners (ElectrumX is not consensus state).
+        /// </summary>
+        public static decimal? PolicyBalance(DebitKey key)
+        {
+            var committed = CommittedBalance(key);
+            if (committed.HasValue || key.Kind != LedgerKind.VbtcV2)
+                return committed;
+            try
+            {
+                var (ok, available, _) = Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(key.ContractUid, key.Holder).GetAwaiter().GetResult();
+                return ok ? available : 0M;
+            }
+            catch { return 0M; }
+        }
+
+        /// <summary>
         /// vBTC ledgers live on the contract record, which is looked up through LiteDB's default collation (case is
         /// ignored), so "ABC:1" and "abc:1" debit the same rows. Keys use the stored record's UID. Token balances are
         /// matched to the UID ordinally (validator and apply alike), so case variants there are separate balances.
@@ -208,10 +235,15 @@ namespace VerifiedXCore.Services
             internal Dictionary<DebitKey, decimal> Spent { get; } = new();
             internal Dictionary<DebitKey, int> Count { get; } = new();
             internal Dictionary<string, string> CanonicalUids { get; } = new(StringComparer.Ordinal);
+            internal HashSet<string> Senders { get; } = new(StringComparer.Ordinal);
+            internal HashSet<string> Swept { get; } = new(StringComparer.Ordinal);
             private readonly Dictionary<DebitKey, decimal?> _balances = new();
 
+            /// <summary>Consensus state (block validation).</summary>
             public State() : this(CommittedBalance) { }
             public State(Func<DebitKey, decimal?> balanceOf) { _balanceOf = balanceOf; }
+            /// <summary>Admission / proposal: also judges vBTC V2 owners (see <see cref="PolicyBalance"/>).</summary>
+            public static State ForPolicy() => new State(PolicyBalance);
 
             internal decimal? BalanceOf(DebitKey key)
             {
@@ -229,9 +261,28 @@ namespace VerifiedXCore.Services
         {
             if (tx == null || state == null)
                 return (true, "");
+            // Whitelisted historical transactions skip VerifyTX entirely; they are not judged here either.
+            if (Globals.BadTxList.Exists(x => x == tx.Hash) || Globals.BadNFTTxList.Exists(x => x == tx.Hash))
+                return (true, "");
+
+            // A reserve Recover() sweeps every balance of the reserve to its recovery address, a debit of the whole
+            // balance that per-transaction checks (committed state) cannot see: a reserve send in the same block wrote a
+            // fresh Pending row after the sweep and paid out again at unlock. Recover() must be the only transaction
+            // from its reserve in the block.
+            var sender = tx.FromAddress ?? "";
+            var isSweep = IsReserveRecover(tx);
+            if (state.Swept.Contains(sender))
+                return (false, $"{ReasonPrefix}: {sender} is swept by Recover() in this block; no other transaction from it may share the block.");
+            if (isSweep && state.Senders.Contains(sender))
+                return (false, $"{ReasonPrefix}: Recover() must be the only transaction from {sender} in its block.");
+
             var debits = GetDebits(tx);
             if (debits.Count == 0)
+            {
+                state.Senders.Add(sender);
+                if (isSweep) state.Swept.Add(sender);
                 return (true, "");
+            }
 
             var byKey = debits.Select(d => (Key: Canonical(d.Key, state.CanonicalUids), d.Amount))
                 .GroupBy(d => d.Key).Select(g => (Key: g.Key, Sum: g.Sum(d => d.Amount), N: g.Count())).ToList();
@@ -254,7 +305,17 @@ namespace VerifiedXCore.Services
                 state.Spent[key] = spent + sum;
                 state.Count[key] = count + n;
             }
+            state.Senders.Add(sender);
+            if (isSweep) state.Swept.Add(sender);
             return (true, "");
+        }
+
+        public static bool IsReserveRecover(Transaction tx)
+        {
+            if (tx?.TransactionType != TransactionType.RESERVE || string.IsNullOrEmpty(tx.Data))
+                return false;
+            try { return JObject.Parse(tx.Data)["Function"]?.ToObject<string?>() == "Recover()"; }
+            catch { return false; }
         }
 
         /// <summary>
@@ -264,7 +325,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static List<Transaction> DropSameBlockOverspends(List<Transaction> approved, State? state = null)
         {
-            state ??= new State();
+            state ??= State.ForPolicy();
             var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
             var result = new List<Transaction>();
             foreach (var tx in approved)
@@ -292,7 +353,7 @@ namespace VerifiedXCore.Services
             var debits = GetDebits(tx);
             if (debits.Count == 0)
                 return (true, "");
-            var state = new State();
+            var state = State.ForPolicy();
             var keys = new HashSet<DebitKey>(debits.Select(d => Canonical(d.Key, state.CanonicalUids)));
             foreach (var p in pendingFromSameSender.OrderBy(p => p.Nonce))
             {

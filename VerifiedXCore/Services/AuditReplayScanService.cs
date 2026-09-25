@@ -280,6 +280,7 @@ namespace VerifiedXCore.Services
                     blockCount++;
                     var createdInBlock = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // NEW-06
                     var debitsInBlock = new Dictionary<SameBlockDebitGuard.DebitKey, (int N, decimal Sum, Transaction Last)>(); // NEW-07
+                    var sweepState = new SameBlockDebitGuard.State(_ => null); // NEW-07: balances not judged, only the Recover() rule
                     foreach (var tx in block.Transactions ?? new List<Transaction>())
                     {
                         txCount++;
@@ -288,6 +289,12 @@ namespace VerifiedXCore.Services
                         if (dup != null)
                             hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-06 duplicate creation in block", dup));
                         try { TrackV1(tx, block.Height, v1, hits); } catch { }
+                        if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd")
+                        {
+                            var (sweepOk, sweepReason) = SameBlockDebitGuard.TryRegister(tx, sweepState);
+                            if (!sweepOk)
+                                hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-07 Recover() shares its block", sweepReason));
+                        }
                         foreach (var (rawKey, amount) in SameBlockDebitGuard.GetDebits(tx))
                         {
                             var key = SameBlockDebitGuard.Canonical(rawKey, canonicalUids);

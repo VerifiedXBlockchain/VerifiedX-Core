@@ -316,5 +316,82 @@ namespace VerifiedXCore.Tests
             TransactionData.GetPool().InsertSafe(TokenTransfer(40M, 0));
             Assert.False(await TransactionData.DoubleSpendReplayCheck(TokenTransfer(60M, 1)));
         }
+
+        // ── Follow-up (third review) ────────────────────────────────────────────────────────
+
+        private static Transaction Raw(string from, TransactionType type, string data, long nonce, string hash) =>
+            new Transaction { FromAddress = from, ToAddress = from, TransactionType = type, Data = data, Nonce = nonce, Hash = hash, Amount = 0M, Fee = 0.00001M };
+
+        [Fact]
+        public void NEW07_FollowUp_ReserveRecoverMustBeAloneInItsBlock()
+        {
+            // Recover() sweeps the reserve's whole balance (not a listed debit); a reserve send in the same block wrote
+            // a fresh Pending row after the sweep and paid out again at unlock (reviewer PoC E: reserve at -1.0).
+            const string reserve = "xRBXreserve0000000000000000000000";
+            var recover = Raw(reserve, TransactionType.RESERVE, JsonConvert.SerializeObject(new { Function = "Recover()", RecoveryAddress = "xRecovery", RecoverySigScript = "sig" }), 0, "recover");
+            var send = Raw(reserve, TransactionType.TX, "", 1, "send");
+            Assert.False(Block(recover, send).Ok);
+            Assert.False(Block(send, recover).Ok);
+            Assert.True(Block(recover).Ok);                                                        // control
+            Assert.True(Block(recover, Raw("xOther", TransactionType.TX, "", 0, "other")).Ok);      // control: other senders
+        }
+
+        [Fact]
+        public void NEW07_FollowUp_PreEscrowWithdrawalRequestIsNotADebit()
+        {
+            // Before WithdrawalEscrowHeight the request wrote no debit (burned at COMPLETE); counting it would refuse
+            // historical blocks the apply accepts.
+            var prior = Globals.WithdrawalEscrowHeight;
+            try
+            {
+                Globals.WithdrawalEscrowHeight = 5_000;
+                var wd = V2Withdrawal(1.0M, 1); wd.Height = 4_000;
+                var tr = V2FunctionTransfer(1.0M, 0); tr.Height = 4_000;
+                Assert.Empty(SameBlockDebitGuard.GetDebits(wd));
+                Assert.True(Block(tr, wd).Ok);
+                wd.Height = 5_000;                                   // control: escrowed request is a debit
+                Assert.False(Block(tr, wd).Ok);
+            }
+            finally { Globals.WithdrawalEscrowHeight = prior; }
+        }
+
+        [Fact]
+        public void NEW07_FollowUp_WhitelistedHistoricalTransactionsAreNotJudged()
+        {
+            var a = V2FunctionTransfer(1.0M, 0);
+            var b = V2FunctionTransfer(1.0M, 1);
+            Globals.BadTxList.Add(b.Hash);
+            try { Assert.True(Block(a, b).Ok); }
+            finally { Globals.BadTxList.Remove(b.Hash); }
+        }
+
+        [Fact]
+        public void NEW07_FollowUp_OwnerDebits_JudgedAtProposalButNotAtBlockValidation()
+        {
+            // Owner balance = deposit (ElectrumX) + owner ledger: policy for admission/proposal only (reviewer PoC G:
+            // an owner's two full-balance transfers were admitted, proposed and verified).
+            var o1 = Signed(_owner, _other.Address, TransactionType.TKNZ_TX,
+                new { Function = "TransferVBTCV2()", ContractUID = V2, FromAddress = _owner.Address, ToAddress = _other.Address, Amount = 1.0M }, 0);
+            var o2 = Signed(_owner, _other.Address, TransactionType.TKNZ_TX,
+                new { Function = "TransferVBTCV2()", ContractUID = V2, FromAddress = _owner.Address, ToAddress = _other.Address, Amount = 1.0M }, 1);
+            // The owner holds no deposit here (no ElectrumX in the test process: deposit 0) and no ledger rows.
+            var ownerKey = new SameBlockDebitGuard.DebitKey(SameBlockDebitGuard.LedgerKind.VbtcV2, V2, _owner.Address);
+            Assert.Null(SameBlockDebitGuard.CommittedBalance(ownerKey));
+            Assert.NotNull(SameBlockDebitGuard.PolicyBalance(ownerKey));
+            var kept = SameBlockDebitGuard.DropSameBlockOverspends(new List<Transaction> { o1, o2 }); // default: policy state
+            Assert.Equal(new[] { o1.Hash }, kept.Select(t => t.Hash).ToArray());
+            Assert.True(Block(o1, o2).Ok); // consensus keeps trusting the producer for owners
+        }
+
+        [Fact]
+        public async Task NEW07_FollowUp_ProposalPrecheckDoesNotDeleteGuardedSiblings()
+        {
+            // The proposal's DoubleSpendReplayCheck deleted a valid transaction whose pending sibling overspent; the
+            // guard there only defers (DropSameBlockOverspends).
+            TransactionData.GetPool().InsertSafe(TokenTransfer(100M, 0));
+            var second = TokenTransfer(100M, 1);
+            Assert.True(await TransactionData.DoubleSpendReplayCheck(second));                       // admission refuses
+            Assert.False(await TransactionData.DoubleSpendReplayCheck(second, skipDebitGuard: true)); // proposal precheck
+        }
     }
 }
