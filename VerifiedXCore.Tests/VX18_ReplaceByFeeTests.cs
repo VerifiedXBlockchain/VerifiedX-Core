@@ -174,5 +174,20 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain(" at VerifiedXCore", message);
             Assert.DoesNotContain(".cs:line", message);
         }
+
+        [Fact]
+        public void NEW01_FollowUp_BitcoinAddressNotStoredWhileLocked_IsNotHandedOut()
+        {
+            // Fourth review: CLI /btc -> 1 while locked printed a new address whose key was never stored (save refused,
+            // result ignored); funds sent there were lost. The import helpers likewise reported success.
+            Lock();
+            Assert.Null(BitcoinAccount.CreateAddress());
+            var key = new NBitcoin.Key().ToHex();
+            Assert.False(BitcoinAccount.ImportPrivateKey(key, NBitcoin.ScriptPubKeyType.Segwit));
+
+            Unlock();                                                        // control
+            Assert.NotNull(BitcoinAccount.CreateAddress());
+            Assert.True(BitcoinAccount.ImportPrivateKey(key, NBitcoin.ScriptPubKeyType.Segwit));
+        }
     }
 }

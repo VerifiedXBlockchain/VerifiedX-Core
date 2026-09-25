@@ -137,7 +137,9 @@ namespace VerifiedXCore.Bitcoin.Models
         #endregion
 
         #region Create Bitcoin Address
-        public static BitcoinAccount CreateAddress(bool save = true)
+        /// <summary>Null when <paramref name="save"/> is set and the address could not be stored (encrypted wallet locked):
+        /// an address whose key was never stored must not be shown, or funds sent to it are lost (fourth review).</summary>
+        public static BitcoinAccount? CreateAddress(bool save = true)
         {
             Key privateKey = new Key();
 
@@ -158,8 +160,8 @@ namespace VerifiedXCore.Bitcoin.Models
                 WifKey = wif, 
             };
 
-            if(save)
-                SaveBitcoinAddress(btcAddress);
+            if(save && !SaveBitcoinAddress(btcAddress))
+                return null;
 
             return btcAddress;
         }
@@ -204,7 +206,8 @@ namespace VerifiedXCore.Bitcoin.Models
         #endregion
 
         #region Import Private Key Hex
-        public static void ImportPrivateKey(string privateKey, ScriptPubKeyType scriptPubKeyType)
+        /// <summary>False when the key was not stored (already present, or encrypted wallet locked).</summary>
+        public static bool ImportPrivateKey(string privateKey, ScriptPubKeyType scriptPubKeyType)
         {
             byte[] privateKeyBytes = privateKey.HexToByteArray();
             Key recreatedKey = new Key(privateKeyBytes);
@@ -227,15 +230,16 @@ namespace VerifiedXCore.Bitcoin.Models
                 WifKey = wif,
             };
 
-            SaveBitcoinAddress(btcAddress);
-
-            _ = AddressSyncService.SyncAddress(btcAddress.Address);
+            var stored = SaveBitcoinAddress(btcAddress);
+            if (stored)
+                _ = AddressSyncService.SyncAddress(btcAddress.Address);
+            return stored;
         }
 
         #endregion
 
         #region Import Private Key WIF
-        public static void ImportPrivateKeyWIF(string privateKey, ScriptPubKeyType scriptPubKeyType)
+        public static bool ImportPrivateKeyWIF(string privateKey, ScriptPubKeyType scriptPubKeyType)
         {
             BitcoinSecret bitcoinSecret = new BitcoinSecret(privateKey, Globals.BTCNetwork);
             // Get the private key
@@ -259,9 +263,10 @@ namespace VerifiedXCore.Bitcoin.Models
                 WifKey = wif,
             };
 
-            SaveBitcoinAddress(btcAddress);
-
-            _ = AddressSyncService.SyncAddress(btcAddress.Address);
+            var stored = SaveBitcoinAddress(btcAddress);
+            if (stored)
+                _ = AddressSyncService.SyncAddress(btcAddress.Address);
+            return stored;
         }
 
         #endregion

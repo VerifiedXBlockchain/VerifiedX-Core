@@ -16,6 +16,11 @@ namespace VerifiedXCore.Bitcoin
         public static void CreateAddress()
         {
             var account = BitcoinAccount.CreateAddress();
+            if (account == null)
+            {
+                Console.WriteLine("No address was created: the wallet is encrypted and locked. Unlock it and try again.");
+                return;
+            }
             BitcoinAccount.PrintAccountInfo(account);
         }
 
@@ -59,16 +64,12 @@ namespace VerifiedXCore.Bitcoin
                 }
 
                 //hex key
-                if (privateKey?.Length > 58)
-                {
-                    BitcoinAccount.ImportPrivateKey(privateKey, scriptPubKeyType);
-                    await ReturnToMenu("Private key has been imported!");
-                }
-                else
-                {
-                    BitcoinAccount.ImportPrivateKeyWIF(privateKey, scriptPubKeyType);
-                    await ReturnToMenu("Private key has been imported!");
-                }
+                var stored = privateKey?.Length > 58
+                    ? BitcoinAccount.ImportPrivateKey(privateKey, scriptPubKeyType)
+                    : BitcoinAccount.ImportPrivateKeyWIF(privateKey, scriptPubKeyType);
+                await ReturnToMenu(stored
+                    ? "Private key has been imported!"
+                    : "The key was not imported (already present, or the wallet is encrypted and locked).");
             }
             catch (Exception ex)
             {

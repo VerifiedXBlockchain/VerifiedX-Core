@@ -55,7 +55,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public async Task<string> GetNewAddress()
         {           
             var account = BitcoinAccount.CreateAddress();
-            
+            if (account == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "No address was created: the wallet is encrypted and locked." });
+
             LogUtility.Log("New Address Created: " + account.Address, "BTCV2Controller.GetNewAddress()");
 
             // VX-13: the one deliberate key hand-off (new address); refused while locked by the BB-3 gate, and the key
@@ -86,14 +88,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 addressFormat == Bitcoin.BitcoinAddressFormat.Segwit ? NBitcoin.ScriptPubKeyType.Segwit : NBitcoin.ScriptPubKeyType.TaprootBIP86;
 
             //hex key
-            if (privateKey?.Length > 58)
-            {
-                BitcoinAccount.ImportPrivateKey(privateKey, scriptPubKeyType);
-            }
-            else
-            {
-                BitcoinAccount.ImportPrivateKeyWIF(privateKey, scriptPubKeyType);
-            }
+            var stored = privateKey?.Length > 58
+                ? BitcoinAccount.ImportPrivateKey(privateKey, scriptPubKeyType)
+                : BitcoinAccount.ImportPrivateKeyWIF(privateKey, scriptPubKeyType);
+            if (!stored)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "The key was not imported (already present, or the wallet is encrypted and locked)." });
 
             LogUtility.Log("Key Import Successful.", "BTCV2Controller.GetNewAddress()");
 
