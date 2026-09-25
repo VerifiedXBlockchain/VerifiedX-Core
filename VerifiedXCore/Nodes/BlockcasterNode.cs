@@ -3044,7 +3044,7 @@ namespace VerifiedXCore.Nodes
             switch (message)
             {
                 case "1":
-                    _ = IpMessage(data);
+                    _ = IpMessage(data, ipAddress);
                     break;
                 case "2":
                     _ = ReceiveVote(data);
@@ -3115,14 +3115,9 @@ namespace VerifiedXCore.Nodes
 
         #region Messages
         //1
-        private static async Task IpMessage(string data)
+        private static async Task IpMessage(string data, string ipAddress)
         {
-            var IP = data.ToString();
-            if (Globals.ReportedIPs.TryGetValue(IP, out int Occurrences))
-                Globals.ReportedIPs[IP]++;
-            else
-                Globals.ReportedIPs[IP] = 1;
-            P2P.P2PClient.TryAutoUpdateReportedIP();
+            P2P.P2PClient.RecordReportedIP(data, ipAddress); // NEW-20
         }
 
         //2
