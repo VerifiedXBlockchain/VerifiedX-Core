@@ -99,5 +99,19 @@ namespace VerifiedXCore.Tests
 
             Assert.True(await Upload(local.Address, local));
         }
+
+        [Fact]
+        public async Task NEW15_BeaconPoolEntryIsRemovedWhenItsConnectionCloses()
+        {
+            // Fifth review: OnDisconnectedAsync called TryGetFromKey1 (a lookup), so pool entries were never removed.
+            var ctx = new FakeContext();
+            Globals.BeaconPool[("10.1.2.3", "ref-new15")] = new BeaconPool { ConnectionId = ctx.ConnectionId, IpAddress = "10.1.2.3", Reference = "ref-new15" };
+            try
+            {
+                await new P2PBeaconServer { Context = ctx }.OnDisconnectedAsync(null);
+                Assert.False(Globals.BeaconPool.TryGetFromKey1("10.1.2.3", out _));
+            }
+            finally { Globals.BeaconPool.TryRemoveFromKey1("10.1.2.3", out _); }
+        }
     }
 }

@@ -54,7 +54,8 @@ namespace VerifiedXCore.P2P
                 SCLogUtility.Log($"Wallet Version Verift: {walletVersionVerify}", "CustomLogging");
                 await Task.Delay(10);
 
-                if (!string.IsNullOrWhiteSpace(beaconRef) && walletVersionVerify)
+                // NEW-15: the reference becomes a pool key; an oversized one only grows memory.
+                if (!string.IsNullOrWhiteSpace(beaconRef) && beaconRef.Length <= 256 && walletVersionVerify)
                 {
                     SCLogUtility.Log($"Wal Version Good and Beacon Ref Good.", "CustomLogging");
                     var beaconData = BeaconData.GetBeaconData();
@@ -178,7 +179,10 @@ namespace VerifiedXCore.P2P
         {
             var peerIP = GetIP(Context);
             Globals.BeaconPeerDict.TryRemove(peerIP, out _);
-            Globals.BeaconPool.TryGetFromKey1(peerIP, out _);
+            // NEW-15: this only LOOKED the entry up, so BeaconPool entries were never removed (unbounded growth on every
+            // node's /beacon hub). Remove this connection's entry (not a newer connection's from the same address).
+            if (Globals.BeaconPool.TryGetFromKey1(peerIP, out var pooled) && pooled.Value?.ConnectionId == Context.ConnectionId)
+                Globals.BeaconPool.TryRemoveFromKey1(peerIP, out _);
         }
         private async Task SendMessageClient(string clientId, string method, string message)
         {
