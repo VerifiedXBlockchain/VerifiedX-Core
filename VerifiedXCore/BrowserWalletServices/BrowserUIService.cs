@@ -978,7 +978,7 @@ function renderNFTs(nfts){
       '<div class=""nft-icon"">'+icon+'</div>'+
       '<div class=""nft-name"">'+esc(n.name||'Unnamed')+'</div>'+
       '<div style=""display:flex;gap:6px;flex-wrap:wrap"">'+badge+pubBadge+'</div>'+
-      '<div class=""nft-uid"" title=""'+esc(n.scUID)+'"">'+uid+'</div>'+
+      '<div class=""nft-uid"" title=""'+esc(n.scUID)+'"">'+esc(uid)+'</div>'+
       (n.minterName?'<div class=""muted"" style=""font-size:11px"">By: '+esc(n.minterName)+'</div>':'')+
       '<div class=""nft-actions"">'+
       '<button class=""act-btn prim"" onclick=""openTransferNFT('+jsa(n.scUID)+','+jsa(n.name||'Unnamed')+')"">&rarr; Transfer</button>'+

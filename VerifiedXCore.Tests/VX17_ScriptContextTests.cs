@@ -94,5 +94,16 @@ namespace VerifiedXCore.Tests
             Assert.Contains("esc(shn(lk.BaseTxHash||lk.baseTxHash,12))", html);
             Assert.Contains("esc(shn(peer||'--',18))", html);
         }
+
+        [Fact]
+        public async Task VX17_FollowUp2_NftUidAndBlockValidatorAreEncoded()
+        {
+            // Third review: an NFT's contract UID (no consensus format rule; any UID is accepted for an undecodable Mint
+            // body) was inserted raw into the wallet's NFT tab - stored script on the wallet origin via a transferred NFT.
+            var wallet = await Page("/wallet");
+            Assert.Contains("'+esc(uid)+'</div>", wallet);
+            var explorer = await Page("/explorer");
+            Assert.DoesNotContain("+vs+'</code>", explorer);
+        }
     }
 }

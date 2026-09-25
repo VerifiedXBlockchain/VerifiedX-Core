@@ -639,7 +639,7 @@ function blkRow(b){
     '<td><span class=""ht-badge"">'+Number(b.height)+'</span></td>'+
     '<td><code class=""hash-lnk"" title=""'+esc(b.hash)+'"">' +hs+'</code></td>'+
     '<td class=""muted"">'+ago(b.timestamp)+'</td>'+
-    '<td><code class=""addr-t"" title=""'+esc(b.validator)+'"">' +vs+'</code></td>'+
+    '<td><code class=""addr-t"" title=""'+esc(b.validator)+'"">' +esc(vs)+'</code></td>'+
     '<td><span class=""'+tc+'"">'+b.numOfTx+'</span></td>'+
     '<td class=""muted"">'+sz(b.size)+'</td>'+
     '<td class=""rwd"">'+b.totalReward+' VFX</td>'+
@@ -685,7 +685,7 @@ function blkRowInner(b){
   return '<td><span class=""ht-badge"">'+Number(b.height)+'</span></td>'+
     '<td><code class=""hash-lnk"" title=""'+esc(b.hash)+'"">' +hs+'</code></td>'+
     '<td class=""muted"">'+ago(b.timestamp)+'</td>'+
-    '<td><code class=""addr-t"" title=""'+esc(b.validator||'')+'"">' +vs+'</code></td>'+
+    '<td><code class=""addr-t"" title=""'+esc(b.validator||'')+'"">' +esc(vs)+'</code></td>'+
     '<td><span class=""'+tc+'"">'+b.numOfTx+'</span></td>'+
     '<td class=""muted"">'+sz(b.size)+'</td>'+
     '<td class=""rwd"">'+b.totalReward+' VFX</td>';
