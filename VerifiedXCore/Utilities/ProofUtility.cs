@@ -365,6 +365,10 @@ namespace VerifiedXCore.Utilities
                 if (useNetworkFilter && !Globals.NetworkValidators.ContainsKey(entry.Address))
                     continue;
 
+                // VX-05 (follow-up): the same eligibility every other caster applies to this proof when it arrives.
+                if (ProducerIneligibility(entry.Address) != null)
+                    continue;
+
                 var proof = await CreateProof(entry.Address, entry.PublicKey, blockHeight, prevHash);
                 if (proof.Item1 != 0 && !string.IsNullOrEmpty(proof.Item2))
                 {
@@ -618,10 +622,8 @@ namespace VerifiedXCore.Utilities
             if (!VerifyProofBinding(proof)) { reason = "binding"; return false; }
             if (proof.BlockHeight != expectedHeight) { reason = "height"; return false; }
             if (!string.Equals(proof.PreviousBlockHash, expectedPrevHash, StringComparison.OrdinalIgnoreCase)) { reason = "prevhash"; return false; }
-            if (Globals.ABL.Exists(x => x == proof.Address)) { reason = "abl"; return false; }
-
-            var state = StateData.GetSpecificAccountStateTrei(proof.Address);
-            if (state == null || state.Balance < ValidatorService.ValidatorRequiredAmount()) { reason = "not-eligible"; return false; }
+            var ineligible = ProducerIneligibility(proof.Address);
+            if (ineligible != null) { reason = ineligible; return false; }
 
             if (Globals.NetworkValidators.TryGetValue(proof.Address, out var nv) && !string.IsNullOrEmpty(nv.IPAddress))
                 proof.IPAddress = nv.IPAddress.Replace("::ffff:", "");
@@ -632,6 +634,22 @@ namespace VerifiedXCore.Utilities
                     proof.IPAddress = caster.PeerIP.Replace("::ffff:", "");
             }
             return true;
+        }
+
+        /// <summary>
+        /// VX-05 (follow-up): the one eligibility rule for a block producer's proof - not on the ABL, and holding the
+        /// validator balance in committed state. Proofs this node generates (snapshot path) and proofs it receives must use
+        /// the same rule: a snapshot validator that moved its coins out was elected locally on every caster but refused
+        /// from every other, so the round sat under quorum at each height where it had the lowest VRF.
+        /// Returns null when eligible, else the reason ("abl" or "not-eligible").
+        /// </summary>
+        public static string? ProducerIneligibility(string? address)
+        {
+            if (string.IsNullOrEmpty(address)) return "not-eligible";
+            if (Globals.ABL.Exists(x => x == address)) return "abl";
+            var state = StateData.GetSpecificAccountStateTrei(address);
+            if (state == null || state.Balance < ValidatorService.ValidatorRequiredAmount()) return "not-eligible";
+            return null;
         }
 
         /// <summary>Round-bound validation against the local tip (next height, current hash).</summary>
