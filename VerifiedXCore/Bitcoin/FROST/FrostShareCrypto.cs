@@ -47,8 +47,7 @@ namespace VerifiedXCore.Bitcoin.FROST
             var plaintext = Encoding.UTF8.GetBytes(packageJson);
             var ciphertext = new byte[plaintext.Length];
             var tag = new byte[16];
-            using (var aes = new AesGcm(key))
-                aes.Encrypt(nonce, plaintext, ciphertext, tag, Aad(sessionId, recipientIdentifier));
+            VerifiedXCore.Privacy.CrossPlatformAesGcm.Encrypt(key, nonce, plaintext, ciphertext, tag, Aad(sessionId, recipientIdentifier)); // works on macOS / .NET 6
 
             return Prefix + Convert.ToBase64String(ephemeral.ToBytes().Concat(nonce).Concat(tag).Concat(ciphertext).ToArray());
         }
@@ -71,8 +70,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 using var myKey = new NBitcoin.Key(myPrivateKey32);
                 var key = DeriveKey(ephemeral.GetSharedPubkey(myKey), ephemeral, myKey.PubKey);
                 var plaintext = new byte[ciphertext.Length];
-                using (var aes = new AesGcm(key))
-                    aes.Decrypt(nonce, ciphertext, tag, plaintext, Aad(sessionId, myIdentifier));
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Decrypt(key, nonce, ciphertext, tag, plaintext, Aad(sessionId, myIdentifier));
                 packageJson = Encoding.UTF8.GetString(plaintext);
                 return true;
             }

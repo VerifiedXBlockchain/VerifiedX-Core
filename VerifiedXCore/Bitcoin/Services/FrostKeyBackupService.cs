@@ -91,12 +91,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 var ciphertext = new byte[plaintextBytes.Length];
                 var tag = new byte[16]; // GCM tag is 16 bytes
 
-#pragma warning disable SYSLIB0053 // AesGcm(byte[]) is obsolete in .NET 8+; needed for .NET 6 compat
-                using (var aesGcm = new AesGcm(encryptionKey))
-#pragma warning restore SYSLIB0053
-                {
-                    aesGcm.Encrypt(nonce, plaintextBytes, ciphertext, tag);
-                }
+                // CrossPlatformAesGcm: AesGcm is not supported on macOS under .NET 6; the managed fallback writes the same format.
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Encrypt(encryptionKey, nonce, plaintextBytes, ciphertext, tag, null);
 
                 // Combine tag + ciphertext for storage (tag first for easy extraction on decrypt)
                 var combined = new byte[tag.Length + ciphertext.Length];
@@ -152,12 +148,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Decrypt with AES-256-GCM (will throw if tag doesn't match = tampered data)
                 var plaintext = new byte[ciphertext.Length];
-#pragma warning disable SYSLIB0053
-                using (var aesGcm = new AesGcm(encryptionKey))
-#pragma warning restore SYSLIB0053
-                {
-                    aesGcm.Decrypt(nonce, ciphertext, tag, plaintext);
-                }
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Decrypt(encryptionKey, nonce, ciphertext, tag, plaintext, null);
 
                 // Clear sensitive data
                 Array.Clear(encryptionKey, 0, encryptionKey.Length);

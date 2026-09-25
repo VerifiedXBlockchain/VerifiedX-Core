@@ -153,6 +153,19 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void Locked_ShutdownAndRestartRoutes_Pass()
+        {
+            // The GUI stops (or restarts) the node through these; while locked they were refused, so the node kept running.
+            Lock();
+            foreach (var a in new[] { "SendExit", "SendExitComplete", "SetRestartAndExit" })
+            {
+                var ctx = Context("V1", a);
+                new ActionFilterController().OnActionExecuting(ctx);
+                Assert.Null(ctx.Result);
+            }
+        }
+
+        [Fact]
         public void Locked_RawExternallySignedRelay_Passes()
         {
             Lock();
