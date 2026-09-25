@@ -234,9 +234,9 @@ namespace VerifiedXCore.Data
 
             if(!skipSave)
             {
-                await RestoreSmartContractsForAddress(account.Address);
-
                 var accountCheck = AccountData.GetSingleAccount(account.Address);
+                if (accountCheck != null)
+                    await RestoreSmartContractsForAddress(account.Address);
                 if (accountCheck == null)
                 {
                     // NEW-01 (follow-up): in an encrypted wallet the key is encrypted (and its keystore record saved)
@@ -249,6 +249,8 @@ namespace VerifiedXCore.Data
                         ErrorLogUtility.LogError(refusal, "AccountData.FinishRestore()");
                         return false;
                     }
+                    // Contract records only once the import is accepted (a refused import wrote them anyway).
+                    await RestoreSmartContractsForAddress(account.Address);
                     AddToAccount(account); //only add if not already in accounts
                     if (rescanForTx == true)
                     {

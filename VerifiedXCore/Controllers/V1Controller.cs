@@ -352,7 +352,8 @@ namespace VerifiedXCore.Controllers
             {
                 var mnemonic = HDWallet.HDWalletData.CreateHDWallet(strength, BIP39Wordlist.English);
 
-                Globals.HDWallet = mnemonic.Item1;
+                if (mnemonic.Item1)
+                    Globals.HDWallet = true; // a refusal ("HD wallet exist") must not clear the flag
 
                 output = JsonConvert.SerializeObject(new { Result = mnemonic.Item1, Message = mnemonic.Item2});
             }
@@ -396,7 +397,9 @@ namespace VerifiedXCore.Controllers
         public async Task<string> GetEncryptWallet(string password)
         {
             var output = "";
-            if(Globals.HDWallet == true)
+            // NEW-01 (follow-up): the stored HD record decides, not the session flag (GetHDWallet on an existing HD wallet
+            // used to clear the flag, and encryption then left the seed in plaintext).
+            if(Globals.HDWallet == true || HDWallet.HDWalletData.GetHDWallet() != null)
             {
                 output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"HD wallet cannot be encrypted at this time." });
             }

@@ -180,5 +180,25 @@ namespace VerifiedXCore.Tests
             await Task.Delay(100);
             Assert.Equal(before, AccountData.GetAccounts().Count());
         }
+
+        // ── Follow-up (fourth review) ───────────────────────────────────────────────────────
+
+        [Fact]
+        public async Task NEW01_FollowUp_EncryptionRefusedWhileAnHdRecordExists_EvenIfTheFlagWasCleared()
+        {
+            // GetHDWallet on an existing HD wallet answered "HD wallet exist" and set Globals.HDWallet = false; encryption
+            // then went ahead and left the HD seed in plaintext.
+            Globals.IsWalletEncrypted = false;
+            var priorHd = Globals.HDWallet;
+            try
+            {
+                VerifiedXCore.Models.HDWallet.HDWalletData.GetHDWalletData().Insert(new VerifiedXCore.Models.HDWallet { Nonce = 0, Path = "m/0'/0'", WalletSeed = "00" });
+                Globals.HDWallet = false;
+                var result = await new VerifiedXCore.Controllers.V1Controller().GetEncryptWallet(WalletPw);
+                Assert.Contains("HD wallet cannot be encrypted", result);
+                Assert.False(Globals.IsWalletEncrypted);
+            }
+            finally { Globals.HDWallet = priorHd; }
+        }
     }
 }

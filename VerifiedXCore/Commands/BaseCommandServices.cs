@@ -110,7 +110,7 @@ namespace VerifiedXCore.Commands
         }
         public static async Task EncryptWallet()
         {
-            if(Globals.HDWallet == true)
+            if(Globals.HDWallet == true || HDWallet.HDWalletData.GetHDWallet() != null) // NEW-01 (follow-up): stored record decides
             {
                 Console.WriteLine("Wallet Encryption is not currently compatible with HD wallets.");
                 Console.WriteLine("This will be released in a future wallet update.");
@@ -949,7 +949,8 @@ namespace VerifiedXCore.Commands
                 {
                     var strength = Convert.ToInt32(strengthStr);
                     var mnemonic = HDWallet.HDWalletData.CreateHDWallet(strength, BIP39Wordlist.English);
-                    Globals.HDWallet = mnemonic.Item1;
+                    if (mnemonic.Item1)
+                        Globals.HDWallet = true; // a refusal must not clear the flag
 
                     return mnemonic.Item2;
                 }
@@ -957,7 +958,8 @@ namespace VerifiedXCore.Commands
                 {
                     var strength = Convert.ToInt32(strengthStr);
                     var mnemonic = HDWallet.HDWalletData.CreateHDWallet(strength, BIP39Wordlist.English);
-                    Globals.HDWallet = mnemonic.Item1;
+                    if (mnemonic.Item1)
+                        Globals.HDWallet = true; // a refusal must not clear the flag
 
                     return mnemonic.Item2;
                 }
