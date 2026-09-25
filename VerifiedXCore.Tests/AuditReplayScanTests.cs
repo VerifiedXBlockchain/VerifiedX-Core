@@ -97,6 +97,29 @@ namespace VerifiedXCore.Tests
             Assert.Equal(2, hit.Height);
         }
 
+        [Fact]
+        public void ScanChain_OnePass_InHeightOrder_StopsAtTheTip()
+        {
+            // Blocks stored out of height order (a rollback re-inserts them) are still walked in height order, and blocks
+            // above the tip are not scanned. The scan used a range query per batch, which re-read the collection each time.
+            var blocks = BlockchainData.GetBlocks();
+            var seen = new List<long>();
+            foreach (var h in new long[] { 3, 1, 5, 2, 4 })
+                blocks.InsertSafe(new Block { Height = h, Hash = "h" + h, Transactions = new List<Transaction> { Withdrawal("scan:v2", h == 5 ? -1M : 0.5M) } });
+            Globals.LastBlock = new Block { Height = 4 };
+
+            var (blockCount, txCount, hits) = AuditReplayScanService.ScanChain(p => seen.Add(0));
+
+            Assert.Equal(4, blockCount);           // block 5 is above the tip
+            Assert.Equal(4, txCount);
+            Assert.Empty(hits);                    // the negative withdrawal is only in block 5
+            Assert.Single(seen);                   // one final progress line for a short chain
+            var src = File.ReadAllText(Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!, "VerifiedXCore", "Services", "AuditReplayScanService.cs"));
+            Assert.DoesNotContain("b.Height >= start && b.Height <= end", src);
+        }
+
+        private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+
         // ── Independent-review follow-ups ─────────────────────────────────────────────────
 
         [Fact]

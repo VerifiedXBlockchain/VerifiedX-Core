@@ -299,17 +299,19 @@ namespace VerifiedXCore.Services
             var tip = Globals.LastBlock?.Height ?? -1;
             var hits = new List<Hit>();
             long blockCount = 0, txCount = 0;
-            const long batch = 1000;
+            const long progressEvery = 100_000;
             var v1 = new V1ReceiptTracker();
             var canonicalUids = new Dictionary<string, string>(StringComparer.Ordinal); // NEW-07
             var native = new Dictionary<string, decimal>(StringComparer.Ordinal);       // NEW-07 native: reconstructed balances
 
-            for (long start = 0; start <= tip; start += batch)
+            // AUDIT-PREP (follow-up): one streaming pass in height order (index order). The per-batch range query
+            // (Height >= a && Height <= b) re-read the collection for every batch, so a mainnet scan never finished.
             {
-                var end = Math.Min(tip, start + batch - 1);
-                var page = blocks.Query().Where(b => b.Height >= start && b.Height <= end).ToList().OrderBy(b => b.Height);
-                foreach (var block in page)
+                foreach (var block in blocks.Query().OrderBy(b => b.Height).ToEnumerable())
                 {
+                    if (block.Height > tip) break;
+                    if (block.Height > 0 && block.Height % progressEvery == 0)
+                        progress?.Invoke($"Scanned heights 0..{block.Height - 1} of {tip} — {hits.Count} hit(s) so far");
                     blockCount++;
                     LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: as validation and apply do
                     if (block.Height == 0 && block.Transactions != null && block.MerkleRoot != new Block { Transactions = block.Transactions }.MerkleRootOf()) // NEW-25
@@ -357,7 +359,7 @@ namespace VerifiedXCore.Services
                             hits.Add(new Hit(block.Height, d.Last.Hash ?? "", d.Last.TransactionType, "NEW-07 candidate: several debits by one holder on one contract in block",
                                 $"{key.Kind} {key.ContractUid} holder {key.Holder}: {d.N} debits totalling {d.Sum}; compare with the balance at height {block.Height - 1}"));
                 }
-                progress?.Invoke($"Scanned heights {start}..{end} of {tip} — {hits.Count} hit(s) so far");
+                progress?.Invoke($"Scanned heights 0..{tip} of {tip} — {hits.Count} hit(s)");
             }
 
             return (blockCount, txCount, hits);
