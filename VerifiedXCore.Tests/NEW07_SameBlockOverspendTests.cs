@@ -442,5 +442,20 @@ namespace VerifiedXCore.Tests
             Assert.False(Block(Send(5M, 0), Send(4.8M, 1)).Ok);
             Assert.True(Block(Send(5M, 0), Send(4.4M, 1)).Ok);
         }
+
+        // ── NEW-13 (fourth review): tx.Height is not covered by any hash ────────────────────
+
+        [Fact]
+        public void NEW13_PoC_HeightIsNotCoveredByTheTransactionHash_AndIsNowBoundToTheBlock()
+        {
+            var wd = V2Withdrawal(1.0M, 1);
+            var hash = wd.Hash;
+            wd.Height = 1;
+            Assert.Equal(hash, wd.GetHash());                                        // relabelling does not change the hash
+            Assert.NotNull(LedgerIntegrityRules.TransactionHeight(wd, 5_000));        // refused in a block at 5,000
+            wd.Height = 5_000;
+            Assert.Null(LedgerIntegrityRules.TransactionHeight(wd, 5_000));           // control
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal(LedgerIntegrityRules.TransactionHeight(wd, 1)));
+        }
     }
 }

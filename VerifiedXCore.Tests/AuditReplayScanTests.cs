@@ -81,8 +81,10 @@ namespace VerifiedXCore.Tests
         public void ScanChain_WalksStoredBlocks_AndReportsHeights()
         {
             var blocks = BlockchainData.GetBlocks();
-            blocks.InsertSafe(new Block { Height = 0, Hash = "h0", Transactions = new List<Transaction> { Withdrawal("scan:v2", 0.5M) } });
-            blocks.InsertSafe(new Block { Height = 1, Hash = "h1", Transactions = new List<Transaction> { Withdrawal("scan:v2", -1M) } });
+            var w0 = Withdrawal("scan:v2", 0.5M); w0.Height = 0; // honest producers set tx.Height to the block height (NEW-13)
+            var w1 = Withdrawal("scan:v2", -1M); w1.Height = 1;
+            blocks.InsertSafe(new Block { Height = 0, Hash = "h0", Transactions = new List<Transaction> { w0 } });
+            blocks.InsertSafe(new Block { Height = 1, Hash = "h1", Transactions = new List<Transaction> { w1 } });
             blocks.InsertSafe(new Block { Height = 2, Hash = "h2", Transactions = new List<Transaction>() });
             Globals.LastBlock = new Block { Height = 2 };
 

@@ -96,6 +96,21 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        // ── NEW-13: a transaction's Height is its block's height ────────────────────────────────────────────────
+
+        public const string TransactionHeightPrefix = "Transaction height";
+
+        /// <summary>
+        /// tx.Height is covered by neither the transaction hash nor the block hash, and the apply reads it (vBTC withdrawal
+        /// escrow: EscrowAppliesTo(tx.Height), stored RequestBlockHeight). A producer or relaying peer could set an escrowed
+        /// request's Height to 1 so it was applied as pre-escrow (no debit; burned later at COMPLETE without a balance
+        /// check). Honest producers set it to the block height (BlockchainData.GiveOtherInfos).
+        /// </summary>
+        public static string? TransactionHeight(Transaction tx, long blockHeight) =>
+            tx != null && tx.Height != blockHeight
+                ? $"{TransactionHeightPrefix} {tx.Height} does not match block height {blockHeight}."
+                : null;
+
         // ── NEW-10: contract UIDs are exact ─────────────────────────────────────────────────────────────────────
 
         /// <summary>Format of a NEW contract's UID: what every wallet generator produces (lowercase GUID hex, ':', a timestamp).</summary>

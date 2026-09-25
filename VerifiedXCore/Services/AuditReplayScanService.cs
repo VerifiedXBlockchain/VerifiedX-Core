@@ -310,6 +310,9 @@ namespace VerifiedXCore.Services
                         try { TrackV1(tx, block.Height, v1, hits); } catch { }
                         if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd")
                         {
+                            var heightError = LedgerIntegrityRules.TransactionHeight(tx, block.Height); // NEW-13
+                            if (heightError != null)
+                                hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-13 transaction height", heightError));
                             var (sweepOk, sweepReason) = SameBlockDebitGuard.TryRegister(tx, sweepState);
                             if (!sweepOk)
                                 hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-07 Recover() shares its block", sweepReason));
