@@ -1232,8 +1232,9 @@ namespace VerifiedXCore.Services
 
                                                 // ===== MEMPOOL DEDUPLICATION (ADDITIONAL SAFETY CHECK) =====
                                                 // Even with lead arbiter rule, check for duplicates as additional safety measure
+                                                // NEW-08 (follow-up): mempool admission only (the lead-arbiter rule above is the consensus rule).
                                                 var mempool = TransactionData.GetPool();
-                                                var duplicateInMempool = mempool.Query().Where(x =>
+                                                var duplicateInMempool = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x =>
                                                     x.TransactionType == TransactionType.TKNZ_WD_ARB &&
                                                     x.Hash != txRequest.Hash
                                                 ).ToList();
@@ -1514,7 +1515,9 @@ namespace VerifiedXCore.Services
                             if (scUID == null)
                                 return (txResult, "SCUID cannot be null.");
 
-                            var mempoolList = mempool.Query().Where(x =>
+                            // NEW-08 (follow-up): MEMPOOL ADMISSION ONLY - at block verification this node's own mempool decided
+                            // whether a block was accepted (possible split).
+                            var mempoolList = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x =>
                             x.FromAddress == txRequest.FromAddress &&
                             x.Hash != txRequest.Hash &&
                             (x.TransactionType == TransactionType.NFT_SALE ||
@@ -1527,8 +1530,10 @@ namespace VerifiedXCore.Services
 
                                 foreach (var tx in mempoolList)
                                 {
-                                    var txObjData = JObject.Parse(txData);
-                                    var mTXSCUID = txObjData["ContractUID"]?.ToObject<string?>();
+                                    // The pending sibling's own contract (this parsed the transaction under validation, so any
+                                    // pending NFT transaction from the sender refused the sale).
+                                    string? mTXSCUID = null;
+                                    try { mTXSCUID = TransactionUtility.GetSCTXFunctionAndUID(tx).Item3; } catch { }
                                     if (mTXSCUID == scUID)
                                     {
                                         reject = true;
@@ -1584,7 +1589,9 @@ namespace VerifiedXCore.Services
                             if (amountSoldFor == null)
                                 return (txResult, "Amount Sold For cannot be null.");
 
-                            var mempoolList = mempool.Query().Where(x => 
+                            // NEW-08 (follow-up): MEMPOOL ADMISSION ONLY - at block verification this node's own mempool decided
+                            // whether a block was accepted (possible split).
+                            var mempoolList = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x => 
                             x.FromAddress == txRequest.FromAddress && 
                             x.Hash != txRequest.Hash && 
                             (x.TransactionType == TransactionType.NFT_SALE || 
@@ -1597,8 +1604,10 @@ namespace VerifiedXCore.Services
 
                                 foreach (var tx in mempoolList)
                                 {
-                                    var txObjData = JObject.Parse(txData);
-                                    var mTXSCUID = txObjData["ContractUID"]?.ToObject<string?>();
+                                    // The pending sibling's own contract (this parsed the transaction under validation, so any
+                                    // pending NFT transaction from the sender refused the sale).
+                                    string? mTXSCUID = null;
+                                    try { mTXSCUID = TransactionUtility.GetSCTXFunctionAndUID(tx).Item3; } catch { }
                                     if(mTXSCUID == scUID)
                                     {
                                         reject = true;
@@ -1668,7 +1677,9 @@ namespace VerifiedXCore.Services
                             var transactions = jobj["Transactions"]?.ToObject<List<Transaction>?>();
                             var keySign = jobj["KeySign"]?.ToObject<string?>();
 
-                            var mempoolList = mempool.Query().Where(x =>
+                            // NEW-08 (follow-up): MEMPOOL ADMISSION ONLY - at block verification this node's own mempool decided
+                            // whether a block was accepted (possible split).
+                            var mempoolList = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x =>
                             x.FromAddress == txRequest.FromAddress &&
                             x.Hash != txRequest.Hash &&
                             (x.TransactionType == TransactionType.NFT_SALE ||
@@ -1681,8 +1692,10 @@ namespace VerifiedXCore.Services
 
                                 foreach (var tx in mempoolList)
                                 {
-                                    var txObjData = JObject.Parse(txData);
-                                    var mTXSCUID = txObjData["ContractUID"]?.ToObject<string?>();
+                                    // The pending sibling's own contract (this parsed the transaction under validation, so any
+                                    // pending NFT transaction from the sender refused the sale).
+                                    string? mTXSCUID = null;
+                                    try { mTXSCUID = TransactionUtility.GetSCTXFunctionAndUID(tx).Item3; } catch { }
                                     if (mTXSCUID == scUID)
                                     {
                                         reject = true;

@@ -107,5 +107,44 @@ namespace VerifiedXCore.Tests
             var (ok, message) = await TransactionValidatorService.VerifyTX(mine, blockDownloads: false, blockVerify: true);
             Assert.True(ok, message);
         }
+
+        // ── Follow-up (third review): NFT sale checks read the local mempool at block verification ──
+
+        private const string Nft = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e:1790500020";
+        private const string OtherNft = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e:1790500021";
+
+        private void SeedNft(string uid) => SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+        {
+            SmartContractUID = uid, ContractData = VbtcTestContracts.PlainNftContractData,
+            MinterAddress = _holder.Address, OwnerAddress = _holder.Address,
+        });
+
+        private Transaction SaleStart(string uid) => Signed(_holder, _other.Address, TransactionType.NFT_SALE,
+            new { Function = "M_Sale_Start()", ContractUID = uid, NextOwner = _other.Address, KeySign = "key-" + uid, SoldFor = 5M, BidSignature = "manual" }, 1);
+
+        private Transaction PendingNftTransfer(string uid) => Signed(_holder, _owner.Address, TransactionType.NFT_TX,
+            new[] { new { Function = "Transfer()", ContractUID = uid, ToAddress = _owner.Address, Data = "" } }, 0);
+
+        [Fact]
+        public async Task NEW08_FollowUp_NftSale_BlockVerificationIgnoresTheLocalMempool()
+        {
+            SeedNft(Nft);
+            TransactionData.GetPool().InsertSafe(PendingNftTransfer(Nft));
+            var sale = SaleStart(Nft);
+            Assert.False((await TransactionValidatorService.VerifyTX(sale)).Item1);        // admission: same contract pending
+            var (ok, message) = await TransactionValidatorService.VerifyTX(sale, blockDownloads: false, blockVerify: true);
+            Assert.True(ok, message);
+        }
+
+        [Fact]
+        public async Task NEW08_FollowUp_NftSale_PendingTransactionOfAnotherContractDoesNotBlock()
+        {
+            // The sibling loop parsed the transaction under validation, so any pending NFT transaction from the seller
+            // matched and refused the sale.
+            SeedNft(Nft); SeedNft(OtherNft);
+            TransactionData.GetPool().InsertSafe(PendingNftTransfer(OtherNft));
+            var (ok, message) = await TransactionValidatorService.VerifyTX(SaleStart(Nft));
+            Assert.True(ok, message);
+        }
     }
 }
