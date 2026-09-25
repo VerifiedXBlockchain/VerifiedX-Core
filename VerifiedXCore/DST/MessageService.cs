@@ -210,9 +210,19 @@ namespace VerifiedXCore.DST
             var remoteEndPoint = IPEndPoint.Parse($"{ip}:{message.Data}");
             udpClient.Send(punchMessage, remoteEndPoint);
         }
+        /// <summary>NEW-21: bound on the DST connection tables (entries were never pruned).</summary>
+        public const int MaxDstConnections = 1000;
+
+        /// <summary>NEW-21: whether a NEW entry may be added (existing endpoints always refresh).</summary>
+        public static bool CanTrack(System.Collections.Concurrent.ConcurrentDictionary<string, DSTConnection> table, string key) =>
+            table.ContainsKey(key) || table.Count < MaxDstConnections;
+
+        /// <summary>NEW-21: the first message is kept for the session; an oversized one is not stored.</summary>
+        private static Message? Bounded(Message message) => (message?.Data?.Length ?? 0) <= 4096 ? message : null;
+
         public static void STUNConnect(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
-            if (message.Data == "helo")
+            if (message.Data == "helo" && CanTrack(Globals.ConnectedShops, endPoint.ToString()))
             {
                 Globals.ConnectedShops.TryGetValue(message.IPAddress, out var shop);
                 if (shop != null)
@@ -227,7 +237,7 @@ namespace VerifiedXCore.DST
                         LastReceiveMessage = TimeUtil.GetTime(),
                         ConnectDate = TimeUtil.GetTime(),
                         IPAddress = endPoint.ToString(),
-                        InitialMessage = message,
+                        InitialMessage = Bounded(message),
                         ConnectionId = RandomStringUtility.GetRandomString(12, true)
                     };
                 }
@@ -239,7 +249,7 @@ namespace VerifiedXCore.DST
         }
         public static void ShopConnect(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
-            if(message.Data == "helo")
+            if(message.Data == "helo" && CanTrack(Globals.ConnectedClients, endPoint.ToString()))
             {
                 Globals.ConnectedClients.TryGetValue(message.IPAddress, out var client);
                 if(client != null)
@@ -254,7 +264,7 @@ namespace VerifiedXCore.DST
                         LastReceiveMessage = TimeUtil.GetTime(),
                         ConnectDate = TimeUtil.GetTime(),
                         IPAddress = endPoint.ToString(),
-                        InitialMessage = message,
+                        InitialMessage = Bounded(message),
                         ConnectionId = RandomStringUtility.GetRandomString(12, true)
                     };
                 }
@@ -291,25 +301,9 @@ namespace VerifiedXCore.DST
                     }
                     else
                     {
-                        client = new DSTConnection
-                        {
-                            LastReceiveMessage = TimeUtil.GetTime(),
-                            ConnectDate = TimeUtil.GetTime(),
-                            IPAddress = endPoint.ToString(),
-                            InitialMessage = message,
-                            ConnectionId = RandomStringUtility.GetRandomString(12, true)
-                        };
-
-                        Globals.ConnectedClients.TryAdd(endPoint.ToString(),client);
-
-                        client.LastReceiveMessage = TimeUtil.GetTime();
-                        if (!client.KeepAliveStarted)
-                        {
-                            client.KeepAliveStarted = true;
-                            _ = KeepAliveService.KeepAlive(7, endPoint, udpClient, client.ConnectionId);
-                        }
-
-                        Globals.ConnectedClients[endPoint.ToString()] = client;
+                        // NEW-21: an unsolicited KeepAlive from an unknown endpoint used to create a permanent client
+                        // entry and start a keepalive loop toward that (spoofable) source - ~100x UDP reflection. A client
+                        // is added only by its "helo" (ShopConnect); anything else is ignored.
                     }
                 }
                 else
