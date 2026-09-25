@@ -150,7 +150,7 @@ namespace VerifiedXCore.Services
                     ?? Newtonsoft.Json.JsonConvert.DeserializeObject<VerifiedXCore.Models.SmartContracts.TokenizationV2Feature>(v2[0].FeatureFeatures?.ToString() ?? "");
             }
             catch { feature = null; }
-            return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid,
+            return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, tx.FromAddress,
                 () => VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1))); // NEW-26 (follow-up): funded now
         }
 

@@ -252,7 +252,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Phase 5: Aggregate and finalize
                 progressCallback?.Invoke(3, 90); // Aggregating
-                var dkgResult = await AggregateDKGResult(sessionId, ceremonyId, validators, threshold, round1Results, respondingAddresses);
+                var dkgResult = await AggregateDKGResult(sessionId, ceremonyId, validators, threshold, round1Results, respondingAddresses, leaderAddress);
                 if (dkgResult != null)
                 {
                     progressCallback?.Invoke(3, 100); // Complete
@@ -656,7 +656,8 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             Dictionary<string, string> commitments,
-            List<string> respondingAddresses)
+            List<string> respondingAddresses,
+            string leaderAddress)
         {
             try
             {
@@ -753,13 +754,17 @@ namespace VerifiedXCore.Bitcoin.Services
                     ErrorLogUtility.LogError($"FROST DKG: address {taprootAddress} is not the Taproot address of the group key", "FrostMPCService.AggregateDKGResult");
                     return null;
                 }
+                // NEW-26 (follow-up): participants, threshold and owner are the ceremony's own (the validators sign them from
+                // their sessions); consensus requires an attestation from every participant.
+                var participants = FrostDkgAttestation.Canonical(validators.Select(v => v.ValidatorAddress));
+                var signingThreshold = FrostDkgAttestation.ThresholdFor(participants.Count, threshold);
                 var attestations = dkgResults
                     .Where(r => r.attestation != null && r.attestation.ValidatorAddress == r.validatorAddr
-                        && FrostDkgAttestation.Verify(r.attestation, ceremonyId, groupPublicKey, taprootAddress))
+                        && FrostDkgAttestation.Verify(r.attestation, ceremonyId, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants))
                     .GroupBy(r => r.validatorAddr, StringComparer.Ordinal)
                     .Select(g => g.First().attestation!)
                     .ToList();
-                dkgProof = FrostDkgAttestation.BuildProof(ceremonyId, groupPublicKey, taprootAddress, attestations);
+                dkgProof = FrostDkgAttestation.BuildProof(ceremonyId, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);
                 LogUtility.Log($"[FROST MPC] DKG attested by {attestations.Count}/{validators.Count} validators for contract {ceremonyId}",
                     "FrostMPCService.AggregateDKGResult");
 

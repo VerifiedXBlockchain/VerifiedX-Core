@@ -307,7 +307,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
 
                 // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
-                var staticResultError = FrostDkgAttestation.CeremonyResultError(ceremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C);
+                var staticResultError = FrostDkgAttestation.CeremonyResultError(ceremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, ceremony.OwnerAddress);
                 if (staticResultError != null)
                 {
                     ceremony.Status = CeremonyStatus.Failed;
@@ -878,7 +878,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocally");
 
             // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
-            var resultError = FrostDkgAttestation.CeremonyResultError(ceremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C);
+            var resultError = FrostDkgAttestation.CeremonyResultError(ceremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, ceremony.OwnerAddress);
             if (resultError != null)
             {
                 ceremony.Status = CeremonyStatus.Failed;
@@ -3528,7 +3528,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         }
 
                         // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
-                        var rawResultError = FrostDkgAttestation.CeremonyResultError(payload.CeremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C);
+                        var rawResultError = FrostDkgAttestation.CeremonyResultError(payload.CeremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, payload.OwnerAddress);
                         if (rawResultError != null)
                         {
                             ceremony.Status = CeremonyStatus.Failed;

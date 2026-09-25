@@ -22,9 +22,11 @@ namespace VerifiedXCore.Tests
     /// <summary>
     /// NEW-26 (owner-approved design change following the NEW-19 review): a vBTC V2 contract's DepositAddress,
     /// FrostGroupPublicKey and DKGProof were whatever the creator wrote into the contract body. The proof was unsigned
-    /// JSON, so a creator could name a Bitcoin address it alone controls: deposits to it mint vBTC other people hold,
-    /// and the creator can move the BTC without any validator. From Globals.VbtcV2DkgAttestationHeight the address must
-    /// be the Taproot address of the group key and a majority of the eligible validators must sign the DKG result.
+    /// JSON, so a creator could name a Bitcoin address it alone controls. From Globals.VbtcV2DkgAttestationHeight the
+    /// address must be the Taproot address of the group key, and every participant of the key ceremony must sign the
+    /// contract UID, key, address, owner, threshold and participant list (DKG_ATTESTED_V2). Participants must be eligible
+    /// (active, funded) validators, a public ceremony must include at least 90% of them (owner decision, near-full
+    /// participation), the threshold must be a majority of the participants, and the owner must be the transaction sender.
     /// </summary>
     [Collection("DbContextSequential")]
     public class NEW26_DkgAttestationTests : IDisposable
@@ -37,7 +39,8 @@ namespace VerifiedXCore.Tests
         private readonly string? _priorValidatorAddress;
         private readonly bool _priorSynced = Globals.IsChainSynced;
         private readonly (PrivateKey Key, string Pub, string Address) _minter = NewKey();
-        private readonly List<(PrivateKey Key, string Pub, string Address)> _public = Enumerable.Range(0, 4).Select(_ => NewKey()).ToList();
+        private readonly (PrivateKey Key, string Pub, string Address) _otherCreator = NewKey();
+        private readonly List<(PrivateKey Key, string Pub, string Address)> _public = Enumerable.Range(0, 10).Select(_ => NewKey()).ToList();
         private readonly List<(PrivateKey Key, string Pub, string Address)> _s3c = Enumerable.Range(0, 3).Select(_ => NewKey()).ToList();
         private readonly string _groupKey;
         private readonly string _address;
@@ -54,9 +57,10 @@ namespace VerifiedXCore.Tests
             DbContext.Initialize();
             Globals.LastBlock = new Block { Height = 99 }; // admission height 100
             Globals.VbtcV2DkgAttestationHeight = Activation;
-            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _minter.Address, Balance = 100M, Nonce = 0 });
+            foreach (var c in new[] { _minter, _otherCreator })
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = c.Address, Balance = 100M, Nonce = 0 });
 
-            // Active vBTC validators, registered on chain (4 public, 3 S3C), each holding the validator balance.
+            // Active vBTC validators, registered on chain (10 public, 3 S3C), each holding the validator balance.
             long h = 10;
             foreach (var v in _public) Register(v, isS3C: false, h++);
             foreach (var v in _s3c) Register(v, isS3C: true, h++);
@@ -105,14 +109,31 @@ namespace VerifiedXCore.Tests
                 },
             });
 
-        private static FrostDkgAttestation.Attestation Attest((PrivateKey Key, string Pub, string Address) v, string uid, string groupKey, string address) =>
-            new() { ValidatorAddress = v.Address, Signature = SignatureService.CreateSignature(FrostDkgAttestation.Message(uid, groupKey, address), v.Key, v.Pub) };
-
         private static string NewUid() => FrostDkgAttestation.NewContractUid();
 
-        private Transaction Create(string uid, string depositAddress, string groupKey, string proof, bool isS3C = false, List<string>? snapshot = null)
+        private static FrostDkgAttestation.Attestation Attest((PrivateKey Key, string Pub, string Address) v, string uid, string groupKey, string address, string owner, int threshold, IEnumerable<string> participants) =>
+            new() { ValidatorAddress = v.Address, Signature = SignatureService.CreateSignature(FrostDkgAttestation.Message(uid, groupKey, address, owner, threshold, participants), v.Key, v.Pub) };
+
+        /// <summary>
+        /// A proof for a ceremony among <paramref name="participants"/>. By default every participant attests, the owner is
+        /// the minter and the threshold is what the validators compute (51% of the participants).
+        /// </summary>
+        private string Proof(string uid, IEnumerable<(PrivateKey Key, string Pub, string Address)> participants, IEnumerable<(PrivateKey Key, string Pub, string Address)>? signers = null,
+            string? owner = null, int? threshold = null, string? groupKey = null, string? address = null)
         {
-            var body = VbtcTestContracts.BuildContractData(uid, _minter.Address, new List<SmartContractFeatures>
+            var list = participants.ToList();
+            var addresses = list.Select(p => p.Address).ToList();
+            var t = threshold ?? FrostDkgAttestation.ThresholdFor(addresses.Count, 51);
+            var o = owner ?? _minter.Address;
+            var gk = groupKey ?? _groupKey; var addr = address ?? _address;
+            return FrostDkgAttestation.BuildProof(uid, gk, addr, o, t, addresses, (signers ?? list).Select(s => Attest(s, uid, gk, addr, o, t, addresses)));
+        }
+
+        private Transaction Create(string uid, string depositAddress, string groupKey, string proof, IEnumerable<string> snapshot, bool isS3C = false,
+            (PrivateKey Key, string Pub, string Address)? creator = null)
+        {
+            var c = creator ?? _minter;
+            var body = VbtcTestContracts.BuildContractData(uid, c.Address, new List<SmartContractFeatures>
             {
                 new SmartContractFeatures
                 {
@@ -120,7 +141,7 @@ namespace VerifiedXCore.Tests
                     FeatureFeatures = new TokenizationV2Feature
                     {
                         AssetName = "vBTC", AssetTicker = "vBTC", DepositAddress = depositAddress, Version = 2,
-                        ValidatorAddressesSnapshot = snapshot ?? (isS3C ? _s3c : _public).Select(v => v.Address).ToList(),
+                        ValidatorAddressesSnapshot = snapshot.ToList(),
                         FrostGroupPublicKey = groupKey, RequiredThreshold = 51, DKGProof = proof, ProofBlockHeight = 1,
                         CeremonyId = uid, ImageBase = "default", IsS3C = isS3C,
                     },
@@ -128,18 +149,20 @@ namespace VerifiedXCore.Tests
             }, name: "vBTC");
             var tx = new Transaction
             {
-                Timestamp = TimeUtil.GetTime(), FromAddress = _minter.Address, ToAddress = _minter.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), FromAddress = c.Address, ToAddress = c.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
                 TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE,
                 Data = JsonConvert.SerializeObject(new[] { new { Function = "Mint()", ContractUID = uid, Data = body, MD5List = "NA" } }),
             };
             tx.Fee = FeeCalcService.CalculateTXFee(tx);
             tx.Build();
-            tx.Signature = SignatureService.CreateSignature(tx.Hash, _minter.Key, _minter.Pub);
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, c.Key, c.Pub);
             return tx;
         }
 
-        private string Proof(string uid, string groupKey, string address, IEnumerable<(PrivateKey Key, string Pub, string Address)> signers) =>
-            FrostDkgAttestation.BuildProof(uid, groupKey, address, signers.Select(s => Attest(s, uid, groupKey, address)));
+        /// <summary>A contract create for a ceremony among <paramref name="participants"/> (snapshot = participants).</summary>
+        private Transaction CreateFor(string uid, IEnumerable<(PrivateKey Key, string Pub, string Address)> participants, string proof, bool isS3C = false,
+            (PrivateKey Key, string Pub, string Address)? creator = null) =>
+            Create(uid, _address, _groupKey, proof, participants.Select(p => p.Address), isS3C, creator);
 
         private static async Task<(bool Ok, string Message)> Verify(Transaction tx, long height = 100)
         {
@@ -147,16 +170,15 @@ namespace VerifiedXCore.Tests
             return (ok, message);
         }
 
-        // ── PoCs ───────────────────────────────────────────────────────────────────────────
+        // ── PoCs (original finding) ────────────────────────────────────────────────────────
 
         [Fact]
         public async Task NEW26_PoC_DepositAddressTheCreatorControls_Refused()
         {
-            // The creator's own key: the validators never held it. The group key and (unsigned) proof are decoration.
             var (_, creatorAddress) = NewGroupKey();
             var uid = NewUid();
             var legacyProof = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("{\"ProofType\":\"DKG_COMPLETION_FROST_NATIVE\"}"));
-            var (ok, _) = await Verify(Create(uid, creatorAddress, _groupKey, legacyProof));
+            var (ok, _) = await Verify(Create(uid, creatorAddress, _groupKey, legacyProof, _public.Select(v => v.Address)));
             Assert.False(ok);
         }
 
@@ -165,7 +187,7 @@ namespace VerifiedXCore.Tests
         {
             var uid = NewUid();
             var legacyProof = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("{\"ProofType\":\"DKG_COMPLETION_FROST_NATIVE\"}"));
-            var (ok, _) = await Verify(Create(uid, _address, _groupKey, legacyProof));
+            var (ok, _) = await Verify(Create(uid, _address, _groupKey, legacyProof, _public.Select(v => v.Address)));
             Assert.False(ok);
         }
 
@@ -174,7 +196,7 @@ namespace VerifiedXCore.Tests
         {
             var uid = NewUid();
             var (_, creatorAddress) = NewGroupKey();
-            var (ok, message) = await Verify(Create(uid, creatorAddress, _groupKey, Proof(uid, _groupKey, _address, _public.Take(3))));
+            var (ok, message) = await Verify(Create(uid, creatorAddress, _groupKey, Proof(uid, _public), _public.Select(v => v.Address)));
             Assert.False(ok);
             Assert.Contains("Taproot address of its FROST group public key", message);
         }
@@ -182,10 +204,19 @@ namespace VerifiedXCore.Tests
         // ── Controls ───────────────────────────────────────────────────────────────────────
 
         [Fact]
-        public async Task NEW26_Control_MajorityOfActivePublicValidatorsAttested_Accepted()
+        public async Task NEW26_Control_EveryEligibleValidatorTookPartAndAttested_Accepted()
         {
             var uid = NewUid();
-            var (ok, message) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, _public.Take(3)))); // 3 of 4
+            var (ok, message) = await Verify(CreateFor(uid, _public, Proof(uid, _public)));
+            Assert.True(ok, message);
+        }
+
+        [Fact]
+        public async Task NEW26_Control_NinetyPercentParticipation_Accepted()
+        {
+            var uid = NewUid();
+            var nine = _public.Take(9).ToList();                                  // 9 of 10 eligible
+            var (ok, message) = await Verify(CreateFor(uid, nine, Proof(uid, nine)));
             Assert.True(ok, message);
         }
 
@@ -194,103 +225,174 @@ namespace VerifiedXCore.Tests
         {
             var uid = NewUid();
             var (_, creatorAddress) = NewGroupKey();
-            var (ok, message) = await Verify(Create(uid, creatorAddress, _groupKey, "fixture-proof"), height: Activation - 1);
+            var (ok, message) = await Verify(Create(uid, creatorAddress, _groupKey, "fixture-proof", _public.Select(v => v.Address)), height: Activation - 1);
             Assert.True(ok, message);
         }
 
-        // ── Attestation rules ──────────────────────────────────────────────────────────────
+        // ── Review round 7 attacks (now refused) ───────────────────────────────────────────
 
         [Fact]
-        public async Task NEW26_MinorityOfValidators_Refused()
+        public async Task NEW26_R7_SubsetOfValidatorsFormingTheGroup_Refused()
         {
+            // A creator (with a colluding minority) ran the ceremony among a subset: a majority of the eligible set used to
+            // be enough, so a group whose threshold the minority could meet was accepted.
             var uid = NewUid();
-            var (ok, message) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, _public.Take(2)))); // 2 of 4 < 51%
+            var eight = _public.Take(8).ToList();                                 // 8 of 10 < 90%
+            var (ok, message) = await Verify(CreateFor(uid, eight, Proof(uid, eight)));
             Assert.False(ok);
-            Assert.Contains("2 eligible validator(s); 3 required", message);
+            Assert.Contains("at least 9 of the 10 eligible validators", message);
         }
 
         [Fact]
-        public async Task NEW26_RepeatedAttestationCountsOnce_Refused()
+        public async Task NEW26_R7_CreatorsUnfundedRegistrationsAsParticipants_Refused()
+        {
+            // Reviewer PoC C: the creator's own registrations (no balance) held the key while funded validators attested.
+            var sybils = Enumerable.Range(0, 3).Select(_ => NewKey()).ToList();
+            long h = 40; foreach (var s in sybils) Register(s, isS3C: false, h++);
+            var participants = _public.Take(9).Concat(sybils).ToList();
+            var uid = NewUid();
+            var (ok, message) = await Verify(CreateFor(uid, participants, Proof(uid, participants)));
+            Assert.False(ok);
+            Assert.Contains("is not an eligible validator", message);
+        }
+
+        [Fact]
+        public async Task NEW26_R7_AttestationsReusedByAnotherCreator_Refused()
+        {
+            // Reviewer PoC B: a participant took the attestations and created the contract first under its own address.
+            var uid = NewUid();
+            var proof = Proof(uid, _public);                                       // made for _minter's ceremony
+            var (ok, message) = await Verify(CreateFor(uid, _public, proof, creator: _otherCreator));
+            Assert.False(ok);
+            Assert.Contains("not made for this contract's creator", message);
+        }
+
+        [Fact]
+        public async Task NEW26_ThresholdBelowAMajorityOfParticipants_Refused()
         {
             var uid = NewUid();
-            var signers = new[] { _public[0], _public[1], _public[1], _public[1] };
-            var (ok, _) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, signers)));
+            var (ok, message) = await Verify(CreateFor(uid, _public, Proof(uid, _public, threshold: 2)));
+            Assert.False(ok);
+            Assert.Contains("is not a majority of its 10 participants", message);
+        }
+
+        [Fact]
+        public async Task NEW26_AParticipantThatDidNotAttest_Refused()
+        {
+            var uid = NewUid();
+            var (ok, message) = await Verify(CreateFor(uid, _public, Proof(uid, _public, signers: _public.Take(9))));
+            Assert.False(ok);
+            Assert.Contains("one attestation from each of its 10 participants", message);
+        }
+
+        [Fact]
+        public async Task NEW26_RepeatedAttestation_Refused()
+        {
+            var uid = NewUid();
+            var signers = _public.Take(9).Append(_public[0]).ToList();            // 10 entries, one participant missing
+            var (ok, _) = await Verify(CreateFor(uid, _public, Proof(uid, _public, signers: signers)));
             Assert.False(ok);
         }
 
         [Fact]
-        public async Task NEW26_UnregisteredSigners_Refused()
+        public async Task NEW26_AttestationsForAnotherContractOrKey_Refused()
         {
-            var uid = NewUid();
-            var strangers = Enumerable.Range(0, 4).Select(_ => NewKey()).ToList();
-            var snapshot = strangers.Select(s => s.Address).ToList();
-            var (ok, _) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, strangers), snapshot: snapshot));
-            Assert.False(ok);
-        }
-
-        [Fact]
-        public async Task NEW26_AttestationsForAnotherContract_Refused()
-        {
-            // One DKG's attestations cannot back a second contract (two contracts sharing one deposit address).
             var uid = NewUid();
             var other = NewUid();
-            var proofForOther = Proof(other, _groupKey, _address, _public.Take(3));
-            var (ok, _) = await Verify(Create(uid, _address, _groupKey, proofForOther));
-            Assert.False(ok);
-
-            // Same attestations relabelled with this UID: the signatures are over the other UID.
-            var relabelled = FrostDkgAttestation.BuildProof(uid, _groupKey, _address, _public.Take(3).Select(s => Attest(s, other, _groupKey, _address)));
-            Assert.False((await Verify(Create(uid, _address, _groupKey, relabelled))).Ok);
+            Assert.False((await Verify(CreateFor(uid, _public, Proof(other, _public)))).Ok);        // proof names another UID
+            var (otherKey, otherAddress) = NewGroupKey();
+            var relabelled = Proof(uid, _public, groupKey: otherKey, address: otherAddress);       // signatures over another key
+            Assert.False((await Verify(CreateFor(uid, _public, relabelled))).Ok);
         }
 
         [Fact]
-        public async Task NEW26_ValidatorRegisteredInTheSameBlock_NotCounted()
+        public async Task NEW26_SnapshotDiffersFromTheParticipants_Refused()
         {
-            // The eligible set is the one committed by the previous block.
+            var uid = NewUid();
+            var tx = Create(uid, _address, _groupKey, Proof(uid, _public), _public.Take(9).Select(v => v.Address));
+            var (ok, message) = await Verify(tx);
+            Assert.False(ok);
+            Assert.Contains("does not match the key ceremony's participants", message);
+        }
+
+        [Fact]
+        public async Task NEW26_ValidatorRegisteredInTheSameBlock_NotEligible()
+        {
             var late = NewKey();
             Register(late, isS3C: false, 100);
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = late.Address, Balance = 5_000M });
+            var participants = _public.Append(late).ToList();
             var uid = NewUid();
-            var snapshot = _public.Select(v => v.Address).Append(late.Address).ToList();
-            var signers = new[] { _public[0], _public[1], late };
-            var (ok, _) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, signers), snapshot: snapshot), height: 100);
+            var (ok, message) = await Verify(CreateFor(uid, participants, Proof(uid, participants)), height: 100);
+            Assert.False(ok);
+            Assert.Contains("is not an eligible validator", message);
+        }
+
+        [Fact]
+        public async Task NEW26_S3cValidatorsCannotParticipateInAPublicContract()
+        {
+            var participants = _public.Take(9).Concat(_s3c.Take(1)).ToList();
+            var uid = NewUid();
+            var (ok, _) = await Verify(CreateFor(uid, participants, Proof(uid, participants)));
             Assert.False(ok);
         }
 
         [Fact]
-        public async Task NEW26_S3cSignersDoNotCountForAPublicContract()
+        public async Task NEW26_S3c_WholePoolAttested_Accepted_AndPoolMustBeActiveS3cValidators()
         {
             var uid = NewUid();
-            var snapshot = _public.Concat(_s3c).Select(v => v.Address).ToList();
-            var (ok, _) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, _s3c), snapshot: snapshot));
-            Assert.False(ok);
-        }
-
-        [Fact]
-        public async Task NEW26_S3c_MajorityOfItsPool_Accepted_AndPoolMustBeActiveS3cValidators()
-        {
-            var uid = NewUid();
-            var (ok, message) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, _s3c.Take(2)), isS3C: true));
+            var (ok, message) = await Verify(CreateFor(uid, _s3c, Proof(uid, _s3c), isS3C: true));
             Assert.True(ok, message);
 
-            // A pool naming a public validator (or anyone not an active S3C validator) is refused.
+            var mixed = new[] { _s3c[0], _s3c[1], _public[0] }.ToList();          // a public validator in an S3C pool
             var uid2 = NewUid();
-            var mixed = new List<string> { _s3c[0].Address, _s3c[1].Address, _public[0].Address };
-            var (ok2, _) = await Verify(Create(uid2, _address, _groupKey, Proof(uid2, _groupKey, _address, _s3c.Take(2)), isS3C: true, snapshot: mixed));
-            Assert.False(ok2);
+            Assert.False((await Verify(CreateFor(uid2, mixed, Proof(uid2, mixed), isS3C: true))).Ok);
         }
+
+        [Fact]
+        public async Task NEW26_ValidatorWhoseBalanceMovedAway_NotEligible()
+        {
+            var moved = _public[3].Address;
+            var acct = StateData.GetAccountStateTrei().FindOne(a => a.Key == moved);
+            acct.Balance = 4_999M;
+            StateData.GetAccountStateTrei().UpdateSafe(acct);
+            var uid = NewUid();
+            var (ok, message) = await Verify(CreateFor(uid, _public, Proof(uid, _public)));
+            Assert.False(ok);
+            Assert.Contains("is not an eligible validator", message);
+
+            // The remaining nine funded validators are 100% of the eligible set.
+            var nine = _public.Where((_, i) => i != 3).ToList();
+            var uid2 = NewUid();
+            var (ok2, message2) = await Verify(CreateFor(uid2, nine, Proof(uid2, nine)));
+            Assert.True(ok2, message2);
+        }
+
+        [Fact]
+        public async Task NEW26_UnfundedRegistrationsDoNotRaiseTheParticipationRequirement()
+        {
+            var sybils = Enumerable.Range(0, 6).Select(_ => NewKey()).ToList();
+            long h = 30; foreach (var s in sybils) Register(s, isS3C: false, h++);   // registered, no balance
+            var uid = NewUid();
+            var nine = _public.Take(9).ToList();
+            var (ok, message) = await Verify(CreateFor(uid, nine, Proof(uid, nine)));
+            Assert.True(ok, message);
+        }
+
+        // ── Registry, cache, decompile ─────────────────────────────────────────────────────
 
         [Fact]
         public void NEW26_ActiveSetAtHeight_IsDerivedFromCommittedBlocks_WithoutSyncGate()
         {
             Globals.IsChainSynced = false;
-            Assert.Equal(7, VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(99).Count);
+            Assert.Equal(13, VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(99).Count);
             Assert.Equal(2, VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(11).Count);
         }
 
         [Fact]
         public void NEW26_ActiveSetCache_FollowsARolledBackBlock()
         {
-            Assert.Equal(7, VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(16).Count); // cached for (16, "h16")
+            Assert.Equal(7, VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(16).Count); // cached for (16, hash)
             var blocks = BlockchainData.GetBlocks();
             blocks.DeleteMany(b => b.Height == 16);
             blocks.Insert(new Block { Height = 16, Hash = "h16-other", Transactions = new List<Transaction>() });
@@ -298,12 +400,12 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void NEW26_ProofWithManyAttestations_SurvivesTheContractWriterAndDecompiler()
+        public void NEW26_ProofWithManyParticipants_SurvivesTheContractWriterAndDecompiler()
         {
             var many = Enumerable.Range(0, 40).Select(_ => NewKey()).ToList();
             var uid = NewUid();
-            var proof = Proof(uid, _groupKey, _address, many);
-            var tx = Create(uid, _address, _groupKey, proof, snapshot: many.Select(m => m.Address).ToList());
+            var proof = Proof(uid, many);
+            var tx = CreateFor(uid, many, proof);
             var body = SmartContractDeployBinding.ReadPayload(tx.Data).Data;
             var sc = SmartContractMain.GenerateSmartContractInMemory(body);
             var feature = (TokenizationV2Feature)sc.Features!.Single(f => f.FeatureName == FeatureName.TokenizationV2).FeatureFeatures;
@@ -311,59 +413,13 @@ namespace VerifiedXCore.Tests
             Assert.Equal(40, FrostDkgAttestation.ParseProof(feature.DKGProof)!.Attestations.Count);
         }
 
-        // ── Follow-up: only validators holding the validator balance count (registry Sybils) ──
-
-        /// <summary>Registers validators that do not hold the balance now (registration checked it once; the same funds moved on).</summary>
-        private List<(PrivateKey Key, string Pub, string Address)> RegisterUnfundedSybils(int n)
-        {
-            var sybils = Enumerable.Range(0, n).Select(_ => NewKey()).ToList();
-            long h = 30;
-            foreach (var s in sybils) Register(s, isS3C: false, h++);
-            return sybils;
-        }
-
-        [Fact]
-        public async Task NEW26_FollowUp_PoC_UnfundedSybilRegistrationsSupplyTheMajority_Refused()
-        {
-            // 4 funded honest validators + 6 registrations kept alive with one balance moved between them: the Sybils
-            // were 6 of 10 active validators, a 51% majority, and could attest a key only they hold.
-            var sybils = RegisterUnfundedSybils(6);
-            var uid = NewUid();
-            var (ok, _) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, sybils), snapshot: sybils.Select(x => x.Address).ToList()));
-            Assert.False(ok);
-        }
-
-        [Fact]
-        public async Task NEW26_FollowUp_UnfundedRegistrationsDoNotRaiseTheMajority()
-        {
-            // Control: the funded validators' majority is the basis; unfunded registrations do not dilute it.
-            RegisterUnfundedSybils(6);
-            var uid = NewUid();
-            var (ok, message) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, _public.Take(3))));
-            Assert.True(ok, message);
-        }
-
-        [Fact]
-        public async Task NEW26_FollowUp_ValidatorWhoseBalanceMovedAway_NotCounted()
-        {
-            foreach (var v in new[] { _public[1], _public[2] })
-            {
-                var acct = StateData.GetAccountStateTrei().FindOne(a => a.Key == v.Address);
-                acct.Balance = 4_999M;
-                StateData.GetAccountStateTrei().UpdateSafe(acct);
-            }
-            var uid = NewUid();
-            // Funded: public[0], public[3] -> 2 required; public[1], public[2] no longer count.
-            var (ok, _) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, _public.Take(3))));
-            Assert.False(ok);
-        }
+        // ── Funded validators (follow-up) ──────────────────────────────────────────────────
 
         [Fact]
         public void NEW26_FollowUp_BalanceCheckUsesTheExactAddress()
         {
             var funded = _public[0].Address;
             Assert.True(VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.HoldsValidatorBalance(funded));
-            // LiteDB lookups ignore case: a case variant must not read the funded account's balance.
             var i = Enumerable.Range(1, funded.Length - 1).First(k => char.IsLetter(funded[k]));
             var variant = funded[..i] + (char.IsUpper(funded[i]) ? char.ToLowerInvariant(funded[i]) : char.ToUpperInvariant(funded[i])) + funded[(i + 1)..];
             Assert.False(VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.HoldsValidatorBalance(variant));
@@ -373,11 +429,12 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void NEW26_FollowUp_CeremonySelectionTakesFundedValidatorsOnly()
         {
-            var sybils = RegisterUnfundedSybils(2);
+            var sybils = Enumerable.Range(0, 2).Select(_ => NewKey()).ToList();
+            long h = 30; foreach (var s in sybils) Register(s, isS3C: false, h++);
             var all = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(99);
             var funded = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.FundedOnly(all);
-            Assert.Equal(9, all.Count);
-            Assert.Equal(7, funded.Count);
+            Assert.Equal(15, all.Count);
+            Assert.Equal(13, funded.Count);
             Assert.DoesNotContain(funded, v => sybils.Any(x => x.Address == v.ValidatorAddress));
 
             var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
@@ -388,29 +445,27 @@ namespace VerifiedXCore.Tests
             Assert.Contains("VBTCValidatorRegistry.HoldsValidatorBalance(v.ValidatorAddress)", s3c);
         }
 
-        // ── Follow-up: the wallet never runs or finishes a ceremony whose contract would be refused ──
+        // ── Wallet: never run or finish a ceremony whose contract would be refused (follow-up) ──
 
         [Fact]
         public void NEW26_FollowUp_TooFewReachableValidators_RefusedBeforeTheCeremony()
         {
-            // 4 funded public validators: a majority is 3. A ceremony with 2 reachable completes with a real key whose
-            // contract can carry at most 2 attestations - refused - so it must not start.
-            Assert.Contains("at least 3 of the 4", FrostDkgAttestation.PreCeremonyShortfall(2, false, 0));
-            Assert.Null(FrostDkgAttestation.PreCeremonyShortfall(3, false, 0));
-            Assert.Contains("at least 2 of the 3", FrostDkgAttestation.PreCeremonyShortfall(1, true, 3));   // S3C: its pool
+            // 10 funded public validators: a ceremony needs 9 of them.
+            Assert.Contains("at least 9 of the 10", FrostDkgAttestation.PreCeremonyShortfall(8, false, 0));
+            Assert.Null(FrostDkgAttestation.PreCeremonyShortfall(9, false, 0));
+            Assert.Contains("at least 3 of the 3", FrostDkgAttestation.PreCeremonyShortfall(2, true, 3));   // S3C: the whole pool
             Globals.LastBlock = new Block { Height = Activation - 10 };                                          // before activation
             Assert.Null(FrostDkgAttestation.PreCeremonyShortfall(0, false, 0));
         }
 
         [Fact]
-        public void NEW26_FollowUp_FinishedCeremonyWithTooFewAttestations_Refused()
+        public void NEW26_FollowUp_FinishedCeremonyThatWouldBeRefused_Detected()
         {
             var uid = NewUid();
-            var two = Proof(uid, _groupKey, _address, _public.Take(2));
-            var three = Proof(uid, _groupKey, _address, _public.Take(3));
-            var participants = _public.Select(v => v.Address).ToList();
-            Assert.Contains("2 eligible validator(s); 3 required", FrostDkgAttestation.CeremonyResultError(uid, _groupKey, _address, two, participants, false));
-            Assert.Null(FrostDkgAttestation.CeremonyResultError(uid, _groupKey, _address, three, participants, false));
+            var eight = _public.Take(8).ToList();
+            Assert.Contains("at least 9 of the 10", FrostDkgAttestation.CeremonyResultError(uid, _groupKey, _address, Proof(uid, eight), eight.Select(v => v.Address).ToList(), false, _minter.Address));
+            Assert.Null(FrostDkgAttestation.CeremonyResultError(uid, _groupKey, _address, Proof(uid, _public), _public.Select(v => v.Address).ToList(), false, _minter.Address));
+            Assert.NotNull(FrostDkgAttestation.CeremonyResultError(uid, _groupKey, _address, Proof(uid, _public), _public.Select(v => v.Address).ToList(), false, _otherCreator.Address));
         }
 
         [Fact]
@@ -444,29 +499,37 @@ namespace VerifiedXCore.Tests
         // ── Validator and coordinator sides ────────────────────────────────────────────────
 
         [Fact]
-        public void NEW26_ValidatorAttestsOnlyAKeyItStored()
+        public void NEW26_ValidatorAttestsOnlyItsOwnCeremony()
         {
             var account = AccountData.CreateNewAccount(skipSave: true);
             AccountData.GetAccounts().Insert(account);
             Globals.ValidatorAddress = account.Address;
             var uid = NewUid();
+            var participants = _public.Take(2).Select(v => v.Address).Append(account.Address).ToList();
+            var owner = _minter.Address;
+            var t = FrostDkgAttestation.ThresholdFor(participants.Count, 51);
 
-            Assert.Null(FrostDkgAttestation.SignLocal(uid, _groupKey, _address)); // no key package
+            Assert.Null(FrostDkgAttestation.SignLocal(uid, _groupKey, _address, owner, t, participants)); // no key package
 
             Assert.True(FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore
             {
-                SmartContractUID = uid, ValidatorAddress = account.Address, KeyPackage = "{}", PubkeyPackage = "{}", GroupPublicKey = _groupKey, CreatedTimestamp = TimeUtil.GetTime(),
+                SmartContractUID = uid, ValidatorAddress = account.Address, KeyPackage = "{}", PubkeyPackage = "{}", GroupPublicKey = _groupKey,
+                ParticipantOrderJson = JsonConvert.SerializeObject(FrostDkgAttestation.Canonical(participants)), CreatedTimestamp = TimeUtil.GetTime(),
             }));
             var (_, otherAddress) = NewGroupKey();
-            Assert.Null(FrostDkgAttestation.SignLocal(uid, _groupKey, otherAddress));   // not the key's address
-            Assert.Null(FrostDkgAttestation.SignLocal(NewUid(), _groupKey, _address));  // another contract
+            Assert.Null(FrostDkgAttestation.SignLocal(uid, _groupKey, otherAddress, owner, t, participants));                   // not the key's address
+            Assert.Null(FrostDkgAttestation.SignLocal(NewUid(), _groupKey, _address, owner, t, participants));                  // another contract
             var (otherKey, otherKeyAddress) = NewGroupKey();
-            Assert.Null(FrostDkgAttestation.SignLocal(uid, otherKey, otherKeyAddress)); // another key
+            Assert.Null(FrostDkgAttestation.SignLocal(uid, otherKey, otherKeyAddress, owner, t, participants));                  // another key
+            Assert.Null(FrostDkgAttestation.SignLocal(uid, _groupKey, _address, owner, t, participants.Take(2).ToList()));       // not a participant
+            Assert.Null(FrostDkgAttestation.SignLocal(uid, _groupKey, _address, owner, t, participants.Append(_public[5].Address).ToList())); // another participant list
 
-            var a = FrostDkgAttestation.SignLocal(uid, _groupKey, _address);
+            var a = FrostDkgAttestation.SignLocal(uid, _groupKey, _address, owner, t, participants);
             Assert.NotNull(a);
             Assert.Equal(account.Address, a!.ValidatorAddress);
-            Assert.True(FrostDkgAttestation.Verify(a, uid, _groupKey, _address));
+            Assert.True(FrostDkgAttestation.Verify(a, uid, _groupKey, _address, owner, t, participants));
+            Assert.False(FrostDkgAttestation.Verify(a, uid, _groupKey, _address, _otherCreator.Address, t, participants));     // owner bound
+            Assert.False(FrostDkgAttestation.Verify(a, uid, _groupKey, _address, owner, t - 1, participants));                  // threshold bound
         }
 
         [Fact]
@@ -485,9 +548,10 @@ namespace VerifiedXCore.Tests
             Assert.Equal(3, CountOf(controller, "var scUID = payload.CeremonyId;"));
 
             var mpc = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "FrostMPCService.cs"));
-            Assert.Contains("dkgProof = FrostDkgAttestation.BuildProof(ceremonyId, groupPublicKey, taprootAddress, attestations);", mpc);
+            Assert.Contains("dkgProof = FrostDkgAttestation.BuildProof(ceremonyId, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);", mpc);
             var startup = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "FROST", "FrostStartup.cs"));
-            Assert.Contains("FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress)", startup);
+            Assert.Contains("FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,", startup);
+            Assert.Contains("session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),", startup);
         }
 
         private static int CountOf(string text, string needle)

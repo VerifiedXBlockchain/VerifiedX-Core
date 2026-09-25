@@ -1569,7 +1569,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                         }
 
                         // NEW-26: this validator's attestation that the key is one it holds a share of, for this contract.
-                        var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress);
+                        // NEW-26 (follow-up): the attestation also binds the owner (the authenticated leader), the signing
+                        // threshold and the participant list of this validator's own session.
+                        var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,
+                            session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),
+                            session.ParticipantAddresses);
 
                         // Return final result
                         context.Response.StatusCode = StatusCodes.Status200OK;
