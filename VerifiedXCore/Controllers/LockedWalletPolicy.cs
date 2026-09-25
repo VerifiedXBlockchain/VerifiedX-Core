@@ -36,6 +36,9 @@ namespace VerifiedXCore.Controllers
             // unlock / lock / encryption status
             "V1.UnlockWallet", "V1.LockWallet", "V1.GetDecryptWallet", "V1.GetEncryptedPassword", "V1.GetEncryptLock", "V1.GetIsWalletEncrypted",
             "V1.CheckPasswordNeeded", "V1.GetIsEncryptedPasswordStored",
+            // shutdown / restart: no keys touched. A locked wallet refused them, so the GUI could not stop (or restart) the
+            // node and left it running in the background. The API token/password and host/origin guard still apply.
+            "V1.SendExit", "V1.SendExitComplete", "V1.SetRestartAndExit",
 
             // ── V2 ──────────────────────────────────────────────────────────────────────────
             "V2.Get", "V2.GetBalances", "V2.GetStateBalance", "V2.ResolveAdnr", "V2.ResolveAddressAdnr",
