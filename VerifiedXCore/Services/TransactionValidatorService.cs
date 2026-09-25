@@ -453,6 +453,14 @@ namespace VerifiedXCore.Services
 
                 newTxnMod.Build();
 
+                // NEW-22: the "Amount 0" re-hash below matched a transaction SIGNED with Amount "0" whatever Amount it now
+                // carries (the non-integer case above also re-hashed with 0): a relay or producer could raise the amount
+                // of any such transaction without breaking its signature. It applies only to a zero amount.
+                if (!newTxnMod.Hash.Equals(txRequest.Hash) && txRequest.Amount != 0M)
+                {
+                    return (txResult, "This transactions hash is not equal to the original hash.");
+                }
+
                 if (!newTxnMod.Hash.Equals(txRequest.Hash))
                 {
                     var newTxnModZero = new Transaction()
