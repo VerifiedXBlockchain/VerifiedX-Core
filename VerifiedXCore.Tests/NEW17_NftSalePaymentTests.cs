@@ -141,5 +141,47 @@ namespace VerifiedXCore.Tests
             var (ok, message) = await TransactionValidatorService.VerifyTX(sale, false, true, false, null, false, 1002);
             Assert.True(ok, message);
         }
+
+        // ── Sixth review ───────────────────────────────────────────────────────────────────
+
+        [Theory]
+        [InlineData("50", "0.00000790")]
+        [InlineData("50.60", "0.00001022")]
+        [InlineData("50.0", "0.00001234")]
+        public async Task NEW17_FollowUp_HonestSaleWithTrailingZeros_Accepted(string amount, string fee)
+        {
+            // The recomputed inner hash differed after JSON parsing dropped trailing zeros: honest sales (and mainnet
+            // history from block 899,466) were refused.
+            var price = decimal.Parse(amount, System.Globalization.CultureInfo.InvariantCulture);
+            SeedLockedSale(VbtcTestContracts.BuildContractData(Nft, _seller.Address, null, name: "Plain"), price);
+            var p = new Transaction { FromAddress = _buyer.Address, ToAddress = _seller.Address, Amount = price,
+                Fee = decimal.Parse(fee, System.Globalization.CultureInfo.InvariantCulture), Timestamp = TimeUtil.GetTime(), Nonce = 0, TransactionType = TransactionType.NFT_SALE,
+                Data = JsonConvert.SerializeObject(new { Function = "M_Sale_Complete()", ContractUID = Nft }) };
+            p.Build();
+            p.Signature = SignatureService.CreateSignature(p.Hash, _buyer.Key, _buyer.Pub);
+            var (ok, message) = await TransactionValidatorService.VerifyTX(Complete(new List<Transaction> { p }), false, true, false, null, false, 1002);
+            Assert.True(ok, message);
+        }
+
+        [Fact]
+        public async Task NEW17_FollowUp_OnePaymentTaggedForSellerAndPayee_Refused()
+        {
+            // A royalty contract whose payee is the seller: one payment tagged "1/2" and "2/2" was selected (and paid)
+            // twice by the apply but counted once by the balance check (buyer 2.01 -> -1.99).
+            var body = VbtcTestContracts.BuildContractData(Nft, _seller.Address, new List<SmartContractFeatures>
+            {
+                new SmartContractFeatures { FeatureName = FeatureName.Royalty,
+                    FeatureFeatures = JObject.FromObject(new RoyaltyFeature { RoyaltyType = RoyaltyType.Percent, RoyaltyAmount = 0.5M, RoyaltyPayToAddress = _seller.Address }) },
+            }, name: "Self royalty");
+            SeedLockedSale(body, 2M);
+            var p = new Transaction { FromAddress = _buyer.Address, ToAddress = _seller.Address, Amount = 2M, Fee = 0.000004M, Timestamp = TimeUtil.GetTime(), Nonce = 0, TransactionType = TransactionType.NFT_SALE,
+                Data = JsonConvert.SerializeObject(new { TXNum = "1/2", Also = "2/2" }) };
+            p.Build();
+            p.Signature = SignatureService.CreateSignature(p.Hash, _buyer.Key, _buyer.Pub);
+            var outer = Signed(_buyer, _seller.Address, TransactionType.NFT_SALE,
+                new { Function = "M_Sale_Complete()", ContractUID = Nft, Royalty = true, RoyaltyAmount = 0.5M, RoyaltyPayTo = _seller.Address, Transactions = new List<Transaction> { p }, KeySign = "k6" });
+            var (ok, message) = await TransactionValidatorService.VerifyTX(outer, false, true, false, null, false, 1002);
+            Assert.False(ok);
+        }
     }
 }

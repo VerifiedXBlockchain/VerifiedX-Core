@@ -185,7 +185,7 @@ namespace VerifiedXCore.Services
 
         /// <summary>
         /// NEW-17: the payments StateData.CompleteSaleSmartContract applies (SameBlockDebitGuard.SalePaidTransactions):
-        /// positive amounts, paid by the buyer (NextOwner) under a valid signature over the payment's own recomputed hash,
+        /// positive amounts, paid by the buyer (NextOwner), as separate transactions,
         /// to the seller (current owner) and - only when the contract has a royalty feature - to its royalty payee; the
         /// data's Royalty flag must match the contract, and together they cover the price (existing 1 VFX tolerance).
         /// </summary>
@@ -214,9 +214,13 @@ namespace VerifiedXCore.Services
                 var expectedTo = toPayee ? royaltyPayTo : sc.OwnerAddress;
                 if (p.ToAddress != expectedTo)
                     return $"Sale payment is sent to {p.ToAddress}, but must be sent to {expectedTo}.";
-                if (string.IsNullOrEmpty(p.Signature) || p.Hash != p.GetHash() || !SignatureService.VerifySignature(p.FromAddress, p.Hash, p.Signature))
-                    return "Sale payment signature failed to verify.";
+                // No inner hash/signature check here: the buyer signs the OUTER transaction, whose Data contains these
+                // payments, and JSON parsing drops trailing zeros (0.00000790 -> 0.0000079), so a recomputed inner hash
+                // differs for honest payments (it refused mainnet history from block 899,466 - sixth review).
             }
+            // One payment tagged "1/2" and "2/2" is selected (and paid) twice by the apply but counted once here.
+            if (contractRoyalty && ReferenceEquals(paid[0].Tx, paid[1].Tx))
+                return "The seller and royalty payments must be separate transactions.";
             if (paid.Sum(x => x.Tx.Amount) < sc.PurchaseAmount - 1.0M)
                 return "Sale payments do not cover the price.";
             return null;
