@@ -15,11 +15,15 @@ namespace VerifiedXCore.Tests
     /// </summary>
     public class NEW16_CoinbaseShapeTests
     {
-        private static Block BlockWith(Transaction coinbase) => new Block
+        private static Block BlockWith(Transaction coinbase)
         {
+            coinbase.Build(); // producers build coinbases (NEW-25 binds content to hash)
+            return new Block
+            {
             Height = 10_000, Version = 4, Validator = "xValidator",
-            Transactions = new List<Transaction> { coinbase },
-        };
+                Transactions = new List<Transaction> { coinbase },
+            };
+        }
 
         [Fact]
         public void NEW16_PoC_CoinbaseCarryingATokenTransfer_Refused()
@@ -44,6 +48,35 @@ namespace VerifiedXCore.Tests
         {
             var coinbase = new Transaction { FromAddress = "Coinbase_BlkRwd", ToAddress = "xValidator", Amount = 0M, TransactionType = TransactionType.TX };
             Assert.True(BlockchainData.ValidateBlock(BlockWith(coinbase)));
+        }
+
+        // ── NEW-25 (sixth review): coinbase content bound to its hash ───────────────────────
+
+        [Fact]
+        public void NEW25_PoC_CoinbaseContentChangedUnderItsHash_Refused()
+        {
+            // Reviewer PoC R6_SpecialBlock_ArbitraryCoinbaseAccepted: a coinbase credited 50,000,000 to an attacker while
+            // keeping the original Hash (and so the merkle root and block hash).
+            var coinbase = new Transaction { FromAddress = "Coinbase_BlkRwd", ToAddress = "xValidator", Amount = 0M, TransactionType = TransactionType.TX, Timestamp = 1 };
+            var block = BlockWith(coinbase);
+            Assert.True(BlockchainData.ValidateBlock(block));                         // control: as built
+            coinbase.Timestamp = 2;                                                   // content changed, Hash kept
+            Assert.False(BlockchainData.ValidateBlock(block));                         // (the special block case below shows the impact)
+        }
+
+        [Fact]
+        public void NEW25_SpecialBlockHeightNoLongerSkipsTheCoinbaseChecks()
+        {
+            var prior = Globals.SpecialBlockHeight;
+            try
+            {
+                Globals.SpecialBlockHeight = 10_000;
+                var coinbase = new Transaction { FromAddress = "Coinbase_BlkRwd", ToAddress = "xValidator", Amount = 0M, TransactionType = TransactionType.TX, Timestamp = 1 };
+                var block = BlockWith(coinbase);
+                coinbase.Amount = 50_000_000M; // Hash kept
+                Assert.False(BlockchainData.ValidateBlock(block));
+            }
+            finally { Globals.SpecialBlockHeight = prior; }
         }
     }
 }

@@ -659,6 +659,12 @@ namespace VerifiedXCore.Data
         }
         public static bool ValidateBlock(Block block)
         {
+            // NEW-16 / NEW-25: coinbase shape and content-to-hash binding apply at every height, including the special
+            // block (which returned before any coinbase check).
+            if (block.Transactions.Any(tx => Services.LedgerIntegrityRules.IsCoinbase(tx)
+                && (Services.LedgerIntegrityRules.CoinbaseShape(tx) != null || Services.LedgerIntegrityRules.ContentMatchesHash(tx) != null)))
+                return false;
+
             if (block.Height == Globals.SpecialBlockHeight)
                 return true;
 

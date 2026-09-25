@@ -111,6 +111,9 @@ namespace VerifiedXCore.Models
 				return "";
 			}
 		}
+		/// <summary>NEW-25: the merkle root of this block's transactions (as Build computes it).</summary>
+		public string MerkleRootOf() => GetMerkleRoot();
+
 		private string GetMerkleRoot()
 		{
 			// List<Transaction> txList = JsonConvert.DeserializeObject<List<Transaction>>(jsonTxs);

@@ -76,6 +76,8 @@ namespace VerifiedXCore.Services
                 var coinbaseError = LedgerIntegrityRules.CoinbaseShape(tx); // NEW-16
                 if (coinbaseError != null)
                     Add("NEW-16 coinbase shape", coinbaseError);
+                if ((LedgerIntegrityRules.IsCoinbase(tx) || height == 0) && LedgerIntegrityRules.ContentMatchesHash(tx) is string contentError) // NEW-25
+                    Add("NEW-25 coinbase/genesis content vs hash", contentError);
 
                 var uidError = LedgerIntegrityRules.ContractUids(tx); // NEW-10
                 if (uidError != null)
@@ -310,6 +312,8 @@ namespace VerifiedXCore.Services
                 {
                     blockCount++;
                     LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: as validation and apply do
+                    if (block.Height == 0 && block.Transactions != null && block.MerkleRoot != new Block { Transactions = block.Transactions }.MerkleRootOf()) // NEW-25
+                        hits.Add(new Hit(0, "", TransactionType.TX, "NEW-25 genesis merkle root", "Genesis merkle root does not match its transactions."));
                     var createdInBlock = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // NEW-06
                     var debitsInBlock = new Dictionary<SameBlockDebitGuard.DebitKey, (int N, decimal Sum, Transaction Last)>(); // NEW-07
                     var sweepState = new SameBlockDebitGuard.State(_ => null); // NEW-07: balances not judged, only the Recover() rule

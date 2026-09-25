@@ -171,6 +171,18 @@ namespace VerifiedXCore.Services
                 : null;
 
         /// <summary>
+        /// NEW-25: the merkle root is built from each transaction's STORED Hash, and only VerifyTX recomputes it - which
+        /// coinbase and genesis transactions never pass through. Their contents were therefore bound to nothing: a peer
+        /// serving blocks to a syncing node could change a coinbase's (or genesis transaction's) recipient, amount, type
+        /// or Data while keeping its Hash, the merkle root, the block hash and every signature (e.g. the special block at
+        /// 3,074,185 crediting 50,000,000 to an attacker). Producers build them with Build(), so the hash recomputes.
+        /// </summary>
+        public static string? ContentMatchesHash(Transaction tx) =>
+            tx != null && (string.IsNullOrEmpty(tx.Hash) || tx.GetHash() != tx.Hash)
+                ? $"Transaction {tx.Hash} content does not match its hash."
+                : null;
+
+        /// <summary>
         /// tx.Height is covered by neither the transaction hash nor the block hash, and the apply reads it (vBTC withdrawal
         /// escrow: EscrowAppliesTo(tx.Height), stored RequestBlockHeight). A producer or relaying peer could set an escrowed
         /// request's Height to 1 so it was applied as pre-escrow (no debit; burned later at COMPLETE without a balance

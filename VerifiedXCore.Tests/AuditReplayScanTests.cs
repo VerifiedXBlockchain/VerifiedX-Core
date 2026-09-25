@@ -81,19 +81,20 @@ namespace VerifiedXCore.Tests
         public void ScanChain_WalksStoredBlocks_AndReportsHeights()
         {
             var blocks = BlockchainData.GetBlocks();
-            var w0 = Withdrawal("scan:v2", 0.5M); w0.Height = 0; // honest producers set tx.Height to the block height (NEW-13)
-            var w1 = Withdrawal("scan:v2", -1M); w1.Height = 1;
-            blocks.InsertSafe(new Block { Height = 0, Hash = "h0", Transactions = new List<Transaction> { w0 } });
-            blocks.InsertSafe(new Block { Height = 1, Hash = "h1", Transactions = new List<Transaction> { w1 } });
-            blocks.InsertSafe(new Block { Height = 2, Hash = "h2", Transactions = new List<Transaction>() });
-            Globals.LastBlock = new Block { Height = 2 };
+            // Fixture blocks start at 1: block 0 is genesis, whose merkle root and transaction hashes the scan now checks (NEW-25).
+            var w0 = Withdrawal("scan:v2", 0.5M);
+            var w1 = Withdrawal("scan:v2", -1M);
+            blocks.InsertSafe(new Block { Height = 1, Hash = "h1", Transactions = new List<Transaction> { w0 } });
+            blocks.InsertSafe(new Block { Height = 2, Hash = "h2", Transactions = new List<Transaction> { w1 } });
+            blocks.InsertSafe(new Block { Height = 3, Hash = "h3", Transactions = new List<Transaction>() });
+            Globals.LastBlock = new Block { Height = 3 };
 
             var (blockCount, txCount, hits) = AuditReplayScanService.ScanChain();
 
             Assert.Equal(3, blockCount);
             Assert.Equal(2, txCount);
             var hit = Assert.Single(hits);
-            Assert.Equal(1, hit.Height);
+            Assert.Equal(2, hit.Height);
         }
 
         // ── Independent-review follow-ups ─────────────────────────────────────────────────

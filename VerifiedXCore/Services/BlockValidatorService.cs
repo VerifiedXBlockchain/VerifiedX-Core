@@ -460,6 +460,14 @@ namespace VerifiedXCore.Services
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-2");
                         return result; //block rejected due to chainref difference
                     }
+                    // NEW-25: genesis transactions skip VerifyTX; bind their contents to their hashes (and so to the
+                    // genesis block hash that block 1 links to).
+                    if (block.Transactions.Any(t => LedgerIntegrityRules.ContentMatchesHash(t) != null)
+                        || !block.MerkleRoot.Equals(new Block { Transactions = block.Transactions }.MerkleRootOf()))
+                    {
+                        DbContext.Rollback("BlockValidatorService.ValidateBlock()-genesisContent");
+                        return result;
+                    }
                     //Genesis Block
                     result = true;
                     await BlockchainData.AddBlock(block);
