@@ -50,7 +50,14 @@ namespace VerifiedXCore.Data
 						{
 							// NEW-01 (follow-up): same rule as imports — in an encrypted wallet the key is encrypted (and
 							// its keystore record saved) before the account is stored; while locked, no address is made.
-							if (Globals.IsWalletEncrypted == true && !WalletEncryptionService.EncryptImportedAccount(account).GetAwaiter().GetResult())
+							bool sealedOk = true;
+							if (Globals.IsWalletEncrypted == true)
+							{
+								// A failure here must end the loop (refuse), not retry forever with new keys.
+								try { sealedOk = WalletEncryptionService.EncryptImportedAccount(account).GetAwaiter().GetResult(); }
+								catch (Exception encEx) { sealedOk = false; ErrorLogUtility.LogError($"Sealing the new key failed: {encEx}", "AccountData.CreateNewAccount()"); }
+							}
+							if (!sealedOk)
 								refused = true;
 							else
 								AddToAccount(account);
