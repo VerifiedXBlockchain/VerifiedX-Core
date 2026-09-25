@@ -73,6 +73,9 @@ namespace VerifiedXCore.Services
                 if (saleError != null)
                     Add("NEW-17 sale amounts", saleError);
 
+                if (LedgerIntegrityRules.VaultCodeUnchanged(tx) is string vaultCodeError) // NEW-26 (follow-up)
+                    Add("NEW-26 vault code changed", vaultCodeError);
+
                 var coinbaseError = LedgerIntegrityRules.CoinbaseShape(tx); // NEW-16
                 if (coinbaseError != null)
                     Add("NEW-16 coinbase shape", coinbaseError);

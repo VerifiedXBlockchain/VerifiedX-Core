@@ -484,6 +484,11 @@ namespace VerifiedXCore.Services
 
             }
 
+            // NEW-26 (follow-up): a vBTC V2 vault's code (deposit address, DKG data) never changes after creation.
+            var vaultCodeError = LedgerIntegrityRules.VaultCodeUnchanged(txRequest);
+            if (vaultCodeError != null)
+                return (txResult, vaultCodeError);
+
             // VX-02 (follow-up): a contract creation (Mint(), TokenDeploy(), vBTC V2 create) has its submitted body
             // decompiled - run in the Trillium interpreter - by the binding checks below. Check the signature first, so a
             // transaction nobody signed (naming any funded address) never reaches the interpreter. The hash check above

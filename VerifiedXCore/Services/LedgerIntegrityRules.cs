@@ -101,6 +101,33 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        // ── NEW-26 (follow-up): a vBTC V2 vault's code never changes after creation ─────────────────────────────
+
+        /// <summary>The contract functions whose apply overwrites the stored ContractData with the carried body.</summary>
+        public static readonly string[] ContractRewritingFunctions = { "Update()", "Transfer()", "Evolve()", "Devolve()", "ChangeEvolveStateSpecific()" };
+
+        /// <summary>
+        /// Update(), Transfer() and the Evolve functions write the body they carry over the stored ContractData, so the owner
+        /// of a vBTC V2 vault could replace its code after creation - including the DepositAddress and the DKG data every
+        /// vault reader and the NEW-26 rule rely on (review round 7). On a vault, the carried body must equal the stored code
+        /// exactly: honest transfers resend it unchanged (all 8 mainnet and 1 testnet vault transfers did; no vault was ever
+        /// updated or evolved), and an empty body (which would wipe the code) is refused. Reads the payload exactly as the
+        /// StateData dispatcher does (case-sensitive "Data"/"ContractUID"). Null when the rule passes.
+        /// </summary>
+        public static string? VaultCodeUnchanged(Transaction tx)
+        {
+            if (tx?.Data == null) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function == null || !ContractRewritingFunctions.Contains(payload.Function) || string.IsNullOrEmpty(payload.ContractUID))
+                return null;
+            var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
+            if (stored == null || !VBTCService.IsVbtcV2Contract(stored))
+                return null;
+            return string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal)
+                ? null
+                : "A vBTC V2 vault's contract code cannot be changed after creation.";
+        }
+
         // ── NEW-27: whitelisted transactions ───────────────────────────────────────────────────────────────────
 
         /// <summary>
