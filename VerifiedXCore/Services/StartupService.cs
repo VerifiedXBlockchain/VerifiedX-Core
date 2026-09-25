@@ -610,11 +610,10 @@ namespace VerifiedXCore.Services
                 if(Globals.SelfBeacon?.SelfBeaconActive == true)
                 {
                     _ = BeaconServerFast.StartBeaconServer();
-                    var port = Globals.BeaconPort; //23338 - mainnet | 33338 - testnet
-
-                    BeaconServer server = new BeaconServer(GetPathUtility.GetBeaconPath(), port);
-                    Thread obj_thread = new Thread(server.StartServer());
-                    Console.WriteLine("Beacon Stopped");
+                    // NEW-03 (follow-up): the legacy TCP beacon (BeaconServer on BeaconPort, 23338/33338) is no longer
+                    // started. No client uses it (uploads/downloads go through the HTTP beacon: Send_New/Receive_New),
+                    // and it read a caller-chosen length (up to ~2 GB) into a new buffer per connection before any
+                    // authorization, on unbounded threads - any caller could exhaust the node's memory.
                 }
             }
             catch (Exception ex)

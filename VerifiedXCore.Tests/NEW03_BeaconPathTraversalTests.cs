@@ -147,5 +147,17 @@ namespace VerifiedXCore.Tests
             var own = await server.CreateClient().PostAsync($"/upload/{ScUid}", Upload("photo.png")); // control: own contract
             Assert.True(File.Exists(Path.Combine(_beaconRoot, ScUid.Replace(":", ""), "photo.png")), $"{(int)own.StatusCode} {await own.Content.ReadAsStringAsync()}");
         }
+
+        [Fact]
+        public void NEW03_FollowUp_LegacyTcpBeaconIsNotStarted()
+        {
+            // Fourth review: the legacy TCP beacon allocated a caller-chosen buffer (up to ~2 GB) per connection before
+            // authorization; no client uses it. StartBeacon no longer starts it.
+            var repo = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
+            var src = File.ReadAllText(Path.Combine(repo, "VerifiedXCore", "Services", "StartupService.cs"));
+            Assert.DoesNotContain("new BeaconServer(", src);
+        }
+
+        private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
     }
 }
