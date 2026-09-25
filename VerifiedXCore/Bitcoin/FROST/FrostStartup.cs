@@ -333,7 +333,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = VerifiedXCore.ApiErrorText.Generic(ex) }));
                     }
                 });
 
@@ -607,7 +607,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -735,7 +735,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -795,7 +795,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -942,7 +942,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         ErrorLogUtility.LogError($"DKG Round 2 error: {ex.Message}", "FrostStartup.DKGRound2");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -1068,7 +1068,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -1238,7 +1238,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         ErrorLogUtility.LogError($"DKG batch share distribution error: {ex.Message}", "FrostStartup.DKGSharesBatch");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -1432,7 +1432,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -1495,7 +1495,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -1566,7 +1566,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -1984,7 +1984,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -2030,7 +2030,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2210,7 +2210,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2262,7 +2262,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2337,7 +2337,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -2434,7 +2434,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2564,7 +2564,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         ErrorLogUtility.LogError($"Backup store error: {ex.Message}", "FrostStartup.BackupStore");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2654,7 +2654,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         ErrorLogUtility.LogError($"Backup recover error: {ex.Message}", "FrostStartup.BackupRecover");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 

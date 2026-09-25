@@ -537,7 +537,7 @@ namespace VerifiedXCore.Arbiter
                     {
                         context.Response.StatusCode = StatusCodes.Status400BadRequest;
                         context.Response.ContentType = "application/json";
-                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" }, Formatting.Indented);
+                        var response = JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }, Formatting.Indented);
                         await context.Response.WriteAsync(response);
                         return;
                     }

@@ -91,5 +91,21 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain(" at ", forOperator);
             Assert.DoesNotContain("secret", forOperator);
         }
+
+        [Theory]
+        [InlineData("Arbiter/ArbiterStartup.cs")]
+        [InlineData("Bitcoin/FROST/FrostStartup.cs")]
+        public void VX23_FollowUp_NetworkHostsReturnNoExceptionText(string relative)
+        {
+            // Second review: the arbiter's /getsignedmultisig returned the full exception (stack trace) and the FROST
+            // validator host returned ex.Message on about 20 routes, to any network caller. They log it locally now.
+            // The repository root, from this test file's compile-time path (tests may run from any output folder).
+            var repo = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(ThisFile()))!;
+            var src = System.IO.File.ReadAllText(System.IO.Path.Combine(repo, "VerifiedXCore", relative));
+            Assert.DoesNotMatch(new System.Text.RegularExpressions.Regex(@"Message = [^;\n]*\bex\.Message\b"), src);
+            Assert.DoesNotMatch(new System.Text.RegularExpressions.Regex(@"Message = \$""[^""]*\{ex\}"), src);
+        }
+
+        private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
     }
 }
