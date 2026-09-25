@@ -1,6 +1,9 @@
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Controllers;
 using VerifiedXCore.Bitcoin.Models;
+using VerifiedXCore.Data;
+using VerifiedXCore.Models;
+using VerifiedXCore.Models.SmartContracts;
 using VerifiedXCore.Utilities;
 using System;
 using System.Collections.Concurrent;
@@ -92,6 +95,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (created == null) { Set(s, S3CAutoBridgeStatus.Failed, "Companion creation failed (public DKG)."); return; }
                     s.PublicScUID = created.Value.scUID;
                     s.PublicDepositAddress = created.Value.depositAddress;
+                    s.CompanionCreateTxHash = created.Value.txHash;
                     s.CompanionBalanceBefore = 0M;   // fresh companion
                 }
                 else
@@ -110,7 +114,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 // GetMPCDepositAddress. Nothing has moved yet if this gives up.
                 var confirmedDeposit = await WaitForCompanionOnChain(s.PublicScUID!, CompanionConfirmMaxSeconds, CeremonyPollSeconds);
                 if (string.IsNullOrEmpty(confirmedDeposit))
-                { Set(s, S3CAutoBridgeStatus.Abandoned, "The companion contract was not confirmed on chain within the wait window; nothing moved."); return; }
+                {
+                    // A companion whose creation is gone (not on chain, not pending) is forgotten locally so a retry creates a
+                    // new one; one still pending is kept (a retry reuses it once it confirms). No BTC was sent to it.
+                    var forgotten = s.CompanionCreateTxHash != null && ForgetUnconfirmedCompanion(s.PublicScUID!, s.CompanionCreateTxHash);
+                    Set(s, S3CAutoBridgeStatus.Abandoned, "The companion contract was not confirmed on chain within the wait window; nothing moved."
+                        + (forgotten ? " Its creation was not mined; a retry will create a new companion." : ""));
+                    return;
+                }
                 s.PublicDepositAddress = confirmedDeposit;
 
                 // 2. Wait for the S3C contract's withdrawal slot to be free (§0 / §12.4).
@@ -159,15 +170,36 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         // §12.2: scan the requester's owned contracts for an existing public companion linked to the S3C.
-        private static VBTCContractV2? DiscoverCompanion(string requester, string s3cUID)
+        // NEW-26 (follow-up): only a companion that is on chain. A local record whose creation was never mined would
+        // otherwise be rediscovered on every retry and waited for forever.
+        internal static VBTCContractV2? DiscoverCompanion(string requester, string s3cUID)
         {
             var owned = VBTCContractV2.GetContractsByOwner(requester);
-            return owned?.FirstOrDefault(c => !c.IsS3C && c.LinkedContractUID == s3cUID);
+            return owned?.FirstOrDefault(c => !c.IsS3C && c.LinkedContractUID == s3cUID
+                && !string.IsNullOrEmpty(c.SmartContractUID) && SmartContractStateTrei.GetSmartContractState(c.SmartContractUID) != null);
+        }
+
+        /// <summary>
+        /// NEW-26 (follow-up): removes the local records of a companion whose creation is not on chain and no longer in the
+        /// mempool (dropped or refused), so it is neither shown nor waited for again. Keeps them while the creation is still
+        /// pending or once it is on chain. Returns whether it removed them.
+        /// </summary>
+        internal static bool ForgetUnconfirmedCompanion(string companionScUID, string createTxHash)
+        {
+            try
+            {
+                if (SmartContractStateTrei.GetSmartContractState(companionScUID) != null) return false;
+                if (!string.IsNullOrEmpty(createTxHash) && TransactionData.GetPool().FindOne(x => x.Hash == createTxHash) != null) return false;
+                VBTCContractV2.DeleteContract(companionScUID);
+                SmartContractMain.SmartContractData.DeleteSmartContract(companionScUID);
+                return true;
+            }
+            catch { return false; }
         }
 
         // §12.2: create a public companion linked to the S3C contract via the live ceremony path
         // (forcePublic so the DKG uses the public pool even on an S3C-configured node).
-        private static async Task<(string scUID, string depositAddress)?> CreateCompanion(string requester, string s3cUID)
+        private static async Task<(string scUID, string depositAddress, string? txHash)?> CreateCompanion(string requester, string s3cUID)
         {
             try
             {
@@ -204,7 +236,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var scUID = createObj["SmartContractUID"]?.ToObject<string>();
                 var deposit = createObj["DepositAddress"]?.ToObject<string>();
                 if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(deposit)) return null;
-                return (scUID, deposit);
+                return (scUID, deposit, createObj["TransactionHash"]?.ToObject<string>());
             }
             catch (Exception ex)
             {

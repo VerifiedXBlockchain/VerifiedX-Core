@@ -31,6 +31,7 @@ namespace VerifiedXCore.Bitcoin.Models
         public S3CAutoBridgeStatus Status { get; set; } = S3CAutoBridgeStatus.ResolvingCompanion;
 
         public string? PublicScUID { get; set; }
+        public string? CompanionCreateTxHash { get; set; }             // set when this orchestration created the companion
         public string? PublicDepositAddress { get; set; }
         public string? BaseGasAddress { get; set; }
         public decimal BaseGasEthBalance { get; set; }

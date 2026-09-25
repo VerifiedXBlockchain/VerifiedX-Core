@@ -5,6 +5,7 @@ using VerifiedXCore;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
 using VerifiedXCore.Data;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
 using Xunit;
 
@@ -69,6 +70,39 @@ namespace VerifiedXCore.Tests
             await Task.Delay(1500);
             Confirm();
             Assert.Equal(Deposit, await wait);
+        }
+
+        // ── Retries (Greptile follow-up): an unconfirmed companion must not block later attempts ──
+
+        [Fact]
+        public void UnconfirmedCompanionIsNotRediscovered_AConfirmedOneIs()
+        {
+            Assert.Null(S3CAutoBridgeService.DiscoverCompanion("xRequester", "s3c:1"));      // local record only: a retry creates a new one
+            Confirm();
+            Assert.Equal(Companion, S3CAutoBridgeService.DiscoverCompanion("xRequester", "s3c:1")?.SmartContractUID);
+        }
+
+        [Fact]
+        public void CompanionWhoseCreationIsGone_IsForgotten()
+        {
+            Assert.True(S3CAutoBridgeService.ForgetUnconfirmedCompanion(Companion, "createtx1"));  // not on chain, not pending
+            Assert.Null(VBTCContractV2.GetContract(Companion));
+        }
+
+        [Fact]
+        public void CompanionWhoseCreationIsStillPending_IsKept()
+        {
+            TransactionData.GetPool().InsertSafe(new Transaction { Hash = "createtx1", FromAddress = "xRequester", ToAddress = "xRequester", Data = "x" });
+            Assert.False(S3CAutoBridgeService.ForgetUnconfirmedCompanion(Companion, "createtx1"));
+            Assert.NotNull(VBTCContractV2.GetContract(Companion));
+        }
+
+        [Fact]
+        public void ConfirmedCompanion_IsNeverForgotten()
+        {
+            Confirm();
+            Assert.False(S3CAutoBridgeService.ForgetUnconfirmedCompanion(Companion, "createtx1"));
+            Assert.NotNull(VBTCContractV2.GetContract(Companion));
         }
 
         [Fact]
