@@ -341,30 +341,39 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>The buyer debits StateData.CompleteSaleSmartContract writes beyond the outer transaction.</summary>
-        public static decimal SaleCompletionPayments(Transaction tx)
+        public static decimal SaleCompletionPayments(Transaction tx) =>
+            SalePaidTransactions(tx).Sum(p => p.Tx.Amount + p.Tx.Fee);
+
+        /// <summary>
+        /// The inner transactions StateData.CompleteSaleSmartContract pays, as it selects them: with the data's Royalty
+        /// flag true, the first "1/2" (seller) and first "2/2" (royalty payee); otherwise the first one (seller).
+        /// </summary>
+        public static List<(Transaction Tx, bool ToRoyaltyPayee)> SalePaidTransactions(Transaction tx)
         {
+            var paid = new List<(Transaction, bool)>();
             if (tx?.TransactionType != TransactionType.NFT_SALE || string.IsNullOrEmpty(tx.Data))
-                return 0M;
+                return paid;
             try
             {
                 var jobj = JObject.Parse(tx.Data);
                 var function = jobj["Function"]?.ToObject<string?>();
                 if (function != "Sale_Complete()" && function != "M_Sale_Complete()")
-                    return 0M;
+                    return paid;
                 var inner = jobj["Transactions"]?.ToObject<List<Transaction>?>();
                 if (inner == null || inner.Count == 0)
-                    return 0M;
-                var royalty = jobj["Royalty"]?.ToObject<bool?>();
-                if (royalty == true)
+                    return paid;
+                if (jobj["Royalty"]?.ToObject<bool?>() == true)
                 {
-                    var toSeller = inner.FirstOrDefault(x => (x.Data ?? "").Contains("1/2"));
-                    var toPayee = inner.FirstOrDefault(x => (x.Data ?? "").Contains("2/2"));
-                    return (toSeller == null ? 0M : toSeller.Amount + toSeller.Fee) + (toPayee == null ? 0M : toPayee.Amount + toPayee.Fee);
+                    var toSeller = inner.FirstOrDefault(x => (x?.Data ?? "").Contains("1/2"));
+                    var toPayee = inner.FirstOrDefault(x => (x?.Data ?? "").Contains("2/2"));
+                    if (toSeller != null) paid.Add((toSeller, false));
+                    if (toPayee != null) paid.Add((toPayee, true));
+                    return paid;
                 }
-                var first = inner[0];
-                return first == null ? 0M : first.Amount + first.Fee;
+                if (inner[0] != null) paid.Add((inner[0], false));
             }
-            catch { return 0M; }
+            catch { }
+            return paid;
         }
 
         public static bool IsReserveRecover(Transaction tx)

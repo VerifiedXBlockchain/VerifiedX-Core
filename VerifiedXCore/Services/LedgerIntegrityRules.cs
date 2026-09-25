@@ -98,6 +98,33 @@ namespace VerifiedXCore.Services
 
         // ── NEW-13: a transaction's Height is its block's height ────────────────────────────────────────────────
 
+        // ── NEW-17: NFT sale amounts ─────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// A sale's price (SoldFor at Sale_Start/M_Sale_Start) and every payment its completion applies must be positive:
+        /// the completion checks were lower-bound or upper-bound only (or absent), and a negative payment debited the
+        /// buyer "negatively" and credited its recipient negatively - minting VFX or draining an arbitrary account.
+        /// </summary>
+        public static string? SaleAmounts(Transaction tx)
+        {
+            if (tx?.TransactionType != TransactionType.NFT_SALE || string.IsNullOrEmpty(tx.Data)) return null;
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                var function = jobj["Function"]?.ToObject<string?>();
+                if (function == "Sale_Start()" || function == "M_Sale_Start()")
+                {
+                    var soldFor = jobj["SoldFor"]?.ToObject<decimal?>();
+                    return soldFor is > 0M ? null : "Sale price must be greater than zero.";
+                }
+                foreach (var (p, _) in SameBlockDebitGuard.SalePaidTransactions(tx))
+                    if (p.Amount <= 0M || p.Fee < 0M)
+                        return "Every sale payment must have a positive amount and a non-negative fee.";
+            }
+            catch { }
+            return null;
+        }
+
         // ── NEW-16: a coinbase transaction is a plain reward/fee record ─────────────────────────────────────────
 
         public static bool IsCoinbase(Transaction tx) => tx?.FromAddress == "Coinbase_BlkRwd" || tx?.FromAddress == "Coinbase_TrxFees";

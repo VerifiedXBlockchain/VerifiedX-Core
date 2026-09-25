@@ -183,6 +183,45 @@ namespace VerifiedXCore.Services
             return (true, string.Empty);
         }
 
+        /// <summary>
+        /// NEW-17: the payments StateData.CompleteSaleSmartContract applies (SameBlockDebitGuard.SalePaidTransactions):
+        /// positive amounts, paid by the buyer (NextOwner) under a valid signature over the payment's own recomputed hash,
+        /// to the seller (current owner) and - only when the contract has a royalty feature - to its royalty payee; the
+        /// data's Royalty flag must match the contract, and together they cover the price (existing 1 VFX tolerance).
+        /// </summary>
+        internal static string? SalePaymentError(Transaction txRequest, bool? royaltyFlag, SmartContractStateTrei sc, SmartContractMain scMain)
+        {
+            var royaltyFeat = scMain.Features?.FirstOrDefault(x => x.FeatureName == FeatureName.Royalty);
+            var contractRoyalty = royaltyFeat != null;
+            if ((royaltyFlag == true) != contractRoyalty)
+                return "The sale's Royalty flag must match the contract's royalty feature.";
+            if (!(sc.PurchaseAmount > 0M))
+                return "Sale price must be greater than zero.";
+
+            var amountError = LedgerIntegrityRules.SaleAmounts(txRequest);
+            if (amountError != null)
+                return amountError;
+
+            var paid = SameBlockDebitGuard.SalePaidTransactions(txRequest);
+            if (paid.Count == 0 || (contractRoyalty && paid.Count != 2))
+                return "Sale payments are missing.";
+
+            var royaltyPayTo = contractRoyalty ? ((RoyaltyFeature)royaltyFeat!.FeatureFeatures).RoyaltyPayToAddress : null;
+            foreach (var (p, toPayee) in paid)
+            {
+                if (p.FromAddress != sc.NextOwner)
+                    return "Every sale payment must come from the buyer.";
+                var expectedTo = toPayee ? royaltyPayTo : sc.OwnerAddress;
+                if (p.ToAddress != expectedTo)
+                    return $"Sale payment is sent to {p.ToAddress}, but must be sent to {expectedTo}.";
+                if (string.IsNullOrEmpty(p.Signature) || p.Hash != p.GetHash() || !SignatureService.VerifySignature(p.FromAddress, p.Hash, p.Signature))
+                    return "Sale payment signature failed to verify.";
+            }
+            if (paid.Sum(x => x.Tx.Amount) < sc.PurchaseAmount - 1.0M)
+                return "Sale payments do not cover the price.";
+            return null;
+        }
+
         public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null)
         {
             bool txResult = false;
@@ -1590,6 +1629,11 @@ namespace VerifiedXCore.Services
                             if (amountSoldFor == null)
                                 return (txResult, "Amount Sold For cannot be null.");
 
+                            // NEW-17: a negative price let the completion's payment be negative (VFX minted).
+                            var salePriceError = LedgerIntegrityRules.SaleAmounts(txRequest);
+                            if (salePriceError != null)
+                                return (txResult, salePriceError);
+
                             // NEW-08 (follow-up): MEMPOOL ADMISSION ONLY - at block verification this node's own mempool decided
                             // whether a block was accepted (possible split).
                             var mempoolList = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x => 
@@ -1738,6 +1782,12 @@ namespace VerifiedXCore.Services
 
                                     if (scMain == null)
                                         return (txResult, "Failed to decompile smart contract.");
+
+                                    // NEW-17: every payment the apply makes is bound here, on every branch (the royalty-less
+                                    // featured branch had no checks; the others were one-sided bounds).
+                                    var salePaymentError = SalePaymentError(txRequest, royalty, scStateTreiRec, scMain);
+                                    if (salePaymentError != null)
+                                        return (txResult, salePaymentError);
 
                                     if(scMain.Features != null)
                                     {

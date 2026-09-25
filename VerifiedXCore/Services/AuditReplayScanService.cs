@@ -65,6 +65,10 @@ namespace VerifiedXCore.Services
 
                 CheckFunctionRules(tx, Add);
 
+                var saleError = LedgerIntegrityRules.SaleAmounts(tx); // NEW-17
+                if (saleError != null)
+                    Add("NEW-17 sale amounts", saleError);
+
                 var coinbaseError = LedgerIntegrityRules.CoinbaseShape(tx); // NEW-16
                 if (coinbaseError != null)
                     Add("NEW-16 coinbase shape", coinbaseError);
