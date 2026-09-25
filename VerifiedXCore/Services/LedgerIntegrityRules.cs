@@ -32,6 +32,20 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        /// <summary>
+        /// NEW-09 (follow-up): the apply resolves both addresses through LiteDB's collation (case and invisible characters
+        /// ignored), so a recipient that merely LOOKS different ("XABC…", "xa­bc…") still loads the sender's own account
+        /// twice. Refused when the data recipient resolves to the sender's account.
+        /// </summary>
+        public static string? TokenTransferResolvesToSender(string? dataFrom, string? dataTo)
+        {
+            if (string.IsNullOrEmpty(dataFrom) || string.IsNullOrEmpty(dataTo)) return null;
+            var toAccount = VerifiedXCore.Data.StateData.GetSpecificAccountStateTrei(dataTo);
+            return toAccount != null && string.Equals(toAccount.Key, dataFrom, StringComparison.Ordinal)
+                ? "Token transfer recipient resolves to the sender's own account."
+                : null;
+        }
+
         public static string? TokenBurn(string txFrom, string? dataFrom, decimal? amount)
         {
             if (dataFrom != txFrom) return "Token burn FromAddress must be the transaction signer.";

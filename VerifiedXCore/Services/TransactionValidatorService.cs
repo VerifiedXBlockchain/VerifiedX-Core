@@ -661,7 +661,8 @@ namespace VerifiedXCore.Services
                                             // NEW-04: the apply debits the FromAddress named in the data, so it must be the signer
                                             // (anyone could move any holder's tokens), the credit goes to the transaction's
                                             // ToAddress, and a negative amount (which minted) is refused.
-                                            var tokenTransferError = LedgerIntegrityRules.TokenTransfer(txRequest.FromAddress, txRequest.ToAddress, fromAddress, toAddress, amount);
+                                            var tokenTransferError = LedgerIntegrityRules.TokenTransfer(txRequest.FromAddress, txRequest.ToAddress, fromAddress, toAddress, amount)
+                                                ?? LedgerIntegrityRules.TokenTransferResolvesToSender(fromAddress, toAddress);
                                             if (tokenTransferError != null)
                                                 return (txResult, tokenTransferError);
 

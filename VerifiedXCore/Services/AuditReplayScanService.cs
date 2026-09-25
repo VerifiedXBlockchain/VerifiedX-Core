@@ -165,7 +165,8 @@ namespace VerifiedXCore.Services
             {
                 case "TokenTransfer()":
                     {
-                        var e = LedgerIntegrityRules.TokenTransfer(tx.FromAddress, tx.ToAddress, d["FromAddress"]?.ToObject<string?>(), d["ToAddress"]?.ToObject<string?>(), d["Amount"]?.ToObject<decimal?>());
+                        var e = LedgerIntegrityRules.TokenTransfer(tx.FromAddress, tx.ToAddress, d["FromAddress"]?.ToObject<string?>(), d["ToAddress"]?.ToObject<string?>(), d["Amount"]?.ToObject<decimal?>())
+                            ?? LedgerIntegrityRules.TokenTransferResolvesToSender(d["FromAddress"]?.ToObject<string?>(), d["ToAddress"]?.ToObject<string?>());
                         if (e != null) add("NEW-04 token transfer binding", e);
                         break;
                     }

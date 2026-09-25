@@ -221,5 +221,20 @@ namespace VerifiedXCore.Tests
             Assert.Equal(990M, TokenBalanceOf(_victim.Address));
             Assert.Equal(15M, TokenBalanceOf(_attacker.Address));
         }
+
+        [Theory]
+        [InlineData("upper")]
+        [InlineData("softhyphen")]
+        public async Task NEW09_FollowUp_AliasOfTheSendersOwnAddress_Refused(string kind)
+        {
+            // Fourth review (PoC R4_NEW09_Bypass_LegacyShape_AliasedSelf: 1000 -> 2000): the legacy "Token_Base" shape
+            // skips the recipient binding, and the apply resolves an aliased recipient to the sender's own account.
+            var alias = kind == "upper" ? _victim.Address.ToUpperInvariant() : _victim.Address.Insert(3, "­");
+            var tx = TokenTx(_victim, "Token_Base", TransactionType.FTKN_TX,
+                new { Function = "TokenTransfer()", ContractUID = TokenX, FromAddress = _victim.Address, ToAddress = alias, Amount = 100M, TokenTicker = "X", TokenName = "X" });
+            var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(ok);
+            Assert.Contains("own account", message);
+        }
     }
 }
