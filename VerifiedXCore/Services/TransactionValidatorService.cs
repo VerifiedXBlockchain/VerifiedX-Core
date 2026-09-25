@@ -196,6 +196,11 @@ namespace VerifiedXCore.Services
             if (badNFTTx) 
                 return (true, "");
 
+            // NEW-10: contract UIDs are exact (creation format; references equal the stored record's UID).
+            var contractUidError = LedgerIntegrityRules.ContractUids(txRequest);
+            if (contractUidError != null)
+                return (false, contractUidError);
+
             // Height-gated vBTC privacy disable (inert until VbtcPrivacyDisableHeight is set).
             // Deterministic under replay/sync: block validation passes the block's own height;
             // mempool admission gates on the height the tx would mine into (tip + 1).

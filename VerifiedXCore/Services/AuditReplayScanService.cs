@@ -64,6 +64,10 @@ namespace VerifiedXCore.Services
                     CheckMintOrDeploy(tx, Add);
 
                 CheckFunctionRules(tx, Add);
+
+                var uidError = LedgerIntegrityRules.ContractUids(tx); // NEW-10
+                if (uidError != null)
+                    Add("NEW-10 contract UID", uidError);
             }
             catch (Exception ex)
             {

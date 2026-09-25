@@ -82,6 +82,58 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        // ── NEW-10: contract UIDs are exact ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>Format of a NEW contract's UID: what every wallet generator produces (lowercase GUID hex, ':', a timestamp).</summary>
+        public static readonly System.Text.RegularExpressions.Regex CreationUidFormat =
+            new(@"^[0-9a-f]{1,64}:[0-9]{1,20}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        private static readonly HashSet<string> UidFieldNames = new(StringComparer.Ordinal) { "ContractUID", "SmartContractUID", "SCUID", "ScUID", "scUID" };
+
+        /// <summary>
+        /// Contract records are looked up through LiteDB's default collation, which is culture-aware and ignores case and
+        /// invisible characters: "ABC:1", "abc:1" and "a\u00ADbc:1" all resolve to one record, while every in-memory set,
+        /// reserve pending total and duplicate guard compared the raw strings. So (a) a new contract's UID must have the
+        /// generator format, which no two distinct values can alias under any collation, and (b) every UID a
+        /// transaction names must equal the stored record's UID exactly when such a record exists.
+        /// </summary>
+        public static string? ContractUids(Transaction tx)
+        {
+            if (tx == null || string.IsNullOrEmpty(tx.Data)) return null;
+            var created = CreatedContractUid(tx);
+            if (created != null && !CreationUidFormat.IsMatch(created))
+                return $"Contract UID '{created}' must be lowercase hex, ':' and digits.";
+
+            foreach (var uid in ReferencedContractUids(tx))
+            {
+                if (uid == created) continue;
+                var record = SmartContractStateTrei.GetSmartContractState(uid);
+                if (record != null && !string.Equals(record.SmartContractUID, uid, StringComparison.Ordinal))
+                    return $"Contract UID '{uid}' does not match the stored contract '{record.SmartContractUID}' exactly.";
+            }
+            return null;
+        }
+
+        /// <summary>Every contract UID named in the transaction data (any depth), plus the debit keys (privacy payloads).</summary>
+        public static HashSet<string> ReferencedContractUids(Transaction tx)
+        {
+            var uids = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                var root = Newtonsoft.Json.Linq.JToken.Parse(tx.Data);
+                foreach (var prop in (root as Newtonsoft.Json.Linq.JContainer)?.Descendants().OfType<Newtonsoft.Json.Linq.JProperty>() ?? Enumerable.Empty<Newtonsoft.Json.Linq.JProperty>())
+                    if (UidFieldNames.Contains(prop.Name) && prop.Value.Type == Newtonsoft.Json.Linq.JTokenType.String)
+                    {
+                        var v = (string?)prop.Value;
+                        if (!string.IsNullOrEmpty(v)) uids.Add(v);
+                    }
+            }
+            catch { }
+            foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx))
+                uids.Add(key.ContractUid);
+            return uids;
+        }
+
         /// <summary>NEW-06: registers a block transaction's contract creation; the reason when its UID was already created in this block.</summary>
         public static string? RegisterCreationInBlock(Transaction tx, HashSet<string> createdInBlock)
         {
