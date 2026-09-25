@@ -273,19 +273,19 @@ namespace VerifiedXCore.Data
                                         await DeployTokenContract(tx, block);
                                         break;
                                     case "TokenTransfer()":
-                                        TokenTransfer(tx, block);
+                                        await TokenTransfer(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenMint()":
-                                        TokenMint(tx);
+                                        await TokenMint(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenBurn()":
-                                        TokenBurn(tx);
+                                        await TokenBurn(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenPause()":
                                         TokenPause(tx);
                                         break;
                                     case "TokenBanAddress()":
-                                        TokenBanAddress(tx);
+                                        await TokenBanAddress(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenContractOwnerChange()":
                                         TokenContractOwnerChange(tx);
@@ -342,10 +342,10 @@ namespace VerifiedXCore.Data
                                             StartSaleSmartContract(tx);
                                             break;
                                         case "Sale_Complete()":
-                                            CompleteSaleSmartContract(tx, block);
+                                            await CompleteSaleSmartContract(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "M_Sale_Complete()":
-                                            CompleteSaleSmartContract(tx, block);
+                                            await CompleteSaleSmartContract(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "Sale_Cancel()":
                                             CancelSaleSmartContract(tx);
@@ -372,7 +372,7 @@ namespace VerifiedXCore.Data
                                             AddNewAdnr(tx);
                                             break;
                                         case "AdnrTransfer()":
-                                            TransferAdnr(tx);
+                                            await TransferAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "AdnrDelete()":
                                             DeleteAdnr(tx);
@@ -381,7 +381,7 @@ namespace VerifiedXCore.Data
                                             AddNewBTCAdnr(tx);
                                             break;
                                         case "BTCAdnrTransfer()":
-                                            TransferBTCAdnr(tx);
+                                            await TransferBTCAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "BTCAdnrDelete()":
                                             DeleteBTCAdnr(tx);
@@ -467,7 +467,7 @@ namespace VerifiedXCore.Data
                                             UpdateDecShop(tx);
                                             break;
                                         case "DecShopDelete()":
-                                            DeleteDecShop(tx);
+                                            await DeleteDecShop(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         default:
                                             break;
@@ -573,7 +573,7 @@ namespace VerifiedXCore.Data
                                     switch (function)
                                     {
                                         case "Register()":
-                                            RegisterReserveAccount(tx);
+                                            await RegisterReserveAccount(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "CallBack()":
                                             var callBackHash = (string?)jobj["Hash"];

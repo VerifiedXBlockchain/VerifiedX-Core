@@ -1,3 +1,4 @@
+using System.Linq;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -201,6 +202,24 @@ namespace VerifiedXCore.Tests
             var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
             Assert.False(ok);
             Assert.Contains("own address", message);
+        }
+
+        // ── NEW-12 (fourth review): apply handlers ran without await ───────────────────────
+
+        private static decimal TokenBalanceOf(string address) =>
+            StateData.GetSpecificAccountStateTrei(address)?.TokenAccounts?.FirstOrDefault(t => t.SmartContractUID == TokenX)?.Balance ?? 0M;
+
+        [Fact]
+        public async Task NEW12_TokenTransferApply_IsCompleteWhenUpdateTreisReturns()
+        {
+            // TokenTransfer (and nine other async apply handlers) was started without await, so UpdateTreis returned -
+            // and the next transaction or block was applied - while its account writes were still pending.
+            var tx = Transfer(_victim, _victim.Address, _attacker.Address, 10M);
+            tx.Height = 101;
+            var block = new Block { Height = 101, StateRoot = "root", Transactions = new List<Transaction> { tx } };
+            Assert.True(await StateData.UpdateTreis(block));
+            Assert.Equal(990M, TokenBalanceOf(_victim.Address));
+            Assert.Equal(15M, TokenBalanceOf(_attacker.Address));
         }
     }
 }
