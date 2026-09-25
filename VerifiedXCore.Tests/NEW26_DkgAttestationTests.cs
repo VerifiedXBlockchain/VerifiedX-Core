@@ -55,10 +55,12 @@ namespace VerifiedXCore.Tests
             Globals.VbtcV2DkgAttestationHeight = Activation;
             StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _minter.Address, Balance = 100M, Nonce = 0 });
 
-            // Active vBTC validators, registered on chain (4 public, 3 S3C).
+            // Active vBTC validators, registered on chain (4 public, 3 S3C), each holding the validator balance.
             long h = 10;
             foreach (var v in _public) Register(v, isS3C: false, h++);
             foreach (var v in _s3c) Register(v, isS3C: true, h++);
+            foreach (var v in _public.Concat(_s3c))
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = v.Address, Balance = 5_000M, Nonce = 0 });
 
             (_groupKey, _address) = NewGroupKey();
         }
@@ -306,6 +308,83 @@ namespace VerifiedXCore.Tests
             var feature = (TokenizationV2Feature)sc.Features!.Single(f => f.FeatureName == FeatureName.TokenizationV2).FeatureFeatures;
             Assert.Equal(proof, feature.DKGProof);
             Assert.Equal(40, FrostDkgAttestation.ParseProof(feature.DKGProof)!.Attestations.Count);
+        }
+
+        // ── Follow-up: only validators holding the validator balance count (registry Sybils) ──
+
+        /// <summary>Registers validators that do not hold the balance now (registration checked it once; the same funds moved on).</summary>
+        private List<(PrivateKey Key, string Pub, string Address)> RegisterUnfundedSybils(int n)
+        {
+            var sybils = Enumerable.Range(0, n).Select(_ => NewKey()).ToList();
+            long h = 30;
+            foreach (var s in sybils) Register(s, isS3C: false, h++);
+            return sybils;
+        }
+
+        [Fact]
+        public async Task NEW26_FollowUp_PoC_UnfundedSybilRegistrationsSupplyTheMajority_Refused()
+        {
+            // 4 funded honest validators + 6 registrations kept alive with one balance moved between them: the Sybils
+            // were 6 of 10 active validators, a 51% majority, and could attest a key only they hold.
+            var sybils = RegisterUnfundedSybils(6);
+            var uid = NewUid();
+            var (ok, _) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, sybils), snapshot: sybils.Select(x => x.Address).ToList()));
+            Assert.False(ok);
+        }
+
+        [Fact]
+        public async Task NEW26_FollowUp_UnfundedRegistrationsDoNotRaiseTheMajority()
+        {
+            // Control: the funded validators' majority is the basis; unfunded registrations do not dilute it.
+            RegisterUnfundedSybils(6);
+            var uid = NewUid();
+            var (ok, message) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, _public.Take(3))));
+            Assert.True(ok, message);
+        }
+
+        [Fact]
+        public async Task NEW26_FollowUp_ValidatorWhoseBalanceMovedAway_NotCounted()
+        {
+            foreach (var v in new[] { _public[1], _public[2] })
+            {
+                var acct = StateData.GetAccountStateTrei().FindOne(a => a.Key == v.Address);
+                acct.Balance = 4_999M;
+                StateData.GetAccountStateTrei().UpdateSafe(acct);
+            }
+            var uid = NewUid();
+            // Funded: public[0], public[3] -> 2 required; public[1], public[2] no longer count.
+            var (ok, _) = await Verify(Create(uid, _address, _groupKey, Proof(uid, _groupKey, _address, _public.Take(3))));
+            Assert.False(ok);
+        }
+
+        [Fact]
+        public void NEW26_FollowUp_BalanceCheckUsesTheExactAddress()
+        {
+            var funded = _public[0].Address;
+            Assert.True(VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.HoldsValidatorBalance(funded));
+            // LiteDB lookups ignore case: a case variant must not read the funded account's balance.
+            var i = Enumerable.Range(1, funded.Length - 1).First(k => char.IsLetter(funded[k]));
+            var variant = funded[..i] + (char.IsUpper(funded[i]) ? char.ToLowerInvariant(funded[i]) : char.ToUpperInvariant(funded[i])) + funded[(i + 1)..];
+            Assert.False(VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.HoldsValidatorBalance(variant));
+            Assert.False(VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.HoldsValidatorBalance(NewKey().Address));
+        }
+
+        [Fact]
+        public void NEW26_FollowUp_CeremonySelectionTakesFundedValidatorsOnly()
+        {
+            var sybils = RegisterUnfundedSybils(2);
+            var all = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(99);
+            var funded = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.FundedOnly(all);
+            Assert.Equal(9, all.Count);
+            Assert.Equal(7, funded.Count);
+            Assert.DoesNotContain(funded, v => sybils.Any(x => x.Address == v.ValidatorAddress));
+
+            var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
+            var controller = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Controllers", "VBTCController.cs"));
+            Assert.Equal(4, CountOf(controller, "FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators())"));
+            Assert.Equal(0, CountOf(controller, "= Services.VBTCValidatorRegistry.GetPublicValidators()"));
+            var s3c = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "S3CService.cs"));
+            Assert.Contains("VBTCValidatorRegistry.HoldsValidatorBalance(v.ValidatorAddress)", s3c);
         }
 
         // ── Validator and coordinator sides ────────────────────────────────────────────────

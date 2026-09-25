@@ -107,6 +107,30 @@ namespace VerifiedXCore.Bitcoin.Services
             => GetActiveValidators().Where(v => !v.IsS3C).ToList();
 
         /// <summary>
+        /// NEW-26 (follow-up): whether an address holds the validator balance (5,000 VFX) in committed state now.
+        /// Registration and heartbeat check the balance only at admission and nothing locks it, so one balance moved from
+        /// address to address kept many registrations active. Counting only validators funded at the same moment makes N
+        /// such validators cost N x 5,000 held at once. At block validation, committed state is the state after the
+        /// previous block, so the answer is the same on every node.
+        /// </summary>
+        public static bool HoldsValidatorBalance(string? address)
+        {
+            if (string.IsNullOrEmpty(address)) return false;
+            try
+            {
+                var account = StateData.GetSpecificAccountStateTrei(address);
+                // Exact key: LiteDB lookups ignore case, so a case variant would read another address's balance.
+                return account != null && string.Equals(account.Key, address, StringComparison.Ordinal)
+                    && account.Balance >= VerifiedXCore.Services.ValidatorService.ValidatorRequiredAmount();
+            }
+            catch { return false; }
+        }
+
+        /// <summary>NEW-26 (follow-up): the validators that hold the validator balance now (see HoldsValidatorBalance).</summary>
+        public static List<VBTCValidator> FundedOnly(IEnumerable<VBTCValidator> validators)
+            => validators.Where(v => v != null && HoldsValidatorBalance(v.ValidatorAddress)).ToList();
+
+        /// <summary>
         /// Returns the count of currently active validators.
         /// </summary>
         public static int GetActiveValidatorCount()

@@ -230,7 +230,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 // Get candidate validators — these are all known active validators.
                 // Some may be offline. We probe reachability to filter to only online ones.
-                var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
+                var allValidators = Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators());   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
 
                 if (allValidators == null || !allValidators.Any())
                 {
@@ -768,7 +768,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             {
                 allValidators = ceremony.IsS3C
                     ? Services.S3CService.GetValidatorsForCeremony()
-                    : Services.VBTCValidatorRegistry.GetPublicValidators();
+                    : Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators()); // NEW-26 (follow-up): funded only
             }
             catch (Exception s3cEx)
             {
@@ -3294,7 +3294,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Active ceremony already in progress.", ExistingCeremonyId = existingActive.CeremonyId });
 
                 // Probe validators
-                var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
+                var allValidators = Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators());   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
                 if (allValidators == null || !allValidators.Any())
                     return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available" });
 
@@ -3409,7 +3409,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         ceremony.Status = CeremonyStatus.ValidatingValidators;
                         ceremony.ProgressPercentage = 5;
 
-                        var allValidators = Services.VBTCValidatorRegistry.GetPublicValidators();   // S3C §7.1: exclusion-only (public mints never use S3C validators)
+                        var allValidators = Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators());   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
                         if (allValidators == null || !allValidators.Any())
                         {
                             ceremony.Status = CeremonyStatus.Failed;

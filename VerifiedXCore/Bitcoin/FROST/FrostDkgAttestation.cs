@@ -23,7 +23,9 @@ namespace VerifiedXCore.Bitcoin.FROST
     ///  - a DKGProof listing signatures by active vBTC validators over (contract UID, group key, address). A validator
     ///    signs only for a DKG it took part in and whose key package it stored, so the key is one the validators hold.
     /// Public contracts need a majority of the active public validator set at the previous block; S3C contracts (a
-    /// creator-chosen private pool, disclosed as such) need a majority of their listed S3C validators.
+    /// creator-chosen private pool, disclosed as such) need a majority of their listed S3C validators. Only validators
+    /// that hold the validator balance in committed state count, as signers and in the basis (NEW-26 follow-up: one
+    /// balance moved between addresses kept many registrations active).
     /// </summary>
     public static class FrostDkgAttestation
     {

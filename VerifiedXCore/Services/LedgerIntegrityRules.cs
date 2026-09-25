@@ -150,7 +150,8 @@ namespace VerifiedXCore.Services
                     ?? Newtonsoft.Json.JsonConvert.DeserializeObject<VerifiedXCore.Models.SmartContracts.TokenizationV2Feature>(v2[0].FeatureFeatures?.ToString() ?? "");
             }
             catch { feature = null; }
-            return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, () => VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1));
+            return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid,
+                () => VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1))); // NEW-26 (follow-up): funded now
         }
 
         // ── NEW-13: a transaction's Height is its block's height ────────────────────────────────────────────────
