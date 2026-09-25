@@ -26,6 +26,9 @@ namespace VerifiedXCore.Services
             // signs the data, so the data recipient is authorised either way; the binding is a consistency rule.
             if (dataTo != txTo && txTo != LegacyTokenTransferToAddress) return "Token transfer ToAddress must be the transaction's ToAddress.";
             if (amount == null || amount.Value <= 0M) return "Token transfer amount must be greater than zero.";
+            // NEW-09: the apply loads the sender and recipient accounts as two copies and saves the recipient's (stale,
+            // pre-debit) copy last, so a transfer to oneself added the amount without the debit - a mint per transaction.
+            if (dataTo == dataFrom) return "Token transfer to the sender's own address is refused.";
             return null;
         }
 

@@ -186,5 +186,21 @@ namespace VerifiedXCore.Tests
             Assert.False(ok);
             Assert.Contains("FromAddress must be the transaction signer", message);
         }
+
+        // ── NEW-09 (third review): a token transfer to oneself minted ──────────────────────
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task NEW09_PoC_TokenTransferToSelf_Refused(bool legacyShape)
+        {
+            // StateData.TokenTransfer loads from/to as two copies and saves the stale recipient copy last: a self
+            // transfer of 100 turned 100 into 200 with CurrentSupply unchanged (found by the third review, PoC H/B).
+            var tx = TokenTx(_victim, legacyShape ? "Token_Base" : _victim.Address, TransactionType.FTKN_TX,
+                new { Function = "TokenTransfer()", ContractUID = TokenX, FromAddress = _victim.Address, ToAddress = _victim.Address, Amount = 100M, TokenTicker = "X", TokenName = "X" });
+            var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(ok);
+            Assert.Contains("own address", message);
+        }
     }
 }
