@@ -69,5 +69,47 @@ namespace VerifiedXCore.Tests
             Assert.False(ok);
             Assert.Contains("ambiguous hash", message);
         }
+
+        // ── NEW-23 (sixth review): Amount | Fee ─────────────────────────────────────────────
+
+        private Transaction SignedWhole(decimal amount)
+        {
+            var tx = new Transaction { Timestamp = TimeUtil.GetTime(), FromAddress = _a.Address, ToAddress = _b.Address, Amount = amount, Fee = 0, Nonce = 0, TransactionType = TransactionType.TX };
+            tx.Fee = FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, _a.Key, _a.Pub);
+            return tx;
+        }
+
+        [Fact]
+        public async Task NEW23_PoC_FeeDigitsShiftedIntoAWholeNumberAmount_Refused()
+        {
+            // "10" + "0.0000xxxx" re-splits as Amount "100.0000xxx" + Fee "x": same hash and signature, ten times the amount.
+            var tx = SignedWhole(10M);
+            var af = tx.Amount.ToString() + tx.Fee.ToString();
+            Transaction? variant = null;
+            for (int k = tx.Amount.ToString().Length + 1; k < af.Length && variant == null; k++)
+            {
+                var a = af.Substring(0, k); var f = af.Substring(k);
+                if (!decimal.TryParse(a, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var ad)) continue;
+                if (!decimal.TryParse(f, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var fd)) continue;
+                if (ad.ToString() != a || fd.ToString() != f || fd <= 0M) continue;
+                var v = new Transaction { Timestamp = tx.Timestamp, FromAddress = tx.FromAddress, ToAddress = tx.ToAddress, Amount = ad, Fee = fd, Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType, Data = tx.Data, Hash = tx.Hash, Signature = tx.Signature };
+                if (v.GetHash() == tx.Hash) variant = v;
+            }
+            Assert.NotNull(variant);
+            Assert.True(variant!.Amount > 10M);                                                      // the ambiguity
+            var (ok, message) = await TransactionValidatorService.VerifyTX(variant);
+            Assert.False(ok);
+            Assert.Contains("decimal places", message);
+        }
+
+        [Fact]
+        public async Task NEW23_Control_WholeNumberAmountAsSigned_Accepted()
+        {
+            var (ok, message) = await TransactionValidatorService.VerifyTX(SignedWhole(10M));
+            Assert.True(ok, message);
+        }
     }
 }

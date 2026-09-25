@@ -113,10 +113,20 @@ namespace VerifiedXCore.Services
         /// transactions with an UnlockTime carry no Data or JSON Data; one whose Data ends in a digit is refused, which
         /// leaves exactly one reading of every preimage that has an UnlockTime.
         /// </summary>
-        public static string? CanonicalPreimage(Transaction tx) =>
-            tx?.UnlockTime != null && !string.IsNullOrEmpty(tx.Data) && char.IsDigit(tx.Data[^1])
-                ? "A transaction with an UnlockTime may not have Data ending in a digit (ambiguous hash)."
-                : null;
+        public static string? CanonicalPreimage(Transaction tx)
+        {
+            if (tx == null) return null;
+            // Data | UnlockTime (a trailing '-' could also move and make the UnlockTime negative).
+            if (tx.UnlockTime != null && !string.IsNullOrEmpty(tx.Data) && (char.IsDigit(tx.Data[^1]) || tx.Data[^1] == '-'))
+                return "A transaction with an UnlockTime may not have Data ending in a digit or '-' (ambiguous hash).";
+            // NEW-23: Amount | Fee. A whole-number Amount is written without a decimal point ("10"), so fee digits can move
+            // into it: "10" + "0.00000602" re-splits as Amount "100.0000060" + Fee "2" - same hash and signature, ten times
+            // the amount. Every such variant leaves a whole-number Fee; honest fees carry decimal places (8 by the fee
+            // calculator), so a non-zero Fee without decimal places is refused.
+            if (tx.Fee != 0M && ((decimal.GetBits(tx.Fee)[3] >> 16) & 0xFF) == 0)
+                return "A non-zero fee must be written with decimal places (ambiguous hash).";
+            return null;
+        }
 
         // ── NEW-17: NFT sale amounts ─────────────────────────────────────────────────────────────────────────────
 
