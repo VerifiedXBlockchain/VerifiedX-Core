@@ -99,7 +99,14 @@ namespace VerifiedXCore.Beacon
                                         break;
                                     }
                                     var beaconData = BeaconData.GetBeaconData();
-                                    if (beaconData != null)
+                                    // NEW-03 (follow-up): with no registrations the upload used to skip authorization entirely
+                                    // (any caller could write 150 MB files); the HTTP server refuses in the same state.
+                                    if (beaconData == null)
+                                    {
+                                        ns.Flush();
+                                        loop_break = true;
+                                        break;
+                                    }
                                     {
                                         var authCheck = beaconData.Exists(x => x.IPAdress == ip_address && x.AssetName == fileName);
                                         if (!authCheck)
@@ -326,18 +333,9 @@ namespace VerifiedXCore.Beacon
 
         private bool CheckExtensionApproval(string fileName)
         {
-            bool output = false;
-
-            string ext = Path.GetExtension(fileName);
-
-            if(!string.IsNullOrEmpty(ext))
-            {
-                var rejectedExtList = Globals.RejectAssetExtensionTypes;
-                var exist = rejectedExtList.Contains(ext);                
-                if(!exist)
-                    output = true;
-            }
-            return output;
+            // NEW-03 (follow-up): the shared, case-insensitive check (".EXE", trailing space/dot) - this server kept the
+            // case-sensitive list lookup.
+            return BeaconPaths.ExtensionAllowed(fileName);
         }       
 
     }

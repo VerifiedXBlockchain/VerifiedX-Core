@@ -43,7 +43,7 @@ namespace VerifiedXCore.Beacon
                     // Increase the maximum request body size
                     try
                     {
-                        context.Features.Get<IHttpMaxRequestBodySizeFeature>().MaxRequestBodySize = 152 * 1024 * 1024; // 150 MB
+                        var bodySize = context.Features.Get<IHttpMaxRequestBodySizeFeature>(); if (bodySize != null && !bodySize.IsReadOnly) bodySize.MaxRequestBodySize = 152 * 1024 * 1024; // 150 MB (absent outside Kestrel, e.g. TestServer)
                         var scUID = context.Request.RouteValues["scUID"] as string;
                         var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
                         // Check if the request contains a file
@@ -87,7 +87,9 @@ namespace VerifiedXCore.Beacon
                             var beaconData = BeaconData.GetBeaconData();
                             if (beaconData != null)
                             {
-                                var authCheck = beaconData.Exists(x => x.IPAdress == ipAddress && x.AssetName == fileName);
+                                // NEW-03 (follow-up): the registration must be for THIS contract (the route's UID); an asset
+                                // registered under one's own contract could be planted in another contract's folder.
+                                var authCheck = beaconData.Exists(x => x.IPAdress == ipAddress && x.AssetName == fileName && x.SmartContractUID == scUID);
                                 if (!authCheck)
                                 {
                                     context.Response.StatusCode = StatusCodes.Status403Forbidden; // Bad Request
@@ -96,7 +98,7 @@ namespace VerifiedXCore.Beacon
                                 }
                                 else
                                 {
-                                    var _beaconData = beaconData.Where(x => x.IPAdress == ipAddress && x.AssetName == fileName).FirstOrDefault();
+                                    var _beaconData = beaconData.Where(x => x.IPAdress == ipAddress && x.AssetName == fileName && x.SmartContractUID == scUID).FirstOrDefault();
                                     if (_beaconData != null)
                                     {
                                         using (var stream = new FileStream(filePath, FileMode.Create))

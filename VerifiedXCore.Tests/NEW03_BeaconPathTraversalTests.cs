@@ -131,5 +131,21 @@ namespace VerifiedXCore.Tests
             Assert.True(VerifiedXCore.Beacon.BeaconPaths.ExtensionAllowed("art.png"));
             Assert.True(VerifiedXCore.Beacon.BeaconPaths.TryResolve(System.IO.Path.GetTempPath(), "abc:1", "art.png", out _));
         }
+
+        [Fact]
+        public async Task NEW03_FollowUp_UploadIsBoundToTheRegisteredContract()
+        {
+            // Third review: upload authorization matched IP and asset name only, not the route's contract, so an asset
+            // registered under one's own contract was written into another contract's folder.
+            const string victim = "abcdefabcdefabcdefabcdefabcdefab:1790500030";
+            Register("photo.png"); // registered under ScUid (the uploader's own contract)
+            using var server = NewServer();
+
+            await server.CreateClient().PostAsync($"/upload/{victim}", Upload("photo.png"));
+            Assert.False(File.Exists(Path.Combine(_beaconRoot, victim.Replace(":", ""), "photo.png")), "asset planted in another contract's folder");
+
+            var own = await server.CreateClient().PostAsync($"/upload/{ScUid}", Upload("photo.png")); // control: own contract
+            Assert.True(File.Exists(Path.Combine(_beaconRoot, ScUid.Replace(":", ""), "photo.png")), $"{(int)own.StatusCode} {await own.Content.ReadAsStringAsync()}");
+        }
     }
 }
