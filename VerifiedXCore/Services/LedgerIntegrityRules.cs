@@ -41,9 +41,14 @@ namespace VerifiedXCore.Services
         {
             if (string.IsNullOrEmpty(dataFrom) || string.IsNullOrEmpty(dataTo)) return null;
             var toAccount = VerifiedXCore.Data.StateData.GetSpecificAccountStateTrei(dataTo);
-            return toAccount != null && string.Equals(toAccount.Key, dataFrom, StringComparison.Ordinal)
-                ? "Token transfer recipient resolves to the sender's own account."
-                : null;
+            if (toAccount == null) return null;
+            // Compare the two RESOLVED records (fifth review): a sender whose record was itself created under an alias
+            // key (e.g. "xa­bc..." via an unvalidated payment recipient) resolves to a record whose Key differs from
+            // its address text, yet sender and recipient still load that one record twice.
+            var fromAccount = VerifiedXCore.Data.StateData.GetSpecificAccountStateTrei(dataFrom);
+            var same = string.Equals(toAccount.Key, dataFrom, StringComparison.Ordinal)
+                || (fromAccount != null && string.Equals(fromAccount.Key, toAccount.Key, StringComparison.Ordinal));
+            return same ? "Token transfer recipient resolves to the sender's own account." : null;
         }
 
         public static string? TokenBurn(string txFrom, string? dataFrom, decimal? amount)

@@ -236,5 +236,25 @@ namespace VerifiedXCore.Tests
             Assert.False(ok);
             Assert.Contains("own account", message);
         }
+
+        [Fact]
+        public async Task NEW09_FollowUp2_SenderRecordKeyedByAnAlias_Refused()
+        {
+            // Fifth review (PoC R5_New09_AliasKeyedRecord_BypassesResolvesToSender: 100 -> 200): the sender's own record
+            // was created under an alias key, so its Key differed from the sender's address text.
+            var a = NewKey();
+            var alias = a.Item3.Insert(5, "­");
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei
+            {
+                Key = alias, Balance = 100M, Nonce = 0,
+                TokenAccounts = new List<TokenAccount> { TokenAccount.CreateTokenAccount(TokenX, "X", "X", 100M, 2) },
+            });
+            Assert.Equal(alias, StateData.GetSpecificAccountStateTrei(a.Item3)!.Key); // the lookup of A lands on the alias record
+            var tx = TokenTx(a, "Token_Base", TransactionType.FTKN_TX,
+                new { Function = "TokenTransfer()", ContractUID = TokenX, FromAddress = a.Item3, ToAddress = alias, Amount = 100M, TokenTicker = "X", TokenName = "X" });
+            var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(ok);
+            Assert.Contains("own account", message);
+        }
     }
 }
