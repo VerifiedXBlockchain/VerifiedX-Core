@@ -98,6 +98,21 @@ namespace VerifiedXCore.Services
 
         // ── NEW-13: a transaction's Height is its block's height ────────────────────────────────────────────────
 
+        // ── NEW-16: a coinbase transaction is a plain reward/fee record ─────────────────────────────────────────
+
+        public static bool IsCoinbase(Transaction tx) => tx?.FromAddress == "Coinbase_BlkRwd" || tx?.FromAddress == "Coinbase_TrxFees";
+
+        /// <summary>
+        /// Coinbase transactions skip VerifyTX, the debit guard and every per-type rule (only their count, amount and
+        /// recipient are checked), yet StateData.UpdateTreis applied their TransactionType and Data like any other
+        /// transaction: a winning producer could make its coinbase an FTKN_TX TokenTransfer() of a victim's tokens to
+        /// itself, an NFT Transfer(), a vBTC transfer or a reserve function. Producers only ever build TX with no Data.
+        /// </summary>
+        public static string? CoinbaseShape(Transaction tx) =>
+            IsCoinbase(tx) && (tx.TransactionType != TransactionType.TX || !string.IsNullOrEmpty(tx.Data))
+                ? "A coinbase transaction must be a plain TX with no Data."
+                : null;
+
         /// <summary>
         /// tx.Height is covered by neither the transaction hash nor the block hash, and the apply reads it (vBTC withdrawal
         /// escrow: EscrowAppliesTo(tx.Height), stored RequestBlockHeight). A producer or relaying peer could set an escrowed

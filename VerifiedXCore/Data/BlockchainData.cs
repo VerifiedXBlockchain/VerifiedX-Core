@@ -679,6 +679,12 @@ namespace VerifiedXCore.Data
                 return result;
             }
 
+            // NEW-16: coinbase transactions are applied like any other; they must be plain TX records with no Data.
+            if (txList.Any(tx => Services.LedgerIntegrityRules.CoinbaseShape(tx) != null))
+            {
+                return result;
+            }
+
             foreach(var tx in txList)
             {
                 if (tx.FromAddress == "Coinbase_TrxFees")

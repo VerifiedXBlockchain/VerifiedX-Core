@@ -65,6 +65,10 @@ namespace VerifiedXCore.Services
 
                 CheckFunctionRules(tx, Add);
 
+                var coinbaseError = LedgerIntegrityRules.CoinbaseShape(tx); // NEW-16
+                if (coinbaseError != null)
+                    Add("NEW-16 coinbase shape", coinbaseError);
+
                 var uidError = LedgerIntegrityRules.ContractUids(tx); // NEW-10
                 if (uidError != null)
                     Add("NEW-10 contract UID", uidError);
