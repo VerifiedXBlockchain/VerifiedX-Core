@@ -46,6 +46,15 @@ namespace VerifiedXCore.Beacon
                         var bodySize = context.Features.Get<IHttpMaxRequestBodySizeFeature>(); if (bodySize != null && !bodySize.IsReadOnly) bodySize.MaxRequestBodySize = 152 * 1024 * 1024; // 150 MB (absent outside Kestrel, e.g. TestServer)
                         var scUID = context.Request.RouteValues["scUID"] as string;
                         var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
+                        // NEW-03 (follow-up): refuse before reading the body (up to 152 MB, spilled to disk) or creating
+                        // folders unless this caller registered an upload for this contract.
+                        var registrations = BeaconData.GetBeaconData();
+                        if (registrations == null || !registrations.Exists(x => x.IPAdress == ipAddress && x.SmartContractUID == scUID))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync("No upload is registered for this contract from this address.");
+                            return;
+                        }
                         // Check if the request contains a file
                         if (context.Request.Form.Files.Count > 0)
                         {
@@ -92,8 +101,8 @@ namespace VerifiedXCore.Beacon
                                 var authCheck = beaconData.Exists(x => x.IPAdress == ipAddress && x.AssetName == fileName && x.SmartContractUID == scUID);
                                 if (!authCheck)
                                 {
-                                    context.Response.StatusCode = StatusCodes.Status403Forbidden; // Bad Request
-                                    await context.Response.WriteAsync("No file was uploaded. Extension was found in auto reject list.");
+                                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                    await context.Response.WriteAsync("No upload is registered for this asset.");
                                     return;
                                 }
                                 else

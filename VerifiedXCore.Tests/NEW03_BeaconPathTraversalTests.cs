@@ -159,5 +159,16 @@ namespace VerifiedXCore.Tests
         }
 
         private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+
+        [Fact]
+        public async Task NEW03_FollowUp_UnregisteredUpload_RefusedBeforeTheBodyIsUsed()
+        {
+            // Fourth review: the handler read the whole form and created the contract folder before any authorization.
+            const string other = "efefefefefefefefefefefefefefefef:1790500060";
+            using var server = NewServer();
+            var r = await server.CreateClient().PostAsync($"/upload/{other}", Upload("photo.png"));
+            Assert.Equal(System.Net.HttpStatusCode.Forbidden, r.StatusCode);
+            Assert.False(Directory.Exists(Path.Combine(_beaconRoot, other.Replace(":", ""))));
+        }
     }
 }
