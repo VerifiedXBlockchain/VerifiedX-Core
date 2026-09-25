@@ -326,6 +326,14 @@ namespace VerifiedXCore.P2P
                         return result;
                     }
 
+                    // NEW-03 (follow-up): a private beacon authorizes by CurrentOwnerAddress, which the caller supplies; it
+                    // must be the contract's owner (whose signature was just verified), or any local address unlocked it.
+                    if (!string.Equals(bsd.CurrentOwnerAddress, scState.OwnerAddress, StringComparison.Ordinal))
+                    {
+                        SCLogUtility.Log($"CurrentOwnerAddress {bsd.CurrentOwnerAddress} is not the owner of {bsd.SmartContractUID}", "P2PBeaconServer.ReceiveUploadRequest");
+                        return result;
+                    }
+
                     // NEW-03: asset names become file names on this beacon; only plain names are registered.
                     if (bsd.Assets == null || bsd.Assets.Any(a => !NFTAssetFileUtility.IsSafeAssetFileName(a)))
                     {
