@@ -195,6 +195,14 @@ namespace VerifiedXCore
         public static long BridgeIntraBlockGuardHeight = 999_999_999_999L;
 
         /// <summary>
+        /// NEW-26: vBTC V2 deposit-address binding. At/after this height a contract creation carrying a TokenizationV2
+        /// feature must name the Taproot address of its FROST group key as its DepositAddress and carry validator
+        /// attestations of the DKG (FrostDkgAttestation). Earlier contracts stay as recorded (creator-trusted; disclosed).
+        /// Inert until set at rollout (mainnet and testnet), after the validators run the attesting build.
+        /// </summary>
+        public static long VbtcV2DkgAttestationHeight = 999_999_999_999L;
+
+        /// <summary>
         /// Withdrawal escrow (security fix): at/after this height a vBTC withdrawal REQUEST debits the
         /// requester's ledger immediately (escrow); COMPLETE only finalizes (no second burn) and an
         /// approved cancellation refunds. Before it, the legacy burn-at-completion applies. Without

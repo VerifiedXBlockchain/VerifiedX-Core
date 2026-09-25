@@ -1568,6 +1568,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
+                        // NEW-26: this validator's attestation that the key is one it holds a share of, for this contract.
+                        var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress);
+
                         // Return final result
                         context.Response.StatusCode = StatusCodes.Status200OK;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1575,9 +1578,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                             Success = true,
                             Message = "DKG result retrieved",
                             SessionId = sessionId,
+                            SmartContractUID = session.SmartContractUID,
                             GroupPublicKey = session.GroupPublicKey,
                             TaprootAddress = session.TaprootAddress,
                             DKGProof = session.DKGProof,
+                            Attestation = attestation,
                             IsCompleted = session.IsCompleted
                         }, Formatting.Indented));
                     }
@@ -3072,6 +3077,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// </summary>
         private static string DeriveTaprootAddress(string groupPublicKeyHex)
         {
+            // NEW-26: consensus derives the address with FrostDkgAttestation.DeriveTaprootAddress; this must agree with it.
             try
             {
                 // The FROST group public key may be either:

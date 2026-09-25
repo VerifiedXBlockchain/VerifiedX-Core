@@ -101,6 +101,38 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        // ── NEW-26: a vBTC V2 deposit address is the validators' FROST key ──────────────────────────────────────
+
+        /// <summary>
+        /// From Globals.VbtcV2DkgAttestationHeight, a contract creation whose body carries a TokenizationV2 feature must
+        /// bind its DepositAddress to its FROST group key and carry validator attestations of the DKG
+        /// (FrostDkgAttestation.Validate). The eligible validators are derived from committed blocks up to height - 1.
+        /// </summary>
+        public static string? VbtcV2DkgAttestation(Transaction tx, long height)
+        {
+            if (height < Globals.VbtcV2DkgAttestationHeight) return null;
+            var uid = CreatedContractUid(tx);
+            if (uid == null) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            var bindingError = SmartContractDeployBinding.Validate(payload.Data, uid, tx.FromAddress, isTokenDeploy: payload.Function == "TokenDeploy()", out var decompiled);
+            if (bindingError != null) return bindingError;
+            // Every reader of a vault's TokenizationV2 data decompiles the body, so a body that does not decompile is never a
+            // vault; after activation the vBTC V2 creation type must still carry one that does.
+            if (decompiled == null)
+                return tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE ? "vBTC V2 contract body could not be decompiled." : null;
+            var v2 = decompiled.Features?.Where(f => f != null && f.FeatureName == FeatureName.TokenizationV2).ToList();
+            if (v2 == null || v2.Count == 0) return null;
+            if (v2.Count > 1) return "A contract may carry only one TokenizationV2 feature.";
+            VerifiedXCore.Models.SmartContracts.TokenizationV2Feature? feature;
+            try
+            {
+                feature = v2[0].FeatureFeatures as VerifiedXCore.Models.SmartContracts.TokenizationV2Feature
+                    ?? Newtonsoft.Json.JsonConvert.DeserializeObject<VerifiedXCore.Models.SmartContracts.TokenizationV2Feature>(v2[0].FeatureFeatures?.ToString() ?? "");
+            }
+            catch { feature = null; }
+            return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, () => VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1));
+        }
+
         // ── NEW-13: a transaction's Height is its block's height ────────────────────────────────────────────────
 
         // ── NEW-18: an unambiguous hash preimage ────────────────────────────────────────────────────────────────

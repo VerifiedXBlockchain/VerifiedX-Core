@@ -249,6 +249,12 @@ namespace VerifiedXCore.Services
             if (contractUidError != null)
                 return (false, contractUidError);
 
+            // NEW-26: a vBTC V2 deposit address must be the validators' FROST key (height-gated; block height at verify,
+            // tip + 1 at admission).
+            var dkgAttestationError = LedgerIntegrityRules.VbtcV2DkgAttestation(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
+            if (dkgAttestationError != null)
+                return (false, dkgAttestationError);
+
             // Height-gated vBTC privacy disable (inert until VbtcPrivacyDisableHeight is set).
             // Deterministic under replay/sync: block validation passes the block's own height;
             // mempool admission gates on the height the tx would mine into (tip + 1).

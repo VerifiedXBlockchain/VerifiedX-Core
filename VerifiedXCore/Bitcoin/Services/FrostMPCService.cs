@@ -666,7 +666,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 string? groupPublicKey = null;
                 string? taprootAddress = null;
                 string? dkgProof = null;
-                var dkgResults = new System.Collections.Concurrent.ConcurrentBag<(string gpk, string addr, string? proof, string validatorAddr)>();
+                var dkgResults = new System.Collections.Concurrent.ConcurrentBag<(string gpk, string addr, string? proof, string validatorAddr, FrostDkgAttestation.Attestation? attestation)>();
 
                 var resultTasks = validators.Select(async validator =>
                 {
@@ -685,10 +685,12 @@ namespace VerifiedXCore.Bitcoin.Services
                                 var gpk = json["GroupPublicKey"]?.Value<string>();
                                 var addr = json["TaprootAddress"]?.Value<string>();
                                 var proof = json["DKGProof"]?.Value<string>();
+                                FrostDkgAttestation.Attestation? attestation = null;
+                                try { attestation = json["Attestation"]?.Type == JTokenType.Object ? json["Attestation"]!.ToObject<FrostDkgAttestation.Attestation>() : null; } catch { }
 
                                 if (!string.IsNullOrEmpty(gpk) && !string.IsNullOrEmpty(addr))
                                 {
-                                    dkgResults.Add((gpk, addr, proof, validator.ValidatorAddress));
+                                    dkgResults.Add((gpk, addr, proof, validator.ValidatorAddress, attestation));
                                 }
                             }
                         }
@@ -742,6 +744,24 @@ namespace VerifiedXCore.Bitcoin.Services
                     ErrorLogUtility.LogError($"FROST DKG: Invalid Taproot address '{taprootAddress}': {ex.Message}", "FrostMPCService.AggregateDKGResult");
                     return null;
                 }
+
+                // NEW-26: the contract carries the validators' signed attestations as its DKG proof (consensus checks them
+                // from the activation height). Only attestations by the responding validator itself, over this contract
+                // UID, key and address, are kept; the address must be the key's Taproot address.
+                if (FrostDkgAttestation.DeriveTaprootAddress(groupPublicKey, FrostDkgAttestation.ConsensusNetwork) != taprootAddress)
+                {
+                    ErrorLogUtility.LogError($"FROST DKG: address {taprootAddress} is not the Taproot address of the group key", "FrostMPCService.AggregateDKGResult");
+                    return null;
+                }
+                var attestations = dkgResults
+                    .Where(r => r.attestation != null && r.attestation.ValidatorAddress == r.validatorAddr
+                        && FrostDkgAttestation.Verify(r.attestation, ceremonyId, groupPublicKey, taprootAddress))
+                    .GroupBy(r => r.validatorAddr, StringComparer.Ordinal)
+                    .Select(g => g.First().attestation!)
+                    .ToList();
+                dkgProof = FrostDkgAttestation.BuildProof(ceremonyId, groupPublicKey, taprootAddress, attestations);
+                LogUtility.Log($"[FROST MPC] DKG attested by {attestations.Count}/{validators.Count} validators for contract {ceremonyId}",
+                    "FrostMPCService.AggregateDKGResult");
 
                 LogUtility.Log($"[FROST MPC] DKG aggregation complete. GroupPubKey: {groupPublicKey.Substring(0, 16)}..., Address: {taprootAddress}", 
                     "FrostMPCService.AggregateDKGResult");

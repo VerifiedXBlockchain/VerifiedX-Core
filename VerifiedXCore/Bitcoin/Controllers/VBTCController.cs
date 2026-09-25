@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using VerifiedXCore.Bitcoin.FROST;
 using VerifiedXCore.Bitcoin.Models;
 using VbtcBaseBridge = VerifiedXCore.Bitcoin.Services.BaseBridgeService;
 using VbtcBaseBridgeExit = VerifiedXCore.Bitcoin.Services.BaseBridgeExitWatchService;
@@ -130,8 +131,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
-                // Generate unique ceremony ID
-                var ceremonyId = Guid.NewGuid().ToString();
+                // Generate unique ceremony ID. NEW-26: it is the contract UID (the validators attest the DKG for it).
+                var ceremonyId = FrostDkgAttestation.NewContractUid();
                 var currentTime = TimeUtil.GetTime();
 
                 // Create initial ceremony state
@@ -477,8 +478,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
-                // Generate unique ceremony ID
-                var ceremonyId = Guid.NewGuid().ToString();
+                // Generate unique ceremony ID. NEW-26: it is the contract UID (the validators attest the DKG for it).
+                var ceremonyId = FrostDkgAttestation.NewContractUid();
                 var currentTime = TimeUtil.GetTime();
 
                 // Create initial ceremony state
@@ -916,7 +917,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
-                var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
+                // NEW-26: the contract UID is the ceremony id the validators attested.
+                var scUID = payload.CeremonyId;
 
                 // Use ceremony results
                 string depositAddress = ceremony.DepositAddress!;
@@ -1177,7 +1179,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
-                var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
+                // NEW-26: the contract UID is the ceremony id the validators attested.
+                var scUID = payload.CeremonyId;
 
                 // Use ceremony results
                 string depositAddress = ceremony.DepositAddress!;
@@ -3303,7 +3306,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 // Generate session ID and ceremony ID
                 var sessionId = Guid.NewGuid().ToString();
-                var ceremonyId = Guid.NewGuid().ToString();
+                var ceremonyId = FrostDkgAttestation.NewContractUid(); // NEW-26: the contract UID
 
                 // Generate timestamps for the leader auth messages
                 var startTimestamp = TimeUtil.GetTime();
@@ -3523,8 +3526,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
                     ? ceremony.RemoteCeremonyId : payload.CeremonyId;
 
-                // Create the smart contract object
-                var scUID = Guid.NewGuid().ToString().Replace("-", "") + ":" + TimeUtil.GetTime().ToString();
+                // Create the smart contract object. NEW-26: its UID is the ceremony id the validators attested.
+                var scUID = payload.CeremonyId;
 
                 var tokenizationV2Feature = new TokenizationV2Feature
                 {

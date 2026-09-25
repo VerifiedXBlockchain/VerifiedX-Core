@@ -62,6 +62,32 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// NEW-26: the active set as of a given height, derived from committed blocks only (no IsChainSynced gate, no
+        /// wall clock) - deterministic on every node, including one replaying history. Consensus uses this; the cached
+        /// GetActiveValidators() above returns nothing until the node is synced.
+        /// </summary>
+        public static List<VBTCValidator> GetActiveValidatorsAt(long height)
+        {
+            if (height < 0) return new List<VBTCValidator>();
+            // One cached scan per (height, block hash at that height): admission checks many transactions against the same
+            // tip, and a rollback that replaces the block changes the key.
+            var tipHash = BlockchainData.GetBlockByHeight(height)?.Hash;
+            if (string.IsNullOrEmpty(tipHash)) return ScanBlocks(height); // no committed block to key on: never cached
+            var cached = _atHeightCache; // a reference: read and replaced atomically
+            if (cached != null && cached.Height == height && cached.Hash == tipHash)
+                return cached.Validators.Select(Copy).ToList();
+            var scanned = ScanBlocks(height);
+            _atHeightCache = new AtHeight(height, tipHash, scanned.Select(Copy).ToList());
+            return scanned;
+        }
+
+        private sealed record AtHeight(long Height, string Hash, List<VBTCValidator> Validators);
+        private static volatile AtHeight? _atHeightCache;
+
+        private static VBTCValidator Copy(VBTCValidator v) =>
+            Newtonsoft.Json.JsonConvert.DeserializeObject<VBTCValidator>(Newtonsoft.Json.JsonConvert.SerializeObject(v))!;
+
+        /// <summary>
         /// Looks up a single validator by address from the active set.
         /// Returns null if the validator is not found or not active.
         /// </summary>
