@@ -49,7 +49,7 @@ namespace VerifiedXCore.Arbiter
                 endpoints.MapGet("/", async context =>
                 {
                     // Handle the GET request
-                    var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                    var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     await context.Response.WriteAsync($"Hello {ipAddress}, this is the server's response!");
                 });

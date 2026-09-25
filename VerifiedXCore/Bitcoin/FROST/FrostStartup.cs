@@ -43,7 +43,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                 endpoints.MapGet("/", async context =>
                 {
-                    var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                    var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     await context.Response.WriteAsync($"FROST Validator Server - IP: {ipAddress}");
                 });

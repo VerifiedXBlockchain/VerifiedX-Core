@@ -1503,7 +1503,7 @@ namespace VerifiedXCore.P2P
                 {
                     if (feature.RemoteIpAddress != null)
                     {
-                        peerIP = feature.RemoteIpAddress.MapToIPv4().ToString();
+                        peerIP = VerifiedXCore.Utilities.RemoteIp.Text(feature.RemoteIpAddress)!;
                     }
                 }
 

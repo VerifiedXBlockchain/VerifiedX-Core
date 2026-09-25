@@ -34,7 +34,7 @@ namespace VerifiedXCore.Beacon
                 endpoints.MapGet("/data", async context =>
                 {
                     // Handle the GET request
-                    var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                    var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
                     await context.Response.WriteAsync($"Hello {ipAddress}, this is the server's response!");
                 });
 
@@ -45,7 +45,7 @@ namespace VerifiedXCore.Beacon
                     {
                         var bodySize = context.Features.Get<IHttpMaxRequestBodySizeFeature>(); if (bodySize != null && !bodySize.IsReadOnly) bodySize.MaxRequestBodySize = 152 * 1024 * 1024; // 150 MB (absent outside Kestrel, e.g. TestServer)
                         var scUID = context.Request.RouteValues["scUID"] as string;
-                        var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                        var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
                         // Check if the request contains a file
                         if (context.Request.Form.Files.Count > 0)
                         {
@@ -152,7 +152,7 @@ namespace VerifiedXCore.Beacon
 
                         var scUID = context.Request.RouteValues["scUID"] as string;
                         var fileName = context.Request.RouteValues["fileName"] as string;
-                        var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                        var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
 
                         if (Globals.OptionalLogging)
                         {

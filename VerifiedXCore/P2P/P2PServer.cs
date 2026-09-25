@@ -836,7 +836,7 @@ namespace VerifiedXCore.P2P
         private static string GetIP(HubCallerContext context)
         {
             var feature = context.Features.Get<IHttpConnectionFeature>();            
-            var peerIP = feature.RemoteIpAddress.MapToIPv4().ToString();
+            var peerIP = VerifiedXCore.Utilities.RemoteIp.Text(feature.RemoteIpAddress)!;
 
             return peerIP;
         }
