@@ -200,7 +200,7 @@ namespace VerifiedXCore
         /// attestations of the DKG (FrostDkgAttestation). Earlier contracts stay as recorded (creator-trusted; disclosed).
         /// Inert until set at rollout (mainnet and testnet), after the validators run the attesting build.
         /// </summary>
-        public static long VbtcV2DkgAttestationHeight = 999_999_999_999L;
+        public static long VbtcV2DkgAttestationHeight = 7_500_500L;
 
         /// <summary>
         /// Withdrawal escrow (security fix): at/after this height a vBTC withdrawal REQUEST debits the
@@ -262,8 +262,8 @@ namespace VerifiedXCore
         public static int APIPort = 7292;
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
-        public static int MajorVer = 7;
-        public static int MinorVer = 2;
+        public static int MajorVer = 8;
+        public static int MinorVer = 0;
         public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;

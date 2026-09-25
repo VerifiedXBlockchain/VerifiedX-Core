@@ -130,6 +130,7 @@ namespace VerifiedXCore
             Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
             Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
+            Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
