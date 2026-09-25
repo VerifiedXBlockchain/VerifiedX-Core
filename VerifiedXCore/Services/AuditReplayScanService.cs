@@ -260,6 +260,23 @@ namespace VerifiedXCore.Services
                     $"{sender} sends on {scUid} with no earlier receipt on that contract in this chain."));
         }
 
+        private static readonly HashSet<string> BaseAddresses = new(StringComparer.Ordinal)
+            { "Adnr_Base", "DecShop_Base", "Topic_Base", "Vote_Base", "Reserve_Base", "Token_Base" };
+
+        /// <summary>Native VFX movements visible in the transaction stream, as StateData applies them.</summary>
+        private static void TrackNative(Transaction tx, long height, Dictionary<string, decimal> bal)
+        {
+            void Add(string? a, decimal v) { if (!string.IsNullOrEmpty(a)) { bal.TryGetValue(a, out var b); bal[a] = b + v; } }
+            var coinbase = tx.FromAddress == "Coinbase_TrxFees" || tx.FromAddress == "Coinbase_BlkRwd";
+            if (height > 0 && !coinbase && !VerifiedXCore.Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
+                Add(tx.FromAddress, -(tx.Amount + tx.Fee));
+            if (tx.ToAddress != null && BaseAddresses.Contains(tx.ToAddress))
+                return;
+            var reserveSender = tx.FromAddress?.StartsWith("xRBX") == true; // credited to LockedBalance (not spendable)
+            if ((coinbase || tx.TransactionType == TransactionType.TX || tx.TransactionType == TransactionType.VFX_UNSHIELD) && !reserveSender)
+                Add(tx.ToAddress, tx.Amount);
+        }
+
         /// <summary>Scans every block in the local database, in height order.</summary>
         public static (long Blocks, long Transactions, List<Hit> Hits) ScanChain(Action<string>? progress = null)
         {
@@ -270,6 +287,7 @@ namespace VerifiedXCore.Services
             const long batch = 1000;
             var v1 = new V1ReceiptTracker();
             var canonicalUids = new Dictionary<string, string>(StringComparer.Ordinal); // NEW-07
+            var native = new Dictionary<string, decimal>(StringComparer.Ordinal);       // NEW-07 native: reconstructed balances
 
             for (long start = 0; start <= tip; start += batch)
             {
@@ -302,8 +320,22 @@ namespace VerifiedXCore.Services
                             debitsInBlock[key] = (d.N + 1, d.Sum + amount, tx);
                         }
                     }
+                    // NEW-07 native: judged against the balance reconstructed from every earlier block (credits that
+                    // happen outside the transaction stream, e.g. reserve unlocks, are missing, so balances are
+                    // understated: this over-reports, never under-reports, except for reserves swept by Recover()).
                     foreach (var (key, d) in debitsInBlock)
-                        if (d.N >= 2)
+                        if (key.Kind == SameBlockDebitGuard.LedgerKind.Native && d.N >= 2 && block.Height > 0)
+                        {
+                            native.TryGetValue(key.Holder, out var bal);
+                            if (d.Sum > bal)
+                                hits.Add(new Hit(block.Height, d.Last.Hash ?? "", d.Last.TransactionType, "NEW-07 native candidate: spends exceed the reconstructed balance",
+                                    $"{key.Holder}: {d.N} transactions spend {d.Sum} VFX; reconstructed balance before the block {bal}"));
+                        }
+                    foreach (var tx in block.Transactions ?? new List<Transaction>())
+                        TrackNative(tx, block.Height, native);
+
+                    foreach (var (key, d) in debitsInBlock)
+                        if (key.Kind != SameBlockDebitGuard.LedgerKind.Native && d.N >= 2)
                             hits.Add(new Hit(block.Height, d.Last.Hash ?? "", d.Last.TransactionType, "NEW-07 candidate: several debits by one holder on one contract in block",
                                 $"{key.Kind} {key.ContractUid} holder {key.Holder}: {d.N} debits totalling {d.Sum}; compare with the balance at height {block.Height - 1}"));
                 }

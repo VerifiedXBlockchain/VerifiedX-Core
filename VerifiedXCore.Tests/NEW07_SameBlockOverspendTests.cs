@@ -347,7 +347,7 @@ namespace VerifiedXCore.Tests
                 Globals.WithdrawalEscrowHeight = 5_000;
                 var wd = V2Withdrawal(1.0M, 1); wd.Height = 4_000;
                 var tr = V2FunctionTransfer(1.0M, 0); tr.Height = 4_000;
-                Assert.Empty(SameBlockDebitGuard.GetDebits(wd));
+                Assert.DoesNotContain(SameBlockDebitGuard.GetDebits(wd), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2);
                 Assert.True(Block(tr, wd).Ok);
                 wd.Height = 5_000;                                   // control: escrowed request is a debit
                 Assert.False(Block(tr, wd).Ok);
@@ -392,6 +392,26 @@ namespace VerifiedXCore.Tests
             var second = TokenTransfer(100M, 1);
             Assert.True(await TransactionData.DoubleSpendReplayCheck(second));                       // admission refuses
             Assert.False(await TransactionData.DoubleSpendReplayCheck(second, skipDebitGuard: true)); // proposal precheck
+        }
+
+        [Fact]
+        public void NEW07_FollowUp_NativeSpendsExceedingTheBalanceInOneBlock_Refused()
+        {
+            // Block validation compared each VFX spend alone with the committed balance: with 100 VFX, two sends of 60
+            // both passed (reviewer PoC C; honest admission refuses the pair, a producer running modified code did not).
+            Transaction Send(decimal amount, long nonce) =>
+                new Transaction { FromAddress = _holder.Address, ToAddress = _other.Address, TransactionType = TransactionType.TX, Amount = amount, Fee = 0.00001M, Nonce = nonce, Hash = $"native-{amount}-{nonce}" };
+            Assert.False(Block(Send(60M, 0), Send(60M, 1)).Ok);
+            Assert.True(Block(Send(40M, 0), Send(50M, 1)).Ok);                                          // control
+        }
+
+        [Fact]
+        public void NEW07_FollowUp_NativeSenderWithoutAnAccount_NotJudged()
+        {
+            // VerifyTX lets an arbiter without an account send TKNZ_WD_ARB; historical blocks carry several per block.
+            Transaction Arb(long nonce) =>
+                new Transaction { FromAddress = "xArbiterWithoutAccount", ToAddress = "xRequestor", TransactionType = TransactionType.TKNZ_WD_ARB, Amount = 0M, Fee = 0.00001M, Nonce = nonce, Hash = $"arb-{nonce}" };
+            Assert.True(Block(Arb(0), Arb(1)).Ok);
         }
     }
 }

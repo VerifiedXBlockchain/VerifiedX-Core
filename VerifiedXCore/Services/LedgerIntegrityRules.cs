@@ -130,7 +130,8 @@ namespace VerifiedXCore.Services
             }
             catch { }
             foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx))
-                uids.Add(key.ContractUid);
+                if (key.Kind != SameBlockDebitGuard.LedgerKind.Native)
+                    uids.Add(key.ContractUid);
             return uids;
         }
 

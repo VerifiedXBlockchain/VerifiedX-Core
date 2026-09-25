@@ -26,7 +26,10 @@ namespace VerifiedXCore.Services
     /// </summary>
     public static class SameBlockDebitGuard
     {
-        public enum LedgerKind { VbtcV2, VbtcV1, Token }
+        public enum LedgerKind { VbtcV2, VbtcV1, Token, Native }
+
+        /// <summary>ContractUid of the native VFX key (not a contract).</summary>
+        public const string NativeUid = "VFX";
 
         public readonly record struct DebitKey(LedgerKind Kind, string ContractUid, string Holder);
 
@@ -47,7 +50,18 @@ namespace VerifiedXCore.Services
         public static List<(DebitKey Key, decimal Amount)> GetDebits(Transaction tx)
         {
             var debits = new List<(DebitKey, decimal)>();
-            if (tx == null || string.IsNullOrEmpty(tx.Data) || string.IsNullOrEmpty(tx.FromAddress))
+            if (tx == null || string.IsNullOrEmpty(tx.FromAddress))
+                return debits;
+
+            // Native VFX: every non-coinbase, non-ZK transaction's apply debits Amount + Fee from the sender's Balance,
+            // while VerifyTX compares each transaction alone with the committed balance. Honest admission and proposal
+            // already sum a sender's pending transactions (DoubleSpendReplayCheck); block validation did not, so a
+            // producer could include spends that together exceed the balance (third review).
+            if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd"
+                && !Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType) && tx.Amount + tx.Fee > 0M)
+                debits.Add((new DebitKey(LedgerKind.Native, NativeUid, tx.FromAddress), tx.Amount + tx.Fee));
+
+            if (string.IsNullOrEmpty(tx.Data))
                 return debits;
 
             try
@@ -169,6 +183,13 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static decimal? CommittedBalance(DebitKey key)
         {
+            if (key.Kind == LedgerKind.Native)
+            {
+                // No account: VerifyTX allows that only for TKNZ_WD_ARB (arbiters); not judged here.
+                var account = StateData.GetSpecificAccountStateTrei(key.Holder);
+                return account?.Balance;
+            }
+
             if (key.Kind == LedgerKind.Token)
             {
                 var account = StateData.GetSpecificAccountStateTrei(key.Holder);
@@ -219,7 +240,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static DebitKey Canonical(DebitKey key, Dictionary<string, string>? cache = null)
         {
-            if (key.Kind == LedgerKind.Token)
+            if (key.Kind == LedgerKind.Token || key.Kind == LedgerKind.Native)
                 return key;
             if (cache == null || !cache.TryGetValue(key.ContractUid, out var uid))
             {
